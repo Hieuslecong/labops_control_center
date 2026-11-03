@@ -57,3 +57,4 @@ CREATE INDEX IF NOT EXISTS idx_ssh_login_result ON ssh_login_events(authenticati
 ALTER TABLE ssh_credentials 
 ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMP WITH TIME ZONE,
 ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE';
+

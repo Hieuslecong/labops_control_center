@@ -110,7 +110,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [portMode, setPortMode] = useState<'auto' | 'manual'>('auto');
   const [customPort, setCustomPort] = useState<number>(22006);
 
-  // Step 6: SSH Key Enrollment
+  // Step 6: SSH Dual-Auth (Password & Key Enrollment)
   const [enrollmentMode, setEnrollmentMode] = useState<'generate' | 'import' | 'pending'>(
     'generate'
   );
@@ -118,6 +118,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [generatedPrivateKey, setGeneratedPrivateKey] = useState<string>('');
   const [generatedPublicKey, setGeneratedPublicKey] = useState<string>('');
   const [keyDownloaded, setKeyDownloaded] = useState<boolean>(false);
+  const [initialPassword, setInitialPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [requirePasswordChange, setRequirePasswordChange] = useState<boolean>(true);
 
   // Step 7: Atomic Provisioning execution
   const [execStep, setExecStep] = useState<number>(0);
@@ -177,6 +180,28 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     setKeyDownloaded(false);
   };
 
+  // Generate secure initial password for member container Linux account (min 12 chars)
+  const handleGeneratePassword = () => {
+    const lower = 'abcdefghjkmnpqrstuvwxyz';
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const digits = '23456789';
+    const syms = '!@#$%^&*_-+=';
+    const all = lower + upper + digits + syms;
+    let pwd = '';
+    pwd += lower[Math.floor(Math.random() * lower.length)];
+    pwd += upper[Math.floor(Math.random() * upper.length)];
+    pwd += digits[Math.floor(Math.random() * digits.length)];
+    pwd += syms[Math.floor(Math.random() * syms.length)];
+    for (let i = 4; i < 16; i++) {
+      pwd += all[Math.floor(Math.random() * all.length)];
+    }
+    const shuffled = pwd
+      .split('')
+      .toSorted(() => 0.5 - Math.random())
+      .join('');
+    setInitialPassword(shuffled);
+  };
+
   const handleDownloadPrivateKey = () => {
     if (!generatedPrivateKey) return;
     const blob = new Blob([generatedPrivateKey], { type: 'text/plain' });
@@ -201,42 +226,54 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     const corrId = `corr-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}`;
     setCorrelationId(corrId);
 
+    // Ensure password exists before running provision
+    if (!initialPassword || initialPassword.length < 12) {
+      handleGeneratePassword();
+    }
+
     const steps = [
-      { text: '1/11: Xác thực quyền quản trị & tính hợp lệ của tài khoản...', pct: 10 },
+      { text: '1/12: Xác thực quyền quản trị & kiểm tra tính hợp lệ tài khoản...', pct: 8 },
       {
-        text: `2/11: Kiểm tra dung lượng storage pool & giữ chỗ cổng SSH duy nhất (${currentServer?.vpnIp}:${allocatedPort})...`,
-        pct: 20
+        text: `2/12: Kiểm tra storage pool & gán cổng SSH duy nhất (${currentServer?.vpnIp}:${allocatedPort})...`,
+        pct: 16
       },
       {
-        text: `3/11: Khởi tạo unprivileged Linux container Incus (ws-${username}, idmap isolated)...`,
-        pct: 30
+        text: `3/12: Khởi tạo unprivileged container Incus (ws-${username}, security.idmap.isolated=true)...`,
+        pct: 25
       },
       {
-        text: `4/11: Áp dụng giới hạn cgroups CPU (${cpuLimit} cores) và RAM (${ramLimit}GB)...`,
-        pct: 40
+        text: `4/12: Cấu hình giới hạn cgroups CPU (${cpuLimit} cores) và RAM (${ramLimit}GB)...`,
+        pct: 33
       },
       {
-        text: `5/11: Tạo ZFS custom storage volume (data-${username}, quota ${storageQuotaGb}GB)...`,
-        pct: 50
+        text: `5/12: Tạo ZFS dataset lưu trữ riêng biệt (data-${username}, quota ${storageQuotaGb}GB)...`,
+        pct: 42
       },
-      { text: `6/11: Gắn mount storage volume vào thư mục ${mountPath}...`, pct: 60 },
+      { text: `6/12: Gắn kết (mount) volume ZFS vào ${mountPath} bên trong container...`, pct: 50 },
       {
-        text: '7/11: Tạo tài khoản Linux người dùng không có sudo (Standard User, UID unprivileged)...',
-        pct: 70
-      },
-      {
-        text: '8/11: Cấu hình bảo mật OpenSSH daemon (PasswordAuthentication no, PubkeyAuthentication yes)...',
-        pct: 80
+        text: '7/12: Tạo tài khoản Linux unprivileged (Standard User, không quyền sudo hoặc wheel)...',
+        pct: 58
       },
       {
-        text: `9/11: Kích hoạt Incus proxy device ánh xạ cổng VPN ${currentServer?.vpnIp}:${allocatedPort} -> 22...`,
-        pct: 88
+        text: '8/12: Thiết lập mật khẩu Linux PAM an toàn (Băm mã hóa shadow hash, min 12 ký tự)...',
+        pct: 67
       },
       {
-        text: '10/11: Tự động kiểm tra cách ly an ninh (sudo -n true: THẤT BẠI - ĐẠT AN NINH TUYỆT ĐỐI)...',
-        pct: 95
+        text: '9/12: Cấu hình OpenSSH bắt buộc Dual-Auth (AuthenticationMethods publickey,password)...',
+        pct: 75
       },
-      { text: '11/11: Hoàn tất khởi tạo môi trường nghiên cứu & ghi nhật ký kiểm toán!', pct: 100 }
+      {
+        text: `10/12: Kích hoạt Incus proxy device ánh xạ cổng VPN ${currentServer?.vpnIp}:${allocatedPort} -> 22...`,
+        pct: 83
+      },
+      {
+        text: '11/12: Kiểm định ma trận Dual-Auth (Chỉ Key: TỪ CHỐI; Chỉ Pass: TỪ CHỐI; Key+Pass: HỢP LỆ)...',
+        pct: 92
+      },
+      {
+        text: '12/12: Kiểm tra cách ly an ninh (Sudo bị từ chối tuyệt đối: ĐẠT CHUẨN AN TOÀN)!',
+        pct: 100
+      }
     ];
 
     let currentIdx = 0;
@@ -287,7 +324,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
           sshPublicKeyPreview: pubKey ? pubKey.slice(0, 32) + '...' : '(Đang chờ nạp khóa)',
           sshPublicKey: pubKey,
           sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
-          passwordStatus: 'ACTIVE',
+          passwordStatus: requirePasswordChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
           failedLoginAttempts: 0,
           sudoPrivilege: 'DENIED',
           securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
@@ -372,7 +409,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
               '3. Ổ đĩa ZFS',
               '4. Tài nguyên',
               '5. Mạng & SSH',
-              '6. Khóa SSH',
+              '6. Khóa & Mật khẩu',
               '7. Khởi tạo'
             ].map((title, idx) => {
               const num = idx + 1;
@@ -975,11 +1012,140 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
           </div>
         )}
 
-        {/* STEP 6: XÁC THỰC SSH & CẤP PHÁT KEY */}
+        {/* STEP 6: BẢO MẬT SSH DUAL-AUTH (MẬT KHẨU LINUX & KHÓA SSH) */}
         {step === 6 && (
-          <div className='grid gap-3 py-2 text-xs'>
+          <div className='grid gap-3.5 py-2 text-xs'>
+            {/* BANNER NGUYÊN TẮC BẢO MẬT BẮT BUỘC DUAL-AUTH */}
+            <div className='p-3 rounded-lg border border-primary/30 bg-primary/5 flex items-start gap-2.5'>
+              <div className='p-1.5 rounded-md bg-primary/10 text-primary shrink-0 mt-0.5'>
+                <Icons.shield className='size-4' />
+              </div>
+              <div className='space-y-1 text-xs'>
+                <div className='flex items-center gap-2 flex-wrap'>
+                  <span className='font-bold text-foreground'>
+                    Chính sách Bảo mật Bắt buộc Hai Phương thức (Dual-Method SSH)
+                  </span>
+                  <Badge
+                    variant='outline'
+                    className='bg-primary/20 text-primary border-primary/40 font-mono text-[10px]'
+                  >
+                    PUBLICKEY + PASSWORD
+                  </Badge>
+                </div>
+                <p className='text-muted-foreground text-[11px] leading-relaxed'>
+                  Mọi thành viên đăng nhập vào container nghiên cứu bắt buộc phải vượt qua{' '}
+                  <strong>CẢ HAI</strong> lớp xác thực: (1) Khóa công khai{' '}
+                  <code>SSH Public Key</code> hợp lệ VÀ (2) Mật khẩu Linux tài khoản{' '}
+                  <code>PAM Password</code>. Thiếu bất kỳ phương thức nào, OpenSSH daemon sẽ từ chối
+                  truy cập ngay lập tức (<code>AuthenticationMethods publickey,password</code>).
+                </p>
+              </div>
+            </div>
+
+            {/* PHẦN 1: THIẾT LẬP MẬT KHẨU LINUX SSH */}
+            <Card className='p-3.5 bg-muted/20 border space-y-3'>
+              <div className='flex items-center justify-between flex-wrap gap-2'>
+                <div className='flex items-center gap-1.5 font-bold text-xs text-foreground'>
+                  <Icons.key className='size-3.5 text-primary' />
+                  <span>1. Thiết lập Mật khẩu Linux SSH cho @{username || 'user'}</span>
+                </div>
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  onClick={handleGeneratePassword}
+                  className='h-7 text-[11px] gap-1 font-semibold text-primary hover:text-primary'
+                >
+                  <Icons.sparkles className='size-3' /> Tạo mật khẩu an toàn ngẫu nhiên
+                </Button>
+              </div>
+
+              <div className='space-y-1.5'>
+                <div className='flex items-center justify-between'>
+                  <Label className='text-xs font-semibold'>
+                    Mật khẩu khởi tạo (Tối thiểu 12 ký tự) *
+                  </Label>
+                  <span
+                    className={`text-[10px] font-mono font-medium ${
+                      initialPassword.length === 0
+                        ? 'text-muted-foreground'
+                        : initialPassword.length < 12
+                          ? 'text-rose-600 dark:text-rose-400 font-bold'
+                          : 'text-emerald-600 dark:text-emerald-400 font-bold'
+                    }`}
+                  >
+                    {initialPassword.length === 0
+                      ? 'Chưa nhập mật khẩu'
+                      : initialPassword.length < 12
+                        ? `${initialPassword.length}/12 ký tự (Chưa đạt tiêu chuẩn)`
+                        : `${initialPassword.length} ký tự (Đạt chuẩn PAM Enterprise)`}
+                  </span>
+                </div>
+
+                <div className='relative'>
+                  <Input
+                    type={showPassword ? 'text' : 'password'}
+                    value={initialPassword}
+                    onChange={(e) => setInitialPassword(e.target.value)}
+                    placeholder='Nhập mật khẩu Linux hoặc bấm "Tạo mật khẩu an toàn ngẫu nhiên"...'
+                    className='h-8 text-xs font-mono pr-16'
+                  />
+                  <button
+                    type='button'
+                    onClick={() => setShowPassword(!showPassword)}
+                    className='absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-[10px] font-medium px-2 py-0.5 rounded bg-muted/80'
+                  >
+                    {showPassword ? 'Ẩn' : 'Hiện'}
+                  </button>
+                </div>
+
+                {/* Password Strength Indicator */}
+                {initialPassword.length > 0 && (
+                  <div className='flex items-center gap-2 pt-0.5'>
+                    <div className='flex-1 h-1.5 bg-muted rounded-full overflow-hidden flex gap-0.5'>
+                      <div
+                        className={`h-full transition-all duration-300 ${
+                          initialPassword.length < 12
+                            ? 'w-1/3 bg-rose-500'
+                            : initialPassword.length < 16
+                              ? 'w-2/3 bg-amber-500'
+                              : 'w-full bg-emerald-500'
+                        }`}
+                      />
+                    </div>
+                    <span className='text-[10px] text-muted-foreground font-mono'>
+                      {initialPassword.length < 12
+                        ? 'Yếu (Không cho phép)'
+                        : initialPassword.length < 16
+                          ? 'Đạt yêu cầu'
+                          : 'Rất mạnh (16+ ký tự)'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className='flex items-center gap-2 p-2 rounded bg-background border'>
+                <input
+                  type='checkbox'
+                  id='wizard-req-change'
+                  checked={requirePasswordChange}
+                  onChange={(e) => setRequirePasswordChange(e.target.checked)}
+                  className='rounded border-border size-3.5 text-primary'
+                />
+                <label
+                  htmlFor='wizard-req-change'
+                  className='text-xs text-foreground cursor-pointer select-none'
+                >
+                  Bắt buộc thành viên đổi mật khẩu khi đăng nhập SSH lần đầu (PAM password expired)
+                </label>
+              </div>
+            </Card>
+
+            {/* PHẦN 2: CẤU HÌNH KHÓA SSH (PUBLIC KEY) */}
             <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>Phương thức Đăng ký Khóa SSH</Label>
+              <Label className='text-xs font-semibold'>
+                2. Phương thức Đăng ký Khóa SSH (Public Key)
+              </Label>
               <div className='grid grid-cols-3 gap-2'>
                 <button
                   type='button'
@@ -1042,7 +1208,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 </div>
 
                 <div className='text-[11px] text-muted-foreground'>
-                  Khóa Ed25519 được sinh ra ngay trên trình duyệt của bạn.{' '}
+                  Khóa Ed25519 được sinh ra an toàn ngay trên trình duyệt của bạn.{' '}
                   <strong>Private Key không bao giờ được gửi hay lưu trữ tại máy chủ.</strong>
                 </div>
 
@@ -1083,7 +1249,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
 
             {/* Connection Preview Snippets */}
             <div className='space-y-1.5 pt-1'>
-              <Label className='text-xs font-semibold'>Lệnh kết nối SSH mẫu:</Label>
+              <Label className='text-xs font-semibold'>
+                Lệnh kết nối SSH mẫu (Yêu cầu cả Key & Password):
+              </Label>
               <div className='flex items-center justify-between p-2 rounded bg-muted/40 border font-mono text-[11px]'>
                 <code>
                   ssh -i ~/.ssh/id_ed25519 -p {allocatedPort} {username || 'user'}@
@@ -1107,6 +1275,11 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   <Icons.forms className='size-3 mr-1' /> Copy
                 </Button>
               </div>
+              <p className='text-[10px] text-muted-foreground'>
+                * Ghi chú: Terminal sẽ gửi chữ ký Private Key trước. Khi được sshd chấp nhận,
+                terminal sẽ tiếp tục hiển thị lời nhắc nhập mật khẩu Linux của @{username || 'user'}
+                .
+              </p>
             </div>
           </div>
         )}
@@ -1141,28 +1314,154 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             </div>
 
             {isProvisionDone && (
-              <Card className='w-full max-w-lg p-3 text-left border bg-card text-xs space-y-1.5'>
-                <div className='font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
-                  <Icons.check className='size-4' /> Xác nhận Kiểm tra Cách ly An ninh Đạt Chuẩn
+              <Card className='w-full max-w-lg p-4 text-left border bg-card text-xs space-y-3'>
+                <div className='font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 text-sm'>
+                  <Icons.circleCheck className='size-4' /> Khởi tạo Môi trường & Thiết lập Tài khoản
+                  Thành công!
                 </div>
-                <div className='text-[11px] text-muted-foreground space-y-0.5'>
-                  <div>
-                    • <strong>Tài khoản:</strong> @{username} (Standard User — Không sudo)
+
+                <div className='p-2.5 rounded-lg border bg-muted/30 space-y-2 text-[11px]'>
+                  <div className='font-bold text-xs text-foreground flex items-center justify-between border-b pb-1.5'>
+                    <span>Thông tin Bàn giao Tài khoản (@{username})</span>
+                    <Badge
+                      variant='outline'
+                      className='bg-primary/10 text-primary border-primary/30 font-mono text-[10px]'
+                    >
+                      DUAL-AUTH BẮT BUỘC
+                    </Badge>
                   </div>
-                  <div>
-                    • <strong>Lưu trữ ZFS:</strong> data-{username} ({storageQuotaGb}GB) mounted tại{' '}
-                    <code>{mountPath}</code>
+
+                  <div className='grid grid-cols-2 gap-2 text-muted-foreground'>
+                    <div>
+                      Họ và tên: <strong className='text-foreground'>{fullName}</strong>
+                    </div>
+                    <div>
+                      Vai trò: <strong className='text-foreground'>{role}</strong>
+                    </div>
+                    <div>
+                      Máy chủ: <strong className='text-foreground'>{currentServer?.name}</strong>
+                    </div>
+                    <div>
+                      Cổng SSH Endpoint:{' '}
+                      <strong className='text-foreground font-mono'>
+                        {currentServer?.vpnIp}:{allocatedPort}
+                      </strong>
+                    </div>
+                    <div>
+                      Lưu trữ ZFS:{' '}
+                      <strong className='text-foreground font-mono'>
+                        {storageQuotaGb}GB ({mountPath})
+                      </strong>
+                    </div>
+                    <div>
+                      Quyền hạn:{' '}
+                      <strong className='text-emerald-600 dark:text-emerald-400'>
+                        Unprivileged (No sudo)
+                      </strong>
+                    </div>
+                    {correlationId && (
+                      <div className='col-span-2 text-[10px] text-muted-foreground'>
+                        Mã phiên cấp phát (Correlation ID):{' '}
+                        <code className='font-mono text-foreground font-semibold'>
+                          {correlationId}
+                        </code>
+                      </div>
+                    )}
+
+                    <div className='col-span-2 flex items-center justify-between p-2 rounded bg-background border'>
+                      <div>
+                        <div className='text-[10px] text-muted-foreground'>
+                          Mật khẩu Linux khởi tạo:
+                        </div>
+                        <div className='font-mono font-bold text-sm text-foreground'>
+                          {initialPassword}
+                        </div>
+                      </div>
+                      <Button
+                        type='button'
+                        size='sm'
+                        variant='outline'
+                        className='h-7 text-xs gap-1 font-medium'
+                        onClick={async () => {
+                          const copied = await copyToClipboard(initialPassword);
+                          if (copied) toast.success('Đã sao chép mật khẩu Linux');
+                        }}
+                      >
+                        <Icons.forms className='size-3 mr-1' /> Copy Mật khẩu
+                      </Button>
+                    </div>
+
+                    <div className='col-span-2 text-[10px] text-muted-foreground'>
+                      • Chính sách mật khẩu:{' '}
+                      <strong>
+                        {requirePasswordChange
+                          ? 'Bắt buộc đổi mật khẩu khi đăng nhập SSH lần đầu'
+                          : 'Hoạt động bình thường'}
+                      </strong>
+                    </div>
                   </div>
-                  <div>
-                    • <strong>Dedicated SSH:</strong>{' '}
-                    <code className='font-mono'>
-                      {currentServer?.vpnIp}:{allocatedPort}
+                </div>
+
+                <div className='space-y-1.5'>
+                  <Label className='text-xs font-semibold'>Lệnh kết nối SSH:</Label>
+                  <div className='flex items-center justify-between p-2 rounded bg-muted/40 border font-mono text-[11px]'>
+                    <code>
+                      ssh -i ~/.ssh/id_ed25519 -p {allocatedPort} {username}@{currentServer?.vpnIp}
                     </code>
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='ghost'
+                      className='h-6 px-2 text-[10px]'
+                      onClick={async () => {
+                        const cmd = `ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username}@{currentServer?.vpnIp}`;
+                        const copied = await copyToClipboard(cmd);
+                        if (copied) toast.success('Đã sao chép lệnh SSH');
+                      }}
+                    >
+                      <Icons.forms className='size-3 mr-1' /> Copy Lệnh
+                    </Button>
                   </div>
-                  <div>
-                    • <strong>Correlation ID:</strong>{' '}
-                    <code className='font-mono text-[10px]'>{correlationId}</code>
-                  </div>
+                </div>
+
+                <div className='flex items-center gap-2 pt-1 flex-wrap'>
+                  <Button
+                    type='button'
+                    size='sm'
+                    variant='outline'
+                    className='h-7 text-xs gap-1 font-medium'
+                    onClick={async () => {
+                      const summary = [
+                        '=== THÔNG TIN BÀN GIAO MÔI TRƯỜNG LABOPS ===',
+                        `Họ và tên: ${fullName}`,
+                        `Tên đăng nhập: ${username}`,
+                        `Máy chủ: ${currentServer?.name} (${currentServer?.vpnIp})`,
+                        `Cổng SSH Endpoint: ${allocatedPort}`,
+                        `Mật khẩu khởi tạo Linux: ${initialPassword}`,
+                        `Yêu cầu đổi mật khẩu lần đầu: ${requirePasswordChange ? 'Bắt buộc' : 'Không'}`,
+                        `Dung lượng lưu trữ ZFS: ${storageQuotaGb} GB (${mountPath})`,
+                        `Quyền GPU: ${selectedGpu !== 'NONE' ? selectedGpu : 'Chỉ CPU'}`,
+                        `Lệnh kết nối SSH: ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username}@${currentServer?.vpnIp}`,
+                        'Lưu ý bảo mật: Mọi đăng nhập SSH bắt buộc vượt qua cả SSH Public Key và Mật khẩu Linux.'
+                      ].join('\n');
+                      const copied = await copyToClipboard(summary);
+                      if (copied) toast.success('Đã sao chép toàn bộ thông tin bàn giao');
+                    }}
+                  >
+                    <Icons.forms className='size-3.5' /> Sao chép toàn bộ thông tin bàn giao
+                  </Button>
+
+                  {enrollmentMode === 'generate' && generatedPrivateKey && (
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='outline'
+                      className='h-7 text-xs gap-1 font-medium'
+                      onClick={handleDownloadPrivateKey}
+                    >
+                      <Icons.download className='size-3.5' /> Tải Private Key (id_ed25519)
+                    </Button>
+                  )}
                 </div>
               </Card>
             )}
@@ -1191,8 +1490,13 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 (step === 3 && currentPool && storageQuotaGb > currentPool.freeGb)
               }
               onClick={() => {
-                if (step === 5 && enrollmentMode === 'generate' && !generatedPublicKey) {
-                  handleGenerateKeypair();
+                if (step === 5) {
+                  if (enrollmentMode === 'generate' && !generatedPublicKey) {
+                    handleGenerateKeypair();
+                  }
+                  if (!initialPassword) {
+                    handleGeneratePassword();
+                  }
                 }
                 setStep(step + 1);
               }}
@@ -1206,6 +1510,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             <Button
               type='button'
               size='sm'
+              disabled={!initialPassword || initialPassword.length < 12}
               onClick={handleStartProvision}
               className='text-xs font-semibold bg-primary gap-1.5'
             >

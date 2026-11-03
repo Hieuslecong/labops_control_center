@@ -1495,10 +1495,24 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       createdAt: new Date().toISOString().split('T')[0]
     };
 
+    const newPolicy: SshAccountPolicy = {
+      workspaceId: `ws-${newMember.username}`,
+      linuxUsername: newMember.username,
+      authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+      passwordStatus: newMember.passwordStatus || 'ACTIVE',
+      keyEnrollmentStatus:
+        newMember.sshKeyStatus === 'ACTIVE' ? 'ACTIVE' : 'PENDING_KEY_ENROLLMENT',
+      accessStatus: 'ACTIVE',
+      minPasswordLength: 12,
+      failedLoginAttempts: 0,
+      updatedAt: new Date().toISOString()
+    };
+
     set((state) => ({
       members: [newMember, ...state.members],
       sshEndpoints: [newEndpoint, ...state.sshEndpoints],
       storageAllocations: [newAllocation, ...state.storageAllocations],
+      sshPolicies: [newPolicy, ...state.sshPolicies],
       auditLogs: [
         {
           id: `log-${Date.now()}`,

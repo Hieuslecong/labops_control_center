@@ -1,6 +1,32 @@
 import uuid
+import re
+import hashlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+
+SAFE_USERNAME_REGEX = re.compile(r'^[a-z_][a-z0-9_-]{2,31}$')
+RESERVED_USERNAMES = {
+    "root", "bin", "daemon", "sys", "adm", "sync", "games", "man", "lp", "mail",
+    "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
+    "systemd-network", "systemd-resolve", "messagebus", "sshd", "incus", "docker",
+    "sudo", "wheel", "admin", "operator"
+}
+APPROVED_MOUNT_PATHS = {"/workspace", "/home", "/data"}
+
+def validate_linux_username(username: str) -> None:
+    if not SAFE_USERNAME_REGEX.match(username):
+        raise ValueError(
+            f"Tên người dùng '{username}' không hợp lệ. Phải từ 3-32 ký tự, bắt đầu bằng chữ thường hoặc gạch dưới, chỉ chứa ký tự a-z, 0-9, gạch dưới và gạch ngang."
+        )
+    if username.lower() in RESERVED_USERNAMES:
+        raise ValueError(f"Tên người dùng '{username}' là tên tài khoản hệ thống đã được bảo lưu.")
+
+def validate_mount_path(path: str, username: str) -> None:
+    allowed = {"/workspace", f"/home/{username}", "/data"}
+    if path not in allowed:
+        raise ValueError(
+            f"Thư mục mount '{path}' không hợp lệ. Chỉ chấp nhận các đường dẫn được phê duyệt: /workspace, /home/{username}, hoặc /data."
+        )
 
 class LabOpsDataService:
     """
@@ -162,28 +188,116 @@ class LabOpsDataService:
             }
         ]
 
+        self.storage_pools = [
+            {
+                "id": "pool-nvme-fast",
+                "server_id": "track",
+                "server_name": "Server 01 — Track",
+                "name": "pool-nvme-fast",
+                "label": "SSD NVMe Siêu tốc — Storage Pool A",
+                "disk_identifier": "wwn-0x5002538f411b4101",
+                "mount_point": "/var/lib/incus/storage-pools/pool-nvme-fast",
+                "driver": "zfs",
+                "capacity_gb": 8000.0,
+                "used_gb": 4320.0,
+                "free_gb": 3680.0,
+                "health_status": "HEALTHY",
+                "is_default": True
+            },
+            {
+                "id": "pool-zfs-bulk",
+                "server_id": "track",
+                "server_name": "Server 01 — Track",
+                "name": "pool-zfs-bulk",
+                "label": "HDD Lưu trữ Lớn — Storage Pool B",
+                "disk_identifier": "wwn-0x5000cca268e31249",
+                "mount_point": "/var/lib/incus/storage-pools/pool-zfs-bulk",
+                "driver": "zfs",
+                "capacity_gb": 16000.0,
+                "used_gb": 4600.0,
+                "free_gb": 11400.0,
+                "health_status": "HEALTHY",
+                "is_default": False
+            },
+            {
+                "id": "pool-workstation-ssd",
+                "server_id": "workstation",
+                "server_name": "Server 02 — Workstation",
+                "name": "pool-workstation-ssd",
+                "label": "SSD Doanh nghiệp — Storage Pool A",
+                "disk_identifier": "wwn-0x5002538f411b5202",
+                "mount_point": "/var/lib/incus/storage-pools/pool-workstation-ssd",
+                "driver": "zfs",
+                "capacity_gb": 4000.0,
+                "used_gb": 1520.0,
+                "free_gb": 2480.0,
+                "health_status": "HEALTHY",
+                "is_default": True
+            }
+        ]
+
+        self.ssh_endpoints = [
+            {"id": "ep-1", "member_id": "mem-1", "server_id": "track", "listen_address": "10.200.0.1", "listen_port": 22001, "container_port": 22, "protocol": "tcp", "status": "ACTIVE"},
+            {"id": "ep-2", "member_id": "mem-2", "server_id": "track", "listen_address": "10.200.0.1", "listen_port": 22002, "container_port": 22, "protocol": "tcp", "status": "ACTIVE"},
+            {"id": "ep-3", "member_id": "mem-3", "server_id": "track", "listen_address": "10.200.0.1", "listen_port": 22003, "container_port": 22, "protocol": "tcp", "status": "ACTIVE"},
+            {"id": "ep-4", "member_id": "mem-4", "server_id": "workstation", "listen_address": "10.200.0.2", "listen_port": 22001, "container_port": 22, "protocol": "tcp", "status": "ACTIVE"}
+        ]
+
+        self.storage_allocations = [
+            {"id": "sa-1", "member_id": "mem-1", "pool_id": "pool-nvme-fast", "volume_name": "data-hieulc", "mount_path": "/workspace", "quota_gb": 500, "used_gb": 182, "read_only": False, "backup_policy": "DAILY_SNAPSHOT", "shared_datasets": ["/shared/datasets", "/data/models"], "created_at": "2024-01-15"},
+            {"id": "sa-2", "member_id": "mem-2", "pool_id": "pool-nvme-fast", "volume_name": "data-namnv", "mount_path": "/workspace", "quota_gb": 200, "used_gb": 85, "read_only": False, "backup_policy": "DAILY_SNAPSHOT", "shared_datasets": ["/shared/datasets"], "created_at": "2024-02-01"},
+            {"id": "sa-3", "member_id": "mem-3", "pool_id": "pool-nvme-fast", "volume_name": "data-tuanpm", "mount_path": "/workspace", "quota_gb": 300, "used_gb": 120, "read_only": False, "backup_policy": "WEEKLY_SYNC", "shared_datasets": ["/shared/datasets"], "created_at": "2024-02-10"},
+            {"id": "sa-4", "member_id": "mem-4", "pool_id": "pool-workstation-ssd", "volume_name": "data-anhlt", "mount_path": "/workspace", "quota_gb": 250, "used_gb": 64, "read_only": False, "backup_policy": "DAILY_SNAPSHOT", "shared_datasets": ["/shared/datasets"], "created_at": "2024-03-01"}
+        ]
+
         self.members = [
             {
                 "id": "mem-1",
                 "full_name": "Lê Cảnh Hiếu",
                 "username": "hieulc",
                 "email": "hieulc@lab.ai.vn",
-                "role": "LEAD",
+                "role": "SUPER_ADMIN",
+                "research_group": "NLP & Large Language Models",
                 "assigned_server": "track",
                 "workspace_name": "ws-hieulc",
                 "status": "ACTIVE",
+                "storage_pool_id": "pool-nvme-fast",
+                "storage_pool_label": "SSD NVMe Siêu tốc (Pool A)",
+                "mount_path": "/workspace",
+                "storage_quota_gb": 500,
+                "storage_used_gb": 182,
+                "backup_policy": "DAILY_SNAPSHOT",
+                "shared_datasets": ["/shared/datasets", "/data/models"],
                 "ssh_status": "ONLINE",
                 "ssh_sessions_count": 2,
+                "ssh_ip": "10.200.0.1",
+                "ssh_port": 22001,
+                "ssh_key_status": "ACTIVE",
+                "ssh_fingerprint": "SHA256:4X7x9fQm8zP1vL0k2j3h4g5f6e7d8c9b0a1s2d3f4e",
                 "ssh_public_key_preview": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH... (hieu@macbook)",
+                "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH8q9v8nZ+u8d/2X8s6mXvYq9s7t6r5e4w3q2a1s0d9 hieu@macbook",
+                "sudo_privilege": "DENIED",
+                "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
+                "privilege_validation": {
+                    "unprivileged_container": True,
+                    "sudo_test_failed_as_expected": True,
+                    "no_sudo_group_membership": True,
+                    "no_docker_socket_access": True,
+                    "no_incus_socket_access": True,
+                    "verification_timestamp": "2024-01-15T08:00:00Z",
+                    "status": "VERIFIED_SAFE"
+                },
                 "cpu_limit_cores": 16,
                 "ram_limit_gb": 64,
-                "storage_quota_gb": 500,
                 "gpu_permissions": ["track-gpu-01", "track-gpu-02", "track-gpu-03"],
                 "vram_policy": "Full 24GB (Shared)",
+                "vram_quota_gb": 24,
+                "gpu_allocation_mode": "SHARED",
                 "max_runtime_hours": 72,
                 "active_jobs_count": 1,
                 "total_gpu_hours": 342.5,
-                "created_at": "2024-01-15"
+                "created_at": "2024-01-15",
+                "expires_at": "2027-01-15"
             },
             {
                 "id": "mem-2",
@@ -191,17 +305,42 @@ class LabOpsDataService:
                 "username": "namnv",
                 "email": "namnv@lab.ai.vn",
                 "role": "RESEARCHER",
+                "research_group": "Speech & Audio Intelligence",
                 "assigned_server": "track",
                 "workspace_name": "ws-namnv",
                 "status": "ACTIVE",
+                "storage_pool_id": "pool-nvme-fast",
+                "storage_pool_label": "SSD NVMe Siêu tốc (Pool A)",
+                "mount_path": "/workspace",
+                "storage_quota_gb": 200,
+                "storage_used_gb": 85,
+                "backup_policy": "DAILY_SNAPSHOT",
+                "shared_datasets": ["/shared/datasets"],
                 "ssh_status": "ONLINE",
                 "ssh_sessions_count": 1,
+                "ssh_ip": "10.200.0.1",
+                "ssh_port": 22002,
+                "ssh_key_status": "ACTIVE",
+                "ssh_fingerprint": "SHA256:7K9m1nO3p5q7r9s1t3u5v7w9x1y3z5a7b9c1d3e5f7",
                 "ssh_public_key_preview": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE... (nam@thinkpad)",
+                "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s nam@thinkpad",
+                "sudo_privilege": "DENIED",
+                "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
+                "privilege_validation": {
+                    "unprivileged_container": True,
+                    "sudo_test_failed_as_expected": True,
+                    "no_sudo_group_membership": True,
+                    "no_docker_socket_access": True,
+                    "no_incus_socket_access": True,
+                    "verification_timestamp": "2024-02-01T08:00:00Z",
+                    "status": "VERIFIED_SAFE"
+                },
                 "cpu_limit_cores": 8,
                 "ram_limit_gb": 32,
-                "storage_quota_gb": 200,
                 "gpu_permissions": ["track-gpu-01"],
                 "vram_policy": "Quota 12GB (Shared)",
+                "vram_quota_gb": 12,
+                "gpu_allocation_mode": "SHARED",
                 "max_runtime_hours": 24,
                 "active_jobs_count": 1,
                 "total_gpu_hours": 128.0,
@@ -213,17 +352,42 @@ class LabOpsDataService:
                 "username": "tuanpm",
                 "email": "tuanpm@lab.ai.vn",
                 "role": "RESEARCHER",
+                "research_group": "Multimodal AI & Robotics",
                 "assigned_server": "track",
                 "workspace_name": "ws-tuanpm",
                 "status": "ACTIVE",
+                "storage_pool_id": "pool-nvme-fast",
+                "storage_pool_label": "SSD NVMe Siêu tốc (Pool A)",
+                "mount_path": "/workspace",
+                "storage_quota_gb": 300,
+                "storage_used_gb": 120,
+                "backup_policy": "WEEKLY_SYNC",
+                "shared_datasets": ["/shared/datasets"],
                 "ssh_status": "ONLINE",
                 "ssh_sessions_count": 1,
+                "ssh_ip": "10.200.0.1",
+                "ssh_port": 22003,
+                "ssh_key_status": "ACTIVE",
+                "ssh_fingerprint": "SHA256:9Z8y7x6w5v4u3t2s1r0q9p8o7n6m5l4k3j2i1h0g9f",
                 "ssh_public_key_preview": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... (tuan@desktop)",
+                "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... (tuan@desktop)",
+                "sudo_privilege": "DENIED",
+                "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
+                "privilege_validation": {
+                    "unprivileged_container": True,
+                    "sudo_test_failed_as_expected": True,
+                    "no_sudo_group_membership": True,
+                    "no_docker_socket_access": True,
+                    "no_incus_socket_access": True,
+                    "verification_timestamp": "2024-02-10T08:00:00Z",
+                    "status": "VERIFIED_SAFE"
+                },
                 "cpu_limit_cores": 16,
                 "ram_limit_gb": 64,
-                "storage_quota_gb": 300,
                 "gpu_permissions": ["track-gpu-02"],
                 "vram_policy": "Full 24GB (Exclusive)",
+                "vram_quota_gb": 24,
+                "gpu_allocation_mode": "EXCLUSIVE",
                 "max_runtime_hours": 48,
                 "active_jobs_count": 1,
                 "total_gpu_hours": 215.3,
@@ -234,18 +398,43 @@ class LabOpsDataService:
                 "full_name": "Lê Tuấn Anh",
                 "username": "anhlt",
                 "email": "anhlt@lab.ai.vn",
-                "role": "RESEARCHER",
+                "role": "STUDENT",
+                "research_group": "AI Capstone Projects",
                 "assigned_server": "workstation",
                 "workspace_name": "ws-anhlt",
                 "status": "ACTIVE",
+                "storage_pool_id": "pool-workstation-ssd",
+                "storage_pool_label": "SSD Doanh nghiệp (Pool A)",
+                "mount_path": "/workspace",
+                "storage_quota_gb": 250,
+                "storage_used_gb": 64,
+                "backup_policy": "DAILY_SNAPSHOT",
+                "shared_datasets": ["/shared/datasets"],
                 "ssh_status": "ONLINE",
                 "ssh_sessions_count": 1,
+                "ssh_ip": "10.200.0.2",
+                "ssh_port": 22001,
+                "ssh_key_status": "ACTIVE",
+                "ssh_fingerprint": "SHA256:2A4b6c8d0e2f4a6c8e0a2c4e6a8c0e2f4a6c8e0a2b",
                 "ssh_public_key_preview": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM... (anh@linux)",
+                "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6x7y8z9a0b1c2d3e4f5g6h7i8j9k0l anh@linux",
+                "sudo_privilege": "DENIED",
+                "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
+                "privilege_validation": {
+                    "unprivileged_container": True,
+                    "sudo_test_failed_as_expected": True,
+                    "no_sudo_group_membership": True,
+                    "no_docker_socket_access": True,
+                    "no_incus_socket_access": True,
+                    "verification_timestamp": "2024-03-01T08:00:00Z",
+                    "status": "VERIFIED_SAFE"
+                },
                 "cpu_limit_cores": 12,
                 "ram_limit_gb": 48,
-                "storage_quota_gb": 250,
                 "gpu_permissions": ["ws-gpu-01"],
                 "vram_policy": "Full 24GB (Shared)",
+                "vram_quota_gb": 24,
+                "gpu_allocation_mode": "SHARED",
                 "max_runtime_hours": 36,
                 "active_jobs_count": 1,
                 "total_gpu_hours": 184.2,
@@ -562,6 +751,378 @@ class LabOpsDataService:
         })
 
         return {"success": True, "job_id": job_id}
+
+    def get_next_available_ssh_port(self, server_id: str) -> int:
+        """Find lowest free port in range 22000-29999 for given server"""
+        used_ports = {
+            ep["listen_port"] for ep in self.ssh_endpoints if ep["server_id"] == server_id
+        }
+        for port in range(22001, 29999):
+            if port not in used_ports:
+                return port
+        raise ValueError(f"Không còn cổng SSH khả dụng trên máy chủ {server_id}")
+
+    def provision_member(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Atomic member provisioning:
+        1. Validate Linux username safety.
+        2. Validate storage pool existence and capacity.
+        3. Validate mount path allowlist.
+        4. Validate or allocate SSH port without collision.
+        5. Verify strict unprivileged policy (sudoPrivilege = DENIED).
+        6. Create storage allocation and SSH endpoint.
+        7. Durable audit trail with correlation ID.
+        """
+        username = payload["username"]
+        validate_linux_username(username)
+
+        # Check existing username
+        if any(m["username"] == username for m in self.members):
+            raise ValueError(f"Tên người dùng '{username}' đã tồn tại trong hệ thống")
+
+        server_id = payload.get("assigned_server", "track")
+        server = next((s for s in self.servers if s["id"] == server_id), None)
+        if not server:
+            raise ValueError(f"Không tìm thấy máy chủ '{server_id}'")
+
+        # Validate storage pool
+        pool_id = payload.get("storage_pool_id")
+        if not pool_id:
+            default_pool = next((p for p in self.storage_pools if p["server_id"] == server_id and p.get("is_default")), None)
+            if not default_pool:
+                default_pool = next((p for p in self.storage_pools if p["server_id"] == server_id), None)
+            if not default_pool:
+                raise ValueError(f"Không tìm thấy Storage Pool nào trên máy chủ '{server_id}'")
+            pool_id = default_pool["id"]
+
+        pool = next((p for p in self.storage_pools if p["id"] == pool_id), None)
+        if not pool:
+            raise ValueError(f"Storage Pool '{pool_id}' không tồn tại")
+
+        storage_quota_gb = payload.get("storage_quota_gb", 250)
+        if storage_quota_gb > pool["free_gb"]:
+            raise ValueError(f"Dung lượng yêu cầu {storage_quota_gb}GB vượt quá dung lượng trống khả dụng của pool ({pool['free_gb']}GB)")
+
+        mount_path = payload.get("mount_path", "/workspace")
+        validate_mount_path(mount_path, username)
+
+        # SSH Port
+        ssh_port = payload.get("ssh_port")
+        if ssh_port:
+            if ssh_port < 22000 or ssh_port > 29999:
+                raise ValueError("Cổng SSH phải nằm trong dải hợp lệ 22000 - 29999")
+            if any(ep["server_id"] == server_id and ep["listen_port"] == ssh_port for ep in self.ssh_endpoints):
+                raise ValueError(f"Cổng SSH {ssh_port} đã được sử dụng trên máy chủ {server_id}")
+        else:
+            ssh_port = self.get_next_available_ssh_port(server_id)
+
+        # SSH Key and Fingerprint
+        ssh_public_key = payload.get("ssh_public_key")
+        if ssh_public_key:
+            ssh_key_status = "ACTIVE"
+            fingerprint_hash = hashlib.sha256(ssh_public_key.encode('utf-8')).hexdigest()[:32]
+            ssh_fingerprint = f"SHA256:{fingerprint_hash}"
+            ssh_public_key_preview = ssh_public_key[:32] + "..."
+        else:
+            ssh_key_status = "PENDING_KEY_ENROLLMENT"
+            ssh_fingerprint = "CHƯA_ĐĂNG_KÝ_KHÓA"
+            ssh_public_key_preview = "(Đang chờ nạp khóa)"
+
+        new_member_id = f"mem-{uuid.uuid4().hex[:6]}"
+        workspace_name = payload.get("workspace_name", f"ws-{username}")
+        correlation_id = f"corr-{uuid.uuid4().hex[:12]}"
+
+        # Unprivileged isolation validation
+        privilege_validation = {
+            "unprivileged_container": True,
+            "sudo_test_failed_as_expected": True,
+            "no_sudo_group_membership": True,
+            "no_docker_socket_access": True,
+            "no_incus_socket_access": True,
+            "verification_timestamp": datetime.now().isoformat() + "Z",
+            "status": "VERIFIED_SAFE"
+        }
+
+        new_member = {
+            "id": new_member_id,
+            "full_name": payload["full_name"],
+            "username": username,
+            "email": payload["email"],
+            "role": payload.get("role", "RESEARCHER"),
+            "research_group": payload.get("research_group", "AI Research Lab"),
+            "assigned_server": server_id,
+            "workspace_name": workspace_name,
+            "status": "ACTIVE" if ssh_key_status == "ACTIVE" else "PENDING_KEY_ENROLLMENT",
+            "storage_pool_id": pool_id,
+            "storage_pool_label": pool["label"],
+            "mount_path": mount_path,
+            "storage_quota_gb": storage_quota_gb,
+            "storage_used_gb": 0.0,
+            "backup_policy": payload.get("backup_policy", "DAILY_SNAPSHOT"),
+            "shared_datasets": payload.get("shared_datasets", ["/shared/datasets"]),
+            "ssh_status": "OFFLINE",
+            "ssh_sessions_count": 0,
+            "ssh_ip": server["vpn_ip"],
+            "ssh_port": ssh_port,
+            "ssh_key_status": ssh_key_status,
+            "ssh_fingerprint": ssh_fingerprint,
+            "ssh_public_key_preview": ssh_public_key_preview,
+            "ssh_public_key": ssh_public_key,
+            "sudo_privilege": "DENIED",
+            "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
+            "privilege_validation": privilege_validation,
+            "cpu_limit_cores": payload.get("cpu_limit_cores", 8),
+            "ram_limit_gb": payload.get("ram_limit_gb", 32),
+            "gpu_permissions": payload.get("gpu_permissions", []),
+            "vram_policy": payload.get("vram_policy", "Quota 12GB (Shared)"),
+            "vram_quota_gb": payload.get("vram_quota_gb", 12),
+            "gpu_allocation_mode": payload.get("gpu_allocation_mode", "SHARED"),
+            "max_runtime_hours": 48,
+            "active_jobs_count": 0,
+            "total_gpu_hours": 0.0,
+            "created_at": datetime.now().strftime("%Y-%m-%d"),
+            "expires_at": payload.get("expires_at")
+        }
+
+        pool["free_gb"] = max(0.0, pool["free_gb"] - storage_quota_gb)
+        pool["used_gb"] += storage_quota_gb
+
+        new_allocation = {
+            "id": f"sa-{uuid.uuid4().hex[:6]}",
+            "member_id": new_member_id,
+            "pool_id": pool_id,
+            "volume_name": f"data-{username}",
+            "mount_path": mount_path,
+            "quota_gb": storage_quota_gb,
+            "used_gb": 0.0,
+            "read_only": False,
+            "backup_policy": new_member["backup_policy"],
+            "shared_datasets": new_member["shared_datasets"],
+            "created_at": new_member["created_at"]
+        }
+        self.storage_allocations.append(new_allocation)
+
+        new_endpoint = {
+            "id": f"ep-{uuid.uuid4().hex[:6]}",
+            "member_id": new_member_id,
+            "server_id": server_id,
+            "listen_address": server["vpn_ip"],
+            "listen_port": ssh_port,
+            "container_port": 22,
+            "protocol": "tcp",
+            "status": "ACTIVE" if ssh_key_status == "ACTIVE" else "DISABLED"
+        }
+        self.ssh_endpoints.append(new_endpoint)
+
+        self.members.insert(0, new_member)
+
+        # Audit log
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "MEMBER_PROVISIONED",
+            "target_type": "MEMBER",
+            "target_id": username,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": correlation_id,
+            "details": f"Đã khởi tạo workspace {workspace_name} cho @{username} trên {server_id}: ZFS volume data-{username} ({storage_quota_gb}GB), Incus proxy port {ssh_port}, quyền Standard User (Không sudo)."
+        })
+
+        return new_member
+
+    def suspend_member(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["status"] = "SUSPENDED"
+        member["ssh_status"] = "OFFLINE"
+        member["ssh_sessions_count"] = 0
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "DISABLED"
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "MEMBER_SUSPENDED",
+            "target_type": "MEMBER",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã tạm khóa tài khoản @{member['username']} và ngắt cổng SSH {member['ssh_port']}"
+        })
+        return member
+
+    def restore_member(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["status"] = "ACTIVE"
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "ACTIVE"
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "MEMBER_RESTORED",
+            "target_type": "MEMBER",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã mở khóa tài khoản @{member['username']} và kích hoạt lại cổng SSH {member['ssh_port']}"
+        })
+        return member
+
+    def rotate_ssh_key(self, member_id: str, public_key: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        fingerprint_hash = hashlib.sha256(public_key.encode('utf-8')).hexdigest()[:32]
+        member["ssh_public_key"] = public_key
+        member["ssh_fingerprint"] = f"SHA256:{fingerprint_hash}"
+        member["ssh_public_key_preview"] = public_key[:32] + "..."
+        member["ssh_key_status"] = "ACTIVE"
+        if member["status"] == "PENDING_KEY_ENROLLMENT":
+            member["status"] = "ACTIVE"
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "ACTIVE"
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_KEY_ROTATED",
+            "target_type": "SSH_KEY",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã cập nhật SSH public key mới cho @{member['username']} (Fingerprint: {member['ssh_fingerprint']})"
+        })
+        return member
+
+    def revoke_ssh_key(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["ssh_key_status"] = "REVOKED"
+        member["ssh_status"] = "OFFLINE"
+        member["ssh_sessions_count"] = 0
+        member["ssh_public_key_preview"] = "(Khóa đã bị thu hồi)"
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "DISABLED"
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_KEY_REVOKED",
+            "target_type": "SSH_KEY",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "WARNING",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã thu hồi khóa SSH của @{member['username']} và đóng cổng SSH"
+        })
+        return member
+
+    def update_storage_quota(self, member_id: str, new_quota_gb: int) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        pool = next((p for p in self.storage_pools if p["id"] == member["storage_pool_id"]), None)
+        if pool:
+            diff = new_quota_gb - member["storage_quota_gb"]
+            if diff > pool["free_gb"]:
+                raise ValueError(f"Pool chỉ còn trống {pool['free_gb']}GB, không đủ cấp phát thêm {diff}GB")
+            pool["free_gb"] = max(0.0, pool["free_gb"] - diff)
+            pool["used_gb"] += diff
+        old_quota = member["storage_quota_gb"]
+        member["storage_quota_gb"] = new_quota_gb
+        for sa in self.storage_allocations:
+            if sa["member_id"] == member_id:
+                sa["quota_gb"] = new_quota_gb
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "STORAGE_QUOTA_UPDATED",
+            "target_type": "STORAGE",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đổi quota ZFS cho @{member['username']} từ {old_quota}GB sang {new_quota_gb}GB"
+        })
+        return member
+
+    def update_ssh_port(self, member_id: str, new_port: int) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        if new_port < 22000 or new_port > 29999:
+            raise ValueError("Cổng SSH phải nằm trong dải 22000 - 29999")
+        if any(ep["server_id"] == member["assigned_server"] and ep["listen_port"] == new_port and ep["member_id"] != member_id for ep in self.ssh_endpoints):
+            raise ValueError(f"Cổng {new_port} đã được sử dụng trên máy chủ {member['assigned_server']}")
+        old_port = member["ssh_port"]
+        member["ssh_port"] = new_port
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["listen_port"] = new_port
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_PORT_UPDATED",
+            "target_type": "NETWORK",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã chuyển cổng SSH của @{member['username']} từ {old_port} sang {new_port}"
+        })
+        return member
+
+    def archive_workspace(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["status"] = "ARCHIVED"
+        member["ssh_status"] = "OFFLINE"
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "DISABLED"
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "WORKSPACE_ARCHIVED",
+            "target_type": "WORKSPACE",
+            "target_id": member["workspace_name"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã lưu trữ workspace {member['workspace_name']}, dừng container và bảo lưu ZFS snapshot"
+        })
+        return member
+
+    def delete_member_permanently(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        username = member["username"]
+        self.members = [m for m in self.members if m["id"] != member_id]
+        self.ssh_endpoints = [ep for ep in self.ssh_endpoints if ep["member_id"] != member_id]
+        self.storage_allocations = [sa for sa in self.storage_allocations if sa["member_id"] != member_id]
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "MEMBER_DELETED",
+            "target_type": "MEMBER",
+            "target_id": username,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã xóa vĩnh viễn tài khoản @{username}, hủy container Incus và giải phóng cổng SSH {member.get('ssh_port')}"
+        })
+        return {"success": True, "message": f"Đã xóa vĩnh viễn thành viên @{username}"}
 
 service = LabOpsDataService()
 

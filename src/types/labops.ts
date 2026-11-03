@@ -75,9 +75,82 @@ export interface PhysicalGpu {
   associatedJobs: string[];
 }
 
-export type MemberRole = 'SUPER_ADMIN' | 'LAB_MANAGER' | 'RESEARCHER' | 'GUEST';
-export type MemberStatus = 'ACTIVE' | 'SUSPENDED' | 'ARCHIVED';
+export type MemberRole = 'SUPER_ADMIN' | 'LAB_MANAGER' | 'RESEARCHER' | 'STUDENT' | 'GUEST';
+export type MemberStatus =
+  | 'CREATED'
+  | 'PROVISIONING'
+  | 'PENDING_KEY_ENROLLMENT'
+  | 'ACTIVE'
+  | 'SUSPENDED'
+  | 'PROVISIONING_FAILED'
+  | 'ARCHIVED'
+  | 'DELETED';
 export type SshStatus = 'ONLINE' | 'OFFLINE';
+export type SshKeyEnrollmentStatus = 'PENDING_KEY_ENROLLMENT' | 'ACTIVE' | 'ROTATING' | 'REVOKED';
+
+export interface StoragePool {
+  id: string;
+  serverId: ServerId;
+  serverName: string;
+  name: string;
+  label: string;
+  diskIdentifier: string; // e.g. "wwn-0x5002538f411b4101"
+  mountPoint: string;
+  driver: 'zfs' | 'btrfs' | 'lvm' | 'dir';
+  capacityGb: number;
+  usedGb: number;
+  freeGb: number;
+  healthStatus: 'HEALTHY' | 'DEGRADED' | 'FAULTED';
+  isDefault: boolean;
+}
+
+export interface StorageAllocation {
+  id: string;
+  memberId: string;
+  poolId: string;
+  volumeName: string;
+  mountPath: string; // approved: "/workspace", "/home/username", "/data"
+  quotaGb: number;
+  usedGb: number;
+  readOnly: boolean;
+  backupPolicy: 'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE';
+  sharedDatasets: string[];
+  createdAt: string;
+}
+
+export interface SshEndpoint {
+  id: string;
+  memberId: string;
+  serverId: ServerId;
+  listenAddress: string; // e.g. "10.200.0.1" (Track) or "10.200.0.2" (Workstation)
+  listenPort: number; // 22000-29999
+  containerPort: number; // 22
+  protocol: 'tcp';
+  status: 'ACTIVE' | 'DISABLED';
+  lastUsedAt?: string;
+}
+
+export interface SshCredential {
+  id: string;
+  memberId: string;
+  publicKey: string;
+  fingerprint: string;
+  keyType: 'ed25519' | 'rsa' | 'ecdsa';
+  enrollmentType: 'BROWSER_GENERATED' | 'IMPORTED' | 'PENDING';
+  status: SshKeyEnrollmentStatus;
+  enrolledAt?: string;
+  expiresAt?: string;
+}
+
+export interface PrivilegeValidationResult {
+  unprivilegedContainer: boolean;
+  sudoTestFailedAsExpected: boolean; // sudo -n true failed (safe)
+  noSudoGroupMembership: boolean;
+  noDockerSocketAccess: boolean;
+  noIncusSocketAccess: boolean;
+  verificationTimestamp: string;
+  status: 'VERIFIED_SAFE' | 'VIOLATION_DETECTED';
+}
 
 export interface LabMember {
   id: string;
@@ -85,21 +158,44 @@ export interface LabMember {
   username: string;
   email: string;
   role: MemberRole;
+  researchGroup?: string;
   assignedServer: ServerId;
   workspaceName: string;
   status: MemberStatus;
+  // Storage Details
+  storagePoolId: string;
+  storagePoolLabel: string;
+  mountPath: string; // approved path, default /workspace
+  storageQuotaGb: number;
+  storageUsedGb: number;
+  backupPolicy: 'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE';
+  sharedDatasets: string[];
+  // SSH & Networking
   sshStatus: SshStatus;
   sshSessionsCount: number;
+  sshIp: string;
+  sshPort: number;
+  sshKeyStatus: SshKeyEnrollmentStatus;
+  sshFingerprint: string;
   sshPublicKeyPreview: string;
+  sshPublicKey?: string;
+  // Security & Privileges
+  sudoPrivilege: 'DENIED'; // Strict: always DENIED
+  securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED';
+  privilegeValidation?: PrivilegeValidationResult;
+  // Hardware Quotas
   cpuLimitCores: number;
   ramLimitGb: number;
-  storageQuotaGb: number;
   gpuPermissions: string[];
   vramPolicy: string;
+  vramQuotaGb?: number;
+  gpuAllocationMode: GpuAllocationMode;
   maxRuntimeHours: number;
   activeJobsCount: number;
   totalGpuHours: number;
   createdAt: string;
+  expiresAt?: string;
+  lastLoginAt?: string;
 }
 
 export type JobStatus = 'RUNNING' | 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';

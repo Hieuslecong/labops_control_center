@@ -108,18 +108,98 @@ class GpuAllocateRequest(BaseSchema):
     requested_vram_gb: int = Field(alias="requestedVramGb")
     job_name: str = Field(alias="jobName")
 
+class PrivilegeValidationResponse(BaseSchema):
+    unprivileged_container: bool = Field(True, alias="unprivilegedContainer")
+    sudo_test_failed_as_expected: bool = Field(True, alias="sudoTestFailedAsExpected")
+    no_sudo_group_membership: bool = Field(True, alias="noSudoGroupMembership")
+    no_docker_socket_access: bool = Field(True, alias="noDockerSocketAccess")
+    no_incus_socket_access: bool = Field(True, alias="noIncusSocketAccess")
+    verification_timestamp: str = Field(alias="verificationTimestamp")
+    status: str = "VERIFIED_SAFE"
+
+class StoragePoolResponse(BaseSchema):
+    id: str
+    server_id: str = Field(alias="serverId")
+    server_name: str = Field(alias="serverName")
+    name: str
+    label: str
+    disk_identifier: str = Field(alias="diskIdentifier")
+    mount_point: str = Field(alias="mountPoint")
+    driver: str
+    capacity_gb: float = Field(alias="capacityGb")
+    used_gb: float = Field(alias="usedGb")
+    free_gb: float = Field(alias="freeGb")
+    health_status: str = Field(alias="healthStatus")
+    is_default: bool = Field(alias="isDefault")
+
+class StorageAllocationResponse(BaseSchema):
+    id: str
+    member_id: str = Field(alias="memberId")
+    pool_id: str = Field(alias="poolId")
+    volume_name: str = Field(alias="volumeName")
+    mount_path: str = Field(alias="mountPath")
+    quota_gb: float = Field(alias="quotaGb")
+    used_gb: float = Field(alias="usedGb")
+    read_only: bool = Field(alias="readOnly")
+    backup_policy: str = Field(alias="backupPolicy")
+    shared_datasets: List[str] = Field(alias="sharedDatasets")
+    created_at: str = Field(alias="createdAt")
+
+class StorageQuotaUpdateRequest(BaseSchema):
+    quota_gb: int = Field(alias="quotaGb")
+
+class SshEndpointResponse(BaseSchema):
+    id: str
+    member_id: str = Field(alias="memberId")
+    server_id: str = Field(alias="serverId")
+    listen_address: str = Field(alias="listenAddress")
+    listen_port: int = Field(alias="listenPort")
+    container_port: int = Field(22, alias="containerPort")
+    protocol: str = "tcp"
+    status: str
+    last_used_at: Optional[str] = Field(None, alias="lastUsedAt")
+
+class SshPortUpdateRequest(BaseSchema):
+    listen_port: int = Field(alias="listenPort")
+
+class SshCredentialResponse(BaseSchema):
+    id: str
+    member_id: str = Field(alias="memberId")
+    public_key: str = Field(alias="publicKey")
+    fingerprint: str
+    key_type: str = Field(alias="keyType")
+    enrollment_type: str = Field(alias="enrollmentType")
+    status: str
+    enrolled_at: Optional[str] = Field(None, alias="enrolledAt")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+
+class SshKeyEnrollRequest(BaseSchema):
+    public_key: str = Field(alias="publicKey")
+    enrollment_type: str = Field("IMPORTED", alias="enrollmentType")
+
 class MemberCreateRequest(BaseSchema):
     full_name: str = Field(alias="fullName")
     username: str
     email: str
-    role: str
+    role: str = "RESEARCHER"
+    research_group: Optional[str] = Field("AI Research Lab", alias="researchGroup")
     assigned_server: str = Field(alias="assignedServer")
     workspace_name: str = Field(alias="workspaceName")
+    storage_pool_id: Optional[str] = Field(None, alias="storagePoolId")
+    mount_path: str = Field("/workspace", alias="mountPath")
+    storage_quota_gb: int = Field(250, alias="storageQuotaGb")
+    backup_policy: str = Field("DAILY_SNAPSHOT", alias="backupPolicy")
+    shared_datasets: List[str] = Field(["/shared/datasets"], alias="sharedDatasets")
     cpu_limit_cores: int = Field(8, alias="cpuLimitCores")
     ram_limit_gb: int = Field(32, alias="ramLimitGb")
-    storage_quota_gb: int = Field(200, alias="storageQuotaGb")
+    gpu_permissions: List[str] = Field([], alias="gpuPermissions")
     vram_policy: str = Field("Quota 12GB (Shared)", alias="vramPolicy")
+    vram_quota_gb: Optional[int] = Field(12, alias="vramQuotaGb")
+    gpu_allocation_mode: str = Field("SHARED", alias="gpuAllocationMode")
+    ssh_port: Optional[int] = Field(None, alias="sshPort")
+    ssh_enrollment_type: str = Field("BROWSER_GENERATED", alias="sshEnrollmentType")
     ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
 
 class MemberResponse(BaseSchema):
     id: str
@@ -127,21 +207,39 @@ class MemberResponse(BaseSchema):
     username: str
     email: str
     role: str
+    research_group: Optional[str] = Field(None, alias="researchGroup")
     assigned_server: str = Field(alias="assignedServer")
     workspace_name: str = Field(alias="workspaceName")
     status: str
+    storage_pool_id: Optional[str] = Field(None, alias="storagePoolId")
+    storage_pool_label: Optional[str] = Field(None, alias="storagePoolLabel")
+    mount_path: str = Field("/workspace", alias="mountPath")
+    storage_quota_gb: int = Field(alias="storageQuotaGb")
+    storage_used_gb: int = Field(0, alias="storageUsedGb")
+    backup_policy: str = Field("DAILY_SNAPSHOT", alias="backupPolicy")
+    shared_datasets: List[str] = Field([], alias="sharedDatasets")
     ssh_status: str = Field(alias="sshStatus")
     ssh_sessions_count: int = Field(alias="sshSessionsCount")
+    ssh_ip: Optional[str] = Field(None, alias="sshIp")
+    ssh_port: Optional[int] = Field(None, alias="sshPort")
+    ssh_key_status: str = Field("ACTIVE", alias="sshKeyStatus")
+    ssh_fingerprint: Optional[str] = Field(None, alias="sshFingerprint")
     ssh_public_key_preview: str = Field(alias="sshPublicKeyPreview")
+    ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    sudo_privilege: str = Field("DENIED", alias="sudoPrivilege")
+    security_isolation_level: str = Field("UNPRIVILEGED_CGROUPS_ISOLATED", alias="securityIsolationLevel")
+    privilege_validation: Optional[PrivilegeValidationResponse] = Field(None, alias="privilegeValidation")
     cpu_limit_cores: int = Field(alias="cpuLimitCores")
     ram_limit_gb: int = Field(alias="ramLimitGb")
-    storage_quota_gb: int = Field(alias="storageQuotaGb")
     gpu_permissions: List[str] = Field(alias="gpuPermissions")
     vram_policy: str = Field(alias="vramPolicy")
+    vram_quota_gb: Optional[int] = Field(None, alias="vramQuotaGb")
+    gpu_allocation_mode: str = Field("SHARED", alias="gpuAllocationMode")
     max_runtime_hours: int = Field(alias="maxRuntimeHours")
     active_jobs_count: int = Field(alias="activeJobsCount")
     total_gpu_hours: float = Field(alias="totalGpuHours")
     created_at: str = Field(alias="createdAt")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
 
 class JobResponse(BaseSchema):
     id: str

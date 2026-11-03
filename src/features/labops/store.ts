@@ -7,7 +7,10 @@ import {
   SecurityReview,
   LabEvent,
   AuditLog,
-  DashboardSummary
+  DashboardSummary,
+  StoragePool,
+  StorageAllocation,
+  SshEndpoint
 } from '@/types/labops';
 
 interface LabOpsState {
@@ -18,6 +21,9 @@ interface LabOpsState {
   securityReviews: SecurityReview[];
   events: LabEvent[];
   auditLogs: AuditLog[];
+  storagePools: StoragePool[];
+  sshEndpoints: SshEndpoint[];
+  storageAllocations: StorageAllocation[];
 
   // Computed summary
   getSummary: () => DashboardSummary;
@@ -34,6 +40,13 @@ interface LabOpsState {
     >
   ) => void;
   deleteMember: (id: string) => void;
+  deleteMemberPermanently: (id: string) => void;
+
+  rotateSshKey: (id: string, newPublicKey: string, newFingerprint: string) => void;
+  revokeSshKey: (id: string) => void;
+  changeStorageQuota: (id: string, newQuotaGb: number) => { success: boolean; message: string };
+  changeSshPort: (id: string, newPort: number) => { success: boolean; message: string };
+  archiveWorkspace: (id: string) => void;
 
   allocateGpu: (payload: {
     gpuId: string;
@@ -233,6 +246,54 @@ const INITIAL_GPUS: PhysicalGpu[] = [
   }
 ];
 
+const INITIAL_STORAGE_POOLS: StoragePool[] = [
+  {
+    id: 'pool-nvme-fast',
+    serverId: 'track',
+    serverName: 'Server 01 — Track',
+    name: 'pool-nvme-fast',
+    label: 'SSD NVMe Siêu tốc — Storage Pool A',
+    diskIdentifier: 'wwn-0x5002538f411b4101',
+    mountPoint: '/var/lib/incus/storage-pools/pool-nvme-fast',
+    driver: 'zfs',
+    capacityGb: 8000,
+    usedGb: 4320,
+    freeGb: 3680,
+    healthStatus: 'HEALTHY',
+    isDefault: true
+  },
+  {
+    id: 'pool-zfs-bulk',
+    serverId: 'track',
+    serverName: 'Server 01 — Track',
+    name: 'pool-zfs-bulk',
+    label: 'HDD Lưu trữ Lớn — Storage Pool B',
+    diskIdentifier: 'wwn-0x5000cca268e31249',
+    mountPoint: '/var/lib/incus/storage-pools/pool-zfs-bulk',
+    driver: 'zfs',
+    capacityGb: 16000,
+    usedGb: 4600,
+    freeGb: 11400,
+    healthStatus: 'HEALTHY',
+    isDefault: false
+  },
+  {
+    id: 'pool-workstation-ssd',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation',
+    name: 'pool-workstation-ssd',
+    label: 'SSD Doanh nghiệp — Storage Pool A',
+    diskIdentifier: 'wwn-0x5002538f411b5202',
+    mountPoint: '/var/lib/incus/storage-pools/pool-workstation-ssd',
+    driver: 'zfs',
+    capacityGb: 4000,
+    usedGb: 1520,
+    freeGb: 2480,
+    healthStatus: 'HEALTHY',
+    isDefault: true
+  }
+];
+
 const INITIAL_MEMBERS: LabMember[] = [
   {
     id: 'mem-001',
@@ -240,21 +301,48 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'hieulc',
     email: 'hieulc@labops.local',
     role: 'SUPER_ADMIN',
+    researchGroup: 'NLP & Large Language Models',
     assignedServer: 'track',
     workspaceName: 'ws-hieulc',
     status: 'ACTIVE',
+    storagePoolId: 'pool-nvme-fast',
+    storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 500,
+    storageUsedGb: 182,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets', '/data/models'],
     sshStatus: 'ONLINE',
     sshSessionsCount: 2,
+    sshIp: '10.200.0.1',
+    sshPort: 22001,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:4X7x9fQm8zP1vL0k2j3h4g5f6e7d8c9b0a1s2d3f4e',
     sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH... hieulc@macbook',
+    sshPublicKey:
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH8q9v8nZ+u8d/2X8s6mXvYq9s7t6r5e4w3q2a1s0d9 hieulc@macbook',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 16,
     ramLimitGb: 64,
-    storageQuotaGb: 500,
     gpuPermissions: ['TRACK-GPU-01', 'TRACK-GPU-02', 'TRACK-GPU-03', 'WS-GPU-01'],
     vramPolicy: 'Tối đa 24GB (Shared/Exclusive)',
+    vramQuotaGb: 24,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 72,
     activeJobsCount: 1,
     totalGpuHours: 142.5,
-    createdAt: '2026-01-10'
+    createdAt: '2026-01-10',
+    expiresAt: '2027-01-10'
   },
   {
     id: 'mem-002',
@@ -262,17 +350,42 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'namnv',
     email: 'namnv@labops.local',
     role: 'RESEARCHER',
+    researchGroup: 'Speech & Audio Intelligence',
     assignedServer: 'track',
     workspaceName: 'ws-namnv',
     status: 'ACTIVE',
+    storagePoolId: 'pool-nvme-fast',
+    storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 400,
+    storageUsedGb: 145,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets'],
     sshStatus: 'ONLINE',
     sshSessionsCount: 1,
+    sshIp: '10.200.0.1',
+    sshPort: 22002,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:7K9m1nO3p5q7r9s1t3u5v7w9x1y3z5a7b9c1d3e5f7',
     sshPublicKeyPreview: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... namnv@laptop',
+    sshPublicKey: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC+0g... namnv@laptop',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 16,
     ramLimitGb: 64,
-    storageQuotaGb: 400,
     gpuPermissions: ['TRACK-GPU-02'],
     vramPolicy: 'Exclusive 24GB',
+    vramQuotaGb: 24,
+    gpuAllocationMode: 'EXCLUSIVE',
     maxRuntimeHours: 48,
     activeJobsCount: 1,
     totalGpuHours: 98.2,
@@ -284,17 +397,43 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'lanpt',
     email: 'lanpt@labops.local',
     role: 'RESEARCHER',
+    researchGroup: 'Computer Vision & Generative AI',
     assignedServer: 'workstation',
     workspaceName: 'ws-lanpt',
     status: 'ACTIVE',
+    storagePoolId: 'pool-workstation-ssd',
+    storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 300,
+    storageUsedGb: 98,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets'],
     sshStatus: 'ONLINE',
     sshSessionsCount: 1,
+    sshIp: '10.200.0.2',
+    sshPort: 22001,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:2A4b6c8d0e2f4a6c8e0a2c4e6a8c0e2f4a6c8e0a2b',
     sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK... lanpt@workstation',
+    sshPublicKey:
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK6x7y8z9a0b1c2d3e4f5g6h7i8j9k0l lanpt@workstation',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 12,
     ramLimitGb: 48,
-    storageQuotaGb: 300,
     gpuPermissions: ['WS-GPU-01'],
     vramPolicy: 'Quota 20GB',
+    vramQuotaGb: 20,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 36,
     activeJobsCount: 1,
     totalGpuHours: 76.4,
@@ -306,17 +445,43 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'tuanpm',
     email: 'tuanpm@labops.local',
     role: 'RESEARCHER',
+    researchGroup: 'Multimodal AI & Robotics',
     assignedServer: 'track',
     workspaceName: 'ws-tuanpm',
     status: 'ACTIVE',
+    storagePoolId: 'pool-nvme-fast',
+    storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 250,
+    storageUsedGb: 64,
+    backupPolicy: 'WEEKLY_SYNC',
+    sharedDatasets: ['/shared/datasets'],
     sshStatus: 'ONLINE',
     sshSessionsCount: 1,
+    sshIp: '10.200.0.1',
+    sshPort: 22003,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:9Z8y7x6w5v4u3t2s1r0q9p8o7n6m5l4k3j2i1h0g9f',
     sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL... tuanpm@desktop',
+    sshPublicKey:
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a tuanpm@desktop',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 8,
     ramLimitGb: 32,
-    storageQuotaGb: 250,
     gpuPermissions: ['TRACK-GPU-01', 'TRACK-GPU-03'],
     vramPolicy: 'Quota 12GB',
+    vramQuotaGb: 12,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 24,
     activeJobsCount: 1,
     totalGpuHours: 54.0,
@@ -328,17 +493,43 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'anhhd',
     email: 'anhhd@labops.local',
     role: 'LAB_MANAGER',
+    researchGroup: 'Infrastructure & MLOps',
     assignedServer: 'track',
     workspaceName: 'ws-anhhd',
     status: 'ACTIVE',
+    storagePoolId: 'pool-nvme-fast',
+    storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 500,
+    storageUsedGb: 210,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets', '/data/models'],
     sshStatus: 'ONLINE',
     sshSessionsCount: 2,
+    sshIp: '10.200.0.1',
+    sshPort: 22004,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:5M4l3k2j1i0h9g8f7e6d5c4b3a2z1y0x9w8v7u6t5s',
     sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP... anhhd@thinkpad',
+    sshPublicKey:
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP1q2w3e4r5t6y7u8i9o0p1a2s3d4f5g anhhd@thinkpad',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 16,
     ramLimitGb: 64,
-    storageQuotaGb: 500,
     gpuPermissions: ['TRACK-GPU-01', 'TRACK-GPU-02', 'TRACK-GPU-03'],
     vramPolicy: 'Toàn quyền',
+    vramQuotaGb: 24,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 72,
     activeJobsCount: 1,
     totalGpuHours: 110.8,
@@ -349,18 +540,44 @@ const INITIAL_MEMBERS: LabMember[] = [
     fullName: 'Vũ Mai Linh',
     username: 'linhvm',
     email: 'linhvm@labops.local',
-    role: 'RESEARCHER',
+    role: 'STUDENT',
+    researchGroup: 'AI Capstone Projects',
     assignedServer: 'workstation',
     workspaceName: 'ws-linhvm',
     status: 'ACTIVE',
+    storagePoolId: 'pool-workstation-ssd',
+    storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 200,
+    storageUsedGb: 45,
+    backupPolicy: 'WEEKLY_SYNC',
+    sharedDatasets: ['/shared/datasets'],
     sshStatus: 'OFFLINE',
     sshSessionsCount: 0,
+    sshIp: '10.200.0.2',
+    sshPort: 22002,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:1Q2w3e4r5t6y7u8i9o0p1a2s3d4f5g6h7j8k9l0z1x',
     sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIQ... linhvm@laptop',
+    sshPublicKey:
+      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIQ2w3e4r5t6y7u8i9o0p1a2s3d4f5g6h linhvm@laptop',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-01T08:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 8,
     ramLimitGb: 32,
-    storageQuotaGb: 200,
     gpuPermissions: ['WS-GPU-01'],
     vramPolicy: 'Quota 8GB',
+    vramQuotaGb: 8,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 24,
     activeJobsCount: 0,
     totalGpuHours: 32.1,
@@ -372,17 +589,42 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'huydq',
     email: 'huydq@labops.local',
     role: 'RESEARCHER',
+    researchGroup: 'Reinforcement Learning',
     assignedServer: 'track',
     workspaceName: 'ws-huydq',
     status: 'SUSPENDED',
+    storagePoolId: 'pool-nvme-fast',
+    storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 150,
+    storageUsedGb: 52,
+    backupPolicy: 'NONE',
+    sharedDatasets: [],
     sshStatus: 'OFFLINE',
     sshSessionsCount: 0,
+    sshIp: '10.200.0.1',
+    sshPort: 22005,
+    sshKeyStatus: 'ACTIVE',
+    sshFingerprint: 'SHA256:8J7h6g5f4d3s2a1p0o9i8u7y6t5r4e3w2q1z0x9c8v',
     sshPublicKeyPreview: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD... huydq@home',
+    sshPublicKey: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD... huydq@home',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-02-20T10:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 4,
     ramLimitGb: 16,
-    storageQuotaGb: 150,
     gpuPermissions: [],
     vramPolicy: 'Tạm khóa',
+    vramQuotaGb: 0,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 0,
     activeJobsCount: 0,
     totalGpuHours: 18.6,
@@ -394,20 +636,234 @@ const INITIAL_MEMBERS: LabMember[] = [
     username: 'chaunb',
     email: 'chaunb@labops.local',
     role: 'GUEST',
+    researchGroup: 'Visiting Scholar Program',
     assignedServer: 'workstation',
     workspaceName: 'ws-chaunb',
-    status: 'ACTIVE',
+    status: 'PENDING_KEY_ENROLLMENT',
+    storagePoolId: 'pool-workstation-ssd',
+    storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
+    mountPath: '/workspace',
+    storageQuotaGb: 100,
+    storageUsedGb: 12,
+    backupPolicy: 'NONE',
+    sharedDatasets: [],
     sshStatus: 'OFFLINE',
     sshSessionsCount: 0,
-    sshPublicKeyPreview: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIR... chaunb@guest',
+    sshIp: '10.200.0.2',
+    sshPort: 22003,
+    sshKeyStatus: 'PENDING_KEY_ENROLLMENT',
+    sshFingerprint: 'CHƯA_ĐĂNG_KÝ_KHÓA',
+    sshPublicKeyPreview: '(Đang chờ thành viên đăng ký khóa)',
+    sudoPrivilege: 'DENIED',
+    securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
+    privilegeValidation: {
+      unprivilegedContainer: true,
+      sudoTestFailedAsExpected: true,
+      noSudoGroupMembership: true,
+      noDockerSocketAccess: true,
+      noIncusSocketAccess: true,
+      verificationTimestamp: '2026-03-15T09:00:00Z',
+      status: 'VERIFIED_SAFE'
+    },
     cpuLimitCores: 4,
     ramLimitGb: 16,
-    storageQuotaGb: 100,
     gpuPermissions: [],
     vramPolicy: 'Chỉ CPU / Đợi duyệt GPU',
+    vramQuotaGb: 0,
+    gpuAllocationMode: 'SHARED',
     maxRuntimeHours: 12,
     activeJobsCount: 0,
     totalGpuHours: 4.2,
+    createdAt: '2026-03-15'
+  }
+];
+
+const INITIAL_SSH_ENDPOINTS: SshEndpoint[] = [
+  {
+    id: 'ep-001',
+    memberId: 'mem-001',
+    serverId: 'track',
+    listenAddress: '10.200.0.1',
+    listenPort: 22001,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-002',
+    memberId: 'mem-002',
+    serverId: 'track',
+    listenAddress: '10.200.0.1',
+    listenPort: 22002,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-003',
+    memberId: 'mem-003',
+    serverId: 'workstation',
+    listenAddress: '10.200.0.2',
+    listenPort: 22001,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-004',
+    memberId: 'mem-004',
+    serverId: 'track',
+    listenAddress: '10.200.0.1',
+    listenPort: 22003,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-005',
+    memberId: 'mem-005',
+    serverId: 'track',
+    listenAddress: '10.200.0.1',
+    listenPort: 22004,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-006',
+    memberId: 'mem-006',
+    serverId: 'workstation',
+    listenAddress: '10.200.0.2',
+    listenPort: 22002,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'ACTIVE'
+  },
+  {
+    id: 'ep-007',
+    memberId: 'mem-007',
+    serverId: 'track',
+    listenAddress: '10.200.0.1',
+    listenPort: 22005,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'DISABLED'
+  },
+  {
+    id: 'ep-008',
+    memberId: 'mem-008',
+    serverId: 'workstation',
+    listenAddress: '10.200.0.2',
+    listenPort: 22003,
+    containerPort: 22,
+    protocol: 'tcp',
+    status: 'DISABLED'
+  }
+];
+
+const INITIAL_STORAGE_ALLOCATIONS: StorageAllocation[] = [
+  {
+    id: 'sa-001',
+    memberId: 'mem-001',
+    poolId: 'pool-nvme-fast',
+    volumeName: 'data-hieulc',
+    mountPath: '/workspace',
+    quotaGb: 500,
+    usedGb: 182,
+    readOnly: false,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets', '/data/models'],
+    createdAt: '2026-01-10'
+  },
+  {
+    id: 'sa-002',
+    memberId: 'mem-002',
+    poolId: 'pool-nvme-fast',
+    volumeName: 'data-namnv',
+    mountPath: '/workspace',
+    quotaGb: 400,
+    usedGb: 145,
+    readOnly: false,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets'],
+    createdAt: '2026-01-15'
+  },
+  {
+    id: 'sa-003',
+    memberId: 'mem-003',
+    poolId: 'pool-workstation-ssd',
+    volumeName: 'data-lanpt',
+    mountPath: '/workspace',
+    quotaGb: 300,
+    usedGb: 98,
+    readOnly: false,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets'],
+    createdAt: '2026-02-01'
+  },
+  {
+    id: 'sa-004',
+    memberId: 'mem-004',
+    poolId: 'pool-nvme-fast',
+    volumeName: 'data-tuanpm',
+    mountPath: '/workspace',
+    quotaGb: 250,
+    usedGb: 64,
+    readOnly: false,
+    backupPolicy: 'WEEKLY_SYNC',
+    sharedDatasets: ['/shared/datasets'],
+    createdAt: '2026-02-10'
+  },
+  {
+    id: 'sa-005',
+    memberId: 'mem-005',
+    poolId: 'pool-nvme-fast',
+    volumeName: 'data-anhhd',
+    mountPath: '/workspace',
+    quotaGb: 500,
+    usedGb: 210,
+    readOnly: false,
+    backupPolicy: 'DAILY_SNAPSHOT',
+    sharedDatasets: ['/shared/datasets', '/data/models'],
+    createdAt: '2026-01-05'
+  },
+  {
+    id: 'sa-006',
+    memberId: 'mem-006',
+    poolId: 'pool-workstation-ssd',
+    volumeName: 'data-linhvm',
+    mountPath: '/workspace',
+    quotaGb: 200,
+    usedGb: 45,
+    readOnly: false,
+    backupPolicy: 'WEEKLY_SYNC',
+    sharedDatasets: ['/shared/datasets'],
+    createdAt: '2026-03-01'
+  },
+  {
+    id: 'sa-007',
+    memberId: 'mem-007',
+    poolId: 'pool-nvme-fast',
+    volumeName: 'data-huydq',
+    mountPath: '/workspace',
+    quotaGb: 150,
+    usedGb: 52,
+    readOnly: false,
+    backupPolicy: 'NONE',
+    sharedDatasets: [],
+    createdAt: '2026-02-20'
+  },
+  {
+    id: 'sa-008',
+    memberId: 'mem-008',
+    poolId: 'pool-workstation-ssd',
+    volumeName: 'data-chaunb',
+    mountPath: '/workspace',
+    quotaGb: 100,
+    usedGb: 12,
+    readOnly: false,
+    backupPolicy: 'NONE',
+    sharedDatasets: [],
     createdAt: '2026-03-15'
   }
 ];
@@ -740,6 +1196,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   securityReviews: INITIAL_SECURITY_REVIEWS,
   events: INITIAL_EVENTS,
   auditLogs: INITIAL_AUDIT_LOGS,
+  storagePools: INITIAL_STORAGE_POOLS,
+  sshEndpoints: INITIAL_SSH_ENDPOINTS,
+  storageAllocations: INITIAL_STORAGE_ALLOCATIONS,
 
   getSummary: () => {
     const { servers, gpus, members, jobs } = get();
@@ -804,8 +1263,35 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       createdAt: new Date().toISOString().split('T')[0]
     };
 
+    const newEndpoint: SshEndpoint = {
+      id: `ep-${Date.now()}`,
+      memberId: newId,
+      serverId: newMember.assignedServer,
+      listenAddress: newMember.sshIp,
+      listenPort: newMember.sshPort,
+      containerPort: 22,
+      protocol: 'tcp',
+      status: newMember.status === 'ACTIVE' ? 'ACTIVE' : 'DISABLED'
+    };
+
+    const newAllocation: StorageAllocation = {
+      id: `sa-${Date.now()}`,
+      memberId: newId,
+      poolId: newMember.storagePoolId,
+      volumeName: `data-${newMember.username}`,
+      mountPath: newMember.mountPath || '/workspace',
+      quotaGb: newMember.storageQuotaGb,
+      usedGb: newMember.storageUsedGb || 0,
+      readOnly: false,
+      backupPolicy: newMember.backupPolicy || 'DAILY_SNAPSHOT',
+      sharedDatasets: newMember.sharedDatasets || ['/shared/datasets'],
+      createdAt: new Date().toISOString().split('T')[0]
+    };
+
     set((state) => ({
       members: [newMember, ...state.members],
+      sshEndpoints: [newEndpoint, ...state.sshEndpoints],
+      storageAllocations: [newAllocation, ...state.storageAllocations],
       auditLogs: [
         {
           id: `log-${Date.now()}`,
@@ -816,7 +1302,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
           timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
           result: 'SUCCESS',
           correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã tạo tài khoản cho ${newMember.fullName} (${newMember.username}) trên ${newMember.assignedServer}`
+          details: `Đã tạo tài khoản cho ${newMember.fullName} (@${newMember.username}) trên ${newMember.assignedServer}, Cổng SSH ${newMember.sshPort}, Dung lượng ${newMember.storageQuotaGb}GB ZFS`
         },
         ...state.auditLogs
       ]
@@ -860,9 +1346,243 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   deleteMember: (id) => {
-    set((state) => ({
-      members: state.members.filter((m) => m.id !== id)
+    set((state) => {
+      const member = state.members.find((m) => m.id === id);
+      return {
+        members: state.members.filter((m) => m.id !== id),
+        sshEndpoints: state.sshEndpoints.filter((ep) => ep.memberId !== id),
+        storageAllocations: state.storageAllocations.filter((sa) => sa.memberId !== id),
+        auditLogs: [
+          {
+            id: `log-${Date.now()}`,
+            actor: 'Quản trị viên (Demo)',
+            action: 'Xóa thành viên',
+            targetType: 'MEMBER',
+            targetId: member?.username || id,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            result: 'SUCCESS',
+            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+            details: `Đã xóa thành viên @${member?.username || id} khỏi hệ thống`
+          },
+          ...state.auditLogs
+        ]
+      };
+    });
+  },
+
+  deleteMemberPermanently: (id) => {
+    set((state) => {
+      const member = state.members.find((m) => m.id === id);
+      return {
+        members: state.members.filter((m) => m.id !== id),
+        sshEndpoints: state.sshEndpoints.filter((ep) => ep.memberId !== id),
+        storageAllocations: state.storageAllocations.filter((sa) => sa.memberId !== id),
+        auditLogs: [
+          {
+            id: `log-${Date.now()}`,
+            actor: 'Quản trị viên (Demo)',
+            action: 'Hủy vĩnh viễn thành viên & Workspace',
+            targetType: 'MEMBER',
+            targetId: member?.username || id,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            result: 'SUCCESS',
+            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+            details: `Đã hủy container ${member?.workspaceName}, xóa ZFS volume và thu hồi cổng SSH ${member?.sshPort}`
+          },
+          ...state.auditLogs
+        ]
+      };
+    });
+  },
+
+  rotateSshKey: (id, newPublicKey, newFingerprint) => {
+    set((state) => {
+      const member = state.members.find((m) => m.id === id);
+      const updatedMembers = state.members.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              sshPublicKey: newPublicKey,
+              sshFingerprint: newFingerprint,
+              sshPublicKeyPreview: newPublicKey.slice(0, 30) + '...',
+              sshKeyStatus: 'ACTIVE' as const
+            }
+          : m
+      );
+
+      return {
+        members: updatedMembers,
+        auditLogs: [
+          {
+            id: `log-${Date.now()}`,
+            actor: 'Quản trị viên (Demo)',
+            action: 'Cập nhật/Đổi khóa SSH (Key Rotation)',
+            targetType: 'SSH_KEY',
+            targetId: member?.username || id,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            result: 'SUCCESS',
+            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+            details: `Đã cập nhật khóa SSH Ed25519 mới, fingerprint: ${newFingerprint}`
+          },
+          ...state.auditLogs
+        ]
+      };
+    });
+  },
+
+  revokeSshKey: (id) => {
+    set((state) => {
+      const member = state.members.find((m) => m.id === id);
+      const updatedMembers = state.members.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              sshKeyStatus: 'REVOKED' as const,
+              sshStatus: 'OFFLINE' as const,
+              sshPublicKeyPreview: '(Khóa đã bị thu hồi)'
+            }
+          : m
+      );
+
+      return {
+        members: updatedMembers,
+        auditLogs: [
+          {
+            id: `log-${Date.now()}`,
+            actor: 'Quản trị viên (Demo)',
+            action: 'Thu hồi khóa SSH',
+            targetType: 'SSH_KEY',
+            targetId: member?.username || id,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            result: 'WARNING',
+            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+            details: `Đã thu hồi và xóa khóa khỏi authorized_keys của @${member?.username}`
+          },
+          ...state.auditLogs
+        ]
+      };
+    });
+  },
+
+  changeStorageQuota: (id, newQuotaGb) => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
+
+    const pool = state.storagePools.find((p) => p.id === member.storagePoolId);
+    if (pool) {
+      const quotaDiff = newQuotaGb - member.storageQuotaGb;
+      if (quotaDiff > pool.freeGb) {
+        return {
+          success: false,
+          message: `Storage Pool chỉ còn trống ${pool.freeGb} GB, không đủ cấp phát thêm ${quotaDiff} GB!`
+        };
+      }
+    }
+
+    set((s) => ({
+      members: s.members.map((m) => (m.id === id ? { ...m, storageQuotaGb: newQuotaGb } : m)),
+      storageAllocations: s.storageAllocations.map((sa) =>
+        sa.memberId === id ? { ...sa, quotaGb: newQuotaGb } : sa
+      ),
+      auditLogs: [
+        {
+          id: `log-${Date.now()}`,
+          actor: 'Quản trị viên (Demo)',
+          action: 'Điều chỉnh Hạn ngạch Ổ đĩa',
+          targetType: 'STORAGE',
+          targetId: member.username,
+          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          result: 'SUCCESS',
+          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+          details: `Thay đổi quota ZFS của @${member.username} từ ${member.storageQuotaGb}GB lên ${newQuotaGb}GB`
+        },
+        ...s.auditLogs
+      ]
     }));
+
+    return { success: true, message: `Đã cập nhật hạn ngạch thành ${newQuotaGb} GB thành công` };
+  },
+
+  changeSshPort: (id, newPort) => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
+
+    if (newPort < 22000 || newPort > 29999) {
+      return { success: false, message: 'Cổng SSH phải nằm trong dải hợp lệ 22000 - 29999' };
+    }
+
+    const collision = state.sshEndpoints.find(
+      (ep) =>
+        ep.serverId === member.assignedServer && ep.listenPort === newPort && ep.memberId !== id
+    );
+
+    if (collision) {
+      return {
+        success: false,
+        message: `Cổng ${newPort} đã được sử dụng bởi thành viên khác trên máy chủ ${member.assignedServer}!`
+      };
+    }
+
+    set((s) => ({
+      members: s.members.map((m) => (m.id === id ? { ...m, sshPort: newPort } : m)),
+      sshEndpoints: s.sshEndpoints.map((ep) =>
+        ep.memberId === id ? { ...ep, listenPort: newPort } : ep
+      ),
+      auditLogs: [
+        {
+          id: `log-${Date.now()}`,
+          actor: 'Quản trị viên (Demo)',
+          action: 'Đổi Cổng SSH Endpoint',
+          targetType: 'NETWORK',
+          targetId: member.username,
+          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          result: 'SUCCESS',
+          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+          details: `Đã chuyển cổng SSH Incus proxy từ ${member.sshPort} sang ${newPort} cho @${member.username}`
+        },
+        ...s.auditLogs
+      ]
+    }));
+
+    return { success: true, message: `Đã chuyển sang cổng SSH ${newPort} thành công` };
+  },
+
+  archiveWorkspace: (id) => {
+    set((state) => {
+      const member = state.members.find((m) => m.id === id);
+      const updatedMembers = state.members.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              status: 'ARCHIVED' as const,
+              sshStatus: 'OFFLINE' as const
+            }
+          : m
+      );
+
+      return {
+        members: updatedMembers,
+        sshEndpoints: state.sshEndpoints.map((ep) =>
+          ep.memberId === id ? { ...ep, status: 'DISABLED' as const } : ep
+        ),
+        auditLogs: [
+          {
+            id: `log-${Date.now()}`,
+            actor: 'Quản trị viên (Demo)',
+            action: 'Lưu trữ Workspace (Archive)',
+            targetType: 'WORKSPACE',
+            targetId: member?.username || id,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            result: 'SUCCESS',
+            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+            details: `Đã dừng container ${member?.workspaceName}, ngắt kết nối SSH và lưu trữ volume ZFS`
+          },
+          ...state.auditLogs
+        ]
+      };
+    });
   },
 
   allocateGpu: ({ gpuId, username, mode, requestedVramGb, jobName }) => {

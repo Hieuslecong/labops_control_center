@@ -27,7 +27,6 @@ import {
 } from '@/components/ui/sidebar';
 import { UserAvatarProfile } from '@/components/user-avatar-profile';
 import { navGroups } from '@/config/nav-config';
-import { useClerk, useUser } from '@clerk/nextjs';
 import { useFilteredNavGroups } from '@/hooks/use-nav';
 import type { NavItem } from '@/types';
 import Link from 'next/link';
@@ -37,31 +36,17 @@ import { OrgSwitcher } from '../org-switcher';
 
 export default function AppSidebar() {
   const pathname = usePathname();
-  let user: {
-    fullName?: string | null;
-    imageUrl?: string;
-    emailAddresses: Array<{ emailAddress: string }>;
-  } | null = null;
-  let signOutFn: ((options?: { redirectUrl?: string }) => Promise<void>) | null = null;
-
-  try {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const clerkUser = useUser();
-    user = clerkUser.user ?? null;
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const clerk = useClerk();
-    signOutFn = clerk.signOut;
-  } catch {
-    // Clerk not configured or in standalone demo mode
-  }
-
   const router = useRouter();
   const filteredGroups = useFilteredNavGroups(navGroups);
 
-  const displayUser = user || {
-    fullName: 'Quản trị viên Lab',
+  const displayUser = {
+    fullName: 'Quản trị viên LabOps',
     imageUrl: '',
     emailAddresses: [{ emailAddress: 'admin@labops.local' }]
+  };
+
+  const handleSignOut = () => {
+    router.push('/auth/sign-in');
   };
 
   return (
@@ -131,15 +116,7 @@ export default function AppSidebar() {
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      if (signOutFn) {
-                        void signOutFn({ redirectUrl: '/' });
-                      } else {
-                        router.push('/');
-                      }
-                    }}
-                  >
+                  <DropdownMenuItem onClick={handleSignOut}>
                     <Icons.logout aria-hidden className='mr-2 h-4 w-4 text-destructive' />
                     Đăng xuất
                   </DropdownMenuItem>

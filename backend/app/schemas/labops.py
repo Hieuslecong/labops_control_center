@@ -1,39 +1,42 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Dict, Any
 
-class ServerSummary(BaseModel):
+class BaseSchema(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+class ServerSummary(BaseSchema):
     total: int
     online: int
     offline: int
 
-class GpuSummary(BaseModel):
+class GpuSummary(BaseSchema):
     total_count: int = Field(alias="totalCount")
     model: str
     aggregate_vram_gb: int = Field(alias="aggregateVramGb")
     active_count: int = Field(alias="activeCount")
     used_vram_gb: int = Field(alias="usedVramGb")
 
-class MemberSummary(BaseModel):
+class MemberSummary(BaseSchema):
     online_ssh: int = Field(alias="onlineSsh")
     active_sessions: int = Field(alias="activeSessions")
     total_registered: int = Field(alias="totalRegistered")
 
-class JobSummary(BaseModel):
+class JobSummary(BaseSchema):
     running: int
     pending: int
     failed: int
 
-class GpuHoursSummary(BaseModel):
+class GpuHoursSummary(BaseSchema):
     today: float
     last_7_days: float = Field(alias="last7Days")
     previous_period_change_percent: float = Field(alias="previousPeriodChangePercent")
 
-class AlertSummary(BaseModel):
+class AlertSummary(BaseSchema):
     critical: int
     warnings: int
     unresolved_incidents: int = Field(alias="unresolvedIncidents")
 
-class DashboardSummaryResponse(BaseModel):
+class DashboardSummaryResponse(BaseSchema):
     servers: ServerSummary
     gpus: GpuSummary
     members: MemberSummary
@@ -41,7 +44,7 @@ class DashboardSummaryResponse(BaseModel):
     gpu_hours: GpuHoursSummary = Field(alias="gpuHours")
     alerts: AlertSummary
 
-class PhysicalServerResponse(BaseModel):
+class PhysicalServerResponse(BaseSchema):
     id: str
     name: str
     hostname: str
@@ -70,7 +73,7 @@ class PhysicalServerResponse(BaseModel):
     cuda_version: str = Field(alias="cudaVersion")
     last_updated: str = Field(alias="lastUpdated")
 
-class GpuProcessResponse(BaseModel):
+class GpuProcessResponse(BaseSchema):
     pid: int
     name: str
     username: str
@@ -78,7 +81,7 @@ class GpuProcessResponse(BaseModel):
     vram_mb: int = Field(alias="vramMb")
     cpu_percent: float = Field(alias="cpuPercent")
 
-class PhysicalGpuResponse(BaseModel):
+class PhysicalGpuResponse(BaseSchema):
     id: str
     display_label: str = Field(alias="displayLabel")
     server_id: str = Field(alias="serverId")
@@ -98,14 +101,14 @@ class PhysicalGpuResponse(BaseModel):
     active_users: List[str] = Field(alias="activeUsers")
     associated_jobs: List[str] = Field(alias="associatedJobs")
 
-class GpuAllocateRequest(BaseModel):
+class GpuAllocateRequest(BaseSchema):
     gpu_id: str = Field(alias="gpuId")
     username: str
     mode: str = "SHARED"
     requested_vram_gb: int = Field(alias="requestedVramGb")
     job_name: str = Field(alias="jobName")
 
-class MemberCreateRequest(BaseModel):
+class MemberCreateRequest(BaseSchema):
     full_name: str = Field(alias="fullName")
     username: str
     email: str
@@ -118,7 +121,7 @@ class MemberCreateRequest(BaseModel):
     vram_policy: str = Field("Quota 12GB (Shared)", alias="vramPolicy")
     ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
 
-class MemberResponse(BaseModel):
+class MemberResponse(BaseSchema):
     id: str
     full_name: str = Field(alias="fullName")
     username: str
@@ -140,7 +143,7 @@ class MemberResponse(BaseModel):
     total_gpu_hours: float = Field(alias="totalGpuHours")
     created_at: str = Field(alias="createdAt")
 
-class JobResponse(BaseModel):
+class JobResponse(BaseSchema):
     id: str
     username: str
     full_name: str = Field(alias="fullName")
@@ -158,7 +161,7 @@ class JobResponse(BaseModel):
     ssh_status: str = Field(alias="sshStatus")
     container_state: str = Field(alias="containerState")
 
-class SecurityReviewResponse(BaseModel):
+class SecurityReviewResponse(BaseSchema):
     id: str
     repo_url: str = Field(alias="repoUrl")
     repo_name: str = Field(alias="repoName")
@@ -171,7 +174,7 @@ class SecurityReviewResponse(BaseModel):
     summary: str
     reviewed_by: Optional[str] = Field(None, alias="reviewedBy")
 
-class EventResponse(BaseModel):
+class EventResponse(BaseSchema):
     id: str
     title: str
     type: str
@@ -184,7 +187,7 @@ class EventResponse(BaseModel):
     status: str
     description: str
 
-class AuditLogResponse(BaseModel):
+class AuditLogResponse(BaseSchema):
     id: str
     actor: str
     action: str
@@ -194,4 +197,3 @@ class AuditLogResponse(BaseModel):
     result: str
     correlation_id: str = Field(alias="correlationId")
     details: str
-

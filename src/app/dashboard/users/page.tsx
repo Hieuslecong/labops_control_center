@@ -1,33 +1,18 @@
-import { auth } from '@clerk/nextjs/server';
 import PageContainer from '@/components/layout/page-container';
-import UserListingPage from '@/features/users/components/user-listing';
-import { searchParamsCache } from '@/lib/searchparams';
-import type { SearchParams } from 'nuqs/server';
-import { usersInfoContent } from '@/features/users/info-content';
-import { UserFormSheetTrigger } from '@/features/users/components/user-form-sheet';
+import { MemberManagementView } from '@/features/users/components/member-management-view';
 
 export const metadata = {
-  title: 'Dashboard: Users'
+  title: 'Thành viên - LabOps Control Center',
+  description: 'Quản trị danh sách thành viên nghiên cứu, cấp phát container Incus và khóa SSH'
 };
 
-type PageProps = {
-  searchParams: Promise<SearchParams>;
-};
-
-export default async function UsersPage(props: PageProps) {
-  await auth.protect();
-
-  const searchParams = await props.searchParams;
-  searchParamsCache.parse(searchParams);
-
+export default function UsersPage() {
   return (
     <PageContainer
-      pageTitle='Users'
-      pageDescription='Manage users (React Query + nuqs table pattern.)'
-      infoContent={usersInfoContent}
-      pageHeaderAction={<UserFormSheetTrigger />}
+      pageTitle='Quản trị Thành viên & Quyền truy cập'
+      pageDescription='Quản lý tài khoản nghiên cứu viên, cấp phát Workspace Linux container và phân quyền sử dụng GPU NVIDIA A30'
     >
-      <UserListingPage />
+      <MemberManagementView />
     </PageContainer>
   );
 }

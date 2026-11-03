@@ -27,7 +27,7 @@ import {
 } from '@/components/ui/sidebar';
 import { UserAvatarProfile } from '@/components/user-avatar-profile';
 import { navGroups } from '@/config/nav-config';
-import { useClerk, useOrganization, useUser } from '@clerk/nextjs';
+import { useClerk, useUser } from '@clerk/nextjs';
 import { useFilteredNavGroups } from '@/hooks/use-nav';
 import type { NavItem } from '@/types';
 import Link from 'next/link';
@@ -37,11 +37,32 @@ import { OrgSwitcher } from '../org-switcher';
 
 export default function AppSidebar() {
   const pathname = usePathname();
-  const { user } = useUser();
-  const { organization } = useOrganization();
-  const { signOut } = useClerk();
+  let user: {
+    fullName?: string | null;
+    imageUrl?: string;
+    emailAddresses: Array<{ emailAddress: string }>;
+  } | null = null;
+  let signOutFn: ((options?: { redirectUrl?: string }) => Promise<void>) | null = null;
+
+  try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const clerkUser = useUser();
+    user = clerkUser.user ?? null;
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const clerk = useClerk();
+    signOutFn = clerk.signOut;
+  } catch {
+    // Clerk not configured or in standalone demo mode
+  }
+
   const router = useRouter();
   const filteredGroups = useFilteredNavGroups(navGroups);
+
+  const displayUser = user || {
+    fullName: 'Quản trị viên Lab',
+    imageUrl: '',
+    emailAddresses: [{ emailAddress: 'admin@labops.local' }]
+  };
 
   return (
     <Sidebar collapsible='icon'>
@@ -72,7 +93,7 @@ export default function AppSidebar() {
                   />
                 }
               >
-                {user && <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />}
+                <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={displayUser} />
                 <Icons.chevronsDown className='ml-auto size-4' />
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -84,35 +105,43 @@ export default function AppSidebar() {
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className='p-0 font-normal'>
                     <div className='px-1 py-1.5'>
-                      {user && (
-                        <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />
-                      )}
+                      <UserAvatarProfile
+                        className='h-8 w-8 rounded-lg'
+                        showInfo
+                        user={displayUser}
+                      />
                     </div>
                   </DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
 
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => router.push('/dashboard/profile')}>
-                    <Icons.account className='mr-2 h-4 w-4' />
-                    Profile
+                  <DropdownMenuItem onClick={() => router.push('/dashboard/settings')}>
+                    <Icons.settings className='mr-2 h-4 w-4' />
+                    Cài đặt tài khoản
                   </DropdownMenuItem>
-                  {organization && (
-                    <DropdownMenuItem onClick={() => router.push('/dashboard/billing')}>
-                      <Icons.creditCard className='mr-2 h-4 w-4' />
-                      Billing
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={() => router.push('/dashboard/notifications')}>
-                    <Icons.notification className='mr-2 h-4 w-4' />
-                    Notifications
+                  <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
+                    <Icons.key className='mr-2 h-4 w-4' />
+                    Khóa SSH & Quyền truy cập
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => router.push('/dashboard/audit-logs')}>
+                    <Icons.audit className='mr-2 h-4 w-4' />
+                    Nhật ký thao tác
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => signOut({ redirectUrl: '/auth/sign-in' })}>
-                    <Icons.logout aria-hidden className='mr-2 h-4 w-4' />
-                    Sign out
+                  <DropdownMenuItem
+                    onClick={() => {
+                      if (signOutFn) {
+                        void signOutFn({ redirectUrl: '/' });
+                      } else {
+                        router.push('/');
+                      }
+                    }}
+                  >
+                    <Icons.logout aria-hidden className='mr-2 h-4 w-4 text-destructive' />
+                    Đăng xuất
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
@@ -140,9 +169,9 @@ function NavMainItem({ item, pathname }: { item: NavItem; pathname: string }) {
         <SidebarMenuButton
           render={<Link href={item.url} aria-label={item.title} />}
           tooltip={item.title}
-          isActive={pathname === item.url}
+          isActive={isActivePath(pathname, item.url)}
         >
-          <Icon />
+          {Icon && <Icon className='size-4' />}
           <span>{item.title}</span>
         </SidebarMenuButton>
       </SidebarMenuItem>
@@ -151,7 +180,6 @@ function NavMainItem({ item, pathname }: { item: NavItem; pathname: string }) {
 
   const hasActiveChild = children.some((child) => isActivePath(pathname, child.url));
 
-  // The icon rail hides sub-items, so a group opens its links in a menu to the right instead
   if (state === 'collapsed' && !isMobile) {
     return (
       <SidebarMenuItem>
@@ -165,7 +193,7 @@ function NavMainItem({ item, pathname }: { item: NavItem; pathname: string }) {
               />
             }
           >
-            <Icon />
+            {Icon && <Icon className='size-4' />}
             <span>{item.title}</span>
           </DropdownMenuTrigger>
           <DropdownMenuContent
@@ -217,7 +245,7 @@ function NavMainItem({ item, pathname }: { item: NavItem; pathname: string }) {
           />
         }
       >
-        {item.icon && <Icon />}
+        {item.icon && <Icon className='size-4' />}
         <span>{item.title}</span>
         <Icons.chevronRight className='ml-auto transition-transform duration-200 group-data-panel-open/collapsible:rotate-90' />
       </CollapsibleTrigger>

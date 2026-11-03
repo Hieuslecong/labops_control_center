@@ -1,8 +1,31 @@
 import { clerkMiddleware } from '@clerk/nextjs/server';
+import { NextResponse, type NextRequest, type NextFetchEvent } from 'next/server';
 
-// Each /dashboard page and API route checks auth itself (`auth.protect()` / `auth()`).
-// clerkMiddleware() only attaches the auth context to every request.
-export default clerkMiddleware();
+const hasClerkKeys = Boolean(
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY
+);
+
+type MiddlewareHandler = (
+  request: NextRequest,
+  event: NextFetchEvent
+) => NextResponse | Promise<NextResponse>;
+
+let handler: MiddlewareHandler | null = null;
+if (hasClerkKeys) {
+  try {
+    handler = clerkMiddleware() as unknown as MiddlewareHandler;
+  } catch {
+    handler = null;
+  }
+}
+
+export default function middleware(request: NextRequest, event: NextFetchEvent) {
+  if (handler) {
+    return handler(request, event);
+  }
+  return NextResponse.next();
+}
+
 export const config = {
   matcher: [
     // Skip Next.js internals and all static files, unless found in search params

@@ -1,10 +1,7 @@
 'use client';
 
-import { useAuth, useOrganizationList } from '@clerk/nextjs';
+import React, { useState } from 'react';
 import { Icons } from '@/components/icons';
-import Image from 'next/image';
-import { useRouter } from 'next/navigation';
-
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,7 +9,6 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuShortcut,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
 import {
@@ -21,111 +17,39 @@ import {
   SidebarMenuItem,
   useSidebar
 } from '@/components/ui/sidebar';
-import { useEffect } from 'react';
+import { Badge } from '@/components/ui/badge';
+
+interface ClusterScope {
+  id: string;
+  name: string;
+  location: string;
+  gpus: string;
+}
+
+const CLUSTERS: ClusterScope[] = [
+  {
+    id: 'all',
+    name: 'Toàn bộ Lab (Tất cả cụm)',
+    location: 'Hà Nội & TP.HCM',
+    gpus: '4x NVIDIA A30 (96 GB)'
+  },
+  {
+    id: 'track',
+    name: 'Cụm TRACK (Server 01)',
+    location: 'Phòng Lab Hà Nội',
+    gpus: '3x NVIDIA A30 (72 GB)'
+  },
+  {
+    id: 'workstation',
+    name: 'Cụm WORKSTATION (Server 02)',
+    location: 'Phòng Lab TP.HCM',
+    gpus: '1x NVIDIA A30 (24 GB)'
+  }
+];
 
 export function OrgSwitcher() {
-  const { isMobile, state } = useSidebar();
-  const router = useRouter();
-  const { isLoaded, setActive, userMemberships } = useOrganizationList({
-    userMemberships: {
-      infinite: true,
-      keepPreviousData: false
-    }
-  });
-
-  const { orgId } = useAuth();
-
-  useEffect(() => {
-    if (userMemberships?.revalidate) {
-      void userMemberships.revalidate();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only revalidate when org changes, not on every userMemberships ref change
-  }, [orgId]);
-
-  // Get the currently active organization
-  const activeOrganization = userMemberships?.data?.find(
-    (membership) => membership.organization.id === orgId
-  )?.organization;
-
-  // Handle organization switch
-  const handleOrganizationSwitch = async (organizationId: string) => {
-    if (orgId === organizationId || !setActive) {
-      return; // Already active or setActive not available
-    }
-    try {
-      await setActive({ organization: organizationId });
-    } catch (error) {
-      console.error('Failed to switch organization:', error);
-    }
-  };
-
-  // Show loading state
-  if (!isLoaded) {
-    return (
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton size='lg' disabled>
-            <div className='bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg'>
-              <Icons.galleryVerticalEnd className='size-4' />
-            </div>
-            <div
-              className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
-                state === 'collapsed'
-                  ? 'invisible max-w-0 overflow-hidden opacity-0'
-                  : 'visible max-w-full opacity-100'
-              }`}
-            >
-              <span className='truncate font-medium'>Loading...</span>
-              <span className='text-muted-foreground truncate text-xs'>Organizations</span>
-            </div>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    );
-  }
-
-  // Show create organization option if no organizations
-  if (!userMemberships?.data || userMemberships.data.length === 0) {
-    return (
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            size='lg'
-            onClick={() => router.push('/dashboard/workspaces')}
-            className='data-popup-open:bg-sidebar-accent data-popup-open:text-sidebar-accent-foreground'
-          >
-            <div className='bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg'>
-              <Icons.add className='size-4' />
-            </div>
-            <div
-              className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
-                state === 'collapsed'
-                  ? 'invisible max-w-0 overflow-hidden opacity-0'
-                  : 'visible max-w-full opacity-100'
-              }`}
-            >
-              <span className='truncate font-medium'>Create organization</span>
-              <span className='text-muted-foreground truncate text-xs'>Get started</span>
-            </div>
-            <Icons.chevronsUpDown
-              className={`ml-auto transition-all duration-200 ease-in-out ${
-                state === 'collapsed'
-                  ? 'invisible max-w-0 opacity-0'
-                  : 'visible max-w-full opacity-100'
-              }`}
-            />
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    );
-  }
-
-  // Use active organization or first organization as fallback
-  const displayOrganization = activeOrganization || userMemberships.data[0]?.organization;
-
-  if (!displayOrganization) {
-    return null;
-  }
+  const { state } = useSidebar();
+  const [selectedCluster, setSelectedCluster] = useState<ClusterScope>(CLUSTERS[0]);
 
   return (
     <SidebarMenu>
@@ -135,22 +59,12 @@ export function OrgSwitcher() {
             render={
               <SidebarMenuButton
                 size='lg'
-                className='data-popup-open:bg-sidebar-accent data-popup-open:text-sidebar-accent-foreground'
+                className='data-popup-open:bg-sidebar-accent data-popup-open:text-sidebar-accent-foreground hover:bg-sidebar-accent/80 transition-colors'
               />
             }
           >
-            <div className='bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg'>
-              {displayOrganization.hasImage && displayOrganization.imageUrl ? (
-                <Image
-                  src={displayOrganization.imageUrl}
-                  alt={displayOrganization.name}
-                  width={32}
-                  height={32}
-                  className='size-full object-cover'
-                />
-              ) : (
-                <Icons.galleryVerticalEnd className='size-4' />
-              )}
+            <div className='bg-primary text-primary-foreground flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg shadow-sm'>
+              <Icons.server className='size-4.5' />
             </div>
             <div
               className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
@@ -159,14 +73,21 @@ export function OrgSwitcher() {
                   : 'visible max-w-full opacity-100'
               }`}
             >
-              <span className='truncate font-medium'>{displayOrganization.name}</span>
-              <span className='text-muted-foreground truncate text-xs'>
-                {userMemberships.data.find((m) => m.organization.id === displayOrganization.id)
-                  ?.role || 'Organization'}
+              <div className='flex items-center gap-1.5'>
+                <span className='truncate font-bold tracking-tight'>LabOps Control</span>
+                <Badge
+                  variant='outline'
+                  className='text-[10px] px-1 py-0 h-4 border-emerald-500/40 text-emerald-400 bg-emerald-500/10 font-mono'
+                >
+                  DEMO
+                </Badge>
+              </div>
+              <span className='text-sidebar-foreground/70 truncate text-xs font-normal'>
+                {selectedCluster.name}
               </span>
             </div>
             <Icons.chevronsUpDown
-              className={`ml-auto transition-all duration-200 ease-in-out ${
+              className={`ml-auto size-4 transition-all duration-200 ease-in-out text-sidebar-foreground/60 ${
                 state === 'collapsed'
                   ? 'invisible max-w-0 opacity-0'
                   : 'visible max-w-full opacity-100'
@@ -174,58 +95,46 @@ export function OrgSwitcher() {
             />
           </DropdownMenuTrigger>
           <DropdownMenuContent
-            className='w-(--anchor-width) min-w-56 rounded-lg'
+            className='w-(--anchor-width) min-w-64 rounded-lg'
             align='start'
-            side={isMobile ? 'bottom' : 'right'}
+            side='bottom'
             sideOffset={4}
           >
             <DropdownMenuGroup>
-              <DropdownMenuLabel className='text-muted-foreground text-xs'>
-                Organizations
+              <DropdownMenuLabel className='text-muted-foreground text-xs uppercase tracking-wider font-semibold'>
+                Phạm vi hạ tầng quản lý
               </DropdownMenuLabel>
             </DropdownMenuGroup>
             <DropdownMenuGroup>
-              {userMemberships.data.map((membership, index) => {
-                const isActive = membership.organization.id === orgId;
+              {CLUSTERS.map((cluster) => {
+                const isActive = cluster.id === selectedCluster.id;
                 return (
                   <DropdownMenuItem
-                    key={membership.id}
-                    onClick={() => handleOrganizationSwitch(membership.organization.id)}
-                    className='gap-2 p-2'
+                    key={cluster.id}
+                    onClick={() => setSelectedCluster(cluster)}
+                    className='gap-2.5 p-2.5 cursor-pointer'
                   >
-                    <div className='flex size-6 items-center justify-center overflow-hidden rounded-md border'>
-                      {membership.organization.hasImage && membership.organization.imageUrl ? (
-                        <Image
-                          src={membership.organization.imageUrl}
-                          alt={membership.organization.name}
-                          width={24}
-                          height={24}
-                          className='size-full object-cover'
-                        />
-                      ) : (
-                        <Icons.galleryVerticalEnd className='size-3.5 shrink-0' />
-                      )}
+                    <div className='flex size-7 items-center justify-center rounded-md border bg-muted/50'>
+                      <Icons.server className='size-4 text-primary' />
                     </div>
-                    {membership.organization.name}
-                    {isActive && <Icons.check className='ml-auto size-4' />}
-                    {!isActive && <DropdownMenuShortcut>⌘{index + 1}</DropdownMenuShortcut>}
+                    <div className='flex flex-col flex-1 leading-tight'>
+                      <span className='font-medium text-sm'>{cluster.name}</span>
+                      <span className='text-muted-foreground text-xs'>
+                        {cluster.location} • {cluster.gpus}
+                      </span>
+                    </div>
+                    {isActive && <Icons.check className='ml-auto size-4 text-primary' />}
                   </DropdownMenuItem>
                 );
               })}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem
-                className='gap-2 p-2'
-                onClick={() => {
-                  router.push('/dashboard/workspaces');
-                }}
-              >
-                <div className='flex size-6 items-center justify-center rounded-md border bg-transparent'>
-                  <Icons.add className='size-4' />
-                </div>
-                <div className='text-muted-foreground font-medium'>Add organization</div>
-              </DropdownMenuItem>
+              <div className='px-2.5 py-1.5 text-[11px] text-muted-foreground leading-normal'>
+                <span className='font-semibold text-foreground'>Hệ thống 2 máy chủ vật lý:</span>
+                <br />• Track (3x A30 24GB)
+                <br />• Workstation (1x A30 24GB)
+              </div>
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>

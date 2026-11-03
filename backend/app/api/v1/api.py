@@ -1,0 +1,23 @@
+from fastapi import APIRouter
+from app.api.v1.endpoints import (
+    dashboard,
+    servers,
+    gpus,
+    users,
+    jobs,
+    security,
+    events,
+    audit
+)
+
+api_router = APIRouter()
+
+api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(servers.router, prefix="/servers", tags=["Servers"])
+api_router.include_router(gpus.router, prefix="/gpus", tags=["GPUs"])
+api_router.include_router(users.router, prefix="/users", tags=["Users"])
+api_router.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
+api_router.include_router(security.router, prefix="/security", tags=["Security"])
+api_router.include_router(events.router, prefix="/events", tags=["Events"])
+api_router.include_router(audit.router, prefix="/audit-logs", tags=["Audit"])
+

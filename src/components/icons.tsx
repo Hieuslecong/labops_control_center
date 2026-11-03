@@ -87,6 +87,18 @@ import {
   IconUsers,
   IconVideo,
   IconCrown,
+  IconServer,
+  IconCpu,
+  IconShieldCheck,
+  IconTerminal2,
+  IconHistory,
+  IconGauge,
+  IconNetwork,
+  IconKey,
+  IconRefresh,
+  IconPower,
+  IconDatabase,
+  IconDownload,
   IconX
 } from '@tabler/icons-react';
 
@@ -219,5 +231,22 @@ export const Icons = {
   slash: IconSlash,
   calendar: IconCalendar,
   galleryVerticalEnd: IconStack2,
-  moreHorizontal: IconDots
+  moreHorizontal: IconDots,
+
+  // LabOps Infrastructure
+  server: IconServer,
+  gpu: IconCpu,
+  cpu: IconCpu,
+  shield: IconShieldCheck,
+  terminal: IconTerminal2,
+  job: IconTerminal2,
+  history: IconHistory,
+  audit: IconHistory,
+  gauge: IconGauge,
+  network: IconNetwork,
+  key: IconKey,
+  refresh: IconRefresh,
+  power: IconPower,
+  database: IconDatabase,
+  download: IconDownload
 };

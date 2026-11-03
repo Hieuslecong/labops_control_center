@@ -286,6 +286,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
           sshFingerprint: fingerprint,
           sshPublicKeyPreview: pubKey ? pubKey.slice(0, 32) + '...' : '(Đang chờ nạp khóa)',
           sshPublicKey: pubKey,
+          sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+          passwordStatus: 'ACTIVE',
+          failedLoginAttempts: 0,
           sudoPrivilege: 'DENIED',
           securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
           privilegeValidation: {

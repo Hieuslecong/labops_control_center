@@ -133,13 +133,59 @@ export interface SshEndpoint {
 export interface SshCredential {
   id: string;
   memberId: string;
+  workspaceId?: string;
   publicKey: string;
   fingerprint: string;
   keyType: 'ed25519' | 'rsa' | 'ecdsa';
   enrollmentType: 'BROWSER_GENERATED' | 'IMPORTED' | 'PENDING';
   status: SshKeyEnrollmentStatus;
   enrolledAt?: string;
+  revokedAt?: string;
   expiresAt?: string;
+}
+
+export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD';
+export type SshPasswordStatus = 'ACTIVE' | 'CHANGE_REQUIRED' | 'LOCKED' | 'EXPIRED';
+export type SshAccessStatus = 'ACTIVE' | 'SUSPENDED' | 'LOCKED';
+
+export interface SshLoginEvent {
+  id: string;
+  memberId: string;
+  workspaceId: string;
+  linuxUsername: string;
+  sourceIp: string;
+  listenPort: number;
+  authStage: 'STAGE_1_PUBLICKEY' | 'STAGE_2_PASSWORD' | 'COMPLETED';
+  authenticationResult: 'SUCCESS' | 'PUBLICKEY_FAILED' | 'PASSWORD_FAILED' | 'BOTH_FAILED';
+  failureReason?: string;
+  timestamp: string;
+}
+
+export interface SshAccountPolicy {
+  workspaceId: string;
+  linuxUsername: string;
+  authenticationMode: SshAuthMode;
+  passwordStatus: SshPasswordStatus;
+  keyEnrollmentStatus: SshKeyEnrollmentStatus;
+  accessStatus: SshAccessStatus;
+  minPasswordLength: number;
+  failedLoginAttempts: number;
+  lastSuccessfulLogin?: string;
+  lastLoginSourceIp?: string;
+  updatedAt: string;
+}
+
+export interface SshDualAuthVerificationResult {
+  sshdSyntaxValid: boolean;
+  authenticationMethods: string; // "publickey,password"
+  pubkeyAuthentication: boolean;
+  passwordAuthentication: boolean;
+  permitRootLogin: boolean;
+  permitEmptyPasswords: boolean;
+  usePam: boolean;
+  testMatrix: Record<string, string>;
+  status: 'DUAL_AUTH_ENFORCED_VERIFIED' | 'CONFIGURATION_ERROR';
+  effectiveConfigSummary: string;
 }
 
 export interface PrivilegeValidationResult {
@@ -179,6 +225,12 @@ export interface LabMember {
   sshFingerprint: string;
   sshPublicKeyPreview: string;
   sshPublicKey?: string;
+  // Mandatory Dual SSH Authentication
+  sshAuthMode: SshAuthMode;
+  passwordStatus: SshPasswordStatus;
+  failedLoginAttempts: number;
+  lastSuccessfulLogin?: string;
+  lastLoginSourceIp?: string;
   // Security & Privileges
   sudoPrivilege: 'DENIED'; // Strict: always DENIED
   securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED';

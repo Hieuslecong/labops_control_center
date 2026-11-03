@@ -291,6 +291,7 @@ export function ServerDetailView() {
                     stroke='oklch(0.55 0.22 260)'
                     fill='oklch(0.55 0.22 260 / 0.2)'
                     name='CPU Util %'
+                    isAnimationActive={false}
                   />
                   <Area
                     type='monotone'
@@ -298,6 +299,7 @@ export function ServerDetailView() {
                     stroke='oklch(0.58 0.22 295)'
                     fill='oklch(0.58 0.22 295 / 0.2)'
                     name='RAM Util %'
+                    isAnimationActive={false}
                   />
                 </AreaChart>
               </ChartContainer>

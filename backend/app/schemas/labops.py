@@ -177,6 +177,54 @@ class SshKeyEnrollRequest(BaseSchema):
     public_key: str = Field(alias="publicKey")
     enrollment_type: str = Field("IMPORTED", alias="enrollmentType")
 
+class SshAccountPolicyResponse(BaseSchema):
+    workspace_id: str = Field(alias="workspaceId")
+    linux_username: str = Field(alias="linuxUsername")
+    authentication_mode: str = Field("PUBLIC_KEY_AND_PASSWORD", alias="authenticationMode")
+    password_status: str = Field("ACTIVE", alias="passwordStatus") # ACTIVE, CHANGE_REQUIRED, LOCKED, EXPIRED
+    key_enrollment_status: str = Field("ENROLLED", alias="keyEnrollmentStatus") # ENROLLED, PENDING, REVOKED
+    access_status: str = Field("ACTIVE", alias="accessStatus") # ACTIVE, SUSPENDED, LOCKED
+    min_password_length: int = Field(12, alias="minPasswordLength")
+    failed_login_attempts: int = Field(0, alias="failedLoginAttempts")
+    last_successful_login: Optional[str] = Field(None, alias="lastSuccessfulLogin")
+    last_login_source_ip: Optional[str] = Field(None, alias="lastLoginSourceIp")
+    updated_at: str = Field(alias="updatedAt")
+
+class SshLoginEventResponse(BaseSchema):
+    id: str
+    member_id: str = Field(alias="memberId")
+    workspace_id: str = Field(alias="workspaceId")
+    linux_username: str = Field(alias="linuxUsername")
+    source_ip: str = Field(alias="sourceIp")
+    listen_port: int = Field(alias="listenPort")
+    auth_stage: str = Field(alias="authStage") # STAGE_1_PUBLICKEY, STAGE_2_PASSWORD, COMPLETED
+    authentication_result: str = Field(alias="authenticationResult") # SUCCESS, PUBLICKEY_FAILED, PASSWORD_FAILED, BOTH_FAILED
+    failure_reason: Optional[str] = Field(None, alias="failureReason")
+    timestamp: str
+
+class SshPasswordResetRequest(BaseSchema):
+    new_password: Optional[str] = Field(None, alias="newPassword")
+    require_change_on_next_login: bool = Field(True, alias="requireChangeOnNextLogin")
+
+class SshPasswordResetResponse(BaseSchema):
+    success: bool
+    member_id: str = Field(alias="memberId")
+    password_status: str = Field(alias="passwordStatus")
+    temporary_password: Optional[str] = Field(None, alias="temporaryPassword")
+    message: str
+
+class SshDualAuthVerificationResponse(BaseSchema):
+    sshd_syntax_valid: bool = Field(alias="sshdSyntaxValid")
+    authentication_methods: str = Field("publickey,password", alias="authenticationMethods")
+    pubkey_authentication: bool = Field(True, alias="pubkeyAuthentication")
+    password_authentication: bool = Field(True, alias="passwordAuthentication")
+    permit_root_login: bool = Field(False, alias="permitRootLogin")
+    permit_empty_passwords: bool = Field(False, alias="permitEmptyPasswords")
+    use_pam: bool = Field(True, alias="usePam")
+    test_matrix: Dict[str, str] = Field(alias="testMatrix")
+    status: str = Field("DUAL_AUTH_ENFORCED_VERIFIED", alias="status")
+    effective_config_summary: str = Field(alias="effectiveConfigSummary")
+
 class MemberCreateRequest(BaseSchema):
     full_name: str = Field(alias="fullName")
     username: str
@@ -199,6 +247,8 @@ class MemberCreateRequest(BaseSchema):
     ssh_port: Optional[int] = Field(None, alias="sshPort")
     ssh_enrollment_type: str = Field("BROWSER_GENERATED", alias="sshEnrollmentType")
     ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    initial_password: Optional[str] = Field(None, alias="initialPassword")
+    require_password_change: bool = Field(True, alias="requirePasswordChange")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
 
 class MemberResponse(BaseSchema):
@@ -226,6 +276,11 @@ class MemberResponse(BaseSchema):
     ssh_fingerprint: Optional[str] = Field(None, alias="sshFingerprint")
     ssh_public_key_preview: str = Field(alias="sshPublicKeyPreview")
     ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    ssh_auth_mode: str = Field("PUBLIC_KEY_AND_PASSWORD", alias="sshAuthMode")
+    password_status: str = Field("ACTIVE", alias="passwordStatus")
+    failed_login_attempts: int = Field(0, alias="failedLoginAttempts")
+    last_successful_login: Optional[str] = Field(None, alias="lastSuccessfulLogin")
+    last_login_source_ip: Optional[str] = Field(None, alias="lastLoginSourceIp")
     sudo_privilege: str = Field("DENIED", alias="sudoPrivilege")
     security_isolation_level: str = Field("UNPRIVILEGED_CGROUPS_ISOLATED", alias="securityIsolationLevel")
     privilege_validation: Optional[PrivilegeValidationResponse] = Field(None, alias="privilegeValidation")

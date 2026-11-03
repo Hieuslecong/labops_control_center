@@ -5,7 +5,11 @@ from app.schemas.labops import (
     MemberCreateRequest,
     StorageQuotaUpdateRequest,
     SshPortUpdateRequest,
-    SshKeyEnrollRequest
+    SshKeyEnrollRequest,
+    SshPasswordResetRequest,
+    SshPasswordResetResponse,
+    SshLoginEventResponse,
+    SshDualAuthVerificationResponse
 )
 from app.services.labops_service import service
 
@@ -87,6 +91,47 @@ async def delete_member_permanently(user_id: str):
     """Permanently destroy container workspace, release SSH port, and delete member record"""
     try:
         return service.delete_member_permanently(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/{user_id}/reset-password", response_model=SshPasswordResetResponse)
+async def reset_member_password(user_id: str, payload: SshPasswordResetRequest):
+    """Reset Linux SSH password separately from website password; returns one-time temporary password"""
+    try:
+        return service.reset_member_password(
+            user_id,
+            new_password=payload.new_password,
+            require_change=payload.require_change_on_next_login
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{user_id}/suspend-ssh", response_model=MemberResponse)
+async def suspend_ssh_access(user_id: str):
+    """Suspend member SSH access without affecting physical host administrator access"""
+    try:
+        return service.suspend_ssh_access(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/{user_id}/restore-ssh", response_model=MemberResponse)
+async def restore_ssh_access(user_id: str):
+    """Restore member SSH access after policy compliance"""
+    try:
+        return service.restore_ssh_access(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/{user_id}/login-events", response_model=List[SshLoginEventResponse])
+async def get_member_login_events(user_id: str):
+    """Retrieve detailed SSH login audit events (tracking both Public Key and Password stages)"""
+    return service.get_member_login_events(user_id)
+
+@router.get("/{user_id}/verify-dual-auth", response_model=SshDualAuthVerificationResponse)
+async def verify_member_dual_auth(user_id: str):
+    """Execute automated sshd verification tests inside member container"""
+    try:
+        return service.verify_member_dual_auth(user_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

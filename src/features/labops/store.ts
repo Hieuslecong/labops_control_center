@@ -10,7 +10,9 @@ import {
   DashboardSummary,
   StoragePool,
   StorageAllocation,
-  SshEndpoint
+  SshEndpoint,
+  SshAccountPolicy,
+  SshLoginEvent
 } from '@/types/labops';
 
 interface LabOpsState {
@@ -24,6 +26,8 @@ interface LabOpsState {
   storagePools: StoragePool[];
   sshEndpoints: SshEndpoint[];
   storageAllocations: StorageAllocation[];
+  sshPolicies: SshAccountPolicy[];
+  sshLoginEvents: SshLoginEvent[];
 
   // Computed summary
   getSummary: () => DashboardSummary;
@@ -44,6 +48,15 @@ interface LabOpsState {
 
   rotateSshKey: (id: string, newPublicKey: string, newFingerprint: string) => void;
   revokeSshKey: (id: string) => void;
+  resetMemberSshPassword: (
+    id: string,
+    initialPassword?: string,
+    requireChange?: boolean
+  ) => { success: boolean; tempPassword?: string; message: string };
+  requirePasswordChange: (id: string) => void;
+  suspendSshAccess: (id: string, reason?: string) => void;
+  restoreSshAccess: (id: string) => void;
+  getMemberLoginEvents: (username: string) => SshLoginEvent[];
   changeStorageQuota: (id: string, newQuotaGb: number) => { success: boolean; message: string };
   changeSshPort: (id: string, newPort: number) => { success: boolean; message: string };
   archiveWorkspace: (id: string) => void;
@@ -341,6 +354,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 72,
     activeJobsCount: 1,
     totalGpuHours: 142.5,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T14:20:00Z',
+    lastLoginSourceIp: '10.200.0.105',
     createdAt: '2026-01-10',
     expiresAt: '2027-01-10'
   },
@@ -389,6 +407,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 48,
     activeJobsCount: 1,
     totalGpuHours: 98.2,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T11:15:00Z',
+    lastLoginSourceIp: '10.200.0.110',
     createdAt: '2026-01-15'
   },
   {
@@ -437,6 +460,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 36,
     activeJobsCount: 1,
     totalGpuHours: 76.4,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T13:45:00Z',
+    lastLoginSourceIp: '10.200.0.115',
     createdAt: '2026-02-01'
   },
   {
@@ -485,6 +513,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 24,
     activeJobsCount: 1,
     totalGpuHours: 54.0,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 1,
+    lastSuccessfulLogin: '2026-03-03T09:30:00Z',
+    lastLoginSourceIp: '10.200.0.120',
     createdAt: '2026-02-10'
   },
   {
@@ -533,6 +566,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 72,
     activeJobsCount: 1,
     totalGpuHours: 110.8,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T15:00:00Z',
+    lastLoginSourceIp: '10.200.0.102',
     createdAt: '2026-01-05'
   },
   {
@@ -581,6 +619,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 24,
     activeJobsCount: 0,
     totalGpuHours: 32.1,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-02T18:10:00Z',
+    lastLoginSourceIp: '10.200.0.130',
     createdAt: '2026-03-01'
   },
   {
@@ -628,6 +671,11 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 0,
     activeJobsCount: 0,
     totalGpuHours: 18.6,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'LOCKED',
+    failedLoginAttempts: 3,
+    lastSuccessfulLogin: '2026-02-28T16:00:00Z',
+    lastLoginSourceIp: '10.200.0.140',
     createdAt: '2026-02-20'
   },
   {
@@ -674,6 +722,9 @@ const INITIAL_MEMBERS: LabMember[] = [
     maxRuntimeHours: 12,
     activeJobsCount: 0,
     totalGpuHours: 4.2,
+    sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'CHANGE_REQUIRED',
+    failedLoginAttempts: 0,
     createdAt: '2026-03-15'
   }
 ];
@@ -758,6 +809,160 @@ const INITIAL_SSH_ENDPOINTS: SshEndpoint[] = [
     containerPort: 22,
     protocol: 'tcp',
     status: 'DISABLED'
+  }
+];
+
+const INITIAL_SSH_POLICIES: SshAccountPolicy[] = [
+  {
+    workspaceId: 'ws-hieulc',
+    linuxUsername: 'hieulc',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T14:20:00Z',
+    lastLoginSourceIp: '10.200.0.105',
+    updatedAt: '2026-01-10T08:00:00Z'
+  },
+  {
+    workspaceId: 'ws-namnv',
+    linuxUsername: 'namnv',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T11:15:00Z',
+    lastLoginSourceIp: '10.200.0.110',
+    updatedAt: '2026-01-15T09:00:00Z'
+  },
+  {
+    workspaceId: 'ws-lanpt',
+    linuxUsername: 'lanpt',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T13:45:00Z',
+    lastLoginSourceIp: '10.200.0.115',
+    updatedAt: '2026-02-01T10:00:00Z'
+  },
+  {
+    workspaceId: 'ws-tuanpm',
+    linuxUsername: 'tuanpm',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 1,
+    lastSuccessfulLogin: '2026-03-03T09:30:00Z',
+    lastLoginSourceIp: '10.200.0.120',
+    updatedAt: '2026-02-10T11:00:00Z'
+  },
+  {
+    workspaceId: 'ws-anhhd',
+    linuxUsername: 'anhhd',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-03T15:00:00Z',
+    lastLoginSourceIp: '10.200.0.102',
+    updatedAt: '2026-01-05T08:30:00Z'
+  },
+  {
+    workspaceId: 'ws-linhvm',
+    linuxUsername: 'linhvm',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'ACTIVE',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    lastSuccessfulLogin: '2026-03-02T18:10:00Z',
+    lastLoginSourceIp: '10.200.0.130',
+    updatedAt: '2026-03-01T09:00:00Z'
+  },
+  {
+    workspaceId: 'ws-huydq',
+    linuxUsername: 'huydq',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'LOCKED',
+    keyEnrollmentStatus: 'ACTIVE',
+    accessStatus: 'SUSPENDED',
+    minPasswordLength: 12,
+    failedLoginAttempts: 3,
+    lastSuccessfulLogin: '2026-02-28T16:00:00Z',
+    lastLoginSourceIp: '10.200.0.140',
+    updatedAt: '2026-02-20T10:00:00Z'
+  },
+  {
+    workspaceId: 'ws-chaunb',
+    linuxUsername: 'chaunb',
+    authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
+    passwordStatus: 'CHANGE_REQUIRED',
+    keyEnrollmentStatus: 'PENDING_KEY_ENROLLMENT',
+    accessStatus: 'ACTIVE',
+    minPasswordLength: 12,
+    failedLoginAttempts: 0,
+    updatedAt: '2026-03-15T09:00:00Z'
+  }
+];
+
+const INITIAL_SSH_LOGIN_EVENTS: SshLoginEvent[] = [
+  {
+    id: 'evt-log-001',
+    memberId: 'mem-001',
+    workspaceId: 'ws-hieulc',
+    linuxUsername: 'hieulc',
+    sourceIp: '10.200.0.105',
+    listenPort: 22001,
+    authStage: 'COMPLETED',
+    authenticationResult: 'SUCCESS',
+    timestamp: '2026-03-03 14:20:12'
+  },
+  {
+    id: 'evt-log-002',
+    memberId: 'mem-004',
+    workspaceId: 'ws-tuanpm',
+    linuxUsername: 'tuanpm',
+    sourceIp: '10.200.0.120',
+    listenPort: 22003,
+    authStage: 'STAGE_2_PASSWORD',
+    authenticationResult: 'PASSWORD_FAILED',
+    failureReason: 'Sai mật khẩu PAM Linux (Lần 1)',
+    timestamp: '2026-03-03 09:28:44'
+  },
+  {
+    id: 'evt-log-003',
+    memberId: 'mem-004',
+    workspaceId: 'ws-tuanpm',
+    linuxUsername: 'tuanpm',
+    sourceIp: '10.200.0.120',
+    listenPort: 22003,
+    authStage: 'COMPLETED',
+    authenticationResult: 'SUCCESS',
+    timestamp: '2026-03-03 09:30:05'
+  },
+  {
+    id: 'evt-log-004',
+    memberId: 'mem-007',
+    workspaceId: 'ws-huydq',
+    linuxUsername: 'huydq',
+    sourceIp: '10.200.0.140',
+    listenPort: 22005,
+    authStage: 'STAGE_1_PUBLICKEY',
+    authenticationResult: 'BOTH_FAILED',
+    failureReason: 'Tài khoản đang bị quản trị viên TẠM KHÓA',
+    timestamp: '2026-03-01 11:05:22'
   }
 ];
 
@@ -1199,6 +1404,8 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   storagePools: INITIAL_STORAGE_POOLS,
   sshEndpoints: INITIAL_SSH_ENDPOINTS,
   storageAllocations: INITIAL_STORAGE_ALLOCATIONS,
+  sshPolicies: INITIAL_SSH_POLICIES,
+  sshLoginEvents: INITIAL_SSH_LOGIN_EVENTS,
 
   getSummary: () => {
     const { servers, gpus, members, jobs } = get();
@@ -1462,6 +1669,143 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         ]
       };
     });
+  },
+
+  resetMemberSshPassword: (id, initialPassword, requireChange = true) => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
+
+    const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*';
+    let tempPass = initialPassword;
+    if (!tempPass || tempPass.length < 12) {
+      tempPass = Array.from(
+        { length: 16 },
+        () => chars[Math.floor(Math.random() * chars.length)]
+      ).join('');
+    }
+
+    set((s) => ({
+      members: s.members.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              passwordStatus: requireChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
+              failedLoginAttempts: 0
+            }
+          : m
+      ),
+      sshPolicies: s.sshPolicies.map((p) =>
+        p.linuxUsername === member.username
+          ? {
+              ...p,
+              passwordStatus: requireChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
+              failedLoginAttempts: 0,
+              updatedAt: new Date().toISOString()
+            }
+          : p
+      ),
+      auditLogs: [
+        {
+          id: `log-${Date.now()}`,
+          actor: 'Quản trị viên (Demo)',
+          action: 'Đặt lại Mật khẩu Linux SSH',
+          targetType: 'SSH_PASSWORD',
+          targetId: member.username,
+          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          result: 'SUCCESS',
+          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+          details: `Đã thiết lập mật khẩu PAM an toàn mới (${tempPass.length} ký tự, PAM shadow hash cập nhật)`
+        },
+        ...s.auditLogs
+      ]
+    }));
+
+    return {
+      success: true,
+      tempPassword: tempPass,
+      message: 'Đặt lại mật khẩu Linux SSH thành công'
+    };
+  },
+
+  requirePasswordChange: (id) => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return;
+    set((s) => ({
+      members: s.members.map((m) =>
+        m.id === id ? { ...m, passwordStatus: 'CHANGE_REQUIRED' } : m
+      ),
+      sshPolicies: s.sshPolicies.map((p) =>
+        p.linuxUsername === member.username ? { ...p, passwordStatus: 'CHANGE_REQUIRED' } : p
+      )
+    }));
+  },
+
+  suspendSshAccess: (id, reason = 'Quản trị viên tạm khóa truy cập') => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return;
+    set((s) => ({
+      members: s.members.map((m) =>
+        m.id === id ? { ...m, sshStatus: 'OFFLINE', status: 'SUSPENDED' } : m
+      ),
+      sshPolicies: s.sshPolicies.map((p) =>
+        p.linuxUsername === member.username ? { ...p, accessStatus: 'SUSPENDED' } : p
+      ),
+      sshEndpoints: s.sshEndpoints.map((ep) =>
+        ep.memberId === id ? { ...ep, status: 'DISABLED' } : ep
+      ),
+      auditLogs: [
+        {
+          id: `log-${Date.now()}`,
+          actor: 'Quản trị viên (Demo)',
+          action: 'Khóa truy cập SSH (Suspend SSH)',
+          targetType: 'SSH_ACCESS',
+          targetId: member.username,
+          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          result: 'WARNING',
+          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+          details: `Đã vô hiệu hóa cổng SSH proxy container và khóa tài khoản: ${reason}`
+        },
+        ...s.auditLogs
+      ]
+    }));
+  },
+
+  restoreSshAccess: (id) => {
+    const state = get();
+    const member = state.members.find((m) => m.id === id);
+    if (!member) return;
+    set((s) => ({
+      members: s.members.map((m) => (m.id === id ? { ...m, status: 'ACTIVE' } : m)),
+      sshPolicies: s.sshPolicies.map((p) =>
+        p.linuxUsername === member.username
+          ? { ...p, accessStatus: 'ACTIVE', failedLoginAttempts: 0 }
+          : p
+      ),
+      sshEndpoints: s.sshEndpoints.map((ep) =>
+        ep.memberId === id ? { ...ep, status: 'ACTIVE' } : ep
+      ),
+      auditLogs: [
+        {
+          id: `log-${Date.now()}`,
+          actor: 'Quản trị viên (Demo)',
+          action: 'Khôi phục truy cập SSH (Restore SSH)',
+          targetType: 'SSH_ACCESS',
+          targetId: member.username,
+          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          result: 'SUCCESS',
+          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+          details: `Đã mở khóa cổng SSH proxy và khôi phục quyền truy cập hai lớp (Dual-Auth)`
+        },
+        ...s.auditLogs
+      ]
+    }));
+  },
+
+  getMemberLoginEvents: (username) => {
+    return get().sshLoginEvents.filter((e) => e.linuxUsername === username);
   },
 
   changeStorageQuota: (id, newQuotaGb) => {

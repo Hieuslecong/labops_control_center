@@ -250,6 +250,124 @@ class LabOpsDataService:
             {"id": "sa-4", "member_id": "mem-4", "pool_id": "pool-workstation-ssd", "volume_name": "data-anhlt", "mount_path": "/workspace", "quota_gb": 250, "used_gb": 64, "read_only": False, "backup_policy": "DAILY_SNAPSHOT", "shared_datasets": ["/shared/datasets"], "created_at": "2024-03-01"}
         ]
 
+        self.ssh_policies = [
+            {
+                "workspace_id": "ws-hieulc",
+                "linux_username": "hieulc",
+                "authentication_mode": "PUBLIC_KEY_AND_PASSWORD",
+                "password_status": "ACTIVE",
+                "key_enrollment_status": "ENROLLED",
+                "access_status": "ACTIVE",
+                "min_password_length": 12,
+                "failed_login_attempts": 0,
+                "last_successful_login": "2026-11-03 21:15:30",
+                "last_login_source_ip": "10.200.1.45",
+                "updated_at": "2026-11-03 21:15:30"
+            },
+            {
+                "workspace_id": "ws-namnv",
+                "linux_username": "namnv",
+                "authentication_mode": "PUBLIC_KEY_AND_PASSWORD",
+                "password_status": "ACTIVE",
+                "key_enrollment_status": "ENROLLED",
+                "access_status": "ACTIVE",
+                "min_password_length": 12,
+                "failed_login_attempts": 0,
+                "last_successful_login": "2026-11-03 20:30:15",
+                "last_login_source_ip": "10.200.1.52",
+                "updated_at": "2026-11-03 20:30:15"
+            },
+            {
+                "workspace_id": "ws-tuanpm",
+                "linux_username": "tuanpm",
+                "authentication_mode": "PUBLIC_KEY_AND_PASSWORD",
+                "password_status": "ACTIVE",
+                "key_enrollment_status": "ENROLLED",
+                "access_status": "ACTIVE",
+                "min_password_length": 12,
+                "failed_login_attempts": 1,
+                "last_successful_login": "2026-11-03 19:43:02",
+                "last_login_source_ip": "10.200.1.88",
+                "updated_at": "2026-11-03 19:43:02"
+            },
+            {
+                "workspace_id": "ws-anhlt",
+                "linux_username": "anhlt",
+                "authentication_mode": "PUBLIC_KEY_AND_PASSWORD",
+                "password_status": "CHANGE_REQUIRED",
+                "key_enrollment_status": "ENROLLED",
+                "access_status": "ACTIVE",
+                "min_password_length": 12,
+                "failed_login_attempts": 0,
+                "last_successful_login": "2026-11-03 17:10:00",
+                "last_login_source_ip": "10.200.2.14",
+                "updated_at": "2026-11-03 17:10:00"
+            }
+        ]
+
+        self.ssh_login_events = [
+            {
+                "id": "log-evt-101",
+                "member_id": "mem-1",
+                "workspace_id": "ws-hieulc",
+                "linux_username": "hieulc",
+                "source_ip": "10.200.1.45",
+                "listen_port": 22001,
+                "auth_stage": "COMPLETED",
+                "authentication_result": "SUCCESS",
+                "failure_reason": None,
+                "timestamp": "2026-11-03 21:15:30"
+            },
+            {
+                "id": "log-evt-102",
+                "member_id": "mem-1",
+                "workspace_id": "ws-hieulc",
+                "linux_username": "hieulc",
+                "source_ip": "10.200.1.45",
+                "listen_port": 22001,
+                "auth_stage": "STAGE_2_PASSWORD",
+                "authentication_result": "SUCCESS",
+                "failure_reason": None,
+                "timestamp": "2026-11-03 21:15:28"
+            },
+            {
+                "id": "log-evt-103",
+                "member_id": "mem-1",
+                "workspace_id": "ws-hieulc",
+                "linux_username": "hieulc",
+                "source_ip": "10.200.1.45",
+                "listen_port": 22001,
+                "auth_stage": "STAGE_1_PUBLICKEY",
+                "authentication_result": "SUCCESS",
+                "failure_reason": None,
+                "timestamp": "2026-11-03 21:15:25"
+            },
+            {
+                "id": "log-evt-104",
+                "member_id": "mem-3",
+                "workspace_id": "ws-tuanpm",
+                "linux_username": "tuanpm",
+                "source_ip": "10.200.1.88",
+                "listen_port": 22003,
+                "auth_stage": "STAGE_2_PASSWORD",
+                "authentication_result": "PASSWORD_FAILED",
+                "failure_reason": "Sai mật khẩu Linux (1/5 lần thử)",
+                "timestamp": "2026-11-03 19:42:10"
+            },
+            {
+                "id": "log-evt-105",
+                "member_id": "mem-3",
+                "workspace_id": "ws-tuanpm",
+                "linux_username": "tuanpm",
+                "source_ip": "10.200.1.88",
+                "listen_port": 22003,
+                "auth_stage": "COMPLETED",
+                "authentication_result": "SUCCESS",
+                "failure_reason": None,
+                "timestamp": "2026-11-03 19:43:02"
+            }
+        ]
+
         self.members = [
             {
                 "id": "mem-1",
@@ -828,6 +946,17 @@ class LabOpsDataService:
             ssh_fingerprint = "CHƯA_ĐĂNG_KÝ_KHÓA"
             ssh_public_key_preview = "(Đang chờ nạp khóa)"
 
+        # Initial Password validation (min 12 chars)
+        initial_password = payload.get("initial_password")
+        if initial_password:
+            if len(initial_password) < 12:
+                raise ValueError("Mật khẩu tài khoản Linux SSH phải có tối thiểu 12 ký tự.")
+        else:
+            initial_password = f"LabOps-{uuid.uuid4().hex[:6]}-Pass!"
+
+        require_password_change = payload.get("require_password_change", True)
+        password_status = "CHANGE_REQUIRED" if require_password_change else "ACTIVE"
+
         new_member_id = f"mem-{uuid.uuid4().hex[:6]}"
         workspace_name = payload.get("workspace_name", f"ws-{username}")
         correlation_id = f"corr-{uuid.uuid4().hex[:12]}"
@@ -868,6 +997,11 @@ class LabOpsDataService:
             "ssh_fingerprint": ssh_fingerprint,
             "ssh_public_key_preview": ssh_public_key_preview,
             "ssh_public_key": ssh_public_key,
+            "ssh_auth_mode": "PUBLIC_KEY_AND_PASSWORD",
+            "password_status": password_status,
+            "failed_login_attempts": 0,
+            "last_successful_login": None,
+            "last_login_source_ip": None,
             "sudo_privilege": "DENIED",
             "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED",
             "privilege_validation": privilege_validation,
@@ -913,6 +1047,34 @@ class LabOpsDataService:
             "status": "ACTIVE" if ssh_key_status == "ACTIVE" else "DISABLED"
         }
         self.ssh_endpoints.append(new_endpoint)
+
+        new_policy = {
+            "workspace_id": workspace_name,
+            "linux_username": username,
+            "authentication_mode": "PUBLIC_KEY_AND_PASSWORD",
+            "password_status": password_status,
+            "key_enrollment_status": "ENROLLED" if ssh_key_status == "ACTIVE" else "PENDING",
+            "access_status": "ACTIVE" if ssh_key_status == "ACTIVE" else "PENDING_KEY_ENROLLMENT",
+            "min_password_length": 12,
+            "failed_login_attempts": 0,
+            "last_successful_login": None,
+            "last_login_source_ip": None,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.ssh_policies.append(new_policy)
+
+        self.ssh_login_events.insert(0, {
+            "id": f"log-evt-{uuid.uuid4().hex[:6]}",
+            "member_id": new_member_id,
+            "workspace_id": workspace_name,
+            "linux_username": username,
+            "source_ip": "127.0.0.1",
+            "listen_port": ssh_port,
+            "auth_stage": "COMPLETED",
+            "authentication_result": "SUCCESS",
+            "failure_reason": None,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
 
         self.members.insert(0, new_member)
 
@@ -1123,6 +1285,139 @@ class LabOpsDataService:
             "details": f"Đã xóa vĩnh viễn tài khoản @{username}, hủy container Incus và giải phóng cổng SSH {member.get('ssh_port')}"
         })
         return {"success": True, "message": f"Đã xóa vĩnh viễn thành viên @{username}"}
+
+    def reset_member_password(self, member_id: str, new_password: Optional[str] = None, require_change: bool = True) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        
+        if new_password:
+            if len(new_password) < 12:
+                raise ValueError("Mật khẩu Linux SSH phải có tối thiểu 12 ký tự theo chính sách an ninh LabOps.")
+            password_to_set = new_password
+        else:
+            password_to_set = f"LabOps-{uuid.uuid4().hex[:6]}-Pass!"
+        
+        member["password_status"] = "CHANGE_REQUIRED" if require_change else "ACTIVE"
+        member["failed_login_attempts"] = 0
+        
+        for pol in self.ssh_policies:
+            if pol.get("linux_username") == member["username"]:
+                pol["password_status"] = member["password_status"]
+                pol["failed_login_attempts"] = 0
+                pol["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_PASSWORD_RESET",
+            "target_type": "MEMBER",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã đặt lại mật khẩu Linux SSH cho @{member['username']} (Yêu cầu đổi mật khẩu ở lần đăng nhập tiếp theo: {require_change})."
+        })
+
+        return {
+            "success": True,
+            "member_id": member_id,
+            "password_status": member["password_status"],
+            "temporary_password": password_to_set,
+            "message": f"Đã đặt lại mật khẩu SSH thành công cho @{member['username']}"
+        }
+
+    def require_password_change(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["password_status"] = "CHANGE_REQUIRED"
+        for pol in self.ssh_policies:
+            if pol.get("linux_username") == member["username"]:
+                pol["password_status"] = "CHANGE_REQUIRED"
+                pol["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return {"success": True, "password_status": "CHANGE_REQUIRED"}
+
+    def suspend_ssh_access(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["ssh_status"] = "SUSPENDED"
+        member["ssh_sessions_count"] = 0
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "DISABLED"
+        for pol in self.ssh_policies:
+            if pol.get("linux_username") == member["username"]:
+                pol["access_status"] = "SUSPENDED"
+                pol["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_ACCESS_SUSPENDED",
+            "target_type": "SECURITY",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "WARNING",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã khóa quyền truy cập SSH của @{member['username']} (Tạm dừng container proxy endpoint)"
+        })
+        return member
+
+    def restore_ssh_access(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        member["ssh_status"] = "OFFLINE"
+        for ep in self.ssh_endpoints:
+            if ep["member_id"] == member_id:
+                ep["status"] = "ACTIVE"
+        for pol in self.ssh_policies:
+            if pol.get("linux_username") == member["username"]:
+                pol["access_status"] = "ACTIVE"
+                pol["failed_login_attempts"] = 0
+                pol["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:6]}",
+            "actor": "admin@labops.local",
+            "action": "SSH_ACCESS_RESTORED",
+            "target_type": "SECURITY",
+            "target_id": member["username"],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": f"Đã mở khóa quyền truy cập SSH của @{member['username']} (Tái kích hoạt Incus proxy endpoint)"
+        })
+        return member
+
+    def get_member_login_events(self, member_id: str) -> List[Dict[str, Any]]:
+        return [evt for evt in self.ssh_login_events if evt["member_id"] == member_id]
+
+    def verify_member_dual_auth(self, member_id: str) -> Dict[str, Any]:
+        member = next((m for m in self.members if m["id"] == member_id), None)
+        if not member:
+            raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        return {
+            "sshd_syntax_valid": True,
+            "authentication_methods": "publickey,password",
+            "pubkey_authentication": True,
+            "password_authentication": True,
+            "permit_root_login": False,
+            "permit_empty_passwords": False,
+            "use_pam": True,
+            "test_matrix": {
+                "valid_key_and_valid_password": "SUCCESS",
+                "password_only_no_key": "REJECTED_PUBLICKEY_REQUIRED",
+                "key_only_no_password": "REJECTED_PASSWORD_REQUIRED",
+                "valid_key_and_wrong_password": "REJECTED_INVALID_PASSWORD",
+                "wrong_key_and_valid_password": "REJECTED_INVALID_PUBLICKEY",
+                "revoked_key": "REJECTED_KEY_REVOKED",
+                "root_login_attempt": "REJECTED_ROOT_LOGIN_PROHIBITED",
+                "sudo_execution_attempt": "REJECTED_USER_NOT_IN_SUDOERS"
+            },
+            "status": "DUAL_AUTH_ENFORCED_VERIFIED",
+            "effective_config_summary": f"OpenSSH sshd_config.d trên container {member['workspace_name']}: AuthenticationMethods publickey,password (MANDATORY)"
+        }
 
 service = LabOpsDataService()
 

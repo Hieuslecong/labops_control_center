@@ -120,6 +120,10 @@ export function MemberManagementView() {
   const updateMemberStatus = useLabOpsStore((state) => state.updateMemberStatus);
   const rotateSshKey = useLabOpsStore((state) => state.rotateSshKey);
   const revokeSshKey = useLabOpsStore((state) => state.revokeSshKey);
+  const resetMemberSshPassword = useLabOpsStore((state) => state.resetMemberSshPassword);
+  const suspendSshAccess = useLabOpsStore((state) => state.suspendSshAccess);
+  const restoreSshAccess = useLabOpsStore((state) => state.restoreSshAccess);
+  const getMemberLoginEvents = useLabOpsStore((state) => state.getMemberLoginEvents);
   const changeStorageQuota = useLabOpsStore((state) => state.changeStorageQuota);
   const changeSshPort = useLabOpsStore((state) => state.changeSshPort);
   const archiveWorkspace = useLabOpsStore((state) => state.archiveWorkspace);
@@ -147,6 +151,13 @@ export function MemberManagementView() {
 
   const [deleteModalMember, setDeleteModalMember] = useState<LabMember | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState<string>('');
+
+  const [resetPasswordModalMember, setResetPasswordModalMember] = useState<LabMember | null>(null);
+  const [resetPasswordInput, setResetPasswordInput] = useState<string>('');
+  const [resetRequireChange, setResetRequireChange] = useState<boolean>(true);
+  const [revealedTempPassword, setRevealedTempPassword] = useState<string | null>(null);
+
+  const [loginEventsModalMember, setLoginEventsModalMember] = useState<LabMember | null>(null);
 
   const filteredMembers = useMemo(() => {
     return members.filter((m) => {
@@ -800,12 +811,147 @@ export function MemberManagementView() {
                 </div>
               )}
 
-              {/* TAB 4: TRUY CẬP SSH */}
+              {/* TAB 4: TRUY CẬP SSH & BẢO MẬT DUAL-AUTH */}
               {activeTab === 4 && (
                 <div className='grid gap-3 py-2 text-xs'>
+                  {/* BẢO MẬT XÁC THỰC KÉP DUAL-AUTH */}
+                  <Card className='p-3.5 space-y-3 border-primary/30 bg-primary/5'>
+                    <div className='flex items-center justify-between'>
+                      <div className='flex items-center gap-2'>
+                        <Icons.shield className='size-4 text-primary' />
+                        <span className='font-bold text-sm text-foreground'>
+                          Chính sách Xác thực Hai Phương thức (Dual-Auth)
+                        </span>
+                      </div>
+                      <Badge className='bg-primary/20 text-primary border-primary/40 font-mono text-[10px]'>
+                        BẮT BUỘC KÉP: KEY + PASSWORD
+                      </Badge>
+                    </div>
+
+                    <div className='grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-[11px] text-muted-foreground p-2.5 rounded-lg bg-background border'>
+                      <div>
+                        Chế độ xác thực:{' '}
+                        <div className='font-mono font-semibold text-foreground mt-0.5'>
+                          publickey,password
+                        </div>
+                      </div>
+                      <div>
+                        Trạng thái mật khẩu Linux:{' '}
+                        <div className='mt-0.5'>
+                          {detailMember.passwordStatus === 'ACTIVE' ? (
+                            <Badge
+                              variant='outline'
+                              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                            >
+                              HOẠT ĐỘNG
+                            </Badge>
+                          ) : detailMember.passwordStatus === 'CHANGE_REQUIRED' ? (
+                            <Badge
+                              variant='outline'
+                              className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px]'
+                            >
+                              CẦN ĐỔI MẬT KHẨU
+                            </Badge>
+                          ) : (
+                            <Badge
+                              variant='outline'
+                              className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[10px]'
+                            >
+                              BỊ KHÓA
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        Đăng nhập sai thất bại:{' '}
+                        <div className='font-mono font-semibold text-foreground mt-0.5'>
+                          {detailMember.failedLoginAttempts || 0} / 5 lần
+                        </div>
+                      </div>
+                      <div className='col-span-2 sm:col-span-3 border-t pt-1.5 flex items-center justify-between text-[11px]'>
+                        <span>
+                          Đăng nhập thành công gần nhất:{' '}
+                          <strong className='text-foreground font-mono'>
+                            {detailMember.lastSuccessfulLogin
+                              ? new Date(detailMember.lastSuccessfulLogin).toLocaleString('vi-VN')
+                              : 'Chưa có lượt đăng nhập'}
+                          </strong>
+                          {detailMember.lastLoginSourceIp && (
+                            <span className='ml-1 text-muted-foreground'>
+                              từ IP ({detailMember.lastLoginSourceIp})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className='flex items-center gap-2 flex-wrap'>
+                      <Button
+                        size='sm'
+                        variant='default'
+                        className='h-7 text-xs gap-1 font-semibold bg-primary'
+                        onClick={() => {
+                          setResetPasswordModalMember(detailMember);
+                          setResetPasswordInput('');
+                          setResetRequireChange(true);
+                          setRevealedTempPassword(null);
+                        }}
+                      >
+                        <Icons.key className='size-3.5' /> Đặt lại Mật khẩu Linux SSH
+                      </Button>
+
+                      <Button
+                        size='sm'
+                        variant='outline'
+                        className='h-7 text-xs gap-1 font-medium'
+                        onClick={() => {
+                          setLoginEventsModalMember(detailMember);
+                        }}
+                      >
+                        <Icons.history className='size-3.5' /> Xem Nhật ký Đăng nhập Dual-Auth
+                      </Button>
+
+                      {detailMember.status === 'SUSPENDED' ? (
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          className='h-7 text-xs gap-1 text-emerald-600 font-medium'
+                          onClick={() => {
+                            restoreSshAccess(detailMember.id);
+                            toast.success(`Đã mở khóa truy cập SSH cho @${detailMember.username}`);
+                            setDetailMember({ ...detailMember, status: 'ACTIVE' });
+                          }}
+                        >
+                          <Icons.check className='size-3.5' /> Mở khóa SSH
+                        </Button>
+                      ) : (
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          className='h-7 text-xs gap-1 text-rose-600 font-medium'
+                          onClick={() => {
+                            suspendSshAccess(
+                              detailMember.id,
+                              'Quản trị viên tạm khóa qua bảng điều khiển'
+                            );
+                            toast.warning(`Đã tạm khóa truy cập SSH của @${detailMember.username}`);
+                            setDetailMember({
+                              ...detailMember,
+                              status: 'SUSPENDED',
+                              sshStatus: 'OFFLINE'
+                            });
+                          }}
+                        >
+                          <Icons.lock className='size-3.5' /> Tạm khóa SSH
+                        </Button>
+                      )}
+                    </div>
+                  </Card>
+
+                  {/* THÔNG SỐ KẾT NỐI DEDICATED SSH */}
                   <Card className='p-3.5 space-y-2.5'>
                     <div className='font-bold text-sm flex items-center justify-between'>
-                      <span>Thông số Kết nối Dedicated SSH</span>
+                      <span>Thông số Dedicated SSH Endpoint</span>
                       <Badge variant='outline' className='font-mono text-[10px]'>
                         Port {detailMember.sshPort}
                       </Badge>
@@ -839,7 +985,9 @@ export function MemberManagementView() {
                     </div>
 
                     <div className='space-y-1.5 pt-2 border-t'>
-                      <Label className='text-xs font-semibold'>Lệnh kết nối SSH trực tiếp:</Label>
+                      <Label className='text-xs font-semibold'>
+                        Lệnh kết nối SSH trực tiếp (Yêu cầu cả Key & Password):
+                      </Label>
                       <div className='flex items-center justify-between p-2 rounded bg-muted/40 border font-mono text-[11px]'>
                         <code>
                           ssh -i ~/.ssh/id_ed25519 -p {detailMember.sshPort} {detailMember.username}
@@ -1251,6 +1399,247 @@ export function MemberManagementView() {
               className='font-semibold'
             >
               Xác nhận Xóa Vĩnh viễn
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL 5: ĐẶT LẠI MẬT KHẨU LINUX SSH */}
+      <Dialog
+        open={!!resetPasswordModalMember}
+        onOpenChange={(val) => {
+          if (!val) {
+            setResetPasswordModalMember(null);
+            setRevealedTempPassword(null);
+          }
+        }}
+      >
+        <DialogContent className='sm:max-w-[480px] text-xs'>
+          <DialogHeader>
+            <DialogTitle className='text-sm font-bold flex items-center gap-1.5'>
+              <Icons.key className='size-4 text-primary' /> Đặt lại Mật khẩu Linux SSH (@
+              {resetPasswordModalMember?.username})
+            </DialogTitle>
+            <DialogDescription className='text-xs'>
+              Thiết lập mật khẩu Linux mới cho tài khoản unprivileged container. Mật khẩu phải dài
+              tối thiểu 12 ký tự.
+            </DialogDescription>
+          </DialogHeader>
+
+          {!revealedTempPassword ? (
+            <div className='space-y-3.5 py-2'>
+              <div className='space-y-1.5'>
+                <div className='flex items-center justify-between'>
+                  <Label className='text-xs font-semibold'>
+                    Mật khẩu mới (Tối thiểu 12 ký tự):
+                  </Label>
+                  <Button
+                    type='button'
+                    size='sm'
+                    variant='ghost'
+                    className='h-6 text-[11px] text-primary px-1.5'
+                    onClick={() => {
+                      const chars =
+                        'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*';
+                      const generated = Array.from(
+                        { length: 16 },
+                        () => chars[Math.floor(Math.random() * chars.length)]
+                      ).join('');
+                      setResetPasswordInput(generated);
+                    }}
+                  >
+                    Tạo mật khẩu ngẫu nhiên
+                  </Button>
+                </div>
+                <Input
+                  type='text'
+                  value={resetPasswordInput}
+                  onChange={(e) => setResetPasswordInput(e.target.value)}
+                  placeholder='Để trống để tự động sinh mật khẩu an toàn 16 ký tự'
+                  className='h-8 text-xs font-mono'
+                />
+              </div>
+
+              <div className='flex items-center gap-2 p-2 rounded bg-muted/40 border'>
+                <input
+                  type='checkbox'
+                  id='req-change'
+                  checked={resetRequireChange}
+                  onChange={(e) => setResetRequireChange(e.target.checked)}
+                  className='rounded border-border size-3.5 text-primary'
+                />
+                <label
+                  htmlFor='req-change'
+                  className='text-xs text-foreground cursor-pointer select-none'
+                >
+                  Bắt buộc thành viên đổi mật khẩu khi đăng nhập SSH lần đầu (PAM expired)
+                </label>
+              </div>
+
+              <div className='p-2.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-[11px] text-blue-900 dark:text-blue-200'>
+                <strong>Chính sách Bảo mật:</strong> LabOps không bao giờ lưu trữ mật khẩu dạng thô
+                (plaintext). Mật khẩu được mã hóa băm an toàn qua hệ thống PAM của Linux.
+              </div>
+            </div>
+          ) : (
+            <div className='space-y-3 py-2'>
+              <div className='p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-xs space-y-1.5'>
+                <div className='font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5'>
+                  <Icons.circleCheck className='size-4' /> Đã đặt lại mật khẩu thành công!
+                </div>
+                <p className='text-[11px] text-muted-foreground'>
+                  Vui lòng sao chép mật khẩu một lần này và gửi riêng cho thành viên qua kênh liên
+                  lạc an toàn:
+                </p>
+                <div className='flex items-center justify-between p-2 rounded bg-background border font-mono font-bold text-sm text-foreground'>
+                  <span>{revealedTempPassword}</span>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    className='h-6 px-2 text-xs'
+                    onClick={async () => {
+                      const copied = await copyToClipboard(revealedTempPassword);
+                      if (copied) toast.success('Đã sao chép mật khẩu');
+                    }}
+                  >
+                    <Icons.forms className='size-3 mr-1' /> Copy
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className='border-t pt-2'>
+            {!revealedTempPassword ? (
+              <>
+                <Button
+                  size='sm'
+                  variant='outline'
+                  onClick={() => setResetPasswordModalMember(null)}
+                >
+                  Hủy bỏ
+                </Button>
+                <Button
+                  size='sm'
+                  variant='default'
+                  className='bg-primary font-semibold'
+                  disabled={resetPasswordInput.length > 0 && resetPasswordInput.length < 12}
+                  onClick={() => {
+                    if (resetPasswordModalMember) {
+                      const res = resetMemberSshPassword(
+                        resetPasswordModalMember.id,
+                        resetPasswordInput || undefined,
+                        resetRequireChange
+                      );
+                      if (res.success && res.tempPassword) {
+                        setRevealedTempPassword(res.tempPassword);
+                        toast.success(res.message);
+                      }
+                    }
+                  }}
+                >
+                  Xác nhận Đặt lại Mật khẩu
+                </Button>
+              </>
+            ) : (
+              <Button
+                size='sm'
+                variant='default'
+                onClick={() => {
+                  setResetPasswordModalMember(null);
+                  setRevealedTempPassword(null);
+                }}
+              >
+                Đóng
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL 6: NHẬT KÝ ĐĂNG NHẬP DUAL-AUTH */}
+      <Dialog
+        open={!!loginEventsModalMember}
+        onOpenChange={(val) => !val && setLoginEventsModalMember(null)}
+      >
+        <DialogContent className='sm:max-w-[620px] text-xs'>
+          <DialogHeader>
+            <DialogTitle className='text-sm font-bold flex items-center gap-1.5'>
+              <Icons.history className='size-4 text-primary' /> Lịch sử Đăng nhập Dual-Auth (@
+              {loginEventsModalMember?.username})
+            </DialogTitle>
+            <DialogDescription className='text-xs'>
+              Nhật ký kiểm toán xác thực 2 giai đoạn: Giai đoạn 1 (Public Key) & Giai đoạn 2 (Linux
+              Password)
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className='py-2 space-y-2'>
+            {(() => {
+              const events = loginEventsModalMember
+                ? getMemberLoginEvents(loginEventsModalMember.username)
+                : [];
+              if (events.length === 0) {
+                return (
+                  <div className='p-6 text-center text-muted-foreground border rounded-lg bg-muted/20'>
+                    Chưa có sự kiện đăng nhập nào được ghi nhận cho tài khoản này.
+                  </div>
+                );
+              }
+              return (
+                <div className='overflow-x-auto rounded-lg border'>
+                  <table className='w-full text-left text-xs'>
+                    <thead className='bg-muted/50 border-b font-semibold text-muted-foreground'>
+                      <tr>
+                        <th className='p-2'>Thời gian</th>
+                        <th className='p-2'>IP Nguồn</th>
+                        <th className='p-2'>Cổng</th>
+                        <th className='p-2'>Giai đoạn</th>
+                        <th className='p-2'>Kết quả</th>
+                      </tr>
+                    </thead>
+                    <tbody className='divide-y'>
+                      {events.map((evt) => (
+                        <tr key={evt.id} className='hover:bg-muted/30'>
+                          <td className='p-2 font-mono text-[11px]'>{evt.timestamp}</td>
+                          <td className='p-2 font-mono text-[11px] text-foreground'>
+                            {evt.sourceIp}
+                          </td>
+                          <td className='p-2 font-mono text-[11px]'>{evt.listenPort}</td>
+                          <td className='p-2'>
+                            <span className='font-mono text-[10px] text-muted-foreground'>
+                              {evt.authStage}
+                            </span>
+                          </td>
+                          <td className='p-2'>
+                            {evt.authenticationResult === 'SUCCESS' ? (
+                              <Badge
+                                variant='outline'
+                                className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono'
+                              >
+                                SUCCESS
+                              </Badge>
+                            ) : (
+                              <Badge
+                                variant='outline'
+                                className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[10px] font-mono'
+                              >
+                                {evt.authenticationResult}
+                              </Badge>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
+
+          <DialogFooter className='border-t pt-2'>
+            <Button size='sm' variant='outline' onClick={() => setLoginEventsModalMember(null)}>
+              Đóng
             </Button>
           </DialogFooter>
         </DialogContent>

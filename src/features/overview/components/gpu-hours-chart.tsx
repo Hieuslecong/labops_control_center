@@ -24,8 +24,8 @@ const chartConfig = {
 
 interface ChartTooltipProps {
   active?: boolean;
-  payload?: Array<{ value?: number; payload?: Record<string, unknown> }>;
-  label?: string;
+  payload?: ReadonlyArray<{ value?: React.ReactNode; payload?: Record<string, unknown> }>;
+  label?: React.ReactNode;
 }
 
 const TimelineTooltip = ({ active, payload, label }: ChartTooltipProps) => {
@@ -82,6 +82,9 @@ const USER_DISTRIBUTION_DATA = [
   { user: 'Phạm Minh Tuấn', hours: 54.0, server: 'Track' },
   { user: 'Vũ Mai Linh', hours: 32.1, server: 'Workstation' }
 ];
+
+const legendFormatter = (value: string) =>
+  value === 'track' ? 'Server Track (3x A30)' : 'Server Workstation (1x A30)';
 
 export function GpuHoursChart() {
   const [viewMode, setViewMode] = useState<'timeline' | 'users'>('timeline');
@@ -163,24 +166,24 @@ export function GpuHoursChart() {
                 <CartesianGrid strokeDasharray='3 3' vertical={false} opacity={0.2} />
                 <XAxis dataKey='day' tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
                 <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11 }} unit='h' />
-                <Tooltip content={<TimelineTooltip />} />
+                <Tooltip content={TimelineTooltip} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, paddingTop: 6 }}
-                  formatter={(value) =>
-                    value === 'track' ? 'Server Track (3x A30)' : 'Server Workstation (1x A30)'
-                  }
+                  formatter={legendFormatter}
                 />
                 <Bar
                   dataKey='track'
                   stackId='a'
                   fill='oklch(0.55 0.22 260)'
                   radius={[0, 0, 0, 0]}
+                  isAnimationActive={false}
                 />
                 <Bar
                   dataKey='workstation'
                   stackId='a'
                   fill='oklch(0.58 0.22 295)'
                   radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
                 />
               </BarChart>
             ) : (
@@ -204,8 +207,13 @@ export function GpuHoursChart() {
                   axisLine={false}
                   tick={{ fontSize: 11 }}
                 />
-                <Tooltip content={<UserTooltip />} />
-                <Bar dataKey='hours' fill='oklch(0.55 0.22 260)' radius={[0, 4, 4, 0]} />
+                <Tooltip content={UserTooltip} />
+                <Bar
+                  dataKey='hours'
+                  fill='oklch(0.55 0.22 260)'
+                  radius={[0, 4, 4, 0]}
+                  isAnimationActive={false}
+                />
               </BarChart>
             )}
           </ChartContainer>

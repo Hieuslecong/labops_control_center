@@ -39,6 +39,16 @@ function useChart() {
   return context;
 }
 
+const emptySubscribe = () => () => {};
+
+function useIsClient() {
+  return React.useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
+  );
+}
+
 function ChartContainer({
   id,
   className,
@@ -56,6 +66,7 @@ function ChartContainer({
 }) {
   const uniqueId = React.useId();
   const chartId = `chart-${id ?? uniqueId.replace(/:/g, '')}`;
+  const isMounted = useIsClient();
 
   return (
     <ChartContext.Provider value={{ config }}>
@@ -63,15 +74,24 @@ function ChartContainer({
         data-slot='chart'
         data-chart={chartId}
         className={cn(
-          "flex aspect-video justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+          "flex justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
           className
         )}
         {...props}
       >
         <ChartStyle id={chartId} config={config} />
-        <RechartsPrimitive.ResponsiveContainer initialDimension={initialDimension}>
-          {children}
-        </RechartsPrimitive.ResponsiveContainer>
+        {isMounted ? (
+          <RechartsPrimitive.ResponsiveContainer
+            width='100%'
+            height='100%'
+            debounce={50}
+            initialDimension={initialDimension}
+          >
+            {children}
+          </RechartsPrimitive.ResponsiveContainer>
+        ) : (
+          <div className='flex h-full w-full items-center justify-center text-muted-foreground' />
+        )}
       </div>
     </ChartContext.Provider>
   );

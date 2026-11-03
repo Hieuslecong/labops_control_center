@@ -1,8 +1,13 @@
 import { clerkMiddleware } from '@clerk/nextjs/server';
 import { NextResponse, type NextRequest, type NextFetchEvent } from 'next/server';
 
-const hasClerkKeys = Boolean(
-  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY
+const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+const hasRealClerkKeys = Boolean(
+  !isDemoMode &&
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
+  !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
+  process.env.CLERK_SECRET_KEY &&
+  !process.env.CLERK_SECRET_KEY.includes('mock')
 );
 
 type MiddlewareHandler = (
@@ -11,7 +16,7 @@ type MiddlewareHandler = (
 ) => NextResponse | Promise<NextResponse>;
 
 let handler: MiddlewareHandler | null = null;
-if (hasClerkKeys) {
+if (hasRealClerkKeys) {
   try {
     handler = clerkMiddleware() as unknown as MiddlewareHandler;
   } catch {

@@ -18,7 +18,16 @@ export const metadata: Metadata = {
 };
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  if (process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY) {
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+  const hasRealClerkKeys = Boolean(
+    !isDemoMode &&
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
+    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
+    process.env.CLERK_SECRET_KEY &&
+    !process.env.CLERK_SECRET_KEY.includes('mock')
+  );
+
+  if (hasRealClerkKeys) {
     try {
       await auth.protect();
     } catch {

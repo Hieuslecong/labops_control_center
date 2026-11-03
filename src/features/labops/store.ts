@@ -1636,6 +1636,70 @@ const PROD_JOBS: ComputeJob[] = [
   }
 ];
 
+function mapRawServer(s: Record<string, any>): PhysicalServer {
+  return {
+    id: s.id,
+    name: s.name,
+    hostname: s.hostname,
+    location: s.location,
+    status: s.status,
+    ipAddress: s.ipAddress ?? s.ip_address ?? '',
+    vpnIp: s.vpnIp ?? s.vpn_ip ?? '',
+    uptime: s.uptime ?? '',
+    cpuModel: s.cpuModel ?? s.cpu_model ?? '',
+    cpuCores: Number(s.cpuCores ?? s.cpu_cores ?? 0),
+    cpuUsagePercent: Number(s.cpuUsagePercent ?? s.cpu_usage_percent ?? 0),
+    ramTotalGb: Number(s.ramTotalGb ?? s.ram_total_gb ?? 0),
+    ramUsedGb: Number(s.ramUsedGb ?? s.ram_used_gb ?? 0),
+    ramUsagePercent: Number(s.ramUsagePercent ?? s.ram_usage_percent ?? 0),
+    diskTotalTb: Number(s.diskTotalTb ?? s.disk_total_tb ?? 0),
+    diskUsedTb: Number(s.diskUsedTb ?? s.disk_used_tb ?? 0),
+    diskUsagePercent: Number(s.diskUsagePercent ?? s.disk_usage_percent ?? 0),
+    diskType: s.diskType ?? s.disk_type ?? '',
+    networkInMbps: Number(s.networkInMbps ?? s.network_in_mbps ?? 0),
+    networkOutMbps: Number(s.networkOutMbps ?? s.network_out_mbps ?? 0),
+    gpuCount: Number(s.gpuCount ?? s.gpu_count ?? 0),
+    activeMembers: Number(s.activeMembers ?? s.active_members ?? 0),
+    activeJobs: Number(s.activeJobs ?? s.active_jobs ?? 0),
+    incusVersion: s.incusVersion ?? s.incus_version ?? '',
+    driverVersion: s.driverVersion ?? s.driver_version ?? '',
+    cudaVersion: s.cudaVersion ?? s.cuda_version ?? '',
+    lastUpdated: s.lastUpdated ?? s.last_updated ?? ''
+  };
+}
+
+function mapRawGpu(g: Record<string, any>): PhysicalGpu {
+  return {
+    id: g.id,
+    displayLabel: g.displayLabel ?? g.display_label ?? g.id,
+    serverId: g.serverId ?? g.server_id,
+    serverName: g.serverName ?? g.server_name ?? '',
+    model: g.model ?? '',
+    pciBusId: g.pciBusId ?? g.pci_bus_id ?? '',
+    uuid: g.uuid ?? '',
+    vramTotalMb: Number(g.vramTotalMb ?? g.vram_total_mb ?? 0),
+    vramUsedMb: Number(g.vramUsedMb ?? g.vram_used_mb ?? 0),
+    gpuUtilPercent: Number(g.gpuUtilPercent ?? g.gpu_util_percent ?? 0),
+    tempCelsius: Number(g.tempCelsius ?? g.temp_celsius ?? 0),
+    powerWatts: Number(g.powerWatts ?? g.power_watts ?? 0),
+    powerLimitWatts: Number(g.powerLimitWatts ?? g.power_limit_watts ?? 0),
+    allocationMode: g.allocationMode ?? g.allocation_mode ?? 'SHARED',
+    enforcementState: g.enforcementState ?? g.enforcement_state ?? 'MONITOR_ONLY',
+    activeProcesses: Array.isArray(g.activeProcesses ?? g.active_processes)
+      ? (g.activeProcesses ?? g.active_processes).map((p: Record<string, any>) => ({
+          pid: Number(p.pid),
+          name: String(p.name || ''),
+          username: String(p.username || ''),
+          workspace: String(p.workspace || ''),
+          vramMb: Number(p.vramMb ?? p.vram_mb ?? 0),
+          cpuPercent: Number(p.cpuPercent ?? p.cpu_percent ?? 0)
+        }))
+      : [],
+    activeUsers: g.activeUsers ?? g.active_users ?? [],
+    associatedJobs: g.associatedJobs ?? g.associated_jobs ?? []
+  };
+}
+
 export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   servers: isDemoMode ? INITIAL_SERVERS : PROD_SERVERS,
   gpus: isDemoMode ? INITIAL_GPUS : PROD_GPUS,
@@ -1659,13 +1723,13 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       if (resServers && resServers.ok) {
         const data = await resServers.json();
         if (Array.isArray(data) && data.length > 0) {
-          set({ servers: data });
+          set({ servers: data.map(mapRawServer) });
         }
       }
       if (resGpus && resGpus.ok) {
         const data = await resGpus.json();
         if (Array.isArray(data) && data.length > 0) {
-          set({ gpus: data });
+          set({ gpus: data.map(mapRawGpu) });
         }
       }
     } catch {

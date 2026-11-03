@@ -1256,6 +1256,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã tạm khóa tài khoản @{member['username']} và ngắt cổng SSH {member['ssh_port']}"
         })
+        self._save_persistent_data()
         return member
 
     def restore_member(self, member_id: str) -> Dict[str, Any]:
@@ -1277,6 +1278,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã mở khóa tài khoản @{member['username']} và kích hoạt lại cổng SSH {member['ssh_port']}"
         })
+        self._save_persistent_data()
         return member
 
     def rotate_ssh_key(self, member_id: str, public_key: str) -> Dict[str, Any]:
@@ -1304,6 +1306,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã cập nhật SSH public key mới cho @{member['username']} (Fingerprint: {member['ssh_fingerprint']})"
         })
+        self._save_persistent_data()
         return member
 
     def revoke_ssh_key(self, member_id: str) -> Dict[str, Any]:
@@ -1328,6 +1331,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã thu hồi khóa SSH của @{member['username']} và đóng cổng SSH"
         })
+        self._save_persistent_data()
         return member
 
     def update_storage_quota(self, member_id: str, new_quota_gb: int) -> Dict[str, Any]:
@@ -1357,6 +1361,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đổi quota ZFS cho @{member['username']} từ {old_quota}GB sang {new_quota_gb}GB"
         })
+        self._save_persistent_data()
         return member
 
     def update_ssh_port(self, member_id: str, new_port: int) -> Dict[str, Any]:
@@ -1383,6 +1388,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã chuyển cổng SSH của @{member['username']} từ {old_port} sang {new_port}"
         })
+        self._save_persistent_data()
         return member
 
     def archive_workspace(self, member_id: str) -> Dict[str, Any]:
@@ -1405,6 +1411,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã lưu trữ workspace {member['workspace_name']}, dừng container và bảo lưu ZFS snapshot"
         })
+        self._save_persistent_data()
         return member
 
     def delete_member_permanently(self, member_id: str) -> Dict[str, Any]:
@@ -1426,6 +1433,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã xóa vĩnh viễn tài khoản @{username}, hủy container Incus và giải phóng cổng SSH {member.get('ssh_port')}"
         })
+        self._save_persistent_data()
         return {"success": True, "message": f"Đã xóa vĩnh viễn thành viên @{username}"}
 
     def reset_member_password(self, member_id: str, new_password: Optional[str] = None, require_change: bool = True) -> Dict[str, Any]:
@@ -1461,6 +1469,7 @@ class LabOpsDataService:
             "details": f"Đã đặt lại mật khẩu Linux SSH cho @{member['username']} (Yêu cầu đổi mật khẩu ở lần đăng nhập tiếp theo: {require_change})."
         })
 
+        self._save_persistent_data()
         return {
             "success": True,
             "member_id": member_id,
@@ -1478,6 +1487,7 @@ class LabOpsDataService:
             if pol.get("linux_username") == member["username"]:
                 pol["password_status"] = "CHANGE_REQUIRED"
                 pol["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._save_persistent_data()
         return {"success": True, "password_status": "CHANGE_REQUIRED"}
 
     def suspend_ssh_access(self, member_id: str) -> Dict[str, Any]:

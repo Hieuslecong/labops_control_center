@@ -133,3 +133,4 @@ Truy vấn trực tiếp qua `nvidia-smi --query-compute-apps`:
 3. **Bộ điều hợp Giám sát GPU (Real NVML Adapter):** Triển khai adapter đọc trực tiếp từ `nvidia-smi` với UUID `GPU-1f6ba03b-45e9-8d99-1d7d-7c76412f3cfc`, cập nhật dung lượng VRAM thực tế và các tiến trình đang chạy.
 4. **Bộ điều hợp Incus Fail-Closed:** Khi Incus chưa khả dụng, báo lỗi chính xác `Chưa cấu hình Incus` thay vì sinh dữ liệu container giả lập.
 5. **Đồng bộ Giao diện Dashboard:** Chuyển đổi toàn bộ UI frontend đọc dữ liệu thực từ backend API, loại bỏ huy hiệu Demo, hiển thị cảnh báo trung thực cho Server Track (Mất kết nối).
+

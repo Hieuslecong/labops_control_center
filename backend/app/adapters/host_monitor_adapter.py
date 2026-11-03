@@ -224,3 +224,4 @@ class HostMonitorAdapter:
             "last_updated": "Mất kết nối (Chưa kết nối WireGuard VPN)",
             "is_real_host": False
         }
+

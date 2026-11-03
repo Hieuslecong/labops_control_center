@@ -10,7 +10,7 @@ import { Icons } from '@/components/icons';
 import { toast } from 'sonner';
 
 export function SettingsView() {
-  const [demoMode, setDemoMode] = useState(true);
+  const [demoMode, setDemoMode] = useState(process.env.NEXT_PUBLIC_DEMO_MODE === 'true');
   const [incusTrackUrl, setIncusTrackUrl] = useState('https://10.10.1.10:8443');
   const [incusWsUrl, setIncusWsUrl] = useState('https://10.10.2.20:8443');
   const [netdataTrackUrl, setNetdataTrackUrl] = useState('http://10.200.0.1:19999');

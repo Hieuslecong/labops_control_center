@@ -48,6 +48,7 @@ const CLUSTERS: ClusterScope[] = [
 ];
 
 export function OrgSwitcher() {
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
   const { state } = useSidebar();
   const [selectedCluster, setSelectedCluster] = useState<ClusterScope>(CLUSTERS[0]);
 
@@ -75,12 +76,21 @@ export function OrgSwitcher() {
             >
               <div className='flex items-center gap-1.5'>
                 <span className='truncate font-bold tracking-tight'>LabOps Control</span>
-                <Badge
-                  variant='outline'
-                  className='text-[10px] px-1 py-0 h-4 border-emerald-500/40 text-emerald-400 bg-emerald-500/10 font-mono'
-                >
-                  DEMO
-                </Badge>
+                {isDemoMode ? (
+                  <Badge
+                    variant='outline'
+                    className='text-[10px] px-1 py-0 h-4 border-amber-500/40 text-amber-400 bg-amber-500/10 font-mono'
+                  >
+                    DEMO
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant='outline'
+                    className='text-[10px] px-1 py-0 h-4 border-emerald-500/40 text-emerald-400 bg-emerald-500/10 font-mono'
+                  >
+                    LIVE
+                  </Badge>
+                )}
               </div>
               <span className='text-sidebar-foreground/70 truncate text-xs font-normal'>
                 {selectedCluster.name}

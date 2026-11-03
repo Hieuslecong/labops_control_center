@@ -29,7 +29,11 @@ export function GpuAllocationDialog({
   defaultGpuId
 }: GpuAllocationDialogProps) {
   const gpus = useLabOpsStore((state) => state.gpus);
-  const members = useLabOpsStore((state) => state.members.filter((m) => m.status === 'ACTIVE'));
+  const allMembers = useLabOpsStore((state) => state.members);
+  const members = React.useMemo(
+    () => allMembers.filter((m) => m.status === 'ACTIVE'),
+    [allMembers]
+  );
   const allocateGpu = useLabOpsStore((state) => state.allocateGpu);
 
   const [customGpuId, setCustomGpuId] = useState<string | null>(null);

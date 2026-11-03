@@ -8,7 +8,53 @@ import { useLabOpsStore } from '@/features/labops/store';
 import Link from 'next/link';
 
 export function KpiSummary() {
-  const summary = useLabOpsStore((state) => state.getSummary());
+  const servers = useLabOpsStore((state) => state.servers);
+  const gpus = useLabOpsStore((state) => state.gpus);
+  const members = useLabOpsStore((state) => state.members);
+  const jobs = useLabOpsStore((state) => state.jobs);
+
+  const summary = React.useMemo(() => {
+    const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramUsedMb, 0) / 1024);
+    const activeGpus = gpus.filter((g) => g.vramUsedMb > 0).length;
+    const onlineSsh = members.filter((m) => m.sshStatus === 'ONLINE').length;
+    const activeSessions = members.reduce((acc, m) => acc + m.sshSessionsCount, 0);
+    const runningJobs = jobs.filter((j) => j.status === 'RUNNING').length;
+
+    return {
+      servers: {
+        total: servers.length,
+        online: servers.filter((s) => s.status === 'online').length,
+        offline: servers.filter((s) => s.status !== 'online').length
+      },
+      gpus: {
+        totalCount: gpus.length,
+        model: 'NVIDIA A30 24GB',
+        aggregateVramGb: 96,
+        activeCount: activeGpus,
+        usedVramGb
+      },
+      members: {
+        onlineSsh,
+        activeSessions,
+        totalRegistered: members.length
+      },
+      jobs: {
+        running: runningJobs,
+        pending: 0,
+        failed: 0
+      },
+      gpuHours: {
+        today: 48.6,
+        last7Days: 384.2,
+        previousPeriodChangePercent: 14.8
+      },
+      alerts: {
+        critical: 0,
+        warnings: 1,
+        unresolvedIncidents: 0
+      }
+    };
+  }, [servers, gpus, members, jobs]);
 
   return (
     <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6'>
@@ -61,129 +107,113 @@ export function KpiSummary() {
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs'>
-            <div className='flex items-center justify-between text-muted-foreground mb-1'>
-              <span>VRAM sử dụng:</span>
+            <div className='flex items-center justify-between'>
+              <span className='text-muted-foreground'>Đã cấp phát:</span>
               <span className='font-semibold text-foreground font-mono'>
-                {summary.gpus.usedVramGb} / {summary.gpus.aggregateVramGb} GB
+                {summary.gpus.usedVramGb} / {summary.gpus.aggregateVramGb} GB VRAM
               </span>
             </div>
-            <div className='w-full bg-muted rounded-full h-1.5 overflow-hidden'>
+            <div className='w-full bg-muted rounded-full h-1.5 mt-2 overflow-hidden'>
               <div
-                className='bg-indigo-600 dark:bg-indigo-500 h-1.5 rounded-full transition-all duration-500'
+                className='bg-indigo-600 h-1.5 rounded-full transition-all duration-500'
                 style={{
-                  width: `${Math.round((summary.gpus.usedVramGb / summary.gpus.aggregateVramGb) * 100)}%`
+                  width: `${(summary.gpus.usedVramGb / summary.gpus.aggregateVramGb) * 100}%`
                 }}
-              />
+              ></div>
             </div>
           </CardContent>
         </Card>
       </Link>
 
       {/* Card 3: Thành viên Online */}
-      <Link
-        href='/dashboard/users'
-        aria-label='Xem danh sách thành viên trực tuyến'
-        className='group'
-      >
+      <Link href='/dashboard/users' aria-label='Xem danh sách thành viên' className='group'>
         <Card className='h-full transition-all duration-200 hover:shadow-md hover:border-primary/40 bg-card'>
           <CardHeader className='pb-2'>
             <div className='flex items-center justify-between'>
               <CardDescription className='text-xs font-medium text-muted-foreground uppercase tracking-wider'>
-                Thành viên Online
+                Thành viên Lab
               </CardDescription>
               <div className='flex size-7 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'>
-                <Icons.teams className='size-4' />
+                <Icons.user className='size-4' />
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5'>
               {summary.members.onlineSsh}
               <span className='text-xs font-normal text-muted-foreground'>
-                / {summary.members.totalRegistered} Thành viên
+                / {summary.members.totalRegistered} Online
               </span>
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs'>
-            <div className='flex items-center gap-1.5 text-muted-foreground'>
-              <Icons.key className='size-3.5 text-emerald-500' />
-              <span>{summary.members.activeSessions} phiên SSH kết nối</span>
+            <div className='flex items-center justify-between'>
+              <span className='text-muted-foreground'>Phiên SSH:</span>
+              <Badge variant='secondary' className='text-[10px] font-mono px-1.5 py-0'>
+                {summary.members.activeSessions} active
+              </Badge>
             </div>
-            <p className='text-muted-foreground text-[11px] mt-1'>Incus Container riêng biệt</p>
+            <p className='text-muted-foreground text-[11px] mt-1'>Incus container cgroups</p>
           </CardContent>
         </Card>
       </Link>
 
-      {/* Card 4: Công việc đang chạy */}
-      <Link
-        href='/dashboard/jobs'
-        aria-label='Xem các tác vụ tính toán đang chạy'
-        className='group'
-      >
+      {/* Card 4: Tác vụ tính toán */}
+      <Link href='/dashboard/jobs' aria-label='Xem các tác vụ đang chạy' className='group'>
         <Card className='h-full transition-all duration-200 hover:shadow-md hover:border-primary/40 bg-card'>
           <CardHeader className='pb-2'>
             <div className='flex items-center justify-between'>
               <CardDescription className='text-xs font-medium text-muted-foreground uppercase tracking-wider'>
-                Tác vụ tính toán
+                Tác vụ chạy
               </CardDescription>
-              <div className='flex size-7 items-center justify-center rounded-md bg-violet-500/10 text-violet-600 dark:text-violet-400'>
+              <div className='flex size-7 items-center justify-center rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400'>
                 <Icons.job className='size-4' />
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5'>
               {summary.jobs.running}
-              <span className='text-xs font-normal text-muted-foreground'>Đang chạy</span>
+              <span className='text-xs font-normal text-muted-foreground'>Đang huấn luyện</span>
             </CardTitle>
           </CardHeader>
-          <CardContent className='pt-0 text-xs flex items-center justify-between'>
-            <Badge
-              variant='outline'
-              className='bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30 text-[11px] font-medium'
-            >
-              {summary.jobs.pending} chờ
-            </Badge>
-            <Badge
-              variant='outline'
-              className='bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30 text-[11px] font-medium'
-            >
-              {summary.jobs.failed} lỗi
-            </Badge>
+          <CardContent className='pt-0 text-xs'>
+            <div className='flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium'>
+              <span className='size-2 rounded-full bg-amber-500 animate-pulse'></span>
+              <span>4 tiến trình CUDA active</span>
+            </div>
+            <p className='text-muted-foreground text-[11px] mt-1'>0 chờ • 0 thất bại</p>
           </CardContent>
         </Card>
       </Link>
 
-      {/* Card 5: GPU-hours */}
-      <Link href='/dashboard/resources' aria-label='Xem phân tích GPU hours' className='group'>
+      {/* Card 5: GPU Hours */}
+      <Link href='/dashboard/resources' aria-label='Xem thống kê GPU-hours' className='group'>
         <Card className='h-full transition-all duration-200 hover:shadow-md hover:border-primary/40 bg-card'>
           <CardHeader className='pb-2'>
             <div className='flex items-center justify-between'>
               <CardDescription className='text-xs font-medium text-muted-foreground uppercase tracking-wider'>
-                GPU-Hours (Hôm nay)
+                GPU-hours (7 ngày)
               </CardDescription>
-              <div className='flex size-7 items-center justify-center rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400'>
-                <Icons.clock className='size-4' />
+              <div className='flex size-7 items-center justify-center rounded-md bg-purple-500/10 text-purple-600 dark:text-purple-400'>
+                <Icons.history className='size-4' />
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5'>
-              {summary.gpuHours.today}h
-              <span className='text-xs font-normal text-emerald-600 dark:text-emerald-400 flex items-center'>
-                <Icons.trendingUp className='size-3 mr-0.5' />+
-                {summary.gpuHours.previousPeriodChangePercent}%
-              </span>
+              {summary.gpuHours.last7Days}
+              <span className='text-xs font-normal text-muted-foreground'>giờ</span>
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs'>
-            <div className='text-muted-foreground'>
-              7 ngày qua:{' '}
-              <span className='font-semibold text-foreground font-mono'>
-                {summary.gpuHours.last7Days}h
-              </span>
+            <div className='flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-medium'>
+              <span>+{summary.gpuHours.previousPeriodChangePercent}%</span>
+              <span className='text-muted-foreground font-normal'>so với tuần trước</span>
             </div>
-            <p className='text-muted-foreground text-[11px] mt-1'>Dựa trên tải tính toán thực tế</p>
+            <p className='text-muted-foreground text-[11px] mt-1'>
+              Hôm nay: {summary.gpuHours.today}h
+            </p>
           </CardContent>
         </Card>
       </Link>
 
-      {/* Card 6: Cảnh báo */}
-      <Link href='/dashboard/security' aria-label='Xem cảnh báo an ninh hạ tầng' className='group'>
+      {/* Card 6: An ninh Sandbox */}
+      <Link href='/dashboard/security' aria-label='Xem trung tâm an ninh' className='group'>
         <Card className='h-full transition-all duration-200 hover:shadow-md hover:border-primary/40 bg-card'>
           <CardHeader className='pb-2'>
             <div className='flex items-center justify-between'>
@@ -196,15 +226,15 @@ export function KpiSummary() {
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5'>
               {summary.alerts.warnings}
-              <span className='text-xs font-normal text-muted-foreground'>Cảnh báo</span>
+              <span className='text-xs font-normal text-muted-foreground'>Cần kiểm duyệt</span>
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs'>
-            <div className='flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium'>
-              <Icons.warning className='size-3.5' />
-              <span>1 repo cần phê duyệt</span>
+            <div className='flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-medium'>
+              <span className='size-2 rounded-full bg-rose-500'></span>
+              <span>1 repo chờ duyệt AST</span>
             </div>
-            <p className='text-muted-foreground text-[11px] mt-1'>0 sự cố nghiêm trọng</p>
+            <p className='text-muted-foreground text-[11px] mt-1'>0 sự cố bảo mật nghiêm trọng</p>
           </CardContent>
         </Card>
       </Link>

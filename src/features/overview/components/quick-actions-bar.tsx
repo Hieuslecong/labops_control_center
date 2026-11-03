@@ -50,6 +50,7 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
         <Button
           size='sm'
           variant='outline'
+          nativeButton={false}
           render={<Link href='/dashboard/users' aria-label='Thêm thành viên' />}
           className='h-8 text-xs font-semibold gap-1.5'
         >
@@ -59,6 +60,7 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
         <Button
           size='sm'
           variant='outline'
+          nativeButton={false}
           render={<Link href='/dashboard/resources' aria-label='Tạo Workspace Incus' />}
           className='h-8 text-xs font-semibold gap-1.5'
         >

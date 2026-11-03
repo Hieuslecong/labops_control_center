@@ -1,7 +1,7 @@
-import { auth } from '@clerk/nextjs/server';
+import { protectRoute } from '@/lib/auth-guard';
 import TeamView from './team-view';
 
 export default async function Page() {
-  await auth.protect();
+  await protectRoute();
   return <TeamView />;
 }

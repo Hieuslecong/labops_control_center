@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server';
+import { protectRoute } from '@/lib/auth-guard';
 import NotificationsPage from '@/features/notifications/components/notifications-page';
 
 export const metadata = {
@@ -6,7 +6,7 @@ export const metadata = {
 };
 
 export default async function Page() {
-  await auth.protect();
+  await protectRoute();
 
   return <NotificationsPage />;
 }

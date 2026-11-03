@@ -9,15 +9,19 @@ import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { CircularGauge } from '@/features/overview/components/circular-gauge';
 import { ServerId } from '@/types/labops';
-import {
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid
-} from 'recharts';
+import { ChartConfig, ChartContainer } from '@/components/ui/chart';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+
+const cpuRamChartConfig = {
+  cpu: {
+    label: 'CPU Util %',
+    color: 'oklch(0.55 0.22 260)'
+  },
+  ram: {
+    label: 'RAM Util %',
+    color: 'oklch(0.58 0.22 295)'
+  }
+} satisfies ChartConfig;
 
 const TIME_SERIES_CPU_RAM = [
   { time: '14:00', cpu: 38, ram: 65, net: 410 },
@@ -275,7 +279,7 @@ export function ServerDetailView() {
               Dữ liệu giám sát thời gian thực từ Netdata Agent
             </CardDescription>
             <div className='h-[260px] w-full'>
-              <ResponsiveContainer width='100%' height='100%'>
+              <ChartContainer config={cpuRamChartConfig} className='aspect-auto h-[260px] w-full'>
                 <AreaChart data={TIME_SERIES_CPU_RAM}>
                   <CartesianGrid strokeDasharray='3 3' opacity={0.2} />
                   <XAxis dataKey='time' tickLine={false} tick={{ fontSize: 11 }} />
@@ -296,7 +300,7 @@ export function ServerDetailView() {
                     name='RAM Util %'
                   />
                 </AreaChart>
-              </ResponsiveContainer>
+              </ChartContainer>
             </div>
           </Card>
         </TabsContent>

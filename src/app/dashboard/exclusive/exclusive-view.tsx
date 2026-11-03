@@ -1,64 +1,61 @@
 'use client';
 
+import React from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { useOrganization, Show } from '@clerk/nextjs';
+import { Badge } from '@/components/ui/badge';
 import { Icons } from '@/components/icons';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import Link from 'next/link';
 
 export default function ExclusiveView() {
-  const { organization, isLoaded } = useOrganization();
-
   return (
-    <PageContainer isLoading={!isLoaded}>
-      <Show
-        when={{ plan: 'pro' }}
-        fallback={
-          <div className='flex h-full items-center justify-center'>
-            <Alert>
-              <Icons.lock className='h-5 w-5 text-yellow-600' />
-              <AlertDescription>
-                <div className='mb-1 text-lg font-semibold'>Pro Plan Required</div>
-                <div className='text-muted-foreground'>
-                  This page is only available to organizations on the{' '}
-                  <span className='font-semibold'>Pro</span> plan.
-                  <br />
-                  Upgrade your subscription in&nbsp;
-                  <Link className='underline' href='/dashboard/billing'>
-                    Billing &amp; Plans
-                  </Link>
-                  .
-                </div>
-              </AlertDescription>
-            </Alert>
-          </div>
-        }
-      >
-        <div className='space-y-6'>
-          <div>
-            <h1 className='flex items-center gap-2 text-3xl font-bold tracking-tight'>
-              <Icons.badgeCheck className='h-7 w-7 text-green-600' />
-              Exclusive Area
-            </h1>
-            <p className='text-muted-foreground'>
-              Welcome, <span className='font-semibold'>{organization?.name}</span>! This page
-              contains exclusive features for Pro plan organizations.
-            </p>
-          </div>
-          <Card>
+    <PageContainer
+      pageTitle='Khu vực Quản trị Nâng cao (Exclusive Access)'
+      pageDescription='Tính năng bảo mật và quản lý đặc quyền cho Quản trị viên Hạ tầng LabOps'
+    >
+      <div className='space-y-6'>
+        <div className='flex items-center gap-2'>
+          <Icons.badgeCheck className='h-6 w-6 text-emerald-600' />
+          <h2 className='text-lg font-bold'>Đặc quyền Hạ tầng Máy chủ AI</h2>
+          <Badge variant='outline' className='bg-primary/10 text-primary text-[10px]'>
+            ENTERPRISE PRO
+          </Badge>
+        </div>
+
+        <div className='grid grid-cols-1 md:grid-cols-2 gap-4'>
+          <Card className='bg-card'>
             <CardHeader>
-              <CardTitle>Thank You for Checking Out the Exclusive Page</CardTitle>
-              <CardDescription>
-                This means you belong to an organization subscribed to the Pro plan.
+              <CardTitle className='text-sm font-bold flex items-center gap-2'>
+                <Icons.server className='size-4 text-primary' /> Cấu hình Cụm Vật lý Độc lập
+              </CardTitle>
+              <CardDescription className='text-xs'>
+                Kiểm soát cấp độ Kernel, IOMMU Groups và PCIe Passthrough cho NVIDIA A30
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className='text-lg'>Have a wonderful day!</div>
+            <CardContent className='text-xs text-muted-foreground space-y-2'>
+              <p>• Phân chia VRAM phần cứng MIG (Multi-Instance GPU) hoặc Driver-enforced MPS.</p>
+              <p>• Giao thức WireGuard Site-to-Site giữa Hà Nội và TP.HCM với MTU tối ưu hóa.</p>
+              <p>• ZFS Storage Pool với nén zstd và kiểm tra toàn vẹn Scrub định kỳ.</p>
+            </CardContent>
+          </Card>
+
+          <Card className='bg-card'>
+            <CardHeader>
+              <CardTitle className='text-sm font-bold flex items-center gap-2'>
+                <Icons.shield className='size-4 text-rose-600' /> Chính sách Cô lập An ninh Tuyệt
+                đối
+              </CardTitle>
+              <CardDescription className='text-xs'>
+                Không cấp quyền Sudo Host cho thành viên nghiên cứu
+              </CardDescription>
+            </CardHeader>
+            <CardContent className='text-xs text-muted-foreground space-y-2'>
+              <p>• 100% Containers chạy ở chế độ Unprivileged (security.idmap.isolated=true).</p>
+              <p>• Cổng SSH trung gian chuyên biệt theo dải 22000-29999 cho từng thành viên.</p>
+              <p>• Khóa riêng tư Ed25519 được sinh phía Client, không lưu trữ trên máy chủ.</p>
             </CardContent>
           </Card>
         </div>
-      </Show>
+      </div>
     </PageContainer>
   );
 }

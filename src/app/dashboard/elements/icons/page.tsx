@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server';
+import { protectRoute } from '@/lib/auth-guard';
 import IconsViewPage from '@/features/elements/components/icons-view-page';
 
 export const metadata = {
@@ -6,7 +6,7 @@ export const metadata = {
 };
 
 export default async function page() {
-  await auth.protect();
+  await protectRoute();
 
   return <IconsViewPage />;
 }

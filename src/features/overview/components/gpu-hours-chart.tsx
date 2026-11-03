@@ -4,16 +4,23 @@ import React, { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
-import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  Legend,
-  CartesianGrid
-} from 'recharts';
+import { ChartConfig, ChartContainer } from '@/components/ui/chart';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, CartesianGrid } from 'recharts';
+
+const chartConfig = {
+  track: {
+    label: 'Server Track (3x A30)',
+    color: 'oklch(0.55 0.22 260)'
+  },
+  workstation: {
+    label: 'Server Workstation (1x A30)',
+    color: 'oklch(0.58 0.22 295)'
+  },
+  hours: {
+    label: 'Số giờ GPU',
+    color: 'oklch(0.55 0.22 260)'
+  }
+} satisfies ChartConfig;
 
 interface ChartTooltipProps {
   active?: boolean;
@@ -147,7 +154,7 @@ export function GpuHoursChart() {
 
       <CardContent className='pt-2 pb-4'>
         <div className='h-[260px] w-full'>
-          <ResponsiveContainer width='100%' height='100%'>
+          <ChartContainer config={chartConfig} className='aspect-auto h-[260px] w-full'>
             {viewMode === 'timeline' ? (
               <BarChart
                 data={DAILY_USAGE_DATA}
@@ -201,7 +208,7 @@ export function GpuHoursChart() {
                 <Bar dataKey='hours' fill='oklch(0.55 0.22 260)' radius={[0, 4, 4, 0]} />
               </BarChart>
             )}
-          </ResponsiveContainer>
+          </ChartContainer>
         </div>
 
         <div className='flex items-center gap-2 mt-2 pt-2 border-t text-[11px] text-muted-foreground'>

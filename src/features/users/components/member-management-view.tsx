@@ -26,6 +26,7 @@ import { useLabOpsStore } from '@/features/labops/store';
 import { MemberProvisioningWizard } from './member-provisioning-wizard';
 import { MemberRole, MemberStatus, LabMember } from '@/types/labops';
 import { toast } from 'sonner';
+import { copyToClipboard } from '@/lib/clipboard';
 
 function getRoleBadge(role: MemberRole) {
   switch (role) {
@@ -848,11 +849,14 @@ export function MemberManagementView() {
                           size='sm'
                           variant='ghost'
                           className='h-6 px-2 text-[10px]'
-                          onClick={() => {
-                            navigator.clipboard.writeText(
-                              `ssh -i ~/.ssh/id_ed25519 -p ${detailMember.sshPort} ${detailMember.username}@{detailMember.sshIp}`
-                            );
-                            toast.success('Đã sao chép lệnh SSH');
+                          onClick={async () => {
+                            const cmd = `ssh -i ~/.ssh/id_ed25519 -p ${detailMember.sshPort} ${detailMember.username}@{detailMember.sshIp}`;
+                            const copied = await copyToClipboard(cmd);
+                            if (copied) {
+                              toast.success('Đã sao chép lệnh SSH');
+                            } else {
+                              toast.info(`Lệnh SSH: ${cmd}`);
+                            }
                           }}
                         >
                           <Icons.forms className='size-3 mr-1' /> Copy

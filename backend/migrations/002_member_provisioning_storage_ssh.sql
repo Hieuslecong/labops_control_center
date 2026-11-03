@@ -88,3 +88,4 @@ CREATE TABLE IF NOT EXISTS provisioning_operations (
 
 CREATE INDEX IF NOT EXISTS idx_prov_op_user ON provisioning_operations(user_id);
 CREATE INDEX IF NOT EXISTS idx_prov_op_idemp ON provisioning_operations(idempotency_key);
+

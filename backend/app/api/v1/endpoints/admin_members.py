@@ -89,3 +89,4 @@ async def delete_member_permanently(user_id: str):
         return service.delete_member_permanently(user_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+

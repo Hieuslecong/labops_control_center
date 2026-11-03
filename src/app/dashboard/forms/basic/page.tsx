@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server';
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import DemoForm from '@/components/forms/demo-form';
 
@@ -7,7 +7,7 @@ export const metadata = {
 };
 
 export default async function Page() {
-  await auth.protect();
+  await protectRoute();
 
   return (
     <PageContainer

@@ -22,3 +22,4 @@ async def get_storage_pool(pool_id: str):
     if not pool:
         raise HTTPException(status_code=404, detail="Storage pool not found")
     return pool
+

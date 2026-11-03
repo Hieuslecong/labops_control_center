@@ -18,6 +18,7 @@ import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { MemberRole, ServerId, GpuAllocationMode } from '@/types/labops';
 import { toast } from 'sonner';
+import { copyToClipboard } from '@/lib/clipboard';
 
 interface MemberProvisioningWizardProps {
   open: boolean;
@@ -1090,11 +1091,14 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   size='sm'
                   variant='ghost'
                   className='h-6 px-2 text-[10px]'
-                  onClick={() => {
-                    navigator.clipboard.writeText(
-                      `ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username || 'user'}@${currentServer?.vpnIp}`
-                    );
-                    toast.success('Đã sao chép lệnh SSH');
+                  onClick={async () => {
+                    const cmd = `ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username || 'user'}@${currentServer?.vpnIp}`;
+                    const copied = await copyToClipboard(cmd);
+                    if (copied) {
+                      toast.success('Đã sao chép lệnh SSH');
+                    } else {
+                      toast.info(`Lệnh SSH: ${cmd}`);
+                    }
                   }}
                 >
                   <Icons.forms className='size-3 mr-1' /> Copy

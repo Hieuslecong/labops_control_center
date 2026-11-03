@@ -54,10 +54,18 @@ export function ServerDetailView() {
             <h2 className='text-xl font-bold tracking-tight'>{server.name}</h2>
             <Badge
               variant='outline'
-              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
+              className={
+                server.status === 'online'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
+                  : 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
+              }
             >
-              <span className='size-2 rounded-full bg-emerald-500 animate-pulse mr-1'></span>
-              ONLINE
+              <span
+                className={`size-2 rounded-full mr-1 ${
+                  server.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-destructive'
+                }`}
+              ></span>
+              {server.status === 'online' ? 'TRỰC TUYẾN' : 'MẤT KẾT NỐI (Chưa kết nối VPN)'}
             </Badge>
             <Badge variant='secondary' className='font-mono text-xs'>
               {server.hostname}
@@ -69,6 +77,16 @@ export function ServerDetailView() {
             WireGuard: <span className='font-mono font-medium text-foreground'>{server.vpnIp}</span>{' '}
             • Uptime: {server.uptime}
           </p>
+          {server.status !== 'online' && (
+            <div className='mt-2.5 p-2 rounded-md bg-destructive/10 border border-destructive/20 text-xs text-destructive flex items-center gap-2'>
+              <Icons.warning className='size-4 shrink-0' />
+              <span>
+                <strong>Cảnh báo kết nối:</strong> Máy chủ này hiện không phản hồi qua đường hầm
+                WireGuard VPN. LabOps từ chối hiển thị dữ liệu giả định. Vui lòng kiểm tra dịch vụ{' '}
+                <code>wg-quick@wg0</code> trên máy chủ từ xa.
+              </span>
+            </div>
+          )}
         </div>
 
         <div className='flex items-center gap-2'>

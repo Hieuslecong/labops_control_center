@@ -11,6 +11,8 @@ interface QuickActionsBarProps {
 }
 
 export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) {
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+
   return (
     <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl border bg-gradient-to-r from-blue-900/10 via-indigo-900/5 to-card backdrop-blur-xs'>
       <div>
@@ -24,12 +26,29 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
           >
             Ubuntu 22.04 LTS
           </Badge>
-          <Badge
-            variant='outline'
-            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-mono'
-          >
-            Incus 6.0 LTS • CUDA 12.4
-          </Badge>
+          {isDemoMode ? (
+            <Badge
+              variant='outline'
+              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-mono'
+            >
+              Incus 6.0 LTS • CUDA 12.4
+            </Badge>
+          ) : (
+            <>
+              <Badge
+                variant='outline'
+                className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-mono'
+              >
+                Workstation Cục bộ • CUDA 13.2
+              </Badge>
+              <Badge
+                variant='outline'
+                className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[11px] font-mono'
+              >
+                Track: Mất kết nối VPN
+              </Badge>
+            </>
+          )}
         </div>
         <p className='text-xs text-muted-foreground mt-0.5'>
           Hạ tầng phân tán 2 cụm vật lý: <strong>Server Track</strong> (3x NVIDIA A30 24GB) &{' '}

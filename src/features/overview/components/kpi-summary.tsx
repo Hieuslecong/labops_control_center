@@ -14,6 +14,9 @@ export function KpiSummary() {
   const jobs = useLabOpsStore((state) => state.jobs);
 
   const summary = React.useMemo(() => {
+    const totalVramGb = Math.round(
+      gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0) / 1024
+    );
     const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramUsedMb, 0) / 1024);
     const activeGpus = gpus.filter((g) => g.vramUsedMb > 0).length;
     const onlineSsh = members.filter((m) => m.sshStatus === 'ONLINE').length;
@@ -29,7 +32,7 @@ export function KpiSummary() {
       gpus: {
         totalCount: gpus.length,
         model: 'NVIDIA A30 24GB',
-        aggregateVramGb: 96,
+        aggregateVramGb: totalVramGb > 0 ? totalVramGb : 24,
         activeCount: activeGpus,
         usedVramGb
       },
@@ -78,11 +81,25 @@ export function KpiSummary() {
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs'>
-            <div className='flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium'>
-              <span className='size-2 rounded-full bg-emerald-500 animate-pulse'></span>
-              <span>100% Hoạt động bình thường</span>
-            </div>
-            <p className='text-muted-foreground text-[11px] mt-1'>Track: Online • WS: Online</p>
+            {summary.servers.offline > 0 ? (
+              <>
+                <div className='flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium'>
+                  <span className='size-2 rounded-full bg-amber-500 animate-pulse'></span>
+                  <span>{summary.servers.offline} Cụm Mất kết nối VPN</span>
+                </div>
+                <p className='text-muted-foreground text-[11px] mt-1'>
+                  Workstation: Online • Track: Offline
+                </p>
+              </>
+            ) : (
+              <>
+                <div className='flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium'>
+                  <span className='size-2 rounded-full bg-emerald-500 animate-pulse'></span>
+                  <span>100% Hoạt động bình thường</span>
+                </div>
+                <p className='text-muted-foreground text-[11px] mt-1'>Track: Online • WS: Online</p>
+              </>
+            )}
           </CardContent>
         </Card>
       </Link>

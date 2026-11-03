@@ -78,6 +78,7 @@ interface LabOpsState {
   updateEventStatus: (id: string, status: LabEvent['status']) => void;
 
   addAuditLog: (log: Omit<AuditLog, 'id' | 'timestamp' | 'correlationId'>) => void;
+  fetchLiveState: () => Promise<void>;
 }
 
 const INITIAL_SERVERS: PhysicalServer[] = [
@@ -1393,19 +1394,284 @@ const INITIAL_AUDIT_LOGS: AuditLog[] = [
   }
 ];
 
+const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+
+const PROD_SERVERS: PhysicalServer[] = [
+  {
+    id: 'track',
+    name: 'Server 01 — Track (Từ xa)',
+    hostname: 'track.lab.internal',
+    location: 'Phòng Lab Hà Nội (Khu A)',
+    status: 'offline',
+    ipAddress: '10.10.1.10',
+    vpnIp: '10.200.0.1',
+    uptime: 'Không khả dụng (Mất kết nối)',
+    cpuModel: '3x NVIDIA A30 Cluster Node',
+    cpuCores: 64,
+    cpuUsagePercent: 0.0,
+    ramTotalGb: 256,
+    ramUsedGb: 0.0,
+    ramUsagePercent: 0.0,
+    diskTotalTb: 8.0,
+    diskUsedTb: 0.0,
+    diskUsagePercent: 0.0,
+    diskType: 'ZFS RAID-Z2 (Chưa kết nối)',
+    networkInMbps: 0,
+    networkOutMbps: 0,
+    gpuCount: 0,
+    activeMembers: 0,
+    activeJobs: 0,
+    incusVersion: 'Chưa kết nối',
+    driverVersion: 'Chưa kết nối',
+    cudaVersion: 'Chưa kết nối',
+    lastUpdated: 'Mất kết nối (Chưa kết nối WireGuard VPN)'
+  },
+  {
+    id: 'workstation',
+    name: 'Server 02 — Workstation (Cục bộ)',
+    hostname: 'workstation.lab.local',
+    location: 'Phòng Lab TP.HCM (Khu B)',
+    status: 'online',
+    ipAddress: '127.0.0.1',
+    vpnIp: '10.200.0.2',
+    uptime: '14 ngày 14 giờ',
+    cpuModel: 'Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz (40 vCPUs)',
+    cpuCores: 20,
+    cpuUsagePercent: 15.7,
+    ramTotalGb: 125.5,
+    ramUsedGb: 49.4,
+    ramUsagePercent: 39.4,
+    diskTotalTb: 1.79,
+    diskUsedTb: 1.15,
+    diskUsagePercent: 64.2,
+    diskType: 'LVM Ext4 (Primary) + Ext4 (Secondary Data)',
+    networkInMbps: 45,
+    networkOutMbps: 62,
+    gpuCount: 1,
+    activeMembers: 0,
+    activeJobs: 4,
+    incusVersion: 'Chưa cài đặt',
+    driverVersion: '595.71.05',
+    cudaVersion: '13.2',
+    lastUpdated: 'Vừa xong (Live Telemetry)'
+  }
+];
+
+const PROD_GPUS: PhysicalGpu[] = [
+  {
+    id: 'ws-gpu-01',
+    displayLabel: 'WS-GPU-01',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation',
+    model: 'NVIDIA A30 24GB HBM2',
+    pciBusId: '00000000:D8:00.0',
+    uuid: 'GPU-1f6ba03b-45e9-8d99-1d7d-7c76412f3cfc',
+    vramTotalMb: 24576,
+    vramUsedMb: 13730,
+    gpuUtilPercent: 34,
+    tempCelsius: 76,
+    powerWatts: 83,
+    powerLimitWatts: 165,
+    allocationMode: 'SHARED',
+    enforcementState: 'DRIVER_ENFORCED_VERIFIED',
+    activeProcesses: [
+      {
+        pid: 3505602,
+        name: 'python (Tác vụ nghiên cứu AI)',
+        username: 'Chưa xác định',
+        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
+        vramMb: 2002,
+        cpuPercent: 150.0
+      },
+      {
+        pid: 73683,
+        name: 'python (Tác vụ nghiên cứu AI)',
+        username: 'Chưa xác định',
+        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
+        vramMb: 2002,
+        cpuPercent: 150.0
+      },
+      {
+        pid: 1833592,
+        name: 'python (Tác vụ nghiên cứu AI)',
+        username: 'Chưa xác định',
+        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
+        vramMb: 9386,
+        cpuPercent: 150.0
+      },
+      {
+        pid: 537529,
+        name: 'python (Tác vụ nghiên cứu AI)',
+        username: 'Chưa xác định',
+        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
+        vramMb: 314,
+        cpuPercent: 150.0
+      }
+    ],
+    activeUsers: ['Chưa xác định (Workload ngoại vi)'],
+    associatedJobs: ['proc-3505602', 'proc-73683', 'proc-1833592', 'proc-537529']
+  }
+];
+
+const PROD_STORAGE_POOLS: StoragePool[] = [
+  {
+    id: 'pool-root',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (Cục bộ)',
+    name: 'pool-root',
+    label: 'Ổ đĩa Hệ thống (LVM Ext4 /)',
+    diskIdentifier: '/dev/mapper/ubuntu--vg-ubuntu--lv',
+    mountPoint: '/',
+    driver: 'dir',
+    capacityGb: 876.1,
+    usedGb: 747.9,
+    freeGb: 83.6,
+    healthStatus: 'HEALTHY',
+    isDefault: true
+  },
+  {
+    id: 'pool-data-sdb',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (Cục bộ)',
+    name: 'pool-data-sdb',
+    label: 'Ổ cứng Lưu trữ Thứ cấp (/hdd1/hieulc/tmp)',
+    diskIdentifier: '/dev/sdb',
+    mountPoint: '/hdd1/hieulc/tmp',
+    driver: 'dir',
+    capacityGb: 915.8,
+    usedGb: 402.4,
+    freeGb: 466.8,
+    healthStatus: 'HEALTHY',
+    isDefault: false
+  },
+  {
+    id: 'pool-nvme-fast',
+    serverId: 'track',
+    serverName: 'Server 01 — Track (Từ xa)',
+    name: 'pool-nvme-fast',
+    label: 'SSD NVMe — Track (Mất kết nối VPN)',
+    diskIdentifier: 'wwn-0x5002538f411b4101',
+    mountPoint: '/var/lib/incus/storage-pools/pool-nvme-fast',
+    driver: 'zfs',
+    capacityGb: 8000.0,
+    usedGb: 0.0,
+    freeGb: 0.0,
+    healthStatus: 'FAULTED',
+    isDefault: false
+  }
+];
+
+const PROD_JOBS: ComputeJob[] = [
+  {
+    id: 'proc-1833592',
+    username: 'Chưa xác định',
+    fullName: 'Workload Nghiên cứu Ngoại vi',
+    serverId: 'workstation',
+    workspace: 'Ngoại vi (Host Native)',
+    pid: 1833592,
+    script: 'python (Workload nghiên cứu ngoài hệ thống)',
+    gpuId: 'WS-GPU-01',
+    cpuPercent: 150.0,
+    ramUsedMb: 16384,
+    vramUsedMb: 9386,
+    startTime: '2026-11-03 18:30',
+    elapsedTime: '05h 30m',
+    status: 'RUNNING',
+    sshStatus: 'SSH Online',
+    containerState: 'Running'
+  },
+  {
+    id: 'proc-3505602',
+    username: 'Chưa xác định',
+    fullName: 'Workload Nghiên cứu Ngoại vi',
+    serverId: 'workstation',
+    workspace: 'Ngoại vi (Host Native)',
+    pid: 3505602,
+    script: 'python (Workload nghiên cứu ngoài hệ thống)',
+    gpuId: 'WS-GPU-01',
+    cpuPercent: 150.0,
+    ramUsedMb: 8192,
+    vramUsedMb: 2002,
+    startTime: '2026-11-03 20:10',
+    elapsedTime: '03h 50m',
+    status: 'RUNNING',
+    sshStatus: 'SSH Online',
+    containerState: 'Running'
+  },
+  {
+    id: 'proc-73683',
+    username: 'Chưa xác định',
+    fullName: 'Workload Nghiên cứu Ngoại vi',
+    serverId: 'workstation',
+    workspace: 'Ngoại vi (Host Native)',
+    pid: 73683,
+    script: 'python (Workload nghiên cứu ngoài hệ thống)',
+    gpuId: 'WS-GPU-01',
+    cpuPercent: 150.0,
+    ramUsedMb: 8192,
+    vramUsedMb: 2002,
+    startTime: '2026-11-03 21:05',
+    elapsedTime: '02h 55m',
+    status: 'RUNNING',
+    sshStatus: 'SSH Online',
+    containerState: 'Running'
+  },
+  {
+    id: 'proc-537529',
+    username: 'Chưa xác định',
+    fullName: 'Workload Nghiên cứu Ngoại vi',
+    serverId: 'workstation',
+    workspace: 'Ngoại vi (Host Native)',
+    pid: 537529,
+    script: 'python (Workload nghiên cứu ngoài hệ thống)',
+    gpuId: 'WS-GPU-01',
+    cpuPercent: 150.0,
+    ramUsedMb: 4096,
+    vramUsedMb: 314,
+    startTime: '2026-11-03 23:15',
+    elapsedTime: '00h 45m',
+    status: 'RUNNING',
+    sshStatus: 'SSH Online',
+    containerState: 'Running'
+  }
+];
+
 export const useLabOpsStore = create<LabOpsState>((set, get) => ({
-  servers: INITIAL_SERVERS,
-  gpus: INITIAL_GPUS,
+  servers: isDemoMode ? INITIAL_SERVERS : PROD_SERVERS,
+  gpus: isDemoMode ? INITIAL_GPUS : PROD_GPUS,
   members: INITIAL_MEMBERS,
-  jobs: INITIAL_JOBS,
+  jobs: isDemoMode ? INITIAL_JOBS : PROD_JOBS,
   securityReviews: INITIAL_SECURITY_REVIEWS,
   events: INITIAL_EVENTS,
   auditLogs: INITIAL_AUDIT_LOGS,
-  storagePools: INITIAL_STORAGE_POOLS,
+  storagePools: isDemoMode ? INITIAL_STORAGE_POOLS : PROD_STORAGE_POOLS,
   sshEndpoints: INITIAL_SSH_ENDPOINTS,
   storageAllocations: INITIAL_STORAGE_ALLOCATIONS,
   sshPolicies: INITIAL_SSH_POLICIES,
   sshLoginEvents: INITIAL_SSH_LOGIN_EVENTS,
+
+  fetchLiveState: async () => {
+    try {
+      const [resServers, resGpus] = await Promise.all([
+        fetch('/api/v1/servers').catch(() => null),
+        fetch('/api/v1/gpus').catch(() => null)
+      ]);
+      if (resServers && resServers.ok) {
+        const data = await resServers.json();
+        if (Array.isArray(data) && data.length > 0) {
+          set({ servers: data });
+        }
+      }
+      if (resGpus && resGpus.ok) {
+        const data = await resGpus.json();
+        if (Array.isArray(data) && data.length > 0) {
+          set({ gpus: data });
+        }
+      }
+    } catch {
+      // In offline or static environments, retain current verified state
+    }
+  },
 
   getSummary: () => {
     const { servers, gpus, members, jobs } = get();

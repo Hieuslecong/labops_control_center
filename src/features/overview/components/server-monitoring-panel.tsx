@@ -55,10 +55,20 @@ export function ServerMonitoringPanel() {
                       </CardTitle>
                       <Badge
                         variant='outline'
-                        className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0'
+                        className={
+                          server.status === 'online'
+                            ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0'
+                            : 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0'
+                        }
                       >
-                        <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse mr-1'></span>
-                        ONLINE
+                        <span
+                          className={`size-1.5 rounded-full mr-1 ${
+                            server.status === 'online'
+                              ? 'bg-emerald-500 animate-pulse'
+                              : 'bg-destructive'
+                          }`}
+                        ></span>
+                        {server.status === 'online' ? 'ONLINE' : 'MẤT KẾT NỐI'}
                       </Badge>
                       <Badge variant='secondary' className='text-[10px] font-mono'>
                         {server.hostname}
@@ -85,33 +95,43 @@ export function ServerMonitoringPanel() {
               </CardHeader>
 
               <CardContent className='pt-0 pb-4 flex flex-col gap-4'>
-                {/* 3 Circular Gauges */}
-                <div className='grid grid-cols-3 gap-2 py-3 px-2 rounded-lg bg-muted/30 border border-muted/50'>
-                  <CircularGauge
-                    value={server.cpuUsagePercent}
-                    size={76}
-                    strokeWidth={6}
-                    label='CPU'
-                    sublabel={`${server.cpuCores} Cores`}
-                    color={cpuGaugeColor}
-                  />
-                  <CircularGauge
-                    value={server.ramUsagePercent}
-                    size={76}
-                    strokeWidth={6}
-                    label='Bộ nhớ RAM'
-                    sublabel={`${Math.round(server.ramUsedGb)} / ${server.ramTotalGb} GB`}
-                    color={ramGaugeColor}
-                  />
-                  <CircularGauge
-                    value={server.diskUsagePercent}
-                    size={76}
-                    strokeWidth={6}
-                    label='ZFS Lưu trữ'
-                    sublabel={`${server.diskUsedTb.toFixed(1)} / ${server.diskTotalTb} TB`}
-                    color={diskGaugeColor}
-                  />
-                </div>
+                {/* 3 Circular Gauges or Offline alert */}
+                {server.status !== 'online' ? (
+                  <div className='py-6 px-3 text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-1.5 bg-destructive/5 rounded-lg border border-destructive/20'>
+                    <Icons.warning className='size-5 text-destructive' />
+                    <p className='font-semibold text-destructive'>Máy chủ từ xa hiện mất kết nối</p>
+                    <p className='text-[11px] text-muted-foreground'>
+                      Chưa kết nối đường hầm WireGuard VPN. LabOps từ chối hiển thị dữ liệu giả lập.
+                    </p>
+                  </div>
+                ) : (
+                  <div className='grid grid-cols-3 gap-2 py-3 px-2 rounded-lg bg-muted/30 border border-muted/50'>
+                    <CircularGauge
+                      value={server.cpuUsagePercent}
+                      size={76}
+                      strokeWidth={6}
+                      label='CPU'
+                      sublabel={`${server.cpuCores} Cores`}
+                      color={cpuGaugeColor}
+                    />
+                    <CircularGauge
+                      value={server.ramUsagePercent}
+                      size={76}
+                      strokeWidth={6}
+                      label='Bộ nhớ RAM'
+                      sublabel={`${Math.round(server.ramUsedGb)} / ${server.ramTotalGb} GB`}
+                      color={ramGaugeColor}
+                    />
+                    <CircularGauge
+                      value={server.diskUsagePercent}
+                      size={76}
+                      strokeWidth={6}
+                      label='Lưu trữ'
+                      sublabel={`${server.diskUsedTb.toFixed(1)} / ${server.diskTotalTb} TB`}
+                      color={diskGaugeColor}
+                    />
+                  </div>
+                )}
 
                 {/* Key specs and status indicators */}
                 <div className='grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs'>

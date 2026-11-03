@@ -1,0 +1,42 @@
+[
+  {
+    "id": "ep-1",
+    "member_id": "mem-1",
+    "server_id": "track",
+    "listen_address": "10.200.0.1",
+    "listen_port": 22001,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "ACTIVE"
+  },
+  {
+    "id": "ep-2",
+    "member_id": "mem-2",
+    "server_id": "track",
+    "listen_address": "10.200.0.1",
+    "listen_port": 22002,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "ACTIVE"
+  },
+  {
+    "id": "ep-3",
+    "member_id": "mem-3",
+    "server_id": "track",
+    "listen_address": "10.200.0.1",
+    "listen_port": 22003,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "ACTIVE"
+  },
+  {
+    "id": "ep-4",
+    "member_id": "mem-4",
+    "server_id": "workstation",
+    "listen_address": "10.200.0.2",
+    "listen_port": 22001,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "ACTIVE"
+  }
+]

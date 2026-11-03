@@ -15,6 +15,7 @@ interface GpuManagementPanelProps {
 
 export function GpuManagementPanel({ onOpenAllocateDialog }: GpuManagementPanelProps) {
   const gpus = useLabOpsStore((state) => state.gpus);
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
   return (
     <div className='flex flex-col gap-3.5'>
@@ -22,10 +23,15 @@ export function GpuManagementPanel({ onOpenAllocateDialog }: GpuManagementPanelP
         <div className='flex items-center gap-2'>
           <Icons.gpu className='size-5 text-indigo-600 dark:text-indigo-400' />
           <div>
-            <h3 className='text-lg font-bold tracking-tight'>Quản trị 4 GPU Vật lý (NVIDIA A30)</h3>
+            <h3 className='text-lg font-bold tracking-tight'>
+              {isDemoMode
+                ? 'Quản trị 4 GPU Vật lý (NVIDIA A30)'
+                : `Giám sát GPU Vật lý (${gpus.length} GPU Khả dụng)`}
+            </h3>
             <p className='text-xs text-muted-foreground'>
-              Hạ tầng độc lập: 3x A30 trên Server Track (72GB) • 1x A30 trên Server Workstation
-              (24GB)
+              {isDemoMode
+                ? 'Hạ tầng độc lập: 3x A30 trên Server Track (72GB) • 1x A30 trên Server Workstation (24GB)'
+                : `Workstation Cục bộ: 1x NVIDIA A30 (24GB HBM2) • Server Track: Mất kết nối WireGuard`}
             </p>
           </div>
         </div>

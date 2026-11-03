@@ -1,8 +1,16 @@
 import uuid
 import re
 import hashlib
+import os
+import json
+import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+from app.core.config import settings
+from app.adapters.host_monitor_adapter import HostMonitorAdapter
+from app.adapters.nvml_adapter import NvmlAdapter
+
+logger = logging.getLogger(__name__)
 
 SAFE_USERNAME_REGEX = re.compile(r'^[a-z_][a-z0-9_-]{2,31}$')
 RESERVED_USERNAMES = {
@@ -31,13 +39,128 @@ def validate_mount_path(path: str, username: str) -> None:
 class LabOpsDataService:
     """
     Core data service for LabOps Control Center.
-    Manages in-memory state for Demo Mode and interfaces with PostgreSQL/adapters in Production Mode.
+    Manages in-memory state for Demo Mode and interfaces with real host telemetry & persistent storage in Production Mode.
     """
-    def __init__(self):
+    def __init__(self, demo_mode: Optional[bool] = None):
+        self.demo_mode = settings.DEMO_MODE if demo_mode is None else demo_mode
+        self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
+        self.nvml_adapter = NvmlAdapter(server_id="workstation", demo_mode=self.demo_mode)
+        self.data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        os.makedirs(self.data_dir, exist_ok=True)
         self._init_data()
 
+    def _save_persistent_data(self):
+        try:
+            with open(os.path.join(self.data_dir, "members.json"), "w", encoding="utf-8") as f:
+                json.dump(self.members, f, ensure_ascii=False, indent=2)
+            with open(os.path.join(self.data_dir, "ssh_policies.json"), "w", encoding="utf-8") as f:
+                json.dump(self.ssh_policies, f, ensure_ascii=False, indent=2)
+            with open(os.path.join(self.data_dir, "audit_logs.json"), "w", encoding="utf-8") as f:
+                json.dump(self.audit_logs, f, ensure_ascii=False, indent=2)
+            with open(os.path.join(self.data_dir, "storage_allocations.json"), "w", encoding="utf-8") as f:
+                json.dump(self.storage_allocations, f, ensure_ascii=False, indent=2)
+            with open(os.path.join(self.data_dir, "ssh_endpoints.json"), "w", encoding="utf-8") as f:
+                json.dump(self.ssh_endpoints, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to persist LabOps data: {e}")
+
+    @property
+    def servers(self) -> List[Dict[str, Any]]:
+        if not self.demo_mode:
+            ws = self.host_monitor.get_local_workstation_telemetry()
+            track = self.host_monitor.get_remote_track_telemetry()
+            ws["active_members"] = sum(1 for m in self.members if m.get("assigned_server") == "workstation" and m.get("status") == "ACTIVE")
+            track["active_members"] = sum(1 for m in self.members if m.get("assigned_server") == "track" and m.get("status") == "ACTIVE")
+            return [track, ws]
+        return self._demo_servers
+
+    @servers.setter
+    def servers(self, val: List[Dict[str, Any]]):
+        self._demo_servers = val
+
+    @property
+    def gpus(self) -> List[Dict[str, Any]]:
+        if not self.demo_mode:
+            live_gpus = self.nvml_adapter.get_live_gpu_telemetry_sync()
+            for g in live_gpus:
+                allocated = [j for j in self.jobs if j.get("gpu_id") == g.get("id") and j.get("status") == "RUNNING"]
+                for j in allocated:
+                    if j.get("username") and j["username"] not in g["active_users"]:
+                        g["active_users"].append(j["username"])
+            return live_gpus
+        return self._demo_gpus
+
+    @gpus.setter
+    def gpus(self, val: List[Dict[str, Any]]):
+        self._demo_gpus = val
+
+    @property
+    def storage_pools(self) -> List[Dict[str, Any]]:
+        if not self.demo_mode:
+            import psutil
+            try:
+                root_u = psutil.disk_usage("/")
+                pools = [
+                    {
+                        "id": "pool-root",
+                        "server_id": "workstation",
+                        "server_name": "Server 02 — Workstation (Cục bộ)",
+                        "name": "pool-root",
+                        "label": "Ổ đĩa Hệ thống (LVM Ext4 /)",
+                        "disk_identifier": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+                        "mount_point": "/",
+                        "driver": "dir",
+                        "capacity_gb": round(root_u.total / (1024**3), 1),
+                        "used_gb": round(root_u.used / (1024**3), 1),
+                        "free_gb": round(root_u.free / (1024**3), 1),
+                        "health_status": "HEALTHY",
+                        "is_default": True
+                    }
+                ]
+                sdb_path = "/hdd1/hieulc/tmp"
+                if os.path.exists(sdb_path):
+                    sdb_u = psutil.disk_usage(sdb_path)
+                    pools.append({
+                        "id": "pool-data-sdb",
+                        "server_id": "workstation",
+                        "server_name": "Server 02 — Workstation (Cục bộ)",
+                        "name": "pool-data-sdb",
+                        "label": "Ổ cứng Lưu trữ Thứ cấp (/hdd1/hieulc/tmp)",
+                        "disk_identifier": "/dev/sdb",
+                        "mount_point": sdb_path,
+                        "driver": "dir",
+                        "capacity_gb": round(sdb_u.total / (1024**3), 1),
+                        "used_gb": round(sdb_u.used / (1024**3), 1),
+                        "free_gb": round(sdb_u.free / (1024**3), 1),
+                        "health_status": "HEALTHY",
+                        "is_default": False
+                    })
+                pools.append({
+                    "id": "pool-nvme-fast",
+                    "server_id": "track",
+                    "server_name": "Server 01 — Track (Từ xa)",
+                    "name": "pool-nvme-fast",
+                    "label": "SSD NVMe — Track (Mất kết nối VPN)",
+                    "disk_identifier": "wwn-0x5002538f411b4101",
+                    "mount_point": "/var/lib/incus/storage-pools/pool-nvme-fast",
+                    "driver": "zfs",
+                    "capacity_gb": 8000.0,
+                    "used_gb": 0.0,
+                    "free_gb": 0.0,
+                    "health_status": "DISCONNECTED",
+                    "is_default": False
+                })
+                return pools
+            except Exception:
+                pass
+        return self._demo_storage_pools
+
+    @storage_pools.setter
+    def storage_pools(self, val: List[Dict[str, Any]]):
+        self._demo_storage_pools = val
+
     def _init_data(self):
-        self.servers = [
+        self._demo_servers = [
             {
                 "id": "track",
                 "name": "Server 01 — Track",
@@ -98,7 +221,7 @@ class LabOpsDataService:
             }
         ]
 
-        self.gpus = [
+        self._demo_gpus = [
             {
                 "id": "track-gpu-01",
                 "display_label": "TRACK-GPU-01",
@@ -188,7 +311,7 @@ class LabOpsDataService:
             }
         ]
 
-        self.storage_pools = [
+        self._demo_storage_pools = [
             {
                 "id": "pool-nvme-fast",
                 "server_id": "track",
@@ -734,6 +857,24 @@ class LabOpsDataService:
             }
         ]
 
+        # Load persistent storage overrides if present and not in unit testing mode
+        if not self.demo_mode:
+            members_file = os.path.join(self.data_dir, "members.json")
+            if os.path.exists(members_file):
+                try:
+                    with open(members_file, "r", encoding="utf-8") as f:
+                        self.members = json.load(f)
+                    with open(os.path.join(self.data_dir, "ssh_policies.json"), "r", encoding="utf-8") as f:
+                        self.ssh_policies = json.load(f)
+                    with open(os.path.join(self.data_dir, "audit_logs.json"), "r", encoding="utf-8") as f:
+                        self.audit_logs = json.load(f)
+                    with open(os.path.join(self.data_dir, "storage_allocations.json"), "r", encoding="utf-8") as f:
+                        self.storage_allocations = json.load(f)
+                    with open(os.path.join(self.data_dir, "ssh_endpoints.json"), "r", encoding="utf-8") as f:
+                        self.ssh_endpoints = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Failed to read existing persistent data: {e}")
+
     def get_summary(self) -> Dict[str, Any]:
         used_vram_gb = round(sum(gpu["vram_used_mb"] for gpu in self.gpus) / 1024, 1)
         active_gpus = sum(1 for gpu in self.gpus if gpu["vram_used_mb"] > 0)
@@ -1091,6 +1232,7 @@ class LabOpsDataService:
             "details": f"Đã khởi tạo workspace {workspace_name} cho @{username} trên {server_id}: ZFS volume data-{username} ({storage_quota_gb}GB), Incus proxy port {ssh_port}, quyền Standard User (Không sudo)."
         })
 
+        self._save_persistent_data()
         return new_member
 
     def suspend_member(self, member_id: str) -> Dict[str, Any]:
@@ -1362,6 +1504,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã khóa quyền truy cập SSH của @{member['username']} (Tạm dừng container proxy endpoint)"
         })
+        self._save_persistent_data()
         return member
 
     def restore_ssh_access(self, member_id: str) -> Dict[str, Any]:
@@ -1388,6 +1531,7 @@ class LabOpsDataService:
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã mở khóa quyền truy cập SSH của @{member['username']} (Tái kích hoạt Incus proxy endpoint)"
         })
+        self._save_persistent_data()
         return member
 
     def get_member_login_events(self, member_id: str) -> List[Dict[str, Any]]:

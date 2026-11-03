@@ -1,0 +1,46 @@
+[
+  {
+    "id": "aud-479995",
+    "actor": "admin@labops.local",
+    "action": "SSH_ACCESS_RESTORED",
+    "target_type": "SECURITY",
+    "target_id": "hieulc",
+    "timestamp": "2026-11-04 00:10:53",
+    "result": "SUCCESS",
+    "correlation_id": "corr-6ddd4a1ccd7b",
+    "details": "Đã mở khóa quyền truy cập SSH của @hieulc (Tái kích hoạt Incus proxy endpoint)"
+  },
+  {
+    "id": "aud-a91550",
+    "actor": "admin@labops.local",
+    "action": "SSH_ACCESS_SUSPENDED",
+    "target_type": "SECURITY",
+    "target_id": "hieulc",
+    "timestamp": "2026-11-04 00:10:53",
+    "result": "WARNING",
+    "correlation_id": "corr-16a7acba0577",
+    "details": "Đã khóa quyền truy cập SSH của @hieulc (Tạm dừng container proxy endpoint)"
+  },
+  {
+    "id": "aud-1",
+    "actor": "admin@labops.local",
+    "action": "GPU_ALLOCATED",
+    "target_type": "GPU",
+    "target_id": "track-gpu-01",
+    "timestamp": "Hôm nay 11:15",
+    "result": "SUCCESS",
+    "correlation_id": "corr-98f21a4e-3c01",
+    "details": "Cấp phát 6GB VRAM cho thành viên namnv (job-102)"
+  },
+  {
+    "id": "aud-2",
+    "actor": "admin@labops.local",
+    "action": "WORKSPACE_CREATED",
+    "target_type": "CONTAINER",
+    "target_id": "ws-anhlt",
+    "timestamp": "Hôm nay 09:30",
+    "result": "SUCCESS",
+    "correlation_id": "corr-17b84c3d-9a82",
+    "details": "Khởi tạo thành công Incus container ws-anhlt trên Server Workstation"
+  }
+]

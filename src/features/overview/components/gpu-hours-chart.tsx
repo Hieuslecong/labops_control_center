@@ -107,7 +107,7 @@ export function GpuHoursChart() {
   };
 
   return (
-    <Card className='border bg-card'>
+    <Card className='border bg-card min-w-0 w-full'>
       <CardHeader className='pb-2 pt-4'>
         <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2'>
           <div>

@@ -55,7 +55,7 @@ export function SecuritySummaryPanel() {
   const updateSecurityReview = useLabOpsStore((state) => state.updateSecurityReview);
 
   return (
-    <Card className='border bg-card h-full flex flex-col justify-between'>
+    <Card className='border bg-card h-full flex flex-col justify-between min-w-0'>
       <CardHeader className='pb-3 pt-4'>
         <div className='flex items-center justify-between'>
           <div className='flex items-center gap-2'>

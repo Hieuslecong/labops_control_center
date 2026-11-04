@@ -14,7 +14,7 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
   const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
   return (
-    <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl border bg-gradient-to-r from-blue-900/10 via-indigo-900/5 to-card backdrop-blur-xs'>
+    <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl border bg-gradient-to-r from-blue-900/10 via-indigo-900/5 to-card backdrop-blur-xs min-w-0 w-full'>
       <div>
         <div className='flex items-center gap-2 flex-wrap'>
           <h2 className='text-xl font-bold tracking-tight text-foreground'>

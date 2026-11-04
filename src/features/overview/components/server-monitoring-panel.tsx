@@ -26,7 +26,7 @@ export function ServerMonitoringPanel() {
         </Link>
       </div>
 
-      <div className='grid grid-cols-1 gap-4 lg:grid-cols-2'>
+      <div className='grid grid-cols-1 gap-4 lg:grid-cols-2 min-w-0 w-full'>
         {servers.map((server) => {
           const isTrack = server.id === 'track';
           const cpuGaugeColor = server.cpuUsagePercent > 80 ? 'stroke-rose-500' : 'stroke-blue-600';
@@ -38,7 +38,7 @@ export function ServerMonitoringPanel() {
           return (
             <Card
               key={server.id}
-              className='relative overflow-hidden border transition-all duration-200 hover:shadow-md bg-card'
+              className='relative overflow-hidden border transition-all duration-200 hover:shadow-md bg-card min-w-0'
             >
               <div
                 className={`absolute top-0 left-0 right-0 h-1 ${
@@ -47,18 +47,18 @@ export function ServerMonitoringPanel() {
               />
 
               <CardHeader className='pb-3 pt-4'>
-                <div className='flex items-start justify-between'>
-                  <div>
-                    <div className='flex items-center gap-2'>
-                      <CardTitle className='text-base font-bold tracking-tight'>
+                <div className='flex items-start justify-between gap-2 min-w-0'>
+                  <div className='min-w-0 flex-1'>
+                    <div className='flex items-center gap-2 flex-wrap'>
+                      <CardTitle className='text-base font-bold tracking-tight truncate'>
                         {server.name}
                       </CardTitle>
                       <Badge
                         variant='outline'
                         className={
                           server.status === 'online'
-                            ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0'
-                            : 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0'
+                            ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
+                            : 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
                         }
                       >
                         <span
@@ -70,11 +70,11 @@ export function ServerMonitoringPanel() {
                         ></span>
                         {server.status === 'online' ? 'ONLINE' : 'MẤT KẾT NỐI'}
                       </Badge>
-                      <Badge variant='secondary' className='text-[10px] font-mono'>
+                      <Badge variant='secondary' className='text-[10px] font-mono shrink-0'>
                         {server.hostname}
                       </Badge>
                     </div>
-                    <CardDescription className='text-xs mt-0.5 flex items-center gap-2'>
+                    <CardDescription className='text-xs mt-0.5 flex items-center gap-2 flex-wrap'>
                       <span>{server.location}</span>
                       <span>•</span>
                       <span className='font-mono text-foreground font-medium'>
@@ -87,14 +87,14 @@ export function ServerMonitoringPanel() {
 
                   <Link
                     href={`/dashboard/servers?id=${server.id}`}
-                    className='text-xs px-2.5 py-1 rounded-md border bg-muted/40 hover:bg-muted font-medium transition-colors flex items-center gap-1 text-muted-foreground hover:text-foreground'
+                    className='text-xs px-2.5 py-1 rounded-md border bg-muted/40 hover:bg-muted font-medium transition-colors flex items-center gap-1 text-muted-foreground hover:text-foreground shrink-0'
                   >
                     Quản trị <Icons.arrowRight className='size-3' />
                   </Link>
                 </div>
               </CardHeader>
 
-              <CardContent className='pt-0 pb-4 flex flex-col gap-4'>
+              <CardContent className='pt-0 pb-4 flex flex-col gap-4 min-w-0'>
                 {/* 3 Circular Gauges or Offline alert */}
                 {server.status !== 'online' ? (
                   <div className='py-6 px-3 text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-1.5 bg-destructive/5 rounded-lg border border-destructive/20'>
@@ -105,27 +105,27 @@ export function ServerMonitoringPanel() {
                     </p>
                   </div>
                 ) : (
-                  <div className='grid grid-cols-3 gap-2 py-3 px-2 rounded-lg bg-muted/30 border border-muted/50'>
+                  <div className='grid grid-cols-3 gap-1.5 py-3 px-1.5 rounded-lg bg-muted/30 border border-muted/50 min-w-0 w-full'>
                     <CircularGauge
                       value={server.cpuUsagePercent}
-                      size={76}
-                      strokeWidth={6}
+                      size={68}
+                      strokeWidth={5.5}
                       label='CPU'
                       sublabel={`${server.cpuCores} Cores`}
                       color={cpuGaugeColor}
                     />
                     <CircularGauge
                       value={server.ramUsagePercent}
-                      size={76}
-                      strokeWidth={6}
+                      size={68}
+                      strokeWidth={5.5}
                       label='Bộ nhớ RAM'
                       sublabel={`${Math.round(server.ramUsedGb)} / ${server.ramTotalGb} GB`}
                       color={ramGaugeColor}
                     />
                     <CircularGauge
                       value={server.diskUsagePercent}
-                      size={76}
-                      strokeWidth={6}
+                      size={68}
+                      strokeWidth={5.5}
                       label='Lưu trữ'
                       sublabel={`${server.diskUsedTb.toFixed(1)} / ${server.diskTotalTb} TB`}
                       color={diskGaugeColor}
@@ -134,40 +134,50 @@ export function ServerMonitoringPanel() {
                 )}
 
                 {/* Key specs and status indicators */}
-                <div className='grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs'>
-                  <div className='p-2 rounded-md bg-background border flex flex-col'>
-                    <span className='text-[11px] text-muted-foreground'>GPU Vật lý</span>
-                    <span className='font-bold text-sm text-foreground flex items-center gap-1 mt-0.5'>
-                      <Icons.gpu className='size-3.5 text-primary' />
+                <div className='grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs min-w-0'>
+                  <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
+                    <span className='text-[11px] text-muted-foreground truncate'>GPU Vật lý</span>
+                    <span className='font-bold text-sm text-foreground flex items-center gap-1 mt-0.5 truncate'>
+                      <Icons.gpu className='size-3.5 text-primary shrink-0' />
                       {server.gpuCount}x NVIDIA A30
                     </span>
-                    <span className='text-[10px] text-muted-foreground font-mono'>
+                    <span className='text-[10px] text-muted-foreground font-mono truncate'>
                       {server.gpuCount * 24} GB VRAM
                     </span>
                   </div>
 
-                  <div className='p-2 rounded-md bg-background border flex flex-col'>
-                    <span className='text-[11px] text-muted-foreground'>Băng thông Mạng</span>
-                    <span className='font-bold text-sm text-foreground font-mono mt-0.5'>
+                  <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
+                    <span className='text-[11px] text-muted-foreground truncate'>
+                      Băng thông Mạng
+                    </span>
+                    <span className='font-bold text-sm text-foreground font-mono mt-0.5 truncate'>
                       ↓{server.networkInMbps} ↑{server.networkOutMbps}
                     </span>
-                    <span className='text-[10px] text-muted-foreground'>Mbps (WireGuard)</span>
+                    <span className='text-[10px] text-muted-foreground truncate'>
+                      Mbps (WireGuard)
+                    </span>
                   </div>
 
-                  <div className='p-2 rounded-md bg-background border flex flex-col'>
-                    <span className='text-[11px] text-muted-foreground'>Thành viên / Tác vụ</span>
-                    <span className='font-bold text-sm text-foreground mt-0.5'>
+                  <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
+                    <span className='text-[11px] text-muted-foreground truncate'>
+                      Thành viên / Tác vụ
+                    </span>
+                    <span className='font-bold text-sm text-foreground mt-0.5 truncate'>
                       {server.activeMembers} người • {server.activeJobs} jobs
                     </span>
-                    <span className='text-[10px] text-muted-foreground'>Incus Workspaces</span>
+                    <span className='text-[10px] text-muted-foreground truncate'>
+                      Incus Workspaces
+                    </span>
                   </div>
 
-                  <div className='p-2 rounded-md bg-background border flex flex-col'>
-                    <span className='text-[11px] text-muted-foreground'>Thời gian Uptime</span>
-                    <span className='font-bold text-sm text-foreground mt-0.5'>
+                  <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
+                    <span className='text-[11px] text-muted-foreground truncate'>
+                      Thời gian Uptime
+                    </span>
+                    <span className='font-bold text-sm text-foreground mt-0.5 truncate'>
                       {server.uptime}
                     </span>
-                    <span className='text-[10px] text-emerald-600 dark:text-emerald-400 font-medium'>
+                    <span className='text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate'>
                       Ổn định tuyệt đối
                     </span>
                   </div>

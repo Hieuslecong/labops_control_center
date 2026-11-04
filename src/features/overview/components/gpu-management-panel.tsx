@@ -53,7 +53,7 @@ export function GpuManagementPanel({ onOpenAllocateDialog }: GpuManagementPanelP
         </div>
       </div>
 
-      <div className='grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4'>
+      <div className='grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 min-w-0 w-full'>
         {gpus.map((gpu) => (
           <GpuCard key={gpu.id} gpu={gpu} onAllocate={() => onOpenAllocateDialog?.(gpu.id)} />
         ))}
@@ -110,7 +110,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
   const isAvailable = gpu.vramUsedMb < gpu.vramTotalMb - 1024 && gpu.allocationMode !== 'EXCLUSIVE';
 
   return (
-    <Card className='relative overflow-hidden border transition-all duration-200 hover:shadow-md flex flex-col justify-between bg-card'>
+    <Card className='relative overflow-hidden border transition-all duration-200 hover:shadow-md flex flex-col justify-between bg-card min-w-0'>
       {/* Top indicator stripe */}
       <div
         className={`absolute top-0 left-0 right-0 h-1 ${

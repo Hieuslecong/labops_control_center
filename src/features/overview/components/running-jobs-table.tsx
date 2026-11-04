@@ -137,7 +137,7 @@ export function RunningJobsTable() {
 
   return (
     <>
-      <Card className='border bg-card'>
+      <Card className='border bg-card min-w-0 w-full'>
         <CardHeader className='pb-3 pt-4'>
           <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
             <div className='flex items-center gap-2'>

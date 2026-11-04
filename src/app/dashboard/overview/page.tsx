@@ -1,3 +1,4 @@
+import PageContainer from '@/components/layout/page-container';
 import { OverviewContent } from '@/features/overview/components/overview-content';
 
 export const metadata = {
@@ -6,5 +7,9 @@ export const metadata = {
 };
 
 export default function OverviewPage() {
-  return <OverviewContent />;
+  return (
+    <PageContainer>
+      <OverviewContent />
+    </PageContainer>
+  );
 }

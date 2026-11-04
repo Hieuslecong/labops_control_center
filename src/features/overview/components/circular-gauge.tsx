@@ -29,9 +29,9 @@ export function CircularGauge({
   const strokeDashoffset = circumference - (percentage / 100) * circumference;
 
   return (
-    <div className='flex flex-col items-center justify-center text-center'>
+    <div className='flex flex-col items-center justify-center text-center min-w-0 w-full px-0.5'>
       <div
-        className='relative flex items-center justify-center'
+        className='relative flex items-center justify-center shrink-0'
         style={{ width: size, height: size }}
       >
         <svg width={size} height={size} className='-rotate-90 transform'>
@@ -64,8 +64,22 @@ export function CircularGauge({
           </span>
         </div>
       </div>
-      {label && <span className='text-xs font-semibold mt-1.5 text-foreground'>{label}</span>}
-      {sublabel && <span className='text-[11px] text-muted-foreground font-mono'>{sublabel}</span>}
+      {label && (
+        <span
+          className='text-xs font-semibold mt-1 text-foreground truncate max-w-full'
+          title={label}
+        >
+          {label}
+        </span>
+      )}
+      {sublabel && (
+        <span
+          className='text-[10px] sm:text-[11px] text-muted-foreground font-mono truncate max-w-full mt-0.5'
+          title={sublabel}
+        >
+          {sublabel}
+        </span>
+      )}
     </div>
   );
 }

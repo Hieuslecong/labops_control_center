@@ -173,7 +173,21 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/v1/servers":
             self._send_json(200, [_format_server(s) for s in service.servers])
         elif path.startswith("/api/v1/servers/"):
-            server_id = path.split("/")[4]
+            parts = path.split("/")
+            server_id = parts[4]
+            if len(parts) > 5:
+                sub = parts[5]
+                if sub == "processes":
+                    query_params = parse_qs(parsed.query)
+                    filter_type = query_params.get("filter", ["all"])[0]
+                    self._send_json(200, service.get_server_processes(server_id, filter_type=filter_type))
+                    return
+                elif sub == "gpu-processes":
+                    self._send_json(200, service.get_server_gpu_processes(server_id))
+                    return
+                elif sub == "ssh-sessions":
+                    self._send_json(200, service.get_server_ssh_sessions(server_id))
+                    return
             srv = next((s for s in service.servers if s["id"] == server_id), None)
             if srv:
                 self._send_json(200, _format_server(srv))
@@ -194,8 +208,13 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, service.storage_pools)
         elif path == "/api/v1/ssh/endpoints":
             self._send_json(200, service.ssh_endpoints)
-        elif path == "/api/v1/jobs":
+        elif path in ["/api/v1/jobs", "/api/v1/jobs/active"]:
             self._send_json(200, service.jobs)
+        elif path.startswith("/api/v1/workspaces/") and path.endswith("/processes"):
+            ws_id = path.split("/")[4]
+            self._send_json(200, service.get_workspace_processes(ws_id))
+        elif path == "/api/v1/monitoring/health":
+            self._send_json(200, service.get_monitoring_health())
         elif path == "/api/v1/security":
             self._send_json(200, service.security_reviews)
         elif path == "/api/v1/events":

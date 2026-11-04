@@ -1,14 +1,14 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
-import { JobStatus } from '@/types/labops';
-import { toast } from 'sonner';
+import { ProcessDetailSheet } from '@/features/overview/components/process-detail-sheet';
+import { JobStatus, ComputeJob } from '@/types/labops';
 
 function getJobStatusBadge(status: JobStatus) {
   switch (status) {
@@ -61,11 +61,22 @@ function getJobStatusBadge(status: JobStatus) {
 
 export function JobsMonitoringView() {
   const jobs = useLabOpsStore((state) => state.jobs);
-  const stopJob = useLabOpsStore((state) => state.stopJob);
+  const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
+  const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [serverFilter, setServerFilter] = useState<string>('all');
+  const [selectedJob, setSelectedJob] = useState<ComputeJob | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+
+  useEffect(() => {
+    fetchLiveJobs();
+    const timer = setInterval(() => {
+      fetchLiveJobs();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [fetchLiveJobs]);
 
   const runningCount = jobs.filter((j) => j.status === 'RUNNING').length;
   const pendingCount = jobs.filter((j) => j.status === 'PENDING').length;
@@ -77,7 +88,7 @@ export function JobsMonitoringView() {
       j.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       j.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
       j.script.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      j.gpuId.toLowerCase().includes(searchTerm.toLowerCase());
+      (j.gpuId ? j.gpuId.toLowerCase().includes(searchTerm.toLowerCase()) : false);
     const matchesStatus = statusFilter === 'all' || j.status === statusFilter;
     const matchesServer = serverFilter === 'all' || j.serverId === serverFilter;
     return matchesSearch && matchesStatus && matchesServer;
@@ -153,6 +164,22 @@ export function JobsMonitoringView() {
             <option value='track'>Server Track (Hà Nội)</option>
             <option value='workstation'>Server Workstation (TP.HCM)</option>
           </select>
+
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => fetchLiveJobs()}
+            className='h-9 text-xs gap-1.5'
+          >
+            <Icons.refresh className='size-3.5' /> Làm mới
+          </Button>
+
+          {lastSyncTime && (
+            <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
+              <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse'></span>
+              Cập nhật: {lastSyncTime}
+            </span>
+          )}
         </div>
       </div>
 
@@ -176,7 +203,15 @@ export function JobsMonitoringView() {
               </thead>
               <tbody className='divide-y divide-border/60'>
                 {filteredJobs.map((j) => (
-                  <tr key={j.id} className='hover:bg-muted/30 transition-colors'>
+                  <tr
+                    key={j.id}
+                    onClick={() => {
+                      setSelectedJob(j);
+                      setDetailOpen(true);
+                    }}
+                    className='hover:bg-muted/40 cursor-pointer transition-colors'
+                    title='Nhấp để xem đầy đủ chi tiết tiến trình'
+                  >
                     {/* Người dùng */}
                     <td className='py-3 px-3'>
                       <div className='font-bold text-foreground'>{j.fullName}</div>
@@ -207,7 +242,7 @@ export function JobsMonitoringView() {
                       </div>
                       <div
                         className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
-                        title={j.script}
+                        title={j.cmdline || j.script}
                       >
                         {j.script}
                       </div>
@@ -215,12 +250,16 @@ export function JobsMonitoringView() {
 
                     {/* GPU */}
                     <td className='py-3 px-3'>
-                      <Badge
-                        variant={j.gpuId === 'CPU Only' ? 'secondary' : 'default'}
-                        className='font-mono text-[10px]'
-                      >
-                        {j.gpuId}
-                      </Badge>
+                      {j.isGpu || j.vramUsedMb > 0 ? (
+                        <Badge
+                          variant='default'
+                          className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600'
+                        >
+                          {j.gpuId || 'WS-GPU-01'}
+                        </Badge>
+                      ) : (
+                        <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                      )}
                     </td>
 
                     {/* CPU & RAM */}
@@ -254,7 +293,7 @@ export function JobsMonitoringView() {
                         {getJobStatusBadge(j.status)}
                         <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
                           <span
-                            className={`size-1.5 rounded-full ${j.sshStatus === 'SSH Online' ? 'bg-emerald-500' : 'bg-slate-400'}`}
+                            className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
                           ></span>
                           {j.sshStatus}
                         </span>
@@ -263,19 +302,18 @@ export function JobsMonitoringView() {
 
                     {/* Thao tác */}
                     <td className='py-3 px-3 text-right'>
-                      {j.status === 'RUNNING' && (
-                        <Button
-                          size='sm'
-                          variant='ghost'
-                          onClick={() => {
-                            stopJob(j.id);
-                            toast.warning(`Đã dừng tiến trình ${j.pid} của @${j.username}`);
-                          }}
-                          className='h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
-                        >
-                          <Icons.trash className='size-3.5 mr-1' /> Dừng
-                        </Button>
-                      )}
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedJob(j);
+                          setDetailOpen(true);
+                        }}
+                        className='h-7 text-xs text-primary hover:bg-primary/10'
+                      >
+                        <Icons.view className='size-3.5 mr-1' /> Chi tiết
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -284,6 +322,8 @@ export function JobsMonitoringView() {
           </div>
         </CardContent>
       </Card>
+
+      <ProcessDetailSheet job={selectedJob} open={detailOpen} onOpenChange={setDetailOpen} />
     </div>
   );
 }

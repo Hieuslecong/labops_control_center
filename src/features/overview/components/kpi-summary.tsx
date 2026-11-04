@@ -22,6 +22,7 @@ export function KpiSummary() {
     const onlineSsh = members.filter((m) => m.sshStatus === 'ONLINE').length;
     const activeSessions = members.reduce((acc, m) => acc + m.sshSessionsCount, 0);
     const runningJobs = jobs.filter((j) => j.status === 'RUNNING').length;
+    const cudaProcCount = gpus.reduce((acc, g) => acc + (g.activeProcesses?.length || 0), 0);
 
     return {
       servers: {
@@ -43,6 +44,7 @@ export function KpiSummary() {
       },
       jobs: {
         running: runningJobs,
+        cudaProcs: cudaProcCount,
         pending: 0,
         failed: 0
       },
@@ -193,7 +195,7 @@ export function KpiSummary() {
           <CardContent className='pt-0 text-xs'>
             <div className='flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium'>
               <span className='size-2 rounded-full bg-amber-500 animate-pulse'></span>
-              <span>4 tiến trình CUDA active</span>
+              <span>{summary.jobs.cudaProcs} tiến trình CUDA active</span>
             </div>
             <p className='text-muted-foreground text-[11px] mt-1'>0 chờ • 0 thất bại</p>
           </CardContent>

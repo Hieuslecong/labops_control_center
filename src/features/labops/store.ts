@@ -12,7 +12,10 @@ import {
   StorageAllocation,
   SshEndpoint,
   SshAccountPolicy,
-  SshLoginEvent
+  SshLoginEvent,
+  RealSshSession,
+  ServerId,
+  JobStatus
 } from '@/types/labops';
 
 interface LabOpsState {
@@ -20,6 +23,10 @@ interface LabOpsState {
   gpus: PhysicalGpu[];
   members: LabMember[];
   jobs: ComputeJob[];
+  activeSshSessions: RealSshSession[];
+  lastSyncTime: string | null;
+  syncError: string | null;
+  isLivePolling: boolean;
   securityReviews: SecurityReview[];
   events: LabEvent[];
   auditLogs: AuditLog[];
@@ -28,6 +35,11 @@ interface LabOpsState {
   storageAllocations: StorageAllocation[];
   sshPolicies: SshAccountPolicy[];
   sshLoginEvents: SshLoginEvent[];
+
+  // Live polling actions
+  setLivePolling: (enabled: boolean) => void;
+  fetchLiveJobs: () => Promise<void>;
+  fetchLiveSshSessions: () => Promise<void>;
 
   // Computed summary
   getSummary: () => DashboardSummary;
@@ -1467,49 +1479,16 @@ const PROD_GPUS: PhysicalGpu[] = [
     pciBusId: '00000000:D8:00.0',
     uuid: 'GPU-1f6ba03b-45e9-8d99-1d7d-7c76412f3cfc',
     vramTotalMb: 24576,
-    vramUsedMb: 13730,
-    gpuUtilPercent: 34,
-    tempCelsius: 76,
-    powerWatts: 83,
+    vramUsedMb: 0,
+    gpuUtilPercent: 0,
+    tempCelsius: 0,
+    powerWatts: 0,
     powerLimitWatts: 165,
     allocationMode: 'SHARED',
     enforcementState: 'DRIVER_ENFORCED_VERIFIED',
-    activeProcesses: [
-      {
-        pid: 3505602,
-        name: 'python (Tác vụ nghiên cứu AI)',
-        username: 'Chưa xác định',
-        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
-        vramMb: 2002,
-        cpuPercent: 150.0
-      },
-      {
-        pid: 73683,
-        name: 'python (Tác vụ nghiên cứu AI)',
-        username: 'Chưa xác định',
-        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
-        vramMb: 2002,
-        cpuPercent: 150.0
-      },
-      {
-        pid: 1833592,
-        name: 'python (Tác vụ nghiên cứu AI)',
-        username: 'Chưa xác định',
-        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
-        vramMb: 9386,
-        cpuPercent: 150.0
-      },
-      {
-        pid: 537529,
-        name: 'python (Tác vụ nghiên cứu AI)',
-        username: 'Chưa xác định',
-        workspace: 'Ngoại vi (Workload ngoài hệ thống)',
-        vramMb: 314,
-        cpuPercent: 150.0
-      }
-    ],
-    activeUsers: ['Chưa xác định (Workload ngoại vi)'],
-    associatedJobs: ['proc-3505602', 'proc-73683', 'proc-1833592', 'proc-537529']
+    activeProcesses: [],
+    activeUsers: [],
+    associatedJobs: []
   }
 ];
 
@@ -1561,80 +1540,65 @@ const PROD_STORAGE_POOLS: StoragePool[] = [
   }
 ];
 
-const PROD_JOBS: ComputeJob[] = [
-  {
-    id: 'proc-1833592',
-    username: 'Chưa xác định',
-    fullName: 'Workload Nghiên cứu Ngoại vi',
-    serverId: 'workstation',
-    workspace: 'Ngoại vi (Host Native)',
-    pid: 1833592,
-    script: 'python (Workload nghiên cứu ngoài hệ thống)',
-    gpuId: 'WS-GPU-01',
-    cpuPercent: 150.0,
-    ramUsedMb: 16384,
-    vramUsedMb: 9386,
-    startTime: '2026-11-03 18:30',
-    elapsedTime: '05h 30m',
-    status: 'RUNNING',
-    sshStatus: 'SSH Online',
-    containerState: 'Running'
-  },
-  {
-    id: 'proc-3505602',
-    username: 'Chưa xác định',
-    fullName: 'Workload Nghiên cứu Ngoại vi',
-    serverId: 'workstation',
-    workspace: 'Ngoại vi (Host Native)',
-    pid: 3505602,
-    script: 'python (Workload nghiên cứu ngoài hệ thống)',
-    gpuId: 'WS-GPU-01',
-    cpuPercent: 150.0,
-    ramUsedMb: 8192,
-    vramUsedMb: 2002,
-    startTime: '2026-11-03 20:10',
-    elapsedTime: '03h 50m',
-    status: 'RUNNING',
-    sshStatus: 'SSH Online',
-    containerState: 'Running'
-  },
-  {
-    id: 'proc-73683',
-    username: 'Chưa xác định',
-    fullName: 'Workload Nghiên cứu Ngoại vi',
-    serverId: 'workstation',
-    workspace: 'Ngoại vi (Host Native)',
-    pid: 73683,
-    script: 'python (Workload nghiên cứu ngoài hệ thống)',
-    gpuId: 'WS-GPU-01',
-    cpuPercent: 150.0,
-    ramUsedMb: 8192,
-    vramUsedMb: 2002,
-    startTime: '2026-11-03 21:05',
-    elapsedTime: '02h 55m',
-    status: 'RUNNING',
-    sshStatus: 'SSH Online',
-    containerState: 'Running'
-  },
-  {
-    id: 'proc-537529',
-    username: 'Chưa xác định',
-    fullName: 'Workload Nghiên cứu Ngoại vi',
-    serverId: 'workstation',
-    workspace: 'Ngoại vi (Host Native)',
-    pid: 537529,
-    script: 'python (Workload nghiên cứu ngoài hệ thống)',
-    gpuId: 'WS-GPU-01',
-    cpuPercent: 150.0,
-    ramUsedMb: 4096,
-    vramUsedMb: 314,
-    startTime: '2026-11-03 23:15',
-    elapsedTime: '00h 45m',
-    status: 'RUNNING',
-    sshStatus: 'SSH Online',
-    containerState: 'Running'
-  }
-];
+const PROD_JOBS: ComputeJob[] = [];
+
+function mapRawJob(j: Record<string, any>): ComputeJob {
+  const isGpu = Boolean(
+    j.isGpu ??
+    j.is_gpu_process ??
+    (j.gpuId && j.gpuId !== 'none') ??
+    (j.gpu_id && j.gpu_id !== 'none') ??
+    Number(j.vramUsedMb ?? j.vram_mb ?? 0) > 0
+  );
+
+  return {
+    id: String(j.id || `proc-${j.pid}`),
+    username: String(j.username || 'unknown'),
+    fullName: String(j.fullName || j.full_name || `@${j.username || 'unknown'}`),
+    serverId: (j.serverId || j.server_id || 'workstation') as ServerId,
+    serverName: String(
+      j.serverName ||
+        j.server_name ||
+        (j.serverId === 'track' ? 'Server 01 — Track' : 'Server 02 — Workstation')
+    ),
+    workspace: String(j.workspace || `ws-${j.username || 'user'}`),
+    pid: Number(j.pid || 0),
+    ppid: j.ppid ? Number(j.ppid) : undefined,
+    script: String(j.script || j.script_display || j.name || 'python'),
+    cmdline: j.cmdline ? String(j.cmdline) : undefined,
+    gpuId: isGpu ? String(j.gpuId || j.gpu_id || 'WS-GPU-01') : null,
+    cpuPercent: Number(j.cpuPercent ?? j.cpuUsagePercent ?? j.cpu_percent ?? 0),
+    ramUsedMb: Number(j.ramUsedMb ?? j.ramUsageMb ?? j.memory_rss_mb ?? 0),
+    vramUsedMb: Number(j.vramUsedMb ?? j.vram_mb ?? 0),
+    startTime: String(j.startTime || j.start_time || 'Vừa xong'),
+    elapsedTime: String(j.elapsedTime || j.elapsed_time || '00m 00s'),
+    status: (j.status || 'RUNNING') as JobStatus,
+    sshStatus: String(
+      j.sshStatus ||
+        j.ssh_status ||
+        (j.username in { tungtt: 1, nhannv: 1 } ? 'SSH Online' : 'Chạy nền (Không SSH)')
+    ),
+    containerState: String(
+      j.containerState || j.container_state || (j.container_id ? 'Running' : 'Trực tiếp trên Host')
+    ),
+    isGpu
+  };
+}
+
+function mapRawSshSession(s: Record<string, any>): RealSshSession {
+  return {
+    id: String(s.id || `ssh-sess-${s.username}-${s.terminal || 'pts'}`),
+    username: String(s.username || 'unknown'),
+    terminal: String(s.terminal || 'pts/?'),
+    sourceIp: String(s.source_ip || s.sourceIp || '127.0.0.1'),
+    startedAt: String(s.started_at || s.startedAt || 'Vừa xong'),
+    sessionDuration: String(s.session_duration || s.sessionDuration || '00m 00s'),
+    serverId: (s.server_id || s.serverId || 'workstation') as ServerId,
+    serverName: String(s.server_name || s.serverName || 'Server 02 — Workstation'),
+    workspace: String(s.workspace || `ws-${s.username || 'user'}`),
+    status: String(s.status || 'ACTIVE')
+  };
+}
 
 function mapRawServer(s: Record<string, any>): PhysicalServer {
   return {
@@ -1705,6 +1669,10 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   gpus: isDemoMode ? INITIAL_GPUS : PROD_GPUS,
   members: INITIAL_MEMBERS,
   jobs: isDemoMode ? INITIAL_JOBS : PROD_JOBS,
+  activeSshSessions: [],
+  lastSyncTime: null,
+  syncError: null,
+  isLivePolling: true,
   securityReviews: INITIAL_SECURITY_REVIEWS,
   events: INITIAL_EVENTS,
   auditLogs: INITIAL_AUDIT_LOGS,
@@ -1714,26 +1682,80 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   sshPolicies: INITIAL_SSH_POLICIES,
   sshLoginEvents: INITIAL_SSH_LOGIN_EVENTS,
 
+  setLivePolling: (enabled: boolean) => set({ isLivePolling: enabled }),
+
+  fetchLiveJobs: async () => {
+    try {
+      const res = await fetch('/api/v1/jobs/active').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          set({
+            jobs: data.map(mapRawJob),
+            lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
+            syncError: null
+          });
+        }
+      } else {
+        set({ syncError: 'Không thể tải danh sách tiến trình từ API' });
+      }
+    } catch (err: any) {
+      set({ syncError: err?.message || 'Lỗi kết nối khi đồng bộ tiến trình' });
+    }
+  },
+
+  fetchLiveSshSessions: async () => {
+    try {
+      const res = await fetch('/api/v1/servers/workstation/ssh-sessions').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        const obs = data.actual_observations || [];
+        set({ activeSshSessions: obs.map(mapRawSshSession) });
+      }
+    } catch {
+      // In offline or static environments, retain current verified state
+    }
+  },
+
   fetchLiveState: async () => {
     try {
-      const [resServers, resGpus] = await Promise.all([
+      const [resServers, resGpus, resJobs, resSsh] = await Promise.all([
         fetch('/api/v1/servers').catch(() => null),
-        fetch('/api/v1/gpus').catch(() => null)
+        fetch('/api/v1/gpus').catch(() => null),
+        fetch('/api/v1/jobs/active').catch(() => null),
+        fetch('/api/v1/servers/workstation/ssh-sessions').catch(() => null)
       ]);
+      const updates: Partial<LabOpsState> = {
+        lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
+        syncError: null
+      };
+
       if (resServers && resServers.ok) {
         const data = await resServers.json();
         if (Array.isArray(data) && data.length > 0) {
-          set({ servers: data.map(mapRawServer) });
+          updates.servers = data.map(mapRawServer);
         }
       }
       if (resGpus && resGpus.ok) {
         const data = await resGpus.json();
         if (Array.isArray(data) && data.length > 0) {
-          set({ gpus: data.map(mapRawGpu) });
+          updates.gpus = data.map(mapRawGpu);
         }
       }
-    } catch {
-      // In offline or static environments, retain current verified state
+      if (resJobs && resJobs.ok) {
+        const data = await resJobs.json();
+        if (Array.isArray(data)) {
+          updates.jobs = data.map(mapRawJob);
+        }
+      }
+      if (resSsh && resSsh.ok) {
+        const data = await resSsh.json();
+        const obs = data.actual_observations || [];
+        updates.activeSshSessions = obs.map(mapRawSshSession);
+      }
+      set(updates);
+    } catch (err: any) {
+      set({ syncError: err?.message || 'Mất kết nối tới máy chủ giám sát' });
     }
   },
 

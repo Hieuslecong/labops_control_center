@@ -10,7 +10,9 @@ from app.api.v1.endpoints import (
     audit,
     admin_members,
     storage_pools,
-    ssh_endpoints
+    ssh_endpoints,
+    monitoring,
+    workspaces
 )
 
 api_router = APIRouter()
@@ -26,4 +28,6 @@ api_router.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
 api_router.include_router(security.router, prefix="/security", tags=["Security"])
 api_router.include_router(events.router, prefix="/events", tags=["Events"])
 api_router.include_router(audit.router, prefix="/audit-logs", tags=["Audit"])
+api_router.include_router(monitoring.router, prefix="/monitoring", tags=["Monitoring"])
+api_router.include_router(workspaces.router, prefix="/workspaces", tags=["Workspaces"])
 

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shutil
 import logging
@@ -22,9 +23,14 @@ class NvmlAdapter:
         self.has_nvidia_smi = shutil.which("nvidia-smi") is not None
 
     def _get_live_compute_processes(self) -> List[Dict[str, Any]]:
-        """Query real active CUDA compute processes on the physical GPU"""
+        """Query real active CUDA compute processes on the physical GPU and resolve host identity."""
         if not self.has_nvidia_smi:
             return []
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+
         try:
             cmd = [
                 "nvidia-smi",
@@ -42,15 +48,43 @@ class NvmlAdapter:
                         pid = int(parts[0])
                         pname = parts[1]
                         vram_mb = int(parts[2])
-                        displayName = "python (Tác vụ nghiên cứu AI)" if "python" in pname.lower() or pname == "[Not Found]" else pname
+
+                        username = "Chưa xác định"
+                        workspace = "Trực tiếp trên Host"
+                        cpu_pct = 0.0
+                        displayName = pname
+
+                        # Resolve real host process if psutil is available
+                        if psutil and psutil.pid_exists(pid):
+                            try:
+                                proc = psutil.Process(pid)
+                                username = proc.username() or "unknown"
+                                workspace = f"ws-{username}"
+                                cpu_pct = round(proc.cpu_percent(), 1)
+                                cmdline = proc.cmdline()
+                                if cmdline:
+                                    for arg in cmdline[1:]:
+                                        if arg.endswith(".py") or arg.endswith(".sh"):
+                                            displayName = f"{proc.name()} ({os.path.basename(arg)})"
+                                            break
+                                    if displayName == pname and len(cmdline) > 1:
+                                        displayName = f"{proc.name()} ({cmdline[1][:30]})"
+                                else:
+                                    displayName = proc.name()
+                            except Exception:
+                                pass
+
+                        if not displayName or displayName == "[Not Found]":
+                            displayName = "python (Tác vụ nghiên cứu AI)"
+
                         processes.append({
                             "pid": pid,
                             "name": displayName,
-                            "username": "Chưa xác định",
-                            "workspace": "Ngoại vi (Workload nghiên cứu ngoài hệ thống)",
+                            "username": username,
+                            "workspace": workspace,
                             "vram_mb": vram_mb,
-                            "cpu_percent": 150.0,
-                            "attribution_confidence": "UNATTRIBUTED_EXTERNAL"
+                            "cpu_percent": cpu_pct,
+                            "attribution_confidence": "VERIFIED_HOST_PID" if username != "Chưa xác định" else "UNATTRIBUTED_EXTERNAL"
                         })
                     except ValueError:
                         continue
@@ -106,7 +140,7 @@ class NvmlAdapter:
                             "allocation_mode": "SHARED",
                             "enforcement_state": "DRIVER_ENFORCED_VERIFIED",
                             "active_processes": live_processes,
-                            "active_users": ["Chưa xác định (Workload ngoại vi)"] if live_processes else [],
+                            "active_users": list(dict.fromkeys(p["username"] for p in live_processes if p.get("username") and p["username"] != "Chưa xác định")) or (["Chưa xác định (Workload ngoại vi)"] if live_processes else []),
                             "associated_jobs": [f"proc-{p['pid']}" for p in live_processes],
                             "live": True
                         })

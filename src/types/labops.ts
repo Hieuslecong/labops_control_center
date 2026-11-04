@@ -257,18 +257,35 @@ export interface ComputeJob {
   username: string;
   fullName: string;
   serverId: ServerId;
+  serverName?: string;
   workspace: string;
   pid: number;
+  ppid?: number;
   script: string;
-  gpuId: string;
+  cmdline?: string;
+  gpuId?: string | null;
   cpuPercent: number;
   ramUsedMb: number;
   vramUsedMb: number;
   startTime: string;
   elapsedTime: string;
   status: JobStatus;
-  sshStatus: 'SSH Online' | 'SSH Offline';
-  containerState: 'Running' | 'Stopped';
+  sshStatus: string;
+  containerState: string;
+  isGpu?: boolean;
+}
+
+export interface RealSshSession {
+  id: string;
+  username: string;
+  terminal: string;
+  sourceIp: string;
+  startedAt: string;
+  sessionDuration: string;
+  serverId: ServerId;
+  serverName: string;
+  workspace: string;
+  status: string;
 }
 
 export type SecurityReviewStatus =

@@ -2,6 +2,7 @@ import {
   IconAdjustmentsHorizontal,
   IconAlertCircle,
   IconAlertTriangle,
+  IconActivity,
   IconArrowRight,
   IconBell,
   IconBold,
@@ -33,6 +34,7 @@ import {
   IconDotsVertical,
   IconEdit,
   IconExternalLink,
+  IconEye,
   IconEyeOff,
   IconFile,
   IconFileText,
@@ -61,6 +63,8 @@ import {
   IconPhone,
   IconPhoto,
   IconPizza,
+  IconPlayerPause,
+  IconPlayerPlay,
   IconPlus,
   IconProps,
   IconRosetteDiscountCheck,
@@ -90,6 +94,7 @@ import {
   IconServer,
   IconCpu,
   IconShieldCheck,
+  IconShieldExclamation,
   IconTerminal2,
   IconHistory,
   IconGauge,
@@ -148,6 +153,7 @@ export const Icons = {
   employee: IconUserX,
   userPen: IconUserEdit,
   teams: IconUsers,
+  users: IconUsers,
 
   // Brand
   github: IconBrandGithub,
@@ -175,6 +181,9 @@ export const Icons = {
   // Actions
   add: IconPlus,
   edit: IconEdit,
+  view: IconEye,
+  pause: IconPlayerPause,
+  play: IconPlayerPlay,
   upload: IconUpload,
   share: IconShare,
   login: IconLogin,
@@ -206,6 +215,7 @@ export const Icons = {
   lock: IconLock,
 
   // Data / Charts
+  activity: IconActivity,
   trendingDown: IconTrendingDown,
   trendingUp: IconTrendingUp,
   eyeOff: IconEyeOff,
@@ -238,6 +248,7 @@ export const Icons = {
   gpu: IconCpu,
   cpu: IconCpu,
   shield: IconShieldCheck,
+  shieldAlert: IconShieldExclamation,
   terminal: IconTerminal2,
   job: IconTerminal2,
   history: IconHistory,

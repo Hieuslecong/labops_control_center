@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any
 from app.core.config import settings
 from app.adapters.host_monitor_adapter import HostMonitorAdapter
 from app.adapters.nvml_adapter import NvmlAdapter
+from app.adapters.process_monitor_adapter import ProcessMonitorAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class LabOpsDataService:
         self.demo_mode = settings.DEMO_MODE if demo_mode is None else demo_mode
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id="workstation", demo_mode=self.demo_mode)
+        self.process_monitor = ProcessMonitorAdapter(server_id="workstation", demo_mode=self.demo_mode)
         self.data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
         os.makedirs(self.data_dir, exist_ok=True)
         self._init_data()
@@ -158,6 +160,16 @@ class LabOpsDataService:
     @storage_pools.setter
     def storage_pools(self, val: List[Dict[str, Any]]):
         self._demo_storage_pools = val
+
+    @property
+    def jobs(self) -> List[Dict[str, Any]]:
+        if not self.demo_mode:
+            return self.process_monitor.get_active_compute_jobs(members_db=self.members)
+        return self._demo_jobs
+
+    @jobs.setter
+    def jobs(self, val: List[Dict[str, Any]]):
+        self._demo_jobs = val
 
     def _init_data(self):
         self._demo_servers = [
@@ -683,7 +695,7 @@ class LabOpsDataService:
             }
         ]
 
-        self.jobs = [
+        self._demo_jobs = [
             {
                 "id": "job-101",
                 "username": "hieulc",
@@ -877,9 +889,18 @@ class LabOpsDataService:
 
     def get_summary(self) -> Dict[str, Any]:
         used_vram_gb = round(sum(gpu["vram_used_mb"] for gpu in self.gpus) / 1024, 1)
+        total_vram_gb = round(sum(gpu.get("vram_total_mb", 24576) for gpu in self.gpus) / 1024, 1) if self.gpus else 0
         active_gpus = sum(1 for gpu in self.gpus if gpu["vram_used_mb"] > 0)
-        online_ssh = sum(1 for m in self.members if m["ssh_status"] == "ONLINE")
-        running_jobs = sum(1 for j in self.jobs if j["status"] == "RUNNING")
+        
+        if not self.demo_mode:
+            real_ssh = self.process_monitor.get_real_ssh_sessions()
+            online_ssh = real_ssh.get("total_count", 0)
+            active_sessions = online_ssh
+        else:
+            online_ssh = sum(1 for m in self.members if m["ssh_status"] == "ONLINE")
+            active_sessions = sum(m["ssh_sessions_count"] for m in self.members)
+
+        running_jobs = sum(1 for j in self.jobs if j.get("status") == "RUNNING")
         
         return {
             "servers": {
@@ -890,13 +911,13 @@ class LabOpsDataService:
             "gpus": {
                 "totalCount": len(self.gpus),
                 "model": "NVIDIA A30 24GB",
-                "aggregateVramGb": 96,
+                "aggregateVramGb": int(total_vram_gb),
                 "activeCount": active_gpus,
                 "usedVramGb": int(used_vram_gb)
             },
             "members": {
                 "onlineSsh": online_ssh,
-                "activeSessions": sum(m["ssh_sessions_count"] for m in self.members),
+                "activeSessions": active_sessions,
                 "totalRegistered": len(self.members)
             },
             "jobs": {
@@ -913,6 +934,63 @@ class LabOpsDataService:
                 "critical": 0,
                 "warnings": 1,
                 "unresolvedIncidents": 0
+            }
+        }
+
+    def get_server_processes(self, server_id: str, filter_type: str = "all") -> Dict[str, Any]:
+        if server_id == "workstation":
+            return self.process_monitor.get_real_processes(filter_type=filter_type)
+        return {
+            "source_host": "track",
+            "collection_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "collector_status": "UNAVAILABLE",
+            "filter": filter_type,
+            "total_count": 0,
+            "actual_observations": [],
+            "error_details": "Mất kết nối: Server 01 — Track chưa kết nối qua WireGuard VPN (10.200.0.1)"
+        }
+
+    def get_server_gpu_processes(self, server_id: str) -> Dict[str, Any]:
+        return self.get_server_processes(server_id, filter_type="gpu")
+
+    def get_server_ssh_sessions(self, server_id: str) -> Dict[str, Any]:
+        if server_id == "workstation":
+            return self.process_monitor.get_real_ssh_sessions()
+        return {
+            "source_host": "track",
+            "collection_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "collector_status": "UNAVAILABLE",
+            "total_count": 0,
+            "actual_observations": [],
+            "error_details": "Mất kết nối: Server 01 — Track chưa kết nối qua WireGuard VPN"
+        }
+
+    def get_workspace_processes(self, workspace_id: str) -> Dict[str, Any]:
+        all_procs = self.get_server_processes("workstation", filter_type="all")
+        obs = [
+            p for p in all_procs.get("actual_observations", [])
+            if p.get("workspace") == workspace_id or p.get("container_id") == workspace_id
+        ]
+        return {
+            "workspace_id": workspace_id,
+            "collection_timestamp": all_procs.get("collection_timestamp"),
+            "collector_status": all_procs.get("collector_status"),
+            "total_count": len(obs),
+            "actual_observations": obs,
+            "error_details": None
+        }
+
+    def get_monitoring_health(self) -> Dict[str, Any]:
+        return {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "PRODUCTION" if not self.demo_mode else "DEMO",
+            "collectors": {
+                "host_monitor": "OK",
+                "nvml": "OK" if self.nvml_adapter.has_nvidia_smi else "DEGRADED",
+                "process_monitor": "OK",
+                "ssh_sessions": "OK",
+                "incus": "NOT_CONFIGURED",
+                "wireguard_track": "OFFLINE"
             }
         }
 

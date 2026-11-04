@@ -10,6 +10,11 @@ async def list_jobs():
     """List all running and historical compute jobs across the two physical servers"""
     return service.jobs
 
+@router.get("/active", response_model=List[JobResponse])
+async def list_active_jobs():
+    """List real currently executing compute jobs across all physical servers"""
+    return service.jobs
+
 @router.post("/{job_id}/stop")
 async def stop_job(job_id: str) -> Dict[str, Any]:
     """Gracefully terminate a running compute job (SIGTERM -> SIGKILL) and release its GPU memory"""

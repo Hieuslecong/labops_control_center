@@ -38,6 +38,17 @@ export function ServerDetailView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
   const members = useLabOpsStore((state) => state.members);
+  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
+  const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
+
+  React.useEffect(() => {
+    fetchLiveState();
+    fetchLiveJobs();
+    const interval = setInterval(() => {
+      fetchLiveJobs();
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [fetchLiveState, fetchLiveJobs]);
 
   const [selectedServerId, setSelectedServerId] = useState<ServerId>('track');
   const server = servers.find((s) => s.id === selectedServerId) || servers[0];
@@ -399,30 +410,36 @@ export function ServerDetailView() {
           <Card className='p-4 bg-card'>
             <CardTitle className='text-sm font-bold mb-3'>Phiên SSH Đang Kết Nối</CardTitle>
             <div className='space-y-2 text-xs'>
-              {serverMembers
-                .filter((m) => m.sshSessionsCount > 0)
-                .map((m) => (
-                  <div
-                    key={m.id}
-                    className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
-                  >
-                    <div>
-                      <span className='font-mono font-bold text-foreground'>
-                        ssh {m.username}@{server.vpnIp}
-                      </span>
-                      <div className='text-[11px] text-muted-foreground mt-0.5'>
-                        Người dùng: {m.fullName} • {m.sshSessionsCount} phiên hoạt động • Khóa:{' '}
-                        {m.sshPublicKeyPreview.slice(0, 32)}...
-                      </div>
-                    </div>
-                    <Badge
-                      variant='outline'
-                      className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+              {serverMembers.filter((m) => m.sshSessionsCount > 0).length === 0 ? (
+                <div className='py-6 text-center text-xs text-muted-foreground border border-dashed rounded-lg'>
+                  Không có phiên SSH nào đang kết nối tới máy chủ này.
+                </div>
+              ) : (
+                serverMembers
+                  .filter((m) => m.sshSessionsCount > 0)
+                  .map((m) => (
+                    <div
+                      key={m.id}
+                      className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
                     >
-                      ACTIVE
-                    </Badge>
-                  </div>
-                ))}
+                      <div>
+                        <span className='font-mono font-bold text-foreground'>
+                          ssh {m.username}@{server.vpnIp}
+                        </span>
+                        <div className='text-[11px] text-muted-foreground mt-0.5'>
+                          Người dùng: {m.fullName} • {m.sshSessionsCount} phiên hoạt động • Khóa:{' '}
+                          {m.sshPublicKeyPreview.slice(0, 32)}...
+                        </div>
+                      </div>
+                      <Badge
+                        variant='outline'
+                        className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                      >
+                        ACTIVE
+                      </Badge>
+                    </div>
+                  ))
+              )}
             </div>
           </Card>
         </TabsContent>
@@ -434,31 +451,39 @@ export function ServerDetailView() {
               Tiến trình Tính toán trên {server.name}
             </CardTitle>
             <div className='space-y-2 text-xs'>
-              {serverJobs.map((j) => (
-                <div
-                  key={j.id}
-                  className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
-                >
-                  <div>
-                    <div className='flex items-center gap-2'>
-                      <span className='font-mono font-bold'>PID {j.pid}</span>
-                      <Badge variant='default' className='text-[10px] font-mono'>
-                        {j.gpuId}
-                      </Badge>
-                      <span className='text-muted-foreground'>@{j.username}</span>
-                    </div>
-                    <div className='font-mono text-muted-foreground text-[11px] mt-1'>
-                      {j.script}
-                    </div>
-                  </div>
-                  <div className='text-right'>
-                    <span className='font-mono font-bold text-primary'>
-                      {(j.vramUsedMb / 1024).toFixed(1)} GB VRAM
-                    </span>
-                    <div className='text-[10px] text-muted-foreground'>{j.elapsedTime}</div>
-                  </div>
+              {serverJobs.length === 0 ? (
+                <div className='py-6 text-center text-xs text-muted-foreground border border-dashed rounded-lg'>
+                  Không có tiến trình tính toán nào đang chạy trên máy chủ này.
                 </div>
-              ))}
+              ) : (
+                serverJobs.map((j) => (
+                  <div
+                    key={j.id}
+                    className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
+                  >
+                    <div>
+                      <div className='flex items-center gap-2'>
+                        <span className='font-mono font-bold'>PID {j.pid}</span>
+                        <Badge variant='default' className='text-[10px] font-mono'>
+                          {j.gpuId || 'CPU Only'}
+                        </Badge>
+                        <span className='text-muted-foreground'>@{j.username}</span>
+                      </div>
+                      <div className='font-mono text-muted-foreground text-[11px] mt-1'>
+                        {j.script}
+                      </div>
+                    </div>
+                    <div className='text-right'>
+                      <span className='font-mono font-bold text-primary'>
+                        {j.vramUsedMb > 0
+                          ? `${(j.vramUsedMb / 1024).toFixed(1)} GB VRAM`
+                          : `${j.cpuPercent}% CPU`}
+                      </span>
+                      <div className='text-[10px] text-muted-foreground'>{j.elapsedTime}</div>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </Card>
         </TabsContent>

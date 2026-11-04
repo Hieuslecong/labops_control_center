@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException
-from typing import List
-from app.schemas.labops import PhysicalServerResponse, GpuProcessResponse
+from fastapi import APIRouter, HTTPException, Query
+from typing import List, Dict, Any, Optional
+from app.schemas.labops import PhysicalServerResponse
 from app.services.labops_service import service
 
 router = APIRouter()
@@ -18,12 +18,18 @@ async def get_server(server_id: str):
         raise HTTPException(status_code=404, detail="Server not found")
     return server
 
-@router.get("/{server_id}/processes", response_model=List[GpuProcessResponse])
-async def get_server_processes(server_id: str):
-    """Get active processes running on GPUs belonging to the server"""
-    server_gpus = [g for g in service.gpus if g["server_id"] == server_id]
-    processes = []
-    for g in server_gpus:
-        processes.extend(g.get("active_processes", []))
-    return processes
+@router.get("/{server_id}/processes")
+async def get_server_processes(server_id: str, filter: str = Query("all", description="all, research, or gpu")):
+    """Get real processes running on the server host with user, script, CPU, and RAM"""
+    return service.get_server_processes(server_id, filter_type=filter)
+
+@router.get("/{server_id}/gpu-processes")
+async def get_server_gpu_processes(server_id: str):
+    """Get active processes utilizing NVIDIA GPU VRAM on the server"""
+    return service.get_server_gpu_processes(server_id)
+
+@router.get("/{server_id}/ssh-sessions")
+async def get_server_ssh_sessions(server_id: str):
+    """Get active SSH login sessions on the server"""
+    return service.get_server_ssh_sessions(server_id)
 

@@ -81,6 +81,41 @@ class TestHttpEndpoints(unittest.TestCase):
         self.assertEqual(formatted_gpu["vramTotalMb"], 24576)
         self.assertEqual(formatted_gpu["gpuUtilPercent"], 50)
 
+    def test_processes_endpoints(self):
+        # Workstation processes
+        status, data = self._get("/api/v1/servers/workstation/processes")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["source_host"], "workstation")
+        self.assertEqual(data["collector_status"], "OK")
+        self.assertIn("actual_observations", data)
+
+        # Track processes (unreachable WireGuard)
+        status, data_track = self._get("/api/v1/servers/track/processes")
+        self.assertEqual(status, 200)
+        self.assertEqual(data_track["source_host"], "track")
+        self.assertEqual(data_track["collector_status"], "UNAVAILABLE")
+        self.assertIn("Mất kết nối", data_track["error_details"])
+
+    def test_gpu_processes_and_ssh_sessions(self):
+        status, gpu_procs = self._get("/api/v1/servers/workstation/gpu-processes")
+        self.assertEqual(status, 200)
+        self.assertEqual(gpu_procs["source_host"], "workstation")
+
+        status, ssh_sessions = self._get("/api/v1/servers/workstation/ssh-sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual(ssh_sessions["source_host"], "workstation")
+        self.assertIn("actual_observations", ssh_sessions)
+
+    def test_jobs_active_and_monitoring_health(self):
+        status, jobs = self._get("/api/v1/jobs/active")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(jobs, list)
+
+        status, health = self._get("/api/v1/monitoring/health")
+        self.assertEqual(status, 200)
+        self.assertIn("collectors", health)
+        self.assertEqual(health["collectors"]["process_monitor"], "OK")
+
 if __name__ == "__main__":
     unittest.main()
 

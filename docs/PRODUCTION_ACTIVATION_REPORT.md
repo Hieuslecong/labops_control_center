@@ -92,7 +92,7 @@
   ```
 - **Kiểm thử Đơn vị Backend (Unit Tests)**:
   ```bash
-  python3 -m unittest discover -s backend/tests -> 30/30 tests PASSED (0.204s)
+  python3 -m unittest discover -s backend/tests -> 36/36 tests PASSED (100% passed)
   ```
 - **Kiểm tra Biên dịch Toàn diện (Next.js Turbopack Build)**:
   ```bash
@@ -115,15 +115,21 @@
    sudo apt-get update && sudo apt-get install -y incus
    sudo incus admin init --auto
    ```
-3. **Khởi chạy đồng thời Backend và Frontend:**
-   - Terminal 1 (Backend FastAPI):
+3. **Khởi chạy hệ thống LabOps Control Center:**
+   - **Cách 1-Click tự động (Khuyên dùng):**
      ```bash
-     cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+     ./start.sh
+     # hoặc: bun run dev:all
      ```
-   - Terminal 2 (Next.js Dashboard):
-     ```bash
-     bun dev --port 3001
-     ```
+   - **Cách 2 Terminal độc lập:**
+     - Terminal 1 (Backend API):
+       ```bash
+       python3 backend/app/main.py
+       ```
+     - Terminal 2 (Next.js Dashboard):
+       ```bash
+       bun dev
+       ```
 
 ---
 

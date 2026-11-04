@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "next dev",
+    "dev:backend": "python3 backend/app/main.py",
+    "dev:all": "./start.sh",
     "build": "next build",
     "start": "next start",
     "cleanup": "node scripts/cleanup.js",

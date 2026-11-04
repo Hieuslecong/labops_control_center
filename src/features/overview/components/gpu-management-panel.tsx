@@ -107,7 +107,13 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
   const totalGb = (gpu.vramTotalMb / 1024).toFixed(0);
   const vramPercent = Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100);
 
-  const isAvailable = gpu.vramUsedMb < gpu.vramTotalMb - 1024 && gpu.allocationMode !== 'EXCLUSIVE';
+  const isRunning =
+    gpu.vramUsedMb > 512 ||
+    gpu.gpuUtilPercent > 0 ||
+    (gpu.activeProcesses && gpu.activeProcesses.length > 0);
+  const isNearlyFull = vramPercent >= 80;
+  const isAvailable =
+    !isNearlyFull && gpu.vramUsedMb < gpu.vramTotalMb - 1024 && gpu.allocationMode !== 'EXCLUSIVE';
 
   return (
     <Card className='relative overflow-hidden border transition-all duration-200 hover:shadow-md flex flex-col justify-between bg-card min-w-0'>
@@ -116,8 +122,8 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
         className={`absolute top-0 left-0 right-0 h-1 ${
           gpu.allocationMode === 'EXCLUSIVE'
             ? 'bg-purple-600'
-            : gpu.gpuUtilPercent > 0
-              ? 'bg-blue-600'
+            : isRunning
+              ? 'bg-indigo-600'
               : 'bg-emerald-500'
         }`}
       />
@@ -125,7 +131,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
       <CardHeader className='pb-3 pt-4'>
         <div className='flex items-start justify-between gap-1'>
           <div>
-            <div className='flex items-center gap-1.5'>
+            <div className='flex items-center gap-1.5 flex-wrap'>
               <CardTitle className='text-base font-bold tracking-tight'>
                 {gpu.displayLabel}
               </CardTitle>
@@ -135,13 +141,26 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
               >
                 {gpu.allocationMode}
               </Badge>
+              {isRunning ? (
+                <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] px-1.5 py-0 font-medium'>
+                  <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
+                  ĐANG CHẠY
+                </Badge>
+              ) : (
+                <Badge
+                  variant='outline'
+                  className='text-muted-foreground text-[10px] px-1.5 py-0 font-medium'
+                >
+                  SẴN SÀNG
+                </Badge>
+              )}
             </div>
             <p className='text-xs text-muted-foreground mt-0.5'>
               {gpu.serverName} • <span className='font-mono'>{gpu.pciBusId}</span>
             </p>
           </div>
 
-          <div className='text-right'>
+          <div className='text-right shrink-0'>
             <span className={`text-xl font-bold font-mono ${getUtilColor(gpu.gpuUtilPercent)}`}>
               {gpu.gpuUtilPercent}%
             </span>
@@ -252,14 +271,16 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
             size='sm'
             variant={isAvailable ? 'outline' : 'secondary'}
             onClick={onAllocate}
-            disabled={!isAvailable && gpu.allocationMode === 'EXCLUSIVE'}
+            disabled={!isAvailable}
             className='h-7 text-xs font-semibold px-2.5'
           >
             {gpu.allocationMode === 'EXCLUSIVE'
               ? 'Đang độc quyền'
-              : isAvailable
-                ? '+ Cấp phát'
-                : 'Đầy tải'}
+              : isNearlyFull
+                ? `Đầy tải (${vramPercent}%)`
+                : isAvailable
+                  ? '+ Cấp phát'
+                  : 'Hết bộ nhớ'}
           </Button>
         </div>
       </CardContent>

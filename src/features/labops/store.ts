@@ -1765,7 +1765,10 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
     const offlineServers = servers.filter((s) => s.status === 'offline').length;
 
     const activeGpus = gpus.filter(
-      (g) => g.gpuUtilPercent > 0 || g.activeProcesses.length > 0
+      (g) =>
+        (g.vramUsedMb || 0) > 512 ||
+        (g.gpuUtilPercent || 0) > 0 ||
+        (g.activeProcesses?.length || 0) > 0
     ).length;
     const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramUsedMb, 0) / 1024);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,54 +13,72 @@ export function ResourcesManagementView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
   const stopJob = useLabOpsStore((state) => state.stopJob);
+  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
+  const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
   const [allocateOpen, setAllocateOpen] = useState(false);
   const [selectedGpuId, setSelectedGpuId] = useState<string | undefined>(undefined);
 
-  const totalUsedVramMb = gpus.reduce((acc, g) => acc + g.vramUsedMb, 0);
-  const totalVramMb = 96 * 1024;
+  // Poll live telemetry every 4 seconds to ensure GPU states are always synchronized
+  useEffect(() => {
+    fetchLiveState();
+    const timer = setInterval(() => {
+      fetchLiveState();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [fetchLiveState]);
+
+  const totalUsedVramMb = gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0);
+  const onlineVramMb = gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0);
+  const totalLabVramMb = 96 * 1024;
   const totalUsedVramGb = (totalUsedVramMb / 1024).toFixed(1);
-  const totalFreeVramGb = ((totalVramMb - totalUsedVramMb) / 1024).toFixed(1);
+  const onlineFreeVramGb = Math.max(0, (onlineVramMb - totalUsedVramMb) / 1024).toFixed(1);
+  const vramPercentOnline =
+    onlineVramMb > 0 ? Math.round((totalUsedVramMb / onlineVramMb) * 100) : 0;
 
   return (
-    <div className='flex flex-col gap-5'>
+    <div className='flex flex-col gap-5 min-w-0 w-full'>
       {/* Overview Statistics Banner */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
-        <Card className='p-3.5 bg-card'>
+        <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>Tổng số GPU Vật lý</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.gpu className='size-5 text-primary' />
             4x NVIDIA A30
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            3x Track (72GB) • 1x Workstation (24GB)
+            1x Workstation (Online) • 3x Track (Offline)
           </span>
         </Card>
 
-        <Card className='p-3.5 bg-card'>
+        <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>
             Tổng dung lượng VRAM
           </span>
-          <div className='text-xl font-bold mt-0.5 font-mono text-primary'>96 GB HBM2</div>
-          <span className='text-[10px] text-muted-foreground'>Độc lập theo từng máy chủ</span>
+          <div className='text-xl font-bold mt-0.5 font-mono text-primary'>
+            {Math.round(onlineVramMb / 1024)} / 96 GB
+          </div>
+          <span className='text-[10px] text-muted-foreground'>
+            24 GB Workstation • 72 GB Track (Chờ VPN)
+          </span>
         </Card>
 
-        <Card className='p-3.5 bg-card'>
+        <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>VRAM đang sử dụng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-indigo-600 dark:text-indigo-400'>
             {totalUsedVramGb} GB
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            {Math.round((totalUsedVramMb / totalVramMb) * 100)}% công suất toàn lab
+            {vramPercentOnline}% công suất cụm trực tuyến
           </span>
         </Card>
 
-        <Card className='p-3.5 bg-card'>
+        <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>VRAM còn khả dụng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-emerald-600 dark:text-emerald-400'>
-            {totalFreeVramGb} GB
+            {onlineFreeVramGb} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>Sẵn sàng cấp phát ngay</span>
+          <span className='text-[10px] text-muted-foreground'>Khả dụng trên Workstation</span>
         </Card>
       </div>
 
@@ -123,29 +141,53 @@ export function ResourcesManagementView() {
           <h3 className='text-base font-bold tracking-tight'>
             Chi tiết 4 Thiết bị GPU Vật lý & Phân bổ Bộ nhớ
           </h3>
-          <Button
-            size='sm'
-            onClick={() => {
-              setSelectedGpuId(undefined);
-              setAllocateOpen(true);
-            }}
-            className='h-8 text-xs font-semibold gap-1.5 bg-primary'
-          >
-            <Icons.add className='size-3.5' /> Cấp phát GPU mới
-          </Button>
+          <div className='flex items-center gap-2'>
+            {lastSyncTime && (
+              <span className='text-[10px] text-muted-foreground font-mono flex items-center gap-1'>
+                <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse' />
+                {lastSyncTime}
+              </span>
+            )}
+            <Button
+              size='sm'
+              onClick={() => {
+                setSelectedGpuId(undefined);
+                setAllocateOpen(true);
+              }}
+              className='h-8 text-xs font-semibold gap-1.5 bg-primary'
+            >
+              <Icons.add className='size-3.5' /> Cấp phát GPU mới
+            </Button>
+          </div>
         </div>
 
-        <div className='grid grid-cols-1 gap-4 lg:grid-cols-2'>
+        <div className='grid grid-cols-1 gap-4 lg:grid-cols-2 min-w-0'>
           {gpus.map((gpu) => {
             const usedGb = (gpu.vramUsedMb / 1024).toFixed(1);
             const percent = Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100);
+            const isRunning =
+              gpu.vramUsedMb > 512 ||
+              gpu.gpuUtilPercent > 0 ||
+              (gpu.activeProcesses && gpu.activeProcesses.length > 0);
+            const isNearlyFull = percent >= 80;
 
             return (
-              <Card key={gpu.id} className='border bg-card'>
+              <Card key={gpu.id} className='relative overflow-hidden border bg-card min-w-0'>
+                {/* Top indicator stripe */}
+                <div
+                  className={`absolute top-0 left-0 right-0 h-1 ${
+                    gpu.allocationMode === 'EXCLUSIVE'
+                      ? 'bg-purple-600'
+                      : isRunning
+                        ? 'bg-indigo-600'
+                        : 'bg-emerald-500'
+                  }`}
+                />
+
                 <CardHeader className='pb-2 pt-4'>
-                  <div className='flex items-start justify-between'>
+                  <div className='flex items-start justify-between gap-1'>
                     <div>
-                      <div className='flex items-center gap-2'>
+                      <div className='flex items-center gap-1.5 flex-wrap'>
                         <CardTitle className='text-sm font-bold'>{gpu.displayLabel}</CardTitle>
                         <Badge
                           variant={gpu.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'}
@@ -153,16 +195,26 @@ export function ResourcesManagementView() {
                         >
                           {gpu.allocationMode}
                         </Badge>
+                        {isRunning ? (
+                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+                            <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
+                            ĐANG CHẠY
+                          </Badge>
+                        ) : (
+                          <Badge variant='outline' className='text-muted-foreground text-[10px]'>
+                            SẴN SÀNG
+                          </Badge>
+                        )}
                         <Badge variant='outline' className='text-[10px] font-mono'>
                           {gpu.serverName}
                         </Badge>
                       </div>
-                      <CardDescription className='text-xs mt-0.5 font-mono'>
+                      <CardDescription className='text-xs mt-0.5 font-mono truncate'>
                         UUID: {gpu.uuid} • Bus: {gpu.pciBusId}
                       </CardDescription>
                     </div>
 
-                    <div className='text-right'>
+                    <div className='text-right shrink-0'>
                       <span className='font-mono font-bold text-base text-primary'>
                         {usedGb} / 24 GB
                       </span>
@@ -193,7 +245,7 @@ export function ResourcesManagementView() {
                         );
                       })}
                     </div>
-                    <div className='flex justify-between text-[10px] text-muted-foreground'>
+                    <div className='flex justify-between text-[10px] text-muted-foreground font-mono'>
                       <span>0 GB</span>
                       <span>12 GB</span>
                       <span>24 GB (Tối đa)</span>
@@ -235,7 +287,7 @@ export function ResourcesManagementView() {
                               ({proc.workspace})
                             </span>
                             <div className='font-mono text-[11px] text-muted-foreground truncate max-w-[280px]'>
-                              {proc.name}
+                              {proc.name} (PID: {proc.pid})
                             </div>
                           </div>
                           <div className='flex items-center gap-2'>
@@ -256,13 +308,14 @@ export function ResourcesManagementView() {
                     <Button
                       size='sm'
                       variant='outline'
+                      disabled={isNearlyFull}
                       onClick={() => {
                         setSelectedGpuId(gpu.id);
                         setAllocateOpen(true);
                       }}
                       className='h-7 text-xs font-semibold'
                     >
-                      + Cấp phát trên GPU này
+                      {isNearlyFull ? `Đầy tải (${percent}%)` : '+ Cấp phát trên GPU này'}
                     </Button>
                   </div>
                 </CardContent>
@@ -297,60 +350,68 @@ export function ResourcesManagementView() {
                 </tr>
               </thead>
               <tbody className='divide-y divide-border/60'>
-                {jobs
-                  .filter((j) => j.vramUsedMb > 0)
-                  .map((j) => (
-                    <tr key={j.id} className='hover:bg-muted/30 transition-colors'>
-                      <td className='py-2.5 px-3'>
-                        <div className='font-bold text-foreground'>{j.fullName}</div>
-                        <div className='text-[11px] text-muted-foreground font-mono'>
-                          @{j.username}
-                        </div>
-                      </td>
-                      <td className='py-2.5 px-3'>
-                        <Badge variant='default' className='font-mono text-[10px]'>
-                          {j.gpuId}
-                        </Badge>
-                        <div className='text-[10px] text-muted-foreground font-mono uppercase mt-0.5'>
-                          {j.serverId}
-                        </div>
-                      </td>
-                      <td className='py-2.5 px-3 max-w-xs'>
-                        <div className='font-mono font-bold text-[11px]'>PID: {j.pid}</div>
-                        <div
-                          className='font-mono text-muted-foreground text-[11px] truncate max-w-[280px]'
-                          title={j.script}
-                        >
-                          {j.script}
-                        </div>
-                      </td>
-                      <td className='py-2.5 px-3 font-mono font-bold text-indigo-600 dark:text-indigo-400'>
-                        {(j.vramUsedMb / 1024).toFixed(1)} GB VRAM
-                      </td>
-                      <td className='py-2.5 px-3 text-foreground font-mono'>{j.elapsedTime}</td>
-                      <td className='py-2.5 px-3'>
-                        <Badge
-                          variant='outline'
-                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
-                        >
-                          ACTIVE
-                        </Badge>
-                      </td>
-                      <td className='py-2.5 px-3 text-right'>
-                        <Button
-                          size='sm'
-                          variant='ghost'
-                          onClick={() => {
-                            stopJob(j.id);
-                            toast.success(`Đã dừng tiến trình ${j.pid} và giải phóng VRAM`);
-                          }}
-                          className='h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
-                        >
-                          Thu hồi
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
+                {jobs.filter((j) => j.vramUsedMb > 0 || j.isGpu).length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className='py-8 text-center text-xs text-muted-foreground'>
+                      Chưa phát hiện tiến trình nào chiếm dụng GPU VRAM.
+                    </td>
+                  </tr>
+                ) : (
+                  jobs
+                    .filter((j) => j.vramUsedMb > 0 || j.isGpu)
+                    .map((j) => (
+                      <tr key={j.id} className='hover:bg-muted/30 transition-colors'>
+                        <td className='py-2.5 px-3'>
+                          <div className='font-bold text-foreground'>{j.fullName}</div>
+                          <div className='text-[11px] text-muted-foreground font-mono'>
+                            @{j.username}
+                          </div>
+                        </td>
+                        <td className='py-2.5 px-3'>
+                          <Badge variant='default' className='font-mono text-[10px]'>
+                            {j.gpuId}
+                          </Badge>
+                          <div className='text-[10px] text-muted-foreground font-mono uppercase mt-0.5'>
+                            {j.serverId}
+                          </div>
+                        </td>
+                        <td className='py-2.5 px-3 max-w-xs'>
+                          <div className='font-mono font-bold text-[11px]'>PID: {j.pid}</div>
+                          <div
+                            className='font-mono text-muted-foreground text-[11px] truncate max-w-[280px]'
+                            title={j.script}
+                          >
+                            {j.script}
+                          </div>
+                        </td>
+                        <td className='py-2.5 px-3 font-mono font-bold text-indigo-600 dark:text-indigo-400'>
+                          {(j.vramUsedMb / 1024).toFixed(1)} GB VRAM
+                        </td>
+                        <td className='py-2.5 px-3 text-foreground font-mono'>{j.elapsedTime}</td>
+                        <td className='py-2.5 px-3'>
+                          <Badge
+                            variant='outline'
+                            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                          >
+                            ACTIVE
+                          </Badge>
+                        </td>
+                        <td className='py-2.5 px-3 text-right'>
+                          <Button
+                            size='sm'
+                            variant='ghost'
+                            onClick={() => {
+                              stopJob(j.id);
+                              toast.success(`Đã dừng tiến trình ${j.pid} và giải phóng VRAM`);
+                            }}
+                            className='h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
+                          >
+                            Thu hồi
+                          </Button>
+                        </td>
+                      </tr>
+                    ))
+                )}
               </tbody>
             </table>
           </div>

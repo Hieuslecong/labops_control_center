@@ -62,6 +62,7 @@ function getJobStatusBadge(status: JobStatus) {
 export function JobsMonitoringView() {
   const jobs = useLabOpsStore((state) => state.jobs);
   const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
+  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
   const syncError = useLabOpsStore((state) => state.syncError);
 
@@ -77,16 +78,18 @@ export function JobsMonitoringView() {
 
   useEffect(() => {
     fetchLiveJobs();
+    fetchLiveState();
     if (!isAutoRefresh) return;
     const timer = setInterval(() => {
       fetchLiveJobs();
+      fetchLiveState();
     }, 4000);
     return () => clearInterval(timer);
-  }, [fetchLiveJobs, isAutoRefresh]);
+  }, [fetchLiveJobs, fetchLiveState, isAutoRefresh]);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
-    await fetchLiveJobs();
+    await Promise.all([fetchLiveJobs(), fetchLiveState()]);
     setTimeout(() => setIsRefreshing(false), 400);
   };
 
@@ -240,14 +243,18 @@ export function JobsMonitoringView() {
           <Button
             size='sm'
             variant={resourceFilter === 'gpu' ? 'default' : 'outline'}
-            onClick={() => setResourceFilter('gpu')}
+            onClick={() => setResourceFilter(resourceFilter === 'gpu' ? 'all' : 'gpu')}
             className={`h-7 text-xs px-2.5 rounded-full ${
               resourceFilter === 'gpu'
                 ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
                 : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
             }`}
           >
-            <Icons.gpu className='size-3 mr-1' />⚡ Chỉ GPU CUDA ({gpuJobsCount})
+            <Icons.gpu className='size-3 mr-1' />
+            {gpuJobsCount > 0 && (
+              <span className='size-1.5 rounded-full bg-indigo-400 animate-pulse mr-1' />
+            )}
+            ⚡ GPU CUDA ({gpuJobsCount})
           </Button>
 
           <Button
@@ -417,121 +424,134 @@ export function JobsMonitoringView() {
                     </td>
                   </tr>
                 ) : (
-                  filteredJobs.map((j) => (
-                    <tr
-                      key={j.id}
-                      onClick={() => {
-                        setSelectedJob(j);
-                        setDetailOpen(true);
-                      }}
-                      className='hover:bg-muted/40 cursor-pointer transition-colors'
-                      title='Nhấp để xem đầy đủ chi tiết tiến trình'
-                    >
-                      {/* Người dùng */}
-                      <td className='py-3 px-3'>
-                        <div className='font-bold text-foreground'>{j.fullName}</div>
-                        <div className='text-[11px] text-muted-foreground font-mono'>
-                          @{j.username}
-                        </div>
-                      </td>
+                  filteredJobs.map((j) => {
+                    const isGpuJob = j.isGpu || (j.vramUsedMb || 0) > 0;
+                    return (
+                      <tr
+                        key={j.id}
+                        onClick={() => {
+                          setSelectedJob(j);
+                          setDetailOpen(true);
+                        }}
+                        className={`cursor-pointer transition-colors ${
+                          isGpuJob
+                            ? 'bg-indigo-500/5 hover:bg-indigo-500/10 border-l-4 border-l-indigo-600'
+                            : 'hover:bg-muted/40'
+                        }`}
+                        title='Nhấp để xem đầy đủ chi tiết tiến trình'
+                      >
+                        {/* Người dùng */}
+                        <td className='py-3 px-3'>
+                          <div className='font-bold text-foreground'>{j.fullName}</div>
+                          <div className='text-[11px] text-muted-foreground font-mono'>
+                            @{j.username}
+                          </div>
+                        </td>
 
-                      {/* Máy chủ */}
-                      <td className='py-3 px-3'>
-                        <Badge variant='outline' className='font-mono text-[10px] uppercase'>
-                          {j.serverId}
-                        </Badge>
-                        <div className='text-[11px] text-muted-foreground font-mono mt-0.5'>
-                          {j.workspace}
-                        </div>
-                      </td>
-
-                      {/* PID / Lệnh */}
-                      <td className='py-3 px-3 max-w-sm'>
-                        <div className='flex items-center gap-1.5'>
-                          <span className='font-mono font-bold text-foreground text-[11px]'>
-                            {j.pid > 0 ? `PID: ${j.pid}` : 'Chờ phân bổ'}
-                          </span>
-                          <span className='text-[10px] text-muted-foreground font-mono'>
-                            ({j.id})
-                          </span>
-                        </div>
-                        <div
-                          className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
-                          title={j.cmdline || j.script}
-                        >
-                          {j.script}
-                        </div>
-                      </td>
-
-                      {/* GPU */}
-                      <td className='py-3 px-3'>
-                        {j.isGpu || j.vramUsedMb > 0 ? (
-                          <Badge
-                            variant='default'
-                            className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600'
-                          >
-                            {j.gpuId || 'WS-GPU-01'}
+                        {/* Máy chủ */}
+                        <td className='py-3 px-3'>
+                          <Badge variant='outline' className='font-mono text-[10px] uppercase'>
+                            {j.serverId}
                           </Badge>
-                        ) : (
-                          <span className='text-muted-foreground font-mono text-[11px]'>-</span>
-                        )}
-                      </td>
+                          <div className='text-[11px] text-muted-foreground font-mono mt-0.5'>
+                            {j.workspace}
+                          </div>
+                        </td>
 
-                      {/* CPU & RAM */}
-                      <td className='py-3 px-3 font-mono text-[11px]'>
-                        <div>{j.cpuPercent > 0 ? `${j.cpuPercent}% CPU` : '-'}</div>
-                        <div className='text-muted-foreground'>
-                          {j.ramUsedMb > 0 ? `${(j.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
-                        </div>
-                      </td>
+                        {/* PID / Lệnh */}
+                        <td className='py-3 px-3 max-w-sm'>
+                          <div className='flex items-center gap-1.5'>
+                            <span className='font-mono font-bold text-foreground text-[11px]'>
+                              {j.pid > 0 ? `PID: ${j.pid}` : 'Chờ phân bổ'}
+                            </span>
+                            <span className='text-[10px] text-muted-foreground font-mono'>
+                              ({j.id})
+                            </span>
+                          </div>
+                          <div
+                            className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
+                            title={j.cmdline || j.script}
+                          >
+                            {j.script}
+                          </div>
+                        </td>
 
-                      {/* VRAM */}
-                      <td className='py-3 px-3 font-mono text-[11px]'>
-                        {j.vramUsedMb > 0 ? (
-                          <span className='font-bold text-indigo-600 dark:text-indigo-400'>
-                            {(j.vramUsedMb / 1024).toFixed(1)} GB
-                          </span>
-                        ) : (
-                          <span className='text-muted-foreground'>-</span>
-                        )}
-                      </td>
+                        {/* GPU */}
+                        <td className='py-3 px-3'>
+                          {isGpuJob ? (
+                            <div className='flex flex-col gap-0.5 items-start'>
+                              <Badge
+                                variant='default'
+                                className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600 text-white gap-1'
+                              >
+                                <span className='size-1 rounded-full bg-white animate-pulse' />
+                                {j.gpuId || 'WS-GPU-01'}
+                              </Badge>
+                              <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono font-bold'>
+                                {((j.vramUsedMb || 0) / 1024).toFixed(1)} GB
+                              </span>
+                            </div>
+                          ) : (
+                            <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                          )}
+                        </td>
 
-                      {/* Thời gian */}
-                      <td className='py-3 px-3'>
-                        <div className='font-medium text-foreground'>{j.elapsedTime}</div>
-                        <div className='text-[10px] text-muted-foreground'>{j.startTime}</div>
-                      </td>
+                        {/* CPU & RAM */}
+                        <td className='py-3 px-3 font-mono text-[11px]'>
+                          <div>{j.cpuPercent > 0 ? `${j.cpuPercent}% CPU` : '-'}</div>
+                          <div className='text-muted-foreground'>
+                            {j.ramUsedMb > 0 ? `${(j.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
+                          </div>
+                        </td>
 
-                      {/* SSH vs Container */}
-                      <td className='py-3 px-3'>
-                        <div className='flex flex-col gap-1 items-start'>
-                          {getJobStatusBadge(j.status)}
-                          <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
-                            <span
-                              className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
-                            ></span>
-                            {j.sshStatus}
-                          </span>
-                        </div>
-                      </td>
+                        {/* VRAM */}
+                        <td className='py-3 px-3 font-mono text-[11px]'>
+                          {j.vramUsedMb > 0 ? (
+                            <span className='font-bold text-indigo-600 dark:text-indigo-400'>
+                              {(j.vramUsedMb / 1024).toFixed(1)} GB
+                            </span>
+                          ) : (
+                            <span className='text-muted-foreground'>-</span>
+                          )}
+                        </td>
 
-                      {/* Thao tác */}
-                      <td className='py-3 px-3 text-right'>
-                        <Button
-                          size='sm'
-                          variant='ghost'
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedJob(j);
-                            setDetailOpen(true);
-                          }}
-                          className='h-7 text-xs text-primary hover:bg-primary/10'
-                        >
-                          <Icons.view className='size-3.5 mr-1' /> Chi tiết
-                        </Button>
-                      </td>
-                    </tr>
-                  ))
+                        {/* Thời gian */}
+                        <td className='py-3 px-3'>
+                          <div className='font-medium text-foreground'>{j.elapsedTime}</div>
+                          <div className='text-[10px] text-muted-foreground'>{j.startTime}</div>
+                        </td>
+
+                        {/* SSH vs Container */}
+                        <td className='py-3 px-3'>
+                          <div className='flex flex-col gap-1 items-start'>
+                            {getJobStatusBadge(j.status)}
+                            <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
+                              <span
+                                className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
+                              ></span>
+                              {j.sshStatus}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Thao tác */}
+                        <td className='py-3 px-3 text-right'>
+                          <Button
+                            size='sm'
+                            variant='ghost'
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedJob(j);
+                              setDetailOpen(true);
+                            }}
+                            className='h-7 text-xs text-primary hover:bg-primary/10'
+                          >
+                            <Icons.view className='size-3.5 mr-1' /> Chi tiết
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

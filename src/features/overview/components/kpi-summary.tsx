@@ -17,12 +17,20 @@ export function KpiSummary() {
     const totalVramGb = Math.round(
       gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0) / 1024
     );
-    const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramUsedMb, 0) / 1024);
-    const activeGpus = gpus.filter((g) => g.vramUsedMb > 0).length;
+    const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0) / 1024);
+    const activeGpus = gpus.filter(
+      (g) =>
+        (g.vramUsedMb || 0) > 512 ||
+        (g.gpuUtilPercent || 0) > 0 ||
+        (g.activeProcesses?.length || 0) > 0
+    ).length;
     const onlineSsh = members.filter((m) => m.sshStatus === 'ONLINE').length;
     const activeSessions = members.reduce((acc, m) => acc + m.sshSessionsCount, 0);
     const runningJobs = jobs.filter((j) => j.status === 'RUNNING').length;
-    const cudaProcCount = gpus.reduce((acc, g) => acc + (g.activeProcesses?.length || 0), 0);
+    const cudaProcCount = Math.max(
+      gpus.reduce((acc, g) => acc + (g.activeProcesses?.length || 0), 0),
+      jobs.filter((j) => j.isGpu || (j.vramUsedMb || 0) > 0).length
+    );
 
     return {
       servers: {

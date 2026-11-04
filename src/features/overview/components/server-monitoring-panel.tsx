@@ -10,6 +10,7 @@ import Link from 'next/link';
 
 export function ServerMonitoringPanel() {
   const servers = useLabOpsStore((state) => state.servers);
+  const gpus = useLabOpsStore((state) => state.gpus);
 
   return (
     <div className='flex flex-col gap-3.5'>
@@ -34,6 +35,18 @@ export function ServerMonitoringPanel() {
             server.ramUsagePercent > 80 ? 'stroke-rose-500' : 'stroke-indigo-600';
           const diskGaugeColor =
             server.diskUsagePercent > 80 ? 'stroke-amber-500' : 'stroke-cyan-600';
+
+          const serverGpu = gpus.find((g) => g.serverId === server.id);
+          const isGpuRunning = Boolean(
+            serverGpu &&
+            (serverGpu.vramUsedMb > 512 ||
+              serverGpu.gpuUtilPercent > 0 ||
+              (serverGpu.activeProcesses?.length || 0) > 0)
+          );
+          const gpuUsedGb = serverGpu ? (serverGpu.vramUsedMb / 1024).toFixed(1) : '0';
+          const gpuVramPercent = serverGpu
+            ? Math.round((serverGpu.vramUsedMb / (serverGpu.vramTotalMb || 24576)) * 100)
+            : 0;
 
           return (
             <Card
@@ -136,13 +149,35 @@ export function ServerMonitoringPanel() {
                 {/* Key specs and status indicators */}
                 <div className='grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs min-w-0'>
                   <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
-                    <span className='text-[11px] text-muted-foreground truncate'>GPU Vật lý</span>
+                    <div className='flex items-center justify-between text-[11px] text-muted-foreground'>
+                      <span className='truncate'>GPU Vật lý</span>
+                      {isGpuRunning && (
+                        <span
+                          className='size-1.5 rounded-full bg-indigo-500 animate-pulse'
+                          title='GPU đang chạy tải huấn luyện'
+                        />
+                      )}
+                    </div>
                     <span className='font-bold text-sm text-foreground flex items-center gap-1 mt-0.5 truncate'>
-                      <Icons.gpu className='size-3.5 text-primary shrink-0' />
+                      <Icons.gpu
+                        className={`size-3.5 shrink-0 ${
+                          isGpuRunning ? 'text-indigo-600 dark:text-indigo-400' : 'text-primary'
+                        }`}
+                      />
                       {server.gpuCount}x NVIDIA A30
                     </span>
-                    <span className='text-[10px] text-muted-foreground font-mono truncate'>
-                      {server.gpuCount * 24} GB VRAM
+                    <span className='text-[10px] font-mono truncate'>
+                      {isGpuRunning ? (
+                        <span className='text-indigo-600 dark:text-indigo-400 font-semibold'>
+                          {gpuUsedGb}/24 GB ({gpuVramPercent}%)
+                        </span>
+                      ) : (
+                        <span className='text-muted-foreground'>
+                          {server.status === 'online'
+                            ? `${server.gpuCount * 24} GB (Rỗi)`
+                            : 'Mất kết nối'}
+                        </span>
+                      )}
                     </span>
                   </div>
 

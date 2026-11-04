@@ -19,7 +19,17 @@ export default function Header() {
 
   const onlineServers = servers.filter((s) => s.status === 'online').length;
   const isFullyOnline = onlineServers === servers.length;
-  const totalVramGb = Math.round(gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0) / 1024);
+  const totalVramMb = gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0);
+  const totalVramGb = Math.round(totalVramMb / 1024);
+  const usedVramMb = gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0);
+  const usedVramGb = (usedVramMb / 1024).toFixed(1);
+  const activeGpusCount = gpus.filter(
+    (g) =>
+      (g.vramUsedMb || 0) > 512 ||
+      (g.gpuUtilPercent || 0) > 0 ||
+      (g.activeProcesses?.length || 0) > 0
+  ).length;
+  const isGpuRunning = activeGpusCount > 0;
 
   return (
     <header className='bg-background/80 sticky top-0 z-20 flex h-16 shrink-0 items-center justify-between gap-2 border-b backdrop-blur-md md:h-14 px-4'>
@@ -58,9 +68,22 @@ export default function Header() {
               : 'Workstation Online • Track Mất kết nối'}
           </span>
           <span className='text-muted-foreground/60'>•</span>
-          <span className='font-mono text-[11px]'>
-            {gpus.length}x A30 ({totalVramGb} GB)
-          </span>
+          {isGpuRunning ? (
+            <span
+              className='font-mono text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5'
+              title={`GPU đang chạy tác vụ tính toán (${usedVramGb} / ${totalVramGb} GB VRAM)`}
+            >
+              <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse' />
+              <span>
+                ⚡ GPU: {usedVramGb}/{totalVramGb} GB (
+                {Math.round((usedVramMb / (totalVramMb || 1)) * 100)}%)
+              </span>
+            </span>
+          ) : (
+            <span className='font-mono text-[11px] text-muted-foreground'>
+              {gpus.length}x A30 ({totalVramGb} GB)
+            </span>
+          )}
         </div>
 
         {isDemoMode ? (

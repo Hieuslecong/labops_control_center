@@ -302,42 +302,147 @@ export function ServerDetailView() {
 
         {/* TAB 2: GPUS */}
         <TabsContent value='gpus' className='mt-4 space-y-4'>
-          <div className='grid grid-cols-1 md:grid-cols-3 gap-4'>
-            {serverGpus.map((gpu) => (
-              <Card key={gpu.id} className='p-4 bg-card'>
-                <div className='flex items-center justify-between'>
-                  <span className='font-bold text-sm'>{gpu.displayLabel}</span>
-                  <Badge variant='outline' className='font-mono text-[10px]'>
-                    {gpu.allocationMode}
-                  </Badge>
-                </div>
-                <div className='text-xs text-muted-foreground mt-1'>{gpu.model}</div>
-                <div className='my-3'>
-                  <div className='flex justify-between text-xs mb-1'>
-                    <span>VRAM:</span>
-                    <span className='font-mono font-bold'>
-                      {(gpu.vramUsedMb / 1024).toFixed(1)} / 24 GB
-                    </span>
-                  </div>
-                  <div className='w-full bg-muted rounded-full h-2'>
+          {serverGpus.length === 0 ? (
+            <div className='p-8 rounded-lg border border-dashed text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-2 bg-muted/20'>
+              <Icons.warning className='size-6 text-amber-500' />
+              <span className='font-semibold text-foreground text-sm'>
+                {selectedServerId === 'track'
+                  ? 'Server Track (3x NVIDIA A30) hiện ngoại tuyến qua WireGuard VPN'
+                  : 'Không có thiết bị GPU nào được tìm thấy trên máy chủ này'}
+              </span>
+              <span className='max-w-md text-[11px]'>
+                {selectedServerId === 'track'
+                  ? 'Toàn bộ 3x GPU NVIDIA A30 (72 GB VRAM) trên Server Track sẽ tự động xuất hiện khi kết nối VPN 10.200.0.1 được thiết lập.'
+                  : 'Kiểm tra driver NVIDIA hoặc quyền truy cập của agent giám sát.'}
+              </span>
+            </div>
+          ) : (
+            <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
+              {serverGpus.map((gpu) => {
+                const isRunning =
+                  gpu.vramUsedMb > 512 ||
+                  gpu.gpuUtilPercent > 0 ||
+                  (gpu.activeProcesses && gpu.activeProcesses.length > 0);
+                const vramPercent = Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100);
+
+                return (
+                  <Card
+                    key={gpu.id}
+                    className='relative overflow-hidden p-4 bg-card min-w-0 border'
+                  >
                     <div
-                      className='bg-primary h-2 rounded-full'
-                      style={{ width: `${Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100)}%` }}
+                      className={`absolute top-0 left-0 right-0 h-1 ${
+                        isRunning ? 'bg-indigo-600' : 'bg-emerald-500'
+                      }`}
                     />
-                  </div>
-                </div>
-                <div className='text-[11px] text-muted-foreground space-y-1'>
-                  <div>
-                    Nhiệt độ: <strong className='text-foreground'>{gpu.tempCelsius}°C</strong> •
-                    Điện: <strong className='text-foreground'>{gpu.powerWatts}W</strong>
-                  </div>
-                  <div>
-                    UUID: <span className='font-mono text-[10px]'>{gpu.uuid.slice(0, 18)}...</span>
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
+                    <div className='flex items-center justify-between gap-1 flex-wrap'>
+                      <div className='flex items-center gap-1.5'>
+                        <span className='font-bold text-sm'>{gpu.displayLabel}</span>
+                        {isRunning ? (
+                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 font-medium text-[10px] px-1.5 py-0'>
+                            <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
+                            ĐANG CHẠY
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant='outline'
+                            className='text-muted-foreground text-[10px] px-1.5 py-0'
+                          >
+                            RỖI
+                          </Badge>
+                        )}
+                      </div>
+                      <Badge variant='outline' className='font-mono text-[10px]'>
+                        {gpu.allocationMode}
+                      </Badge>
+                    </div>
+                    <div className='text-xs text-muted-foreground mt-1'>{gpu.model}</div>
+                    <div className='my-3'>
+                      <div className='flex justify-between text-xs mb-1'>
+                        <span className='text-muted-foreground font-medium'>Bộ nhớ VRAM:</span>
+                        <span className='font-mono font-bold text-foreground'>
+                          {(gpu.vramUsedMb / 1024).toFixed(1)} / 24 GB{' '}
+                          <span className='font-normal text-[11px] text-muted-foreground'>
+                            ({vramPercent}%)
+                          </span>
+                        </span>
+                      </div>
+                      <div className='w-full bg-muted rounded-full h-2 overflow-hidden'>
+                        <div
+                          className={`h-2 rounded-full transition-all duration-500 ${
+                            vramPercent > 80
+                              ? 'bg-rose-500'
+                              : isRunning
+                                ? 'bg-indigo-600'
+                                : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${vramPercent}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className='text-[11px] text-muted-foreground space-y-1'>
+                      <div className='flex items-center justify-between'>
+                        <span>
+                          Nhiệt độ: <strong className='text-foreground'>{gpu.tempCelsius}°C</strong>
+                        </span>
+                        <span>
+                          Điện: <strong className='text-foreground'>{gpu.powerWatts}W</strong>
+                        </span>
+                        <span>
+                          Tải:{' '}
+                          <strong className='text-foreground font-mono'>
+                            {gpu.gpuUtilPercent}%
+                          </strong>
+                        </span>
+                      </div>
+                      <div className='truncate font-mono text-[10px]'>
+                        UUID: <span>{gpu.uuid.slice(0, 22)}...</span>
+                      </div>
+                    </div>
+
+                    {/* Active processes on this GPU */}
+                    <div className='mt-3 pt-2.5 border-t space-y-1.5'>
+                      <span className='text-[11px] font-semibold text-muted-foreground block'>
+                        Tiến trình chiếm dụng ({gpu.activeProcesses.length}):
+                      </span>
+                      {gpu.activeProcesses.length > 0 ? (
+                        <div className='space-y-1 max-h-36 overflow-y-auto pr-0.5'>
+                          {gpu.activeProcesses.map((proc) => (
+                            <div
+                              key={proc.pid}
+                              className='p-1.5 rounded bg-muted/40 border text-[11px] flex items-center justify-between gap-1'
+                            >
+                              <div className='truncate min-w-0 flex-1'>
+                                <span className='font-bold text-foreground font-mono'>
+                                  @{proc.username}
+                                </span>
+                                <span className='text-muted-foreground text-[10px] ml-1 font-mono'>
+                                  (PID: {proc.pid})
+                                </span>
+                                <div className='font-mono text-[10px] text-muted-foreground truncate'>
+                                  {proc.name}
+                                </div>
+                              </div>
+                              <Badge
+                                variant='outline'
+                                className='font-mono text-[10px] shrink-0 font-bold text-indigo-600 dark:text-indigo-400'
+                              >
+                                {(proc.vramMb / 1024).toFixed(1)} GB
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className='text-[10px] text-muted-foreground italic py-1'>
+                          Không có tiến trình chiếm dụng VRAM.
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
         </TabsContent>
 
         {/* TAB 3: CPU & RAM CHART */}

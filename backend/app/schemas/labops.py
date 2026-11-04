@@ -298,21 +298,26 @@ class MemberResponse(BaseSchema):
 
 class JobResponse(BaseSchema):
     id: str
+    member_id: Optional[str] = Field(None, alias="memberId")
     username: str
     full_name: str = Field(alias="fullName")
     server_id: str = Field(alias="serverId")
+    server_name: Optional[str] = Field(None, alias="serverName")
     workspace: str
     pid: int
+    ppid: Optional[int] = Field(None, alias="ppid")
     script: str
-    gpu_id: str = Field(alias="gpuId")
-    cpu_percent: float = Field(alias="cpuPercent")
-    ram_used_mb: int = Field(alias="ramUsedMb")
-    vram_used_mb: int = Field(alias="vramUsedMb")
+    cmdline: Optional[str] = Field(None, alias="cmdline")
+    gpu_id: Optional[str] = Field(None, alias="gpuId")
+    cpu_percent: float = Field(0.0, alias="cpuPercent")
+    ram_used_mb: float = Field(0.0, alias="ramUsedMb")
+    vram_used_mb: int = Field(0, alias="vramUsedMb")
     start_time: str = Field(alias="startTime")
     elapsed_time: str = Field(alias="elapsedTime")
     status: str
     ssh_status: str = Field(alias="sshStatus")
     container_state: str = Field(alias="containerState")
+    is_gpu: Optional[bool] = Field(False, alias="isGpu")
 
 class SecurityReviewResponse(BaseSchema):
     id: str

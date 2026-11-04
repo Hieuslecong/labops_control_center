@@ -118,3 +118,4 @@ Bộ test tự động `backend/tests/test_http_endpoints.py` đã vượt qua *
 3. **Python Backend Test Suite**:
    - Lệnh: `python3 -m unittest discover -s backend/tests`
    - Kết quả: **Ran 39 tests in 0.954s — OK**.
+

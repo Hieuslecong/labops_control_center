@@ -202,121 +202,139 @@ export function JobsMonitoringView() {
                 </tr>
               </thead>
               <tbody className='divide-y divide-border/60'>
-                {filteredJobs.map((j) => (
-                  <tr
-                    key={j.id}
-                    onClick={() => {
-                      setSelectedJob(j);
-                      setDetailOpen(true);
-                    }}
-                    className='hover:bg-muted/40 cursor-pointer transition-colors'
-                    title='Nhấp để xem đầy đủ chi tiết tiến trình'
-                  >
-                    {/* Người dùng */}
-                    <td className='py-3 px-3'>
-                      <div className='font-bold text-foreground'>{j.fullName}</div>
-                      <div className='text-[11px] text-muted-foreground font-mono'>
-                        @{j.username}
-                      </div>
-                    </td>
-
-                    {/* Máy chủ */}
-                    <td className='py-3 px-3'>
-                      <Badge variant='outline' className='font-mono text-[10px] uppercase'>
-                        {j.serverId}
-                      </Badge>
-                      <div className='text-[11px] text-muted-foreground font-mono mt-0.5'>
-                        {j.workspace}
-                      </div>
-                    </td>
-
-                    {/* PID / Lệnh */}
-                    <td className='py-3 px-3 max-w-sm'>
-                      <div className='flex items-center gap-1.5'>
-                        <span className='font-mono font-bold text-foreground text-[11px]'>
-                          {j.pid > 0 ? `PID: ${j.pid}` : 'Chờ phân bổ'}
-                        </span>
-                        <span className='text-[10px] text-muted-foreground font-mono'>
-                          ({j.id})
-                        </span>
-                      </div>
-                      <div
-                        className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
-                        title={j.cmdline || j.script}
-                      >
-                        {j.script}
-                      </div>
-                    </td>
-
-                    {/* GPU */}
-                    <td className='py-3 px-3'>
-                      {j.isGpu || j.vramUsedMb > 0 ? (
-                        <Badge
-                          variant='default'
-                          className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600'
-                        >
-                          {j.gpuId || 'WS-GPU-01'}
-                        </Badge>
+                {filteredJobs.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className='py-12 text-center text-xs text-muted-foreground'>
+                      {jobs.length === 0 ? (
+                        <div className='flex flex-col items-center justify-center gap-2'>
+                          <Icons.spinner className='size-5 animate-spin text-primary' />
+                          <span>Đang đồng bộ tiến trình thời gian thực từ máy chủ...</span>
+                        </div>
                       ) : (
-                        <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                        <div className='flex flex-col items-center justify-center gap-1'>
+                          <Icons.search className='size-5 text-muted-foreground/60' />
+                          <span>Không tìm thấy tiến trình nào phù hợp với bộ lọc hiện tại.</span>
+                        </div>
                       )}
-                    </td>
-
-                    {/* CPU & RAM */}
-                    <td className='py-3 px-3 font-mono text-[11px]'>
-                      <div>{j.cpuPercent > 0 ? `${j.cpuPercent}% CPU` : '-'}</div>
-                      <div className='text-muted-foreground'>
-                        {j.ramUsedMb > 0 ? `${(j.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
-                      </div>
-                    </td>
-
-                    {/* VRAM */}
-                    <td className='py-3 px-3 font-mono text-[11px]'>
-                      {j.vramUsedMb > 0 ? (
-                        <span className='font-bold text-indigo-600 dark:text-indigo-400'>
-                          {(j.vramUsedMb / 1024).toFixed(1)} GB
-                        </span>
-                      ) : (
-                        <span className='text-muted-foreground'>-</span>
-                      )}
-                    </td>
-
-                    {/* Thời gian */}
-                    <td className='py-3 px-3'>
-                      <div className='font-medium text-foreground'>{j.elapsedTime}</div>
-                      <div className='text-[10px] text-muted-foreground'>{j.startTime}</div>
-                    </td>
-
-                    {/* SSH vs Container */}
-                    <td className='py-3 px-3'>
-                      <div className='flex flex-col gap-1 items-start'>
-                        {getJobStatusBadge(j.status)}
-                        <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
-                          <span
-                            className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
-                          ></span>
-                          {j.sshStatus}
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Thao tác */}
-                    <td className='py-3 px-3 text-right'>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedJob(j);
-                          setDetailOpen(true);
-                        }}
-                        className='h-7 text-xs text-primary hover:bg-primary/10'
-                      >
-                        <Icons.view className='size-3.5 mr-1' /> Chi tiết
-                      </Button>
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredJobs.map((j) => (
+                    <tr
+                      key={j.id}
+                      onClick={() => {
+                        setSelectedJob(j);
+                        setDetailOpen(true);
+                      }}
+                      className='hover:bg-muted/40 cursor-pointer transition-colors'
+                      title='Nhấp để xem đầy đủ chi tiết tiến trình'
+                    >
+                      {/* Người dùng */}
+                      <td className='py-3 px-3'>
+                        <div className='font-bold text-foreground'>{j.fullName}</div>
+                        <div className='text-[11px] text-muted-foreground font-mono'>
+                          @{j.username}
+                        </div>
+                      </td>
+
+                      {/* Máy chủ */}
+                      <td className='py-3 px-3'>
+                        <Badge variant='outline' className='font-mono text-[10px] uppercase'>
+                          {j.serverId}
+                        </Badge>
+                        <div className='text-[11px] text-muted-foreground font-mono mt-0.5'>
+                          {j.workspace}
+                        </div>
+                      </td>
+
+                      {/* PID / Lệnh */}
+                      <td className='py-3 px-3 max-w-sm'>
+                        <div className='flex items-center gap-1.5'>
+                          <span className='font-mono font-bold text-foreground text-[11px]'>
+                            {j.pid > 0 ? `PID: ${j.pid}` : 'Chờ phân bổ'}
+                          </span>
+                          <span className='text-[10px] text-muted-foreground font-mono'>
+                            ({j.id})
+                          </span>
+                        </div>
+                        <div
+                          className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
+                          title={j.cmdline || j.script}
+                        >
+                          {j.script}
+                        </div>
+                      </td>
+
+                      {/* GPU */}
+                      <td className='py-3 px-3'>
+                        {j.isGpu || j.vramUsedMb > 0 ? (
+                          <Badge
+                            variant='default'
+                            className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600'
+                          >
+                            {j.gpuId || 'WS-GPU-01'}
+                          </Badge>
+                        ) : (
+                          <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                        )}
+                      </td>
+
+                      {/* CPU & RAM */}
+                      <td className='py-3 px-3 font-mono text-[11px]'>
+                        <div>{j.cpuPercent > 0 ? `${j.cpuPercent}% CPU` : '-'}</div>
+                        <div className='text-muted-foreground'>
+                          {j.ramUsedMb > 0 ? `${(j.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
+                        </div>
+                      </td>
+
+                      {/* VRAM */}
+                      <td className='py-3 px-3 font-mono text-[11px]'>
+                        {j.vramUsedMb > 0 ? (
+                          <span className='font-bold text-indigo-600 dark:text-indigo-400'>
+                            {(j.vramUsedMb / 1024).toFixed(1)} GB
+                          </span>
+                        ) : (
+                          <span className='text-muted-foreground'>-</span>
+                        )}
+                      </td>
+
+                      {/* Thời gian */}
+                      <td className='py-3 px-3'>
+                        <div className='font-medium text-foreground'>{j.elapsedTime}</div>
+                        <div className='text-[10px] text-muted-foreground'>{j.startTime}</div>
+                      </td>
+
+                      {/* SSH vs Container */}
+                      <td className='py-3 px-3'>
+                        <div className='flex flex-col gap-1 items-start'>
+                          {getJobStatusBadge(j.status)}
+                          <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
+                            <span
+                              className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
+                            ></span>
+                            {j.sshStatus}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Thao tác */}
+                      <td className='py-3 px-3 text-right'>
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedJob(j);
+                            setDetailOpen(true);
+                          }}
+                          className='h-7 text-xs text-primary hover:bg-primary/10'
+                        >
+                          <Icons.view className='size-3.5 mr-1' /> Chi tiết
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

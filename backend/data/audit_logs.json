@@ -1,24 +1,24 @@
 [
   {
-    "id": "aud-191b0a",
+    "id": "aud-911f4e",
     "actor": "admin@labops.local",
     "action": "SSH_ACCESS_RESTORED",
     "target_type": "SECURITY",
     "target_id": "hieulc",
-    "timestamp": "2026-11-04 08:44:37",
+    "timestamp": "2026-11-04 08:47:41",
     "result": "SUCCESS",
-    "correlation_id": "corr-69812939f12e",
+    "correlation_id": "corr-205aba86efa1",
     "details": "Đã mở khóa quyền truy cập SSH của @hieulc (Tái kích hoạt Incus proxy endpoint)"
   },
   {
-    "id": "aud-5815b7",
+    "id": "aud-bcf22b",
     "actor": "admin@labops.local",
     "action": "SSH_ACCESS_SUSPENDED",
     "target_type": "SECURITY",
     "target_id": "hieulc",
-    "timestamp": "2026-11-04 08:44:37",
+    "timestamp": "2026-11-04 08:47:41",
     "result": "WARNING",
-    "correlation_id": "corr-c892f37108a8",
+    "correlation_id": "corr-0388155bee10",
     "details": "Đã khóa quyền truy cập SSH của @hieulc (Tạm dừng container proxy endpoint)"
   },
   {

@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { ProcessDetailSheet } from './process-detail-sheet';
@@ -65,6 +66,7 @@ export function RunningJobsTable() {
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Filters state
+  const [searchTerm, setSearchTerm] = useState<string>('');
   const [serverFilter, setServerFilter] = useState<string>('all');
   const [userFilter, setUserFilter] = useState<string>('all');
   const [gpuFilter, setGpuFilter] = useState<string>('all');
@@ -87,25 +89,46 @@ export function RunningJobsTable() {
     setTimeout(() => setIsRefreshing(false), 400);
   };
 
-  // Distinct values for filter dropdowns
-  const uniqueUsers = useMemo(() => {
-    const set = new Set<string>();
+  // Distinct values for user filter with process count
+  const userCounts = useMemo(() => {
+    const map: Record<string, number> = {};
     jobs.forEach((j) => {
-      if (j.username) set.add(j.username);
+      if (j.username) {
+        map[j.username] = (map[j.username] || 0) + 1;
+      }
     });
-    return Array.from(set);
+    return Object.entries(map).toSorted((a, b) => b[1] - a[1]);
   }, [jobs]);
+
+  const gpuJobsCount = useMemo(
+    () => jobs.filter((j) => j.isGpu || j.vramUsedMb > 0).length,
+    [jobs]
+  );
+  const cpuJobsCount = useMemo(
+    () => jobs.filter((j) => !j.isGpu && j.vramUsedMb <= 0).length,
+    [jobs]
+  );
 
   // Filtered jobs
   const filteredJobs = useMemo(() => {
     return jobs.filter((job) => {
+      if (searchTerm.trim()) {
+        const q = searchTerm.toLowerCase();
+        const matchPid = String(job.pid).includes(q);
+        const matchScript = job.script.toLowerCase().includes(q);
+        const matchCmd = job.cmdline ? job.cmdline.toLowerCase().includes(q) : false;
+        const matchUser =
+          job.username.toLowerCase().includes(q) || job.fullName.toLowerCase().includes(q);
+        const matchGpu = job.gpuId ? job.gpuId.toLowerCase().includes(q) : false;
+        if (!matchPid && !matchScript && !matchCmd && !matchUser && !matchGpu) return false;
+      }
       if (serverFilter !== 'all' && job.serverId !== serverFilter) return false;
       if (userFilter !== 'all' && job.username !== userFilter) return false;
       if (gpuFilter === 'gpu_only' && !job.isGpu && job.vramUsedMb <= 0) return false;
       if (gpuFilter === 'cpu_only' && (job.isGpu || job.vramUsedMb > 0)) return false;
       return true;
     });
-  }, [jobs, serverFilter, userFilter, gpuFilter]);
+  }, [jobs, searchTerm, serverFilter, userFilter, gpuFilter]);
 
   const handleRowClick = (job: ComputeJob) => {
     setSelectedJob(job);
@@ -203,8 +226,56 @@ export function RunningJobsTable() {
             </div>
           )}
 
+          {/* Quick Filter Pills */}
+          <div className='mt-2.5 flex items-center gap-1.5 flex-wrap'>
+            <Button
+              size='sm'
+              variant={gpuFilter === 'all' ? 'default' : 'outline'}
+              onClick={() => setGpuFilter('all')}
+              className='h-6 text-[11px] px-2.5 rounded-full'
+            >
+              Tất cả ({jobs.length})
+            </Button>
+            <Button
+              size='sm'
+              variant={gpuFilter === 'gpu_only' ? 'default' : 'outline'}
+              onClick={() => setGpuFilter('gpu_only')}
+              className={`h-6 text-[11px] px-2.5 rounded-full ${
+                gpuFilter === 'gpu_only'
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                  : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
+              }`}
+            >
+              <Icons.gpu className='size-3 mr-1' />⚡ GPU ({gpuJobsCount})
+            </Button>
+            <Button
+              size='sm'
+              variant={gpuFilter === 'cpu_only' ? 'default' : 'outline'}
+              onClick={() => setGpuFilter('cpu_only')}
+              className={`h-6 text-[11px] px-2.5 rounded-full ${
+                gpuFilter === 'cpu_only'
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'text-blue-600 dark:text-blue-400 border-blue-500/30 hover:bg-blue-500/10'
+              }`}
+            >
+              <Icons.cpu className='size-3 mr-1' />
+              🖥️ CPU ({cpuJobsCount})
+            </Button>
+          </div>
+
           {/* Filters Bar */}
-          <div className='mt-3 pt-3 border-t grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center text-xs'>
+          <div className='mt-3 pt-3 border-t flex flex-wrap items-center gap-2 text-xs'>
+            {/* Search Box */}
+            <div className='relative flex-1 min-w-[200px] max-w-xs'>
+              <Icons.search className='absolute left-2.5 top-2 size-3.5 text-muted-foreground' />
+              <Input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder='Tìm theo PID, script, lệnh, user...'
+                className='pl-8 h-7 text-xs'
+              />
+            </div>
+
             <div className='flex items-center gap-1.5'>
               <span className='text-muted-foreground text-[11px] font-medium'>Máy chủ:</span>
               <select
@@ -225,10 +296,10 @@ export function RunningJobsTable() {
                 onChange={(e) => setUserFilter(e.target.value)}
                 className='h-7 rounded-md border border-input bg-background px-2 text-xs focus:ring-1 focus:ring-primary outline-none'
               >
-                <option value='all'>Tất cả tài khoản</option>
-                {uniqueUsers.map((u) => (
-                  <option key={u} value={u}>
-                    @{u}
+                <option value='all'>Tất cả tài khoản ({userCounts.length})</option>
+                {userCounts.map(([uname, count]) => (
+                  <option key={uname} value={uname}>
+                    @{uname} ({count})
                   </option>
                 ))}
               </select>
@@ -242,23 +313,27 @@ export function RunningJobsTable() {
                 className='h-7 rounded-md border border-input bg-background px-2 text-xs focus:ring-1 focus:ring-primary outline-none'
               >
                 <option value='all'>Tất cả (GPU & CPU)</option>
-                <option value='gpu_only'>Chỉ tiến trình GPU (CUDA)</option>
-                <option value='cpu_only'>Tiến trình CPU thuần</option>
+                <option value='gpu_only'>⚡ Chỉ GPU (CUDA)</option>
+                <option value='cpu_only'>🖥️ Chỉ CPU thuần</option>
               </select>
             </div>
 
-            {(serverFilter !== 'all' || userFilter !== 'all' || gpuFilter !== 'all') && (
+            {(serverFilter !== 'all' ||
+              userFilter !== 'all' ||
+              gpuFilter !== 'all' ||
+              searchTerm.trim() !== '') && (
               <Button
                 variant='ghost'
                 size='sm'
                 onClick={() => {
+                  setSearchTerm('');
                   setServerFilter('all');
                   setUserFilter('all');
                   setGpuFilter('all');
                 }}
                 className='h-7 text-xs text-muted-foreground hover:text-foreground'
               >
-                Đặt lại bộ lọc
+                <Icons.close className='size-3 mr-1' /> Đặt lại bộ lọc
               </Button>
             )}
 

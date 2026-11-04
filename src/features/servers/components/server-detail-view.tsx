@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { Card, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
@@ -51,10 +52,51 @@ export function ServerDetailView() {
   }, [fetchLiveState, fetchLiveJobs]);
 
   const [selectedServerId, setSelectedServerId] = useState<ServerId>('track');
+  const [jobSearchTerm, setJobSearchTerm] = useState('');
+  const [jobResourceFilter, setJobResourceFilter] = useState<'all' | 'gpu' | 'cpu'>('all');
+  const [jobUserFilter, setJobUserFilter] = useState('all');
+
   const server = servers.find((s) => s.id === selectedServerId) || servers[0];
   const serverGpus = gpus.filter((g) => g.serverId === selectedServerId);
   const serverJobs = jobs.filter((j) => j.serverId === selectedServerId);
   const serverMembers = members.filter((m) => m.assignedServer === selectedServerId);
+
+  const serverUserCounts = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    serverJobs.forEach((j) => {
+      if (j.username) {
+        map[j.username] = (map[j.username] || 0) + 1;
+      }
+    });
+    return Object.entries(map).toSorted((a, b) => b[1] - a[1]);
+  }, [serverJobs]);
+
+  const serverGpuCount = React.useMemo(
+    () => serverJobs.filter((j) => j.isGpu || j.vramUsedMb > 0).length,
+    [serverJobs]
+  );
+  const serverCpuCount = React.useMemo(
+    () => serverJobs.filter((j) => !j.isGpu && j.vramUsedMb <= 0).length,
+    [serverJobs]
+  );
+
+  const filteredServerJobs = React.useMemo(() => {
+    return serverJobs.filter((j) => {
+      if (jobSearchTerm.trim()) {
+        const q = jobSearchTerm.toLowerCase();
+        const matchPid = String(j.pid).includes(q);
+        const matchScript = j.script.toLowerCase().includes(q);
+        const matchCmd = j.cmdline ? j.cmdline.toLowerCase().includes(q) : false;
+        const matchUser =
+          j.username.toLowerCase().includes(q) || j.fullName.toLowerCase().includes(q);
+        if (!matchPid && !matchScript && !matchCmd && !matchUser) return false;
+      }
+      if (jobResourceFilter === 'gpu' && !j.isGpu && j.vramUsedMb <= 0) return false;
+      if (jobResourceFilter === 'cpu' && (j.isGpu || j.vramUsedMb > 0)) return false;
+      if (jobUserFilter !== 'all' && j.username !== jobUserFilter) return false;
+      return true;
+    });
+  }, [serverJobs, jobSearchTerm, jobResourceFilter, jobUserFilter]);
 
   return (
     <div className='flex flex-col gap-5'>
@@ -447,39 +489,156 @@ export function ServerDetailView() {
         {/* TAB 7: JOBS */}
         <TabsContent value='jobs' className='mt-4 space-y-3'>
           <Card className='p-4 bg-card'>
-            <CardTitle className='text-sm font-bold mb-3'>
-              Tiến trình Tính toán trên {server.name}
-            </CardTitle>
+            <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3'>
+              <div>
+                <CardTitle className='text-sm font-bold'>
+                  Tiến trình Tính toán trên {server.name}
+                </CardTitle>
+                <p className='text-xs text-muted-foreground'>
+                  {filteredServerJobs.length} / {serverJobs.length} tiến trình đang thực thi
+                </p>
+              </div>
+
+              {/* Quick Pills */}
+              <div className='flex items-center gap-1.5 flex-wrap'>
+                <Button
+                  size='sm'
+                  variant={jobResourceFilter === 'all' ? 'default' : 'outline'}
+                  onClick={() => setJobResourceFilter('all')}
+                  className='h-6 text-[11px] px-2 rounded-full'
+                >
+                  Tất cả ({serverJobs.length})
+                </Button>
+                <Button
+                  size='sm'
+                  variant={jobResourceFilter === 'gpu' ? 'default' : 'outline'}
+                  onClick={() => setJobResourceFilter('gpu')}
+                  className={`h-6 text-[11px] px-2 rounded-full ${
+                    jobResourceFilter === 'gpu'
+                      ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                      : 'text-indigo-600 border-indigo-500/30'
+                  }`}
+                >
+                  <Icons.gpu className='size-3 mr-1' />⚡ GPU ({serverGpuCount})
+                </Button>
+                <Button
+                  size='sm'
+                  variant={jobResourceFilter === 'cpu' ? 'default' : 'outline'}
+                  onClick={() => setJobResourceFilter('cpu')}
+                  className={`h-6 text-[11px] px-2 rounded-full ${
+                    jobResourceFilter === 'cpu'
+                      ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                      : 'text-blue-600 border-blue-500/30'
+                  }`}
+                >
+                  <Icons.cpu className='size-3 mr-1' />
+                  🖥️ CPU ({serverCpuCount})
+                </Button>
+              </div>
+            </div>
+
+            {/* Filter Bar */}
+            <div className='flex flex-wrap items-center gap-2 mb-3 pb-3 border-b text-xs'>
+              <div className='relative flex-1 min-w-[160px] max-w-xs'>
+                <Icons.search className='absolute left-2.5 top-2 size-3.5 text-muted-foreground' />
+                <Input
+                  value={jobSearchTerm}
+                  onChange={(e) => setJobSearchTerm(e.target.value)}
+                  placeholder='Tìm theo PID, script, lệnh, user...'
+                  className='pl-8 h-7 text-xs'
+                />
+              </div>
+
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground text-[11px] font-medium'>Người dùng:</span>
+                <select
+                  value={jobUserFilter}
+                  onChange={(e) => setJobUserFilter(e.target.value)}
+                  className='h-7 rounded-md border border-input bg-background px-2 text-xs outline-none'
+                >
+                  <option value='all'>Tất cả người dùng ({serverUserCounts.length})</option>
+                  {serverUserCounts.map(([uname, count]) => (
+                    <option key={uname} value={uname}>
+                      @{uname} ({count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground text-[11px] font-medium'>Tài nguyên:</span>
+                <select
+                  value={jobResourceFilter}
+                  onChange={(e) => setJobResourceFilter(e.target.value as 'all' | 'gpu' | 'cpu')}
+                  className='h-7 rounded-md border border-input bg-background px-2 text-xs outline-none'
+                >
+                  <option value='all'>Tất cả</option>
+                  <option value='gpu'>⚡ Chỉ GPU CUDA</option>
+                  <option value='cpu'>🖥️ Chỉ CPU</option>
+                </select>
+              </div>
+
+              {(jobSearchTerm.trim() !== '' ||
+                jobResourceFilter !== 'all' ||
+                jobUserFilter !== 'all') && (
+                <Button
+                  size='sm'
+                  variant='ghost'
+                  onClick={() => {
+                    setJobSearchTerm('');
+                    setJobResourceFilter('all');
+                    setJobUserFilter('all');
+                  }}
+                  className='h-7 text-xs text-muted-foreground hover:text-foreground'
+                >
+                  <Icons.close className='size-3 mr-1' /> Đặt lại
+                </Button>
+              )}
+            </div>
+
             <div className='space-y-2 text-xs'>
-              {serverJobs.length === 0 ? (
+              {filteredServerJobs.length === 0 ? (
                 <div className='py-6 text-center text-xs text-muted-foreground border border-dashed rounded-lg'>
-                  Không có tiến trình tính toán nào đang chạy trên máy chủ này.
+                  {serverJobs.length === 0
+                    ? 'Không có tiến trình tính toán nào đang chạy trên máy chủ này.'
+                    : 'Không tìm thấy tiến trình nào phù hợp với bộ lọc.'}
                 </div>
               ) : (
-                serverJobs.map((j) => (
+                filteredServerJobs.map((j) => (
                   <div
                     key={j.id}
-                    className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
+                    className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between hover:bg-muted/40 transition-colors'
                   >
                     <div>
                       <div className='flex items-center gap-2'>
                         <span className='font-mono font-bold'>PID {j.pid}</span>
-                        <Badge variant='default' className='text-[10px] font-mono'>
+                        <Badge
+                          variant={j.isGpu ? 'default' : 'outline'}
+                          className={`text-[10px] font-mono ${
+                            j.isGpu ? 'bg-indigo-600 hover:bg-indigo-700' : 'text-muted-foreground'
+                          }`}
+                        >
                           {j.gpuId || 'CPU Only'}
                         </Badge>
-                        <span className='text-muted-foreground'>@{j.username}</span>
+                        <span className='text-muted-foreground font-semibold'>@{j.username}</span>
+                        <span className='text-[11px] text-muted-foreground'>({j.fullName})</span>
                       </div>
-                      <div className='font-mono text-muted-foreground text-[11px] mt-1'>
+                      <div
+                        className='font-mono text-muted-foreground text-[11px] mt-1 truncate max-w-xl'
+                        title={j.cmdline || j.script}
+                      >
                         {j.script}
                       </div>
                     </div>
-                    <div className='text-right'>
-                      <span className='font-mono font-bold text-primary'>
+                    <div className='text-right shrink-0 ml-2'>
+                      <span className='font-mono font-bold text-primary block'>
                         {j.vramUsedMb > 0
                           ? `${(j.vramUsedMb / 1024).toFixed(1)} GB VRAM`
                           : `${j.cpuPercent}% CPU`}
                       </span>
-                      <div className='text-[10px] text-muted-foreground'>{j.elapsedTime}</div>
+                      <div className='text-[10px] text-muted-foreground font-mono'>
+                        {j.elapsedTime}
+                      </div>
                     </div>
                   </div>
                 ))

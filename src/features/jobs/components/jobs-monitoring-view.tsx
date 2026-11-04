@@ -63,36 +63,101 @@ export function JobsMonitoringView() {
   const jobs = useLabOpsStore((state) => state.jobs);
   const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
+  const syncError = useLabOpsStore((state) => state.syncError);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [resourceFilter, setResourceFilter] = useState<'all' | 'gpu' | 'cpu'>('all');
+  const [userFilter, setUserFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [serverFilter, setServerFilter] = useState<string>('all');
   const [selectedJob, setSelectedJob] = useState<ComputeJob | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [isAutoRefresh, setIsAutoRefresh] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     fetchLiveJobs();
+    if (!isAutoRefresh) return;
     const timer = setInterval(() => {
       fetchLiveJobs();
     }, 4000);
     return () => clearInterval(timer);
-  }, [fetchLiveJobs]);
+  }, [fetchLiveJobs, isAutoRefresh]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    await fetchLiveJobs();
+    setTimeout(() => setIsRefreshing(false), 400);
+  };
+
+  const handleResetFilters = () => {
+    setSearchTerm('');
+    setResourceFilter('all');
+    setUserFilter('all');
+    setStatusFilter('all');
+    setServerFilter('all');
+  };
+
+  const hasActiveFilters =
+    searchTerm.trim() !== '' ||
+    resourceFilter !== 'all' ||
+    userFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    serverFilter !== 'all';
+
+  // Distinct users and process counts
+  const userCounts = React.useMemo(() => {
+    const map: Record<string, { count: number; fullName?: string }> = {};
+    jobs.forEach((j) => {
+      if (j.username) {
+        if (!map[j.username]) {
+          map[j.username] = { count: 0, fullName: j.fullName };
+        }
+        map[j.username].count += 1;
+      }
+    });
+    return Object.entries(map).toSorted((a, b) => b[1].count - a[1].count);
+  }, [jobs]);
 
   const runningCount = jobs.filter((j) => j.status === 'RUNNING').length;
   const pendingCount = jobs.filter((j) => j.status === 'PENDING').length;
   const failedCount = jobs.filter((j) => j.status === 'FAILED').length;
   const completedCount = jobs.filter((j) => j.status === 'COMPLETED').length;
 
-  const filteredJobs = jobs.filter((j) => {
-    const matchesSearch =
-      j.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      j.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      j.script.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (j.gpuId ? j.gpuId.toLowerCase().includes(searchTerm.toLowerCase()) : false);
-    const matchesStatus = statusFilter === 'all' || j.status === statusFilter;
-    const matchesServer = serverFilter === 'all' || j.serverId === serverFilter;
-    return matchesSearch && matchesStatus && matchesServer;
-  });
+  const gpuJobsCount = jobs.filter((j) => j.isGpu || j.vramUsedMb > 0).length;
+  const cpuJobsCount = jobs.filter((j) => !j.isGpu && j.vramUsedMb <= 0).length;
+  const totalVramMb = jobs.reduce((acc, j) => acc + (j.vramUsedMb || 0), 0);
+
+  const filteredJobs = React.useMemo(() => {
+    return jobs.filter((j) => {
+      // 1. Text Search (PID, script, cmdline, username, fullName, gpuId)
+      if (searchTerm.trim()) {
+        const q = searchTerm.toLowerCase();
+        const matchPid = String(j.pid).includes(q);
+        const matchScript = j.script.toLowerCase().includes(q);
+        const matchCmd = j.cmdline ? j.cmdline.toLowerCase().includes(q) : false;
+        const matchUser =
+          j.username.toLowerCase().includes(q) || j.fullName.toLowerCase().includes(q);
+        const matchGpu = j.gpuId ? j.gpuId.toLowerCase().includes(q) : false;
+        if (!matchPid && !matchScript && !matchCmd && !matchUser && !matchGpu) return false;
+      }
+
+      // 2. Resource Filter (GPU vs CPU)
+      if (resourceFilter === 'gpu' && !j.isGpu && j.vramUsedMb <= 0) return false;
+      if (resourceFilter === 'cpu' && (j.isGpu || j.vramUsedMb > 0)) return false;
+
+      // 3. User Filter
+      if (userFilter !== 'all' && j.username !== userFilter) return false;
+
+      // 4. Server Filter
+      if (serverFilter !== 'all' && j.serverId !== serverFilter) return false;
+
+      // 5. Status Filter
+      if (statusFilter !== 'all' && j.status !== statusFilter) return false;
+
+      return true;
+    });
+  }, [jobs, searchTerm, resourceFilter, userFilter, serverFilter, statusFilter]);
 
   return (
     <div className='flex flex-col gap-4'>
@@ -104,82 +169,215 @@ export function JobsMonitoringView() {
             <Icons.job className='size-5' />
             {runningCount} tác vụ
           </div>
-          <span className='text-[10px] text-muted-foreground'>Chiếm dụng GPU & CPU</span>
+          <span className='text-[10px] text-muted-foreground'>Theo dõi tiến trình Linux host</span>
         </Card>
 
         <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Hàng đợi (Pending)</span>
-          <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400'>
-            {pendingCount} tác vụ
+          <span className='text-[11px] text-muted-foreground font-medium'>
+            ⚡ Tác vụ GPU (CUDA)
+          </span>
+          <div className='text-xl font-bold mt-0.5 text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'>
+            <Icons.gpu className='size-5' />
+            {gpuJobsCount} tác vụ
           </div>
-          <span className='text-[10px] text-muted-foreground'>Chờ giải phóng VRAM</span>
+          <span className='text-[10px] text-muted-foreground'>
+            Chiếm {(totalVramMb / 1024).toFixed(1)} GB VRAM
+          </span>
         </Card>
 
         <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Đã hoàn thành</span>
-          <div className='text-xl font-bold mt-0.5 text-foreground'>{completedCount} tác vụ</div>
-          <span className='text-[10px] text-muted-foreground'>Lưu checkpoint thành công</span>
-        </Card>
-
-        <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Gặp sự cố / Lỗi</span>
-          <div className='text-xl font-bold mt-0.5 text-rose-600 dark:text-rose-400'>
-            {failedCount} tác vụ
+          <span className='text-[11px] text-muted-foreground font-medium'>🖥️ Tác vụ CPU</span>
+          <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
+            <Icons.cpu className='size-5' />
+            {cpuJobsCount} tác vụ
           </div>
-          <span className='text-[10px] text-muted-foreground'>CUDA OOM hoặc lỗi script</span>
+          <span className='text-[10px] text-muted-foreground'>Tiến trình tính toán thuần CPU</span>
+        </Card>
+
+        <Card className='p-3 bg-card'>
+          <span className='text-[11px] text-muted-foreground font-medium'>
+            Người dùng đang chạy
+          </span>
+          <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
+            <Icons.user className='size-5' />
+            {userCounts.length} tài khoản
+          </div>
+          <span className='text-[10px] text-muted-foreground'>
+            {userCounts
+              .slice(0, 3)
+              .map(([u]) => `@${u}`)
+              .join(', ')}
+            {userCounts.length > 3 ? '...' : ''}
+          </span>
         </Card>
       </div>
 
-      {/* Filter and Search Bar */}
+      {/* Sync error alert */}
+      {syncError && (
+        <div className='p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2'>
+          <Icons.warning className='size-4 text-amber-500 shrink-0' />
+          <span>
+            <strong>Cảnh báo kết nối:</strong> {syncError}. Dữ liệu có thể chưa phản ánh tiến trình
+            mới nhất.
+          </span>
+        </div>
+      )}
+
+      {/* Quick Filter Pills & Polling Controls */}
+      <div className='flex flex-wrap items-center justify-between gap-2.5 p-2.5 rounded-lg border bg-card/60'>
+        {/* Quick Resource Pills */}
+        <div className='flex items-center gap-1.5 flex-wrap'>
+          <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Lọc nhanh:</span>
+          <Button
+            size='sm'
+            variant={resourceFilter === 'all' ? 'default' : 'outline'}
+            onClick={() => setResourceFilter('all')}
+            className='h-7 text-xs px-2.5 rounded-full'
+          >
+            Tất cả ({jobs.length})
+          </Button>
+
+          <Button
+            size='sm'
+            variant={resourceFilter === 'gpu' ? 'default' : 'outline'}
+            onClick={() => setResourceFilter('gpu')}
+            className={`h-7 text-xs px-2.5 rounded-full ${
+              resourceFilter === 'gpu'
+                ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
+            }`}
+          >
+            <Icons.gpu className='size-3 mr-1' />⚡ Chỉ GPU CUDA ({gpuJobsCount})
+          </Button>
+
+          <Button
+            size='sm'
+            variant={resourceFilter === 'cpu' ? 'default' : 'outline'}
+            onClick={() => setResourceFilter('cpu')}
+            className={`h-7 text-xs px-2.5 rounded-full ${
+              resourceFilter === 'cpu'
+                ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                : 'text-blue-600 dark:text-blue-400 border-blue-500/30 hover:bg-blue-500/10'
+            }`}
+          >
+            <Icons.cpu className='size-3 mr-1' />
+            🖥️ Chỉ CPU ({cpuJobsCount})
+          </Button>
+
+          {hasActiveFilters && (
+            <Button
+              size='sm'
+              variant='ghost'
+              onClick={handleResetFilters}
+              className='h-7 text-xs px-2 text-muted-foreground hover:text-foreground'
+            >
+              <Icons.close className='size-3 mr-1' /> Xóa bộ lọc
+            </Button>
+          )}
+        </div>
+
+        {/* Polling & Refresh Actions */}
+        <div className='flex items-center gap-2'>
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => setIsAutoRefresh(!isAutoRefresh)}
+            className='h-7 text-xs px-2 text-muted-foreground'
+            title={isAutoRefresh ? 'Tạm dừng tự động cập nhật' : 'Bật tự động cập nhật'}
+          >
+            {isAutoRefresh ? (
+              <>
+                <Icons.pause className='size-3 mr-1 text-amber-500' /> Tạm dừng
+              </>
+            ) : (
+              <>
+                <Icons.play className='size-3 mr-1 text-emerald-500' /> Tiếp tục
+              </>
+            )}
+          </Button>
+
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={handleManualRefresh}
+            disabled={isRefreshing}
+            className='h-7 text-xs gap-1.5'
+          >
+            <Icons.refresh className={`size-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Làm mới
+          </Button>
+
+          {lastSyncTime && (
+            <span className='text-[10px] text-muted-foreground flex items-center gap-1 font-mono'>
+              <span
+                className={`size-1.5 rounded-full ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`}
+              ></span>
+              {lastSyncTime}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Advanced Filter and Search Bar */}
       <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-lg border bg-card'>
         <div className='relative flex-1 max-w-md'>
           <Icons.search className='absolute left-2.5 top-2.5 size-4 text-muted-foreground' />
           <Input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder='Tìm kiếm theo lệnh, người dùng, GPU...'
+            placeholder='Tìm kiếm theo PID, lệnh thực thi, script, GPU, người dùng...'
             className='pl-8 h-9 text-xs'
           />
         </div>
 
         <div className='flex items-center gap-2 flex-wrap'>
+          {/* Lọc theo Tài nguyên */}
           <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            value={resourceFilter}
+            onChange={(e) => setResourceFilter(e.target.value as 'all' | 'gpu' | 'cpu')}
             className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
           >
-            <option value='all'>Tất cả trạng thái ({jobs.length})</option>
-            <option value='RUNNING'>Đang chạy ({runningCount})</option>
-            <option value='PENDING'>Hàng đợi ({pendingCount})</option>
-            <option value='FAILED'>Thất bại ({failedCount})</option>
-            <option value='COMPLETED'>Đã hoàn thành ({completedCount})</option>
+            <option value='all'>Tất cả tài nguyên ({jobs.length})</option>
+            <option value='gpu'>⚡ Chỉ GPU CUDA ({gpuJobsCount})</option>
+            <option value='cpu'>🖥️ Chỉ CPU ({cpuJobsCount})</option>
           </select>
 
+          {/* Lọc theo Người dùng */}
+          <select
+            value={userFilter}
+            onChange={(e) => setUserFilter(e.target.value)}
+            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
+          >
+            <option value='all'>Tất cả người dùng ({userCounts.length})</option>
+            {userCounts.map(([uname, info]) => (
+              <option key={uname} value={uname}>
+                @{uname} ({info.count} tác vụ)
+              </option>
+            ))}
+          </select>
+
+          {/* Lọc theo Máy chủ */}
           <select
             value={serverFilter}
             onChange={(e) => setServerFilter(e.target.value)}
             className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
           >
             <option value='all'>Tất cả máy chủ</option>
-            <option value='track'>Server Track (Hà Nội)</option>
-            <option value='workstation'>Server Workstation (TP.HCM)</option>
+            <option value='workstation'>Server 02 — Workstation (Online)</option>
+            <option value='track'>Server 01 — Track (Mất kết nối)</option>
           </select>
 
-          <Button
-            size='sm'
-            variant='outline'
-            onClick={() => fetchLiveJobs()}
-            className='h-9 text-xs gap-1.5'
+          {/* Lọc theo Trạng thái */}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
           >
-            <Icons.refresh className='size-3.5' /> Làm mới
-          </Button>
-
-          {lastSyncTime && (
-            <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
-              <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse'></span>
-              Cập nhật: {lastSyncTime}
-            </span>
-          )}
+            <option value='all'>Tất cả trạng thái</option>
+            <option value='RUNNING'>Đang chạy ({runningCount})</option>
+            <option value='PENDING'>Hàng đợi ({pendingCount})</option>
+            <option value='FAILED'>Thất bại ({failedCount})</option>
+            <option value='COMPLETED'>Đã hoàn thành ({completedCount})</option>
+          </select>
         </div>
       </div>
 

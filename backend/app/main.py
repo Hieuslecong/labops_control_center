@@ -209,7 +209,32 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/v1/ssh/endpoints":
             self._send_json(200, service.ssh_endpoints)
         elif path in ["/api/v1/jobs", "/api/v1/jobs/active"]:
-            self._send_json(200, service.jobs)
+            query_params = parse_qs(parsed.query)
+            resource = query_params.get("resource", [None])[0]
+            uname = query_params.get("username", [None])[0] or query_params.get("user", [None])[0]
+            srv_id = query_params.get("server_id", [None])[0] or query_params.get("server", [None])[0]
+            search_q = query_params.get("search", [None])[0]
+
+            filtered = service.jobs
+            if srv_id and srv_id != "all":
+                filtered = [j for j in filtered if j.get("serverId") == srv_id or j.get("server_id") == srv_id]
+            if uname and uname != "all":
+                filtered = [j for j in filtered if j.get("username") == uname]
+            if resource == "gpu":
+                filtered = [j for j in filtered if j.get("isGpu") or j.get("is_gpu") or (j.get("vramUsedMb") or 0) > 0]
+            elif resource == "cpu":
+                filtered = [j for j in filtered if not (j.get("isGpu") or j.get("is_gpu")) and (j.get("vramUsedMb") or 0) <= 0]
+            if search_q:
+                q = search_q.lower()
+                filtered = [
+                    j for j in filtered
+                    if q in str(j.get("pid", "")).lower()
+                    or q in str(j.get("script", "")).lower()
+                    or q in str(j.get("cmdline", "")).lower()
+                    or q in str(j.get("username", "")).lower()
+                    or q in str(j.get("gpuId", "")).lower()
+                ]
+            self._send_json(200, filtered)
         elif path.startswith("/api/v1/workspaces/") and path.endswith("/processes"):
             ws_id = path.split("/")[4]
             self._send_json(200, service.get_workspace_processes(ws_id))

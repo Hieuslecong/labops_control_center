@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { SettingsView } from '@/features/settings/components/settings-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Cấu hình kết nối Incus daemon, Netdata, NVIDIA NVML và chế độ vận hành'
 };
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Cài đặt & Tích hợp Hạ tầng'

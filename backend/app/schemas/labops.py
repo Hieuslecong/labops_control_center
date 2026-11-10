@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 class BaseSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
@@ -8,6 +8,7 @@ class ServerSummary(BaseSchema):
     total: int
     online: int
     offline: int
+    unknown: Optional[int] = None
 
 class GpuSummary(BaseSchema):
     total_count: int = Field(alias="totalCount")
@@ -27,14 +28,14 @@ class JobSummary(BaseSchema):
     failed: int
 
 class GpuHoursSummary(BaseSchema):
-    today: float
-    last_7_days: float = Field(alias="last7Days")
-    previous_period_change_percent: float = Field(alias="previousPeriodChangePercent")
+    today: Optional[float] = None
+    last_7_days: Optional[float] = Field(default=None, alias="last7Days")
+    previous_period_change_percent: Optional[float] = Field(default=None, alias="previousPeriodChangePercent")
 
 class AlertSummary(BaseSchema):
-    critical: int
-    warnings: int
-    unresolved_incidents: int = Field(alias="unresolvedIncidents")
+    critical: Optional[int] = None
+    warnings: Optional[int] = None
+    unresolved_incidents: Optional[int] = Field(default=None, alias="unresolvedIncidents")
 
 class DashboardSummaryResponse(BaseSchema):
     servers: ServerSummary
@@ -104,18 +105,18 @@ class PhysicalGpuResponse(BaseSchema):
 class GpuAllocateRequest(BaseSchema):
     gpu_id: str = Field(alias="gpuId")
     username: str
-    mode: str = "SHARED"
+    mode: str = "FULL_GPU_EXCLUSIVE"
     requested_vram_gb: int = Field(alias="requestedVramGb")
     job_name: str = Field(alias="jobName")
 
 class PrivilegeValidationResponse(BaseSchema):
-    unprivileged_container: bool = Field(True, alias="unprivilegedContainer")
-    sudo_test_failed_as_expected: bool = Field(True, alias="sudoTestFailedAsExpected")
-    no_sudo_group_membership: bool = Field(True, alias="noSudoGroupMembership")
-    no_docker_socket_access: bool = Field(True, alias="noDockerSocketAccess")
-    no_incus_socket_access: bool = Field(True, alias="noIncusSocketAccess")
+    unprivileged_container: bool = Field(False, alias="unprivilegedContainer")
+    sudo_test_failed_as_expected: bool = Field(False, alias="sudoTestFailedAsExpected")
+    no_sudo_group_membership: bool = Field(False, alias="noSudoGroupMembership")
+    no_docker_socket_access: bool = Field(False, alias="noDockerSocketAccess")
+    no_incus_socket_access: bool = Field(False, alias="noIncusSocketAccess")
     verification_timestamp: str = Field(alias="verificationTimestamp")
-    status: str = "VERIFIED_SAFE"
+    status: str = "NOT_VERIFIED"
 
 class StoragePoolResponse(BaseSchema):
     id: str
@@ -225,31 +226,63 @@ class SshDualAuthVerificationResponse(BaseSchema):
     status: str = Field("DUAL_AUTH_ENFORCED_VERIFIED", alias="status")
     effective_config_summary: str = Field(alias="effectiveConfigSummary")
 
+class WireGuardDeviceSchema(BaseSchema):
+    device_id: str = Field(alias="deviceId")
+    name: str
+    public_key: str = Field(alias="publicKey")
+    client_ip: str = Field(alias="clientIp")
+    server_id: str = Field(alias="serverId")
+    server_public_key: str = Field(alias="serverPublicKey")
+    server_endpoint: str = Field(alias="serverEndpoint")
+    allowed_subnets: str = Field(alias="allowedSubnets")
+    status: str
+    created_at: Optional[int] = Field(None, alias="createdAt")
+    last_handshake: Optional[int] = Field(None, alias="lastHandshake")
+
+
+class WireGuardProfileSchema(BaseSchema):
+    vpn_ip: Optional[str] = Field(None, alias="vpnIp")
+    client_ip: Optional[str] = Field(None, alias="clientIp")
+    public_key: Optional[str] = Field(None, alias="publicKey")
+    server_public_key: Optional[str] = Field(None, alias="serverPublicKey")
+    server_endpoint: Optional[str] = Field(None, alias="serverEndpoint")
+    allowed_subnets: Optional[str] = Field(None, alias="allowedSubnets")
+    status: str = "NOT_CONFIGURED"
+    last_handshake: Optional[str] = Field(None, alias="lastHandshake")
+    transfer_rx_bytes: Optional[int] = Field(0, alias="transferRxBytes")
+    transfer_tx_bytes: Optional[int] = Field(0, alias="transferTxBytes")
+    devices: List[WireGuardDeviceSchema] = Field(default_factory=list)
+
+
+class WireGuardDeviceCreateRequest(BaseSchema):
+    name: str
+    public_key: str = Field(alias="publicKey")
+
+class WireGuardRegenerateRequest(BaseSchema):
+    public_key: Optional[str] = Field(None, alias="publicKey")
+
 class MemberCreateRequest(BaseSchema):
-    full_name: str = Field(alias="fullName")
-    username: str
-    email: str
-    role: str = "RESEARCHER"
-    research_group: Optional[str] = Field("AI Research Lab", alias="researchGroup")
-    assigned_server: str = Field(alias="assignedServer")
-    workspace_name: str = Field(alias="workspaceName")
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, extra="forbid")
+
+    full_name: str = Field(alias="fullName", min_length=1, max_length=120)
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[a-z_][a-z0-9_-]{2,31}$")
+    email: str = Field(min_length=6, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    role: Literal["RESEARCHER", "ADMIN"] = "RESEARCHER"
+    research_group: Optional[str] = Field("AI Research Lab", alias="researchGroup", max_length=120)
+    assigned_server: Literal["track", "workstation"] = Field(alias="assignedServer")
+    workspace_name: str = Field(alias="workspaceName", min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_-]{2,63}$")
     storage_pool_id: Optional[str] = Field(None, alias="storagePoolId")
-    mount_path: str = Field("/workspace", alias="mountPath")
-    storage_quota_gb: int = Field(250, alias="storageQuotaGb")
-    backup_policy: str = Field("DAILY_SNAPSHOT", alias="backupPolicy")
-    shared_datasets: List[str] = Field(["/shared/datasets"], alias="sharedDatasets")
-    cpu_limit_cores: int = Field(8, alias="cpuLimitCores")
-    ram_limit_gb: int = Field(32, alias="ramLimitGb")
-    gpu_permissions: List[str] = Field([], alias="gpuPermissions")
-    vram_policy: str = Field("Quota 12GB (Shared)", alias="vramPolicy")
-    vram_quota_gb: Optional[int] = Field(12, alias="vramQuotaGb")
-    gpu_allocation_mode: str = Field("SHARED", alias="gpuAllocationMode")
-    ssh_port: Optional[int] = Field(None, alias="sshPort")
-    ssh_enrollment_type: str = Field("BROWSER_GENERATED", alias="sshEnrollmentType")
-    ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
-    initial_password: Optional[str] = Field(None, alias="initialPassword")
-    require_password_change: bool = Field(True, alias="requirePasswordChange")
-    expires_at: Optional[str] = Field(None, alias="expiresAt")
+    mount_path: str = Field("/workspace", alias="mountPath", max_length=128)
+    storage_quota_gb: int = Field(250, alias="storageQuotaGb", ge=1, le=1000000)
+    backup_policy: Literal["DAILY_SNAPSHOT", "WEEKLY_SYNC", "NONE"] = Field("DAILY_SNAPSHOT", alias="backupPolicy")
+    shared_datasets: List[str] = Field(default_factory=lambda: ["/shared/datasets"], alias="sharedDatasets", max_length=32)
+    cpu_limit_cores: int = Field(8, alias="cpuLimitCores", ge=1, le=512)
+    ram_limit_gb: int = Field(32, alias="ramLimitGb", ge=1, le=4096)
+    gpu_permissions: List[str] = Field(default_factory=list, alias="gpuPermissions", max_length=16)
+    vram_policy: str = Field("Quota 12GB (Shared)", alias="vramPolicy", max_length=64)
+    vram_quota_gb: Optional[int] = Field(12, alias="vramQuotaGb", ge=0, le=256)
+    gpu_allocation_mode: Literal["SHARED", "EXCLUSIVE", "MIG"] = Field("SHARED", alias="gpuAllocationMode")
+    expires_at: Optional[str] = Field(None, alias="expiresAt", pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 class MemberResponse(BaseSchema):
     id: str
@@ -261,6 +294,9 @@ class MemberResponse(BaseSchema):
     assigned_server: str = Field(alias="assignedServer")
     workspace_name: str = Field(alias="workspaceName")
     status: str
+    provisioning_state: str = Field("PENDING", alias="provisioningState")
+    workspace_status: str = Field("NOT_VERIFIED", alias="workspaceStatus")
+    teleport_status: str = Field("NOT_CONFIGURED", alias="teleportStatus")
     storage_pool_id: Optional[str] = Field(None, alias="storagePoolId")
     storage_pool_label: Optional[str] = Field(None, alias="storagePoolLabel")
     mount_path: str = Field("/workspace", alias="mountPath")
@@ -295,6 +331,7 @@ class MemberResponse(BaseSchema):
     total_gpu_hours: float = Field(alias="totalGpuHours")
     created_at: str = Field(alias="createdAt")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
+    wireguard: Optional[WireGuardProfileSchema] = None
 
 class JobResponse(BaseSchema):
     id: str

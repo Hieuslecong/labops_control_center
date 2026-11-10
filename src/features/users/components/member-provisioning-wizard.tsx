@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import { useState } from 'react';
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
-  DialogTitle,
   DialogDescription,
-  DialogFooter
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,1518 +16,199 @@ import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
-import { MemberRole, ServerId, GpuAllocationMode } from '@/types/labops';
+import { GpuAllocationMode, MemberRole, ServerId } from '@/types/labops';
 import { toast } from 'sonner';
-import { copyToClipboard } from '@/lib/clipboard';
 
 interface MemberProvisioningWizardProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-const RESERVED_USERNAMES = [
-  'root',
-  'bin',
-  'daemon',
-  'sys',
-  'adm',
-  'sync',
-  'games',
-  'man',
-  'lp',
-  'mail',
-  'news',
-  'uucp',
-  'proxy',
-  'www-data',
-  'backup',
-  'list',
-  'irc',
-  'gnats',
-  'nobody',
-  'systemd',
-  'sshd',
-  'incus',
-  'docker',
-  'sudo',
-  'wheel',
-  'admin',
-  'operator'
-];
+const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
-function validateUsername(val: string): { valid: boolean; error?: string } {
-  if (!val) return { valid: false, error: 'Tên người dùng không được để trống' };
-  if (val.length < 3) return { valid: false, error: 'Tên người dùng phải có ít nhất 3 ký tự' };
-  if (val.length > 32) return { valid: false, error: 'Tên người dùng không vượt quá 32 ký tự' };
-  if (!/^[a-z_][a-z0-9_-]*$/.test(val)) {
-    return {
-      valid: false,
-      error: 'Phải bắt đầu bằng chữ cái thường hoặc gạch dưới, chỉ chứa a-z, 0-9, _, -'
-    };
-  }
-  if (RESERVED_USERNAMES.includes(val.toLowerCase())) {
-    return { valid: false, error: `Tên người dùng "${val}" là tên hệ thống đã được bảo lưu` };
-  }
-  return { valid: true };
+function validUsername(value: string) {
+  return /^[a-z_][a-z0-9_-]{2,31}$/.test(value) &&
+    !['root', 'admin', 'sshd', 'docker', 'incus', 'sudo', 'wheel'].includes(value);
 }
 
 export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvisioningWizardProps) {
   const servers = useLabOpsStore((state) => state.servers);
   const storagePools = useLabOpsStore((state) => state.storagePools);
-  const sshEndpoints = useLabOpsStore((state) => state.sshEndpoints);
-  const addMember = useLabOpsStore((state) => state.addMember);
-
+  const gpus = useLabOpsStore((state) => state.gpus);
   const [step, setStep] = useState(1);
-
-  // Step 1: Member Info
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<MemberRole>('RESEARCHER');
-  const [researchGroup, setResearchGroup] = useState('NLP & Large Language Models');
+  const [researchGroup, setResearchGroup] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
-
-  // Step 2: Physical Host
-  const [selectedServerId, setSelectedServerId] = useState<ServerId>('track');
-
-  // Step 3: Storage & Directory
-  const [selectedPoolId, setSelectedPoolId] = useState<string>('pool-nvme-fast');
-  const [mountPath, setMountPath] = useState<string>('/workspace');
-  const [storageQuotaGb, setStorageQuotaGb] = useState<number>(250);
-  const [sharedDatasets, setSharedDatasets] = useState<string[]>(['/shared/datasets']);
-  const [backupPolicy, setBackupPolicy] = useState<'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE'>(
-    'DAILY_SNAPSHOT'
-  );
-
-  // Step 4: Hardware Quotas
-  const [cpuLimit, setCpuLimit] = useState<number>(8);
-  const [ramLimit, setRamLimit] = useState<number>(32);
-  const [selectedGpu, setSelectedGpu] = useState<string>('TRACK-GPU-01');
+  const [serverId, setServerId] = useState<ServerId>('workstation');
+  const [storagePoolId, setStoragePoolId] = useState('');
+  const [workspaceName, setWorkspaceName] = useState('');
+  const [mountPath, setMountPath] = useState('/workspace');
+  const [storageQuotaGb, setStorageQuotaGb] = useState(100);
+  const [backupPolicy, setBackupPolicy] = useState<'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE'>('DAILY_SNAPSHOT');
+  const [cpuLimitCores, setCpuLimitCores] = useState(4);
+  const [ramLimitGb, setRamLimitGb] = useState(16);
+  const [selectedGpu, setSelectedGpu] = useState('NONE');
   const [gpuAllocationMode, setGpuAllocationMode] = useState<GpuAllocationMode>('SHARED');
-  const [vramQuotaGb, setVramQuotaGb] = useState<number>(12);
+  const [vramQuotaGb, setVramQuotaGb] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [created, setCreated] = useState<{ username: string; status: string; provisioningState: string } | null>(null);
 
-  // Step 5: Network & SSH Port
-  const [portMode, setPortMode] = useState<'auto' | 'manual'>('auto');
-  const [customPort, setCustomPort] = useState<number>(22006);
+  const usernameIsValid = validUsername(username);
+  const assignedPools = storagePools.filter((pool) => pool.serverId === serverId);
+  const assignedGpus = gpus.filter((gpu) => gpu.serverId === serverId);
 
-  // Step 6: SSH Dual-Auth (Password & Key Enrollment)
-  const [enrollmentMode, setEnrollmentMode] = useState<'generate' | 'import' | 'pending'>(
-    'generate'
-  );
-  const [importedPublicKey, setImportedPublicKey] = useState('');
-  const [generatedPrivateKey, setGeneratedPrivateKey] = useState<string>('');
-  const [generatedPublicKey, setGeneratedPublicKey] = useState<string>('');
-  const [keyDownloaded, setKeyDownloaded] = useState<boolean>(false);
-  const [initialPassword, setInitialPassword] = useState<string>('');
-  const [showPassword, setShowPassword] = useState<boolean>(false);
-  const [requirePasswordChange, setRequirePasswordChange] = useState<boolean>(true);
-
-  // Step 7: Atomic Provisioning execution
-  const [execStep, setExecStep] = useState<number>(0);
-  const [execStatusText, setExecStatusText] = useState<string>('');
-  const [isProvisionDone, setIsProvisionDone] = useState<boolean>(false);
-  const [correlationId, setCorrelationId] = useState<string>('');
-
-  // Derived server and pools
-  const currentServer = useMemo(
-    () => servers.find((s) => s.id === selectedServerId) || servers[0],
-    [servers, selectedServerId]
-  );
-
-  const availablePools = useMemo(
-    () => storagePools.filter((p) => p.serverId === selectedServerId),
-    [storagePools, selectedServerId]
-  );
-
-  const currentPool = useMemo(
-    () =>
-      availablePools.find((p) => p.id === selectedPoolId) || availablePools[0] || storagePools[0],
-    [availablePools, selectedPoolId, storagePools]
-  );
-
-  // Calculate next auto port for selected server
-  const nextAutoPort = useMemo(() => {
-    const usedPorts = new Set(
-      sshEndpoints.filter((ep) => ep.serverId === selectedServerId).map((ep) => ep.listenPort)
-    );
-    for (let p = 22001; p <= 29999; p++) {
-      if (!usedPorts.has(p)) return p;
+  const createAccessRequest = async () => {
+    if (DEMO_MODE) {
+      toast.error('User Management đang ở DEMO; không gửi yêu cầu cấp quyền giả.');
+      return;
     }
-    return 22001;
-  }, [sshEndpoints, selectedServerId]);
-
-  const allocatedPort = portMode === 'auto' ? nextAutoPort : customPort;
-
-  const handleSelectServer = (srvId: ServerId) => {
-    setSelectedServerId(srvId);
-    const pools = storagePools.filter((p) => p.serverId === srvId);
-    if (pools.length > 0) setSelectedPoolId(pools[0].id);
-    setSelectedGpu(srvId === 'track' ? 'TRACK-GPU-01' : 'WS-GPU-01');
-  };
-
-  // Username validation check
-  const usernameValidation = useMemo(() => validateUsername(username), [username]);
-
-  // Generate Ed25519 keypair mock/client-side
-  const handleGenerateKeypair = () => {
-    const randomHex = Array.from({ length: 32 }, () =>
-      Math.floor(Math.random() * 16).toString(16)
-    ).join('');
-    const pubKey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${btoa(randomHex).substring(0, 43)} ${username || 'user'}@labops-client`;
-    const privKey = `-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACD${btoa(randomHex).substring(0, 43)}==\n-----END OPENSSH PRIVATE KEY-----`;
-    setGeneratedPublicKey(pubKey);
-    setGeneratedPrivateKey(privKey);
-    setKeyDownloaded(false);
-  };
-
-  // Generate secure initial password for member container Linux account (min 12 chars)
-  const handleGeneratePassword = () => {
-    const lower = 'abcdefghjkmnpqrstuvwxyz';
-    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-    const digits = '23456789';
-    const syms = '!@#$%^&*_-+=';
-    const all = lower + upper + digits + syms;
-    let pwd = '';
-    pwd += lower[Math.floor(Math.random() * lower.length)];
-    pwd += upper[Math.floor(Math.random() * upper.length)];
-    pwd += digits[Math.floor(Math.random() * digits.length)];
-    pwd += syms[Math.floor(Math.random() * syms.length)];
-    for (let i = 4; i < 16; i++) {
-      pwd += all[Math.floor(Math.random() * all.length)];
-    }
-    const shuffled = pwd
-      .split('')
-      .toSorted(() => 0.5 - Math.random())
-      .join('');
-    setInitialPassword(shuffled);
-  };
-
-  const handleDownloadPrivateKey = () => {
-    if (!generatedPrivateKey) return;
-    const blob = new Blob([generatedPrivateKey], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `id_ed25519_${username || 'labops'}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setKeyDownloaded(true);
-    toast.success('Đã tải xuống khóa bí mật (id_ed25519)', {
-      description: 'Vui lòng bảo quản an toàn và phân quyền: chmod 600 id_ed25519'
-    });
-  };
-
-  // Handle execution of multi-step atomic provisioning
-  const handleStartProvision = () => {
-    setStep(7);
-    setIsProvisionDone(false);
-    const corrId = `corr-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}`;
-    setCorrelationId(corrId);
-
-    // Ensure password exists before running provision
-    if (!initialPassword || initialPassword.length < 12) {
-      handleGeneratePassword();
-    }
-
-    const steps = [
-      { text: '1/12: Xác thực quyền quản trị & kiểm tra tính hợp lệ tài khoản...', pct: 8 },
-      {
-        text: `2/12: Kiểm tra storage pool & gán cổng SSH duy nhất (${currentServer?.vpnIp}:${allocatedPort})...`,
-        pct: 16
-      },
-      {
-        text: `3/12: Khởi tạo unprivileged container Incus (ws-${username}, security.idmap.isolated=true)...`,
-        pct: 25
-      },
-      {
-        text: `4/12: Cấu hình giới hạn cgroups CPU (${cpuLimit} cores) và RAM (${ramLimit}GB)...`,
-        pct: 33
-      },
-      {
-        text: `5/12: Tạo ZFS dataset lưu trữ riêng biệt (data-${username}, quota ${storageQuotaGb}GB)...`,
-        pct: 42
-      },
-      { text: `6/12: Gắn kết (mount) volume ZFS vào ${mountPath} bên trong container...`, pct: 50 },
-      {
-        text: '7/12: Tạo tài khoản Linux unprivileged (Standard User, không quyền sudo hoặc wheel)...',
-        pct: 58
-      },
-      {
-        text: '8/12: Thiết lập mật khẩu Linux PAM an toàn (Băm mã hóa shadow hash, min 12 ký tự)...',
-        pct: 67
-      },
-      {
-        text: '9/12: Cấu hình OpenSSH bắt buộc Dual-Auth (AuthenticationMethods publickey,password)...',
-        pct: 75
-      },
-      {
-        text: `10/12: Kích hoạt Incus proxy device ánh xạ cổng VPN ${currentServer?.vpnIp}:${allocatedPort} -> 22...`,
-        pct: 83
-      },
-      {
-        text: '11/12: Kiểm định ma trận Dual-Auth (Chỉ Key: TỪ CHỐI; Chỉ Pass: TỪ CHỐI; Key+Pass: HỢP LỆ)...',
-        pct: 92
-      },
-      {
-        text: '12/12: Kiểm tra cách ly an ninh (Sudo bị từ chối tuyệt đối: ĐẠT CHUẨN AN TOÀN)!',
-        pct: 100
-      }
-    ];
-
-    let currentIdx = 0;
-    const interval = setInterval(() => {
-      if (currentIdx < steps.length) {
-        setExecStep(steps[currentIdx].pct);
-        setExecStatusText(steps[currentIdx].text);
-        currentIdx++;
-      } else {
-        clearInterval(interval);
-        setIsProvisionDone(true);
-
-        const pubKey =
-          enrollmentMode === 'generate'
-            ? generatedPublicKey
-            : enrollmentMode === 'import'
-              ? importedPublicKey
-              : '';
-
-        const keyStatus = enrollmentMode === 'pending' ? 'PENDING_KEY_ENROLLMENT' : 'ACTIVE';
-        const fingerprint = pubKey
-          ? `SHA256:${btoa(pubKey).substring(0, 32)}`
-          : 'CHƯA_ĐĂNG_KÝ_KHÓA';
-
-        // Add to Zustand Store
-        addMember({
+    setSubmitting(true);
+    try {
+      const response = await fetch('/api/access/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           fullName,
           username,
           email,
           role,
           researchGroup,
-          assignedServer: selectedServerId,
-          workspaceName: `ws-${username}`,
-          status: keyStatus === 'ACTIVE' ? 'ACTIVE' : 'PENDING_KEY_ENROLLMENT',
-          storagePoolId: currentPool.id,
-          storagePoolLabel: currentPool.label,
+          assignedServer: serverId,
+          storagePoolId: storagePoolId || null,
+          workspaceName: workspaceName || `ws-${username}`,
           mountPath,
           storageQuotaGb,
-          storageUsedGb: 0,
           backupPolicy,
-          sharedDatasets,
-          sshStatus: 'OFFLINE',
-          sshSessionsCount: 0,
-          sshIp: currentServer?.vpnIp || '10.200.0.1',
-          sshPort: allocatedPort,
-          sshKeyStatus: keyStatus,
-          sshFingerprint: fingerprint,
-          sshPublicKeyPreview: pubKey ? pubKey.slice(0, 32) + '...' : '(Đang chờ nạp khóa)',
-          sshPublicKey: pubKey,
-          sshAuthMode: 'PUBLIC_KEY_AND_PASSWORD',
-          passwordStatus: requirePasswordChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
-          failedLoginAttempts: 0,
-          sudoPrivilege: 'DENIED',
-          securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED',
-          privilegeValidation: {
-            unprivilegedContainer: true,
-            sudoTestFailedAsExpected: true,
-            noSudoGroupMembership: true,
-            noDockerSocketAccess: true,
-            noIncusSocketAccess: true,
-            verificationTimestamp: new Date().toISOString(),
-            status: 'VERIFIED_SAFE'
-          },
-          cpuLimitCores: cpuLimit,
-          ramLimitGb: ramLimit,
-          gpuPermissions: selectedGpu !== 'NONE' ? [selectedGpu] : [],
-          vramPolicy: selectedGpu !== 'NONE' ? `${gpuAllocationMode} ${vramQuotaGb}GB` : 'Chỉ CPU',
-          vramQuotaGb: selectedGpu !== 'NONE' ? vramQuotaGb : 0,
+          cpuLimitCores,
+          ramLimitGb,
+          gpuPermissions: selectedGpu === 'NONE' ? [] : [selectedGpu],
+          vramQuotaGb,
           gpuAllocationMode,
-          maxRuntimeHours: 48,
-          expiresAt: expiresAt || undefined
-        });
-
-        toast.success(`Khởi tạo thành công workspace cho @${username}`, {
-          description: `Container ws-${username} sẵn sàng trên ${currentServer?.name}, Port SSH ${allocatedPort}`
-        });
+          expiresAt: expiresAt || null
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.detail || `Backend returned ${response.status}`);
       }
-    }, 280);
+      setCreated({
+        username: result.username,
+        status: result.status,
+        provisioningState: result.provisioningState
+      });
+      setStep(5);
+      await useLabOpsStore.getState().fetchAccessMembers();
+      toast.success('Đã ghi nhận yêu cầu; tài khoản vẫn đang chờ xác minh.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Không thể tạo yêu cầu truy cập.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const resetForm = () => {
-    setStep(1);
-    setFullName('');
-    setUsername('');
-    setEmail('');
-    setRole('RESEARCHER');
-    setResearchGroup('NLP & Large Language Models');
-    setExpiresAt('');
-    setSelectedServerId('track');
-    setMountPath('/workspace');
-    setStorageQuotaGb(250);
-    setCpuLimit(8);
-    setRamLimit(32);
-    setPortMode('auto');
-    setEnrollmentMode('generate');
-    setGeneratedPublicKey('');
-    setGeneratedPrivateKey('');
-    setImportedPublicKey('');
-    setKeyDownloaded(false);
-    setIsProvisionDone(false);
-  };
+
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(val) => {
-        onOpenChange(val);
-        if (!val) resetForm();
-      }}
-    >
-      <DialogContent className='sm:max-w-[700px] max-h-[92vh] overflow-y-auto'>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className='sm:max-w-2xl max-h-[90vh] overflow-y-auto'>
         <DialogHeader>
-          <div className='flex items-center gap-2'>
-            <div className='flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary'>
-              <Icons.teams className='size-5' />
-            </div>
+          <div className='flex items-center justify-between gap-3'>
             <div>
-              <DialogTitle className='text-base font-bold'>
-                Thêm Thành viên & Khởi tạo Môi trường Nghiên cứu
-              </DialogTitle>
-              <DialogDescription className='text-xs'>
-                Khởi tạo unprivileged container Incus, phân vùng ổ đĩa ZFS riêng biệt và cấp quyền
-                SSH bảo mật
-              </DialogDescription>
+              <DialogTitle>Cấp quyền truy cập LabOps</DialogTitle>
+              <DialogDescription>Yêu cầu được ghi nhận trước; chỉ xác minh dịch vụ thật mới kích hoạt quyền.</DialogDescription>
             </div>
-          </div>
-
-          {/* Stepper progress indicator */}
-          <div className='flex items-center justify-between pt-3 pb-1 border-b text-[11px] font-medium overflow-x-auto gap-1'>
-            {[
-              '1. Thông tin',
-              '2. Máy chủ',
-              '3. Ổ đĩa ZFS',
-              '4. Tài nguyên',
-              '5. Mạng & SSH',
-              '6. Khóa & Mật khẩu',
-              '7. Khởi tạo'
-            ].map((title, idx) => {
-              const num = idx + 1;
-              const isActive = step === num;
-              const isPassed = step > num;
-              return (
-                <div key={title} className='flex items-center gap-1 shrink-0'>
-                  <span
-                    className={`size-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                      isActive
-                        ? 'bg-primary text-primary-foreground'
-                        : isPassed
-                          ? 'bg-emerald-500 text-white'
-                          : 'bg-muted text-muted-foreground'
-                    }`}
-                  >
-                    {isPassed ? '✓' : num}
-                  </span>
-                  <span
-                    className={
-                      isActive
-                        ? 'text-foreground font-semibold'
-                        : isPassed
-                          ? 'text-muted-foreground'
-                          : 'text-muted-foreground/60'
-                    }
-                  >
-                    {title}
-                  </span>
-                </div>
-              );
-            })}
+            <Badge variant={DEMO_MODE ? 'secondary' : 'outline'}>{DEMO_MODE ? 'DEMO' : `${step}/5`}</Badge>
           </div>
         </DialogHeader>
 
-        {/* STEP 1: THÔNG TIN THÀNH VIÊN */}
+        {DEMO_MODE && (
+          <Card className='border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-900 dark:text-amber-200'>
+            DEMO mode: không tạo user thật và không hiển thị trạng thái WireGuard/SSH giả.
+          </Card>
+        )}
+
         {step === 1 && (
-          <div className='grid gap-3 py-2 text-xs'>
-            <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Họ và tên thành viên *</Label>
-                <Input
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  placeholder='ví dụ: Nguyễn Hoàng Long'
-                  className='h-8 text-xs'
-                  required
-                />
-              </div>
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Tên đăng nhập (Linux Username) *</Label>
-                <Input
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value.toLowerCase().trim())}
-                  placeholder='ví dụ: longnh'
-                  className={`h-8 text-xs font-mono ${
-                    username && !usernameValidation.valid
-                      ? 'border-destructive focus-visible:ring-destructive'
-                      : ''
-                  }`}
-                  required
-                />
-                {username && !usernameValidation.valid && (
-                  <span className='text-[10px] text-destructive block'>
-                    {usernameValidation.error}
-                  </span>
-                )}
-              </div>
+          <div className='grid gap-4'>
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <div className='space-y-1.5'><Label htmlFor='access-full-name'>Tên hiển thị</Label><Input id='access-full-name' value={fullName} onChange={(event) => setFullName(event.target.value)} /></div>
+              <div className='space-y-1.5'><Label htmlFor='access-username'>Username</Label><Input id='access-username' autoCapitalize='none' value={username} onChange={(event) => { const value = event.target.value.toLowerCase(); setUsername(value); if (!workspaceName || workspaceName === `ws-${username}`) setWorkspaceName(`ws-${value}`); }} />{username && !usernameIsValid && <p className='text-xs text-destructive'>Dùng 3–32 ký tự a-z, 0-9, _ hoặc -, không dùng tên hệ thống.</p>}</div>
             </div>
-
-            <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Địa chỉ Email *</Label>
-                <Input
-                  type='email'
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder='longnh@labops.local'
-                  className='h-8 text-xs'
-                  required
-                />
-              </div>
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Dự án / Nhóm nghiên cứu</Label>
-                <Input
-                  value={researchGroup}
-                  onChange={(e) => setResearchGroup(e.target.value)}
-                  placeholder='ví dụ: NLP & Large Language Models'
-                  className='h-8 text-xs'
-                />
-              </div>
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <div className='space-y-1.5'><Label htmlFor='access-email'>Email nhận lời mời</Label><Input id='access-email' type='email' value={email} onChange={(event) => setEmail(event.target.value)} /></div>
+              <div className='space-y-1.5'><Label htmlFor='access-group'>Nhóm nghiên cứu</Label><Input id='access-group' value={researchGroup} onChange={(event) => setResearchGroup(event.target.value)} /></div>
             </div>
-
-            <div className='space-y-1'>
-              <Label className='text-xs font-semibold'>Vai trò trong Phòng Lab</Label>
-              <div className='grid grid-cols-3 sm:grid-cols-5 gap-1.5'>
-                {(
-                  ['RESEARCHER', 'STUDENT', 'GUEST', 'LAB_MANAGER', 'SUPER_ADMIN'] as MemberRole[]
-                ).map((r) => (
-                  <button
-                    key={r}
-                    type='button'
-                    onClick={() => setRole(r)}
-                    className={`py-1.5 px-2 rounded-md border text-center text-xs transition-colors ${
-                      role === r
-                        ? 'border-primary bg-primary/10 font-bold text-foreground ring-1 ring-primary'
-                        : 'border-border bg-card hover:bg-muted/30 text-muted-foreground'
-                    }`}
-                  >
-                    {r === 'RESEARCHER'
-                      ? 'Nghiên cứu viên'
-                      : r === 'STUDENT'
-                        ? 'Sinh viên'
-                        : r === 'GUEST'
-                          ? 'Khách mời'
-                          : r === 'LAB_MANAGER'
-                            ? 'Quản lý Lab'
-                            : 'Super Admin'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className='space-y-1'>
-              <Label className='text-xs font-semibold'>
-                Ngày hết hạn quyền truy cập (Tùy chọn)
-              </Label>
-              <Input
-                type='date'
-                value={expiresAt}
-                onChange={(e) => setExpiresAt(e.target.value)}
-                className='h-8 text-xs'
-              />
-            </div>
-
-            {/* MANDATORY SECURITY POLICY CARD: UNPRIVILEGED / NO SUDO */}
-            <Card className='border-amber-500/30 bg-amber-500/5 p-3 rounded-lg'>
-              <div className='flex items-start gap-2.5'>
-                <Icons.shield className='size-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5' />
-                <div className='space-y-1'>
-                  <div className='flex items-center gap-2'>
-                    <span className='font-bold text-xs text-amber-900 dark:text-amber-200'>
-                      Chính sách Phân quyền Hệ thống (System Privilege Policy)
-                    </span>
-                    <Badge
-                      variant='outline'
-                      className='bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30 text-[10px]'
-                    >
-                      Standard User (Không sudo)
-                    </Badge>
-                  </div>
-                  <ul className='text-[11px] text-muted-foreground space-y-0.5 list-disc pl-3.5'>
-                    <li>
-                      <strong>Truy cập SSH:</strong> Được cấp phép kết nối qua mạng riêng ảo
-                      WireGuard VPN.
-                    </li>
-                    <li>
-                      <strong>Quyền root/sudo:</strong>{' '}
-                      <span className='text-destructive font-medium'>BỊ TỪ CHỐI</span> — Thành viên
-                      không thể thực thi sudo và không có trong sudoers.
-                    </li>
-                    <li>
-                      <strong>Thư mục cá nhân:</strong> Toàn quyền Đọc/Ghi trên volume ZFS chuyên
-                      dụng được gắn vào container.
-                    </li>
-                    <li>
-                      <strong>Cài đặt gói:</strong> Cài đặt thư viện Python (pip/conda) trong user
-                      space; không có quyền apt/dpkg hệ thống.
-                    </li>
-                    <li>
-                      <strong>Socket Quản trị:</strong> Tuyệt đối không có quyền truy cập socket
-                      Docker hoặc Incus daemon.
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-
-        {/* STEP 2: CHỌN MÁY CHỦ */}
-        {step === 2 && (
-          <div className='grid gap-3 py-2 text-xs'>
-            <Label className='text-xs font-semibold'>Chọn Máy chủ Vật lý Cấp phát Workspace</Label>
-            <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
-              {servers.map((srv) => {
-                const isSelected = selectedServerId === srv.id;
-                const isTrack = srv.id === 'track';
-                return (
-                  <button
-                    key={srv.id}
-                    type='button'
-                    aria-label={`Chọn máy chủ ${srv.name}`}
-                    onClick={() => handleSelectServer(srv.id)}
-                    className={`p-3.5 rounded-xl border text-left transition-all ${
-                      isSelected
-                        ? isTrack
-                          ? 'border-blue-600 bg-blue-500/10 ring-1 ring-blue-600'
-                          : 'border-purple-600 bg-purple-500/10 ring-1 ring-purple-600'
-                        : 'border-border bg-card hover:bg-muted/30'
-                    }`}
-                  >
-                    <div className='flex items-center justify-between'>
-                      <div className='font-bold text-sm text-foreground flex items-center gap-1.5'>
-                        <Icons.server className='size-4' />
-                        {srv.name}
-                      </div>
-                      <Badge variant='outline' className='text-[10px] font-mono'>
-                        {srv.location.includes('Hà Nội') ? 'Hà Nội' : 'TP.HCM'}
-                      </Badge>
-                    </div>
-
-                    <div className='text-[11px] text-muted-foreground mt-1.5 space-y-0.5'>
-                      <div>
-                        <strong>Phần cứng:</strong> {srv.cpuModel.split(' ')[0]} {srv.cpuCores}{' '}
-                        Cores • {srv.ramTotalGb}GB RAM
-                      </div>
-                      <div>
-                        <strong>GPU:</strong> {srv.gpuCount}x NVIDIA A30 24GB ({srv.gpuCount * 24}GB
-                        VRAM)
-                      </div>
-                      <div>
-                        <strong>VPN IP:</strong> <code className='font-mono'>{srv.vpnIp}</code>
-                      </div>
-                    </div>
-
-                    <div className='mt-2.5 pt-2 border-t grid grid-cols-3 gap-1 text-[10px] text-muted-foreground'>
-                      <div>
-                        CPU: <strong>{srv.cpuUsagePercent}%</strong>
-                      </div>
-                      <div>
-                        RAM: <strong>{srv.ramUsagePercent}%</strong>
-                      </div>
-                      <div>
-                        Disk: <strong>{srv.diskUsagePercent}%</strong>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* STEP 3: CẤU HÌNH Ổ ĐĨA & THƯ MỤC ZFS */}
-        {step === 3 && (
-          <div className='grid gap-3 py-2 text-xs'>
-            {/* Storage Pool Selection */}
             <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>
-                Ổ đĩa / Storage Pool trên {currentServer?.name} *
-              </Label>
-              <select
-                value={selectedPoolId}
-                onChange={(e) => setSelectedPoolId(e.target.value)}
-                className='w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-medium'
-              >
-                {availablePools.map((pool) => (
-                  <option key={pool.id} value={pool.id}>
-                    {pool.label} — Trống: {pool.freeGb} GB / {pool.capacityGb} GB (
-                    {pool.driver.toUpperCase()})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Storage Pool Detailed Hardware Card */}
-            {currentPool && (
-              <Card className='p-3 bg-muted/20 border'>
-                <div className='grid grid-cols-2 gap-2 text-[11px]'>
-                  <div>
-                    <span className='text-muted-foreground'>Mã định danh vật lý (WWN/UUID):</span>
-                    <div className='font-mono font-medium text-foreground'>
-                      {currentPool.diskIdentifier}
-                    </div>
-                  </div>
-                  <div>
-                    <span className='text-muted-foreground'>Đường dẫn gắn trên Host:</span>
-                    <div className='font-mono font-medium text-foreground truncate'>
-                      {currentPool.mountPoint}
-                    </div>
-                  </div>
-                  <div>
-                    <span className='text-muted-foreground'>
-                      Hệ thống tập tin & Trình điều khiển:
-                    </span>
-                    <div className='font-medium text-foreground font-mono uppercase'>
-                      {currentPool.driver} Pool
-                    </div>
-                  </div>
-                  <div>
-                    <span className='text-muted-foreground'>Tình trạng sức khỏe ổ đĩa:</span>
-                    <div className='font-medium text-emerald-600 dark:text-emerald-400 flex items-center gap-1'>
-                      <Icons.circleCheck className='size-3.5' /> Tốt ({currentPool.healthStatus})
-                    </div>
-                  </div>
-                </div>
-              </Card>
-            )}
-
-            {/* Approved Mount Directory */}
-            <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>
-                Thư mục gắn bên trong Container (Mount Path) *
-              </Label>
-              <select
-                value={mountPath}
-                onChange={(e) => setMountPath(e.target.value)}
-                className='w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono font-medium'
-              >
-                <option value='/workspace'>
-                  /workspace (Khuyến nghị — Chuẩn môi trường LabOps)
-                </option>
-                <option value={`/home/${username || 'username'}`}>
-                  /home/{username || 'username'} (Thư mục Home cá nhân)
-                </option>
-                <option value='/data'>/data (Không gian lưu trữ dữ liệu lớn)</option>
-              </select>
-              <span className='text-[10px] text-muted-foreground block'>
-                Chỉ cho phép các đường dẫn hợp lệ được phê duyệt. Không chấp nhận đường dẫn tùy tiện
-                của host.
-              </span>
-            </div>
-
-            {/* Storage Quota Slider & Quick Buttons */}
-            <div className='space-y-1.5'>
-              <div className='flex items-center justify-between'>
-                <Label className='text-xs font-semibold'>
-                  Hạn ngạch dung lượng (Storage Quota)
-                </Label>
-                <span className='font-bold font-mono text-primary text-sm'>
-                  {storageQuotaGb} GB ZFS
-                </span>
-              </div>
-              <div className='flex items-center gap-1.5 flex-wrap'>
-                {[50, 100, 250, 500, 1000].map((q) => (
-                  <Button
-                    key={q}
-                    type='button'
-                    size='sm'
-                    variant={storageQuotaGb === q ? 'default' : 'outline'}
-                    onClick={() => setStorageQuotaGb(q)}
-                    className='h-7 text-xs px-2.5 font-mono'
-                  >
-                    {q} GB
-                  </Button>
-                ))}
-              </div>
-              {currentPool && storageQuotaGb > currentPool.freeGb && (
-                <div className='text-destructive text-[11px] font-medium flex items-center gap-1'>
-                  <Icons.warning className='size-3.5' /> Hạn ngạch yêu cầu ({storageQuotaGb}GB) vượt
-                  quá dung lượng trống ({currentPool.freeGb}GB) của Pool!
-                </div>
-              )}
-            </div>
-
-            {/* Shared Datasets and Backup Policy */}
-            <div className='grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1'>
-              <div className='space-y-1.5'>
-                <Label className='text-xs font-semibold'>
-                  Thư mục Dữ liệu dùng chung (Read-Only)
-                </Label>
-                <div className='space-y-1 text-[11px]'>
-                  <label className='flex items-center gap-2 p-1.5 rounded border bg-card cursor-pointer'>
-                    <input
-                      type='checkbox'
-                      checked={sharedDatasets.includes('/shared/datasets')}
-                      onChange={(e) => {
-                        if (e.target.checked)
-                          setSharedDatasets([...sharedDatasets, '/shared/datasets']);
-                        else
-                          setSharedDatasets(sharedDatasets.filter((d) => d !== '/shared/datasets'));
-                      }}
-                      className='rounded'
-                    />
-                    <span>/shared/datasets (Read-Only)</span>
-                  </label>
-                  <label className='flex items-center gap-2 p-1.5 rounded border bg-card cursor-pointer'>
-                    <input
-                      type='checkbox'
-                      checked={sharedDatasets.includes('/data/models')}
-                      onChange={(e) => {
-                        if (e.target.checked)
-                          setSharedDatasets([...sharedDatasets, '/data/models']);
-                        else setSharedDatasets(sharedDatasets.filter((d) => d !== '/data/models'));
-                      }}
-                      className='rounded'
-                    />
-                    <span>/data/models (Trọng số LLM)</span>
-                  </label>
-                </div>
-              </div>
-
-              <div className='space-y-1.5'>
-                <Label className='text-xs font-semibold'>Chính sách Sao lưu Snapshot</Label>
-                <select
-                  value={backupPolicy}
-                  onChange={(e) =>
-                    setBackupPolicy(e.target.value as 'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE')
-                  }
-                  className='w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs'
-                >
-                  <option value='DAILY_SNAPSHOT'>Snapshot hàng ngày (ZFS Daily)</option>
-                  <option value='WEEKLY_SYNC'>Đồng bộ hàng tuần (Weekly Remote)</option>
-                  <option value='NONE'>Không tự động sao lưu</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* STEP 4: PHÂN BỔ TÀI NGUYÊN (CPU/RAM/GPU) */}
-        {step === 4 && (
-          <div className='grid gap-3.5 py-2 text-xs'>
-            <div className='grid grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Giới hạn CPU (Incus cgroups)</Label>
-                <div className='flex items-center gap-2'>
-                  <Input
-                    type='number'
-                    min={2}
-                    max={currentServer?.cpuCores || 32}
-                    value={cpuLimit}
-                    onChange={(e) => setCpuLimit(Number(e.target.value))}
-                    className='h-8 text-xs font-mono'
-                  />
-                  <span className='text-muted-foreground shrink-0'>Cores vCPU</span>
-                </div>
-              </div>
-
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Giới hạn RAM (Incus cgroups)</Label>
-                <div className='flex items-center gap-2'>
-                  <Input
-                    type='number'
-                    min={8}
-                    max={currentServer?.ramTotalGb || 64}
-                    value={ramLimit}
-                    onChange={(e) => setRamLimit(Number(e.target.value))}
-                    className='h-8 text-xs font-mono'
-                  />
-                  <span className='text-muted-foreground shrink-0'>GB RAM</span>
-                </div>
-              </div>
-            </div>
-
-            {/* GPU Access & VRAM Quota Policy */}
-            <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>Thiết bị NVIDIA GPU Cấp phát</Label>
-              <select
-                value={selectedGpu}
-                onChange={(e) => setSelectedGpu(e.target.value)}
-                className='w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono font-medium'
-              >
-                <option value='NONE'>Chỉ CPU (Không cấp GPU lúc này)</option>
-                {selectedServerId === 'track' ? (
-                  <>
-                    <option value='TRACK-GPU-01'>
-                      TRACK-GPU-01 (NVIDIA A30 24GB - PCIe 3b:00.0)
-                    </option>
-                    <option value='TRACK-GPU-02'>
-                      TRACK-GPU-02 (NVIDIA A30 24GB - PCIe 5e:00.0)
-                    </option>
-                    <option value='TRACK-GPU-03'>
-                      TRACK-GPU-03 (NVIDIA A30 24GB - PCIe 86:00.0)
-                    </option>
-                  </>
-                ) : (
-                  <option value='WS-GPU-01'>WS-GPU-01 (NVIDIA A30 24GB - PCIe 1a:00.0)</option>
-                )}
-              </select>
-            </div>
-
-            {selectedGpu !== 'NONE' && (
-              <div className='grid grid-cols-2 gap-3 p-3 bg-muted/20 rounded-lg border'>
-                <div className='space-y-1'>
-                  <Label className='text-xs font-semibold'>Chế độ Cấp phát GPU</Label>
-                  <select
-                    value={gpuAllocationMode}
-                    onChange={(e) => setGpuAllocationMode(e.target.value as GpuAllocationMode)}
-                    className='w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs'
-                  >
-                    <option value='SHARED'>SHARED (Chia sẻ tiến trình với MPS / Driver)</option>
-                    <option value='EXCLUSIVE'>EXCLUSIVE (Chiếm độc quyền 1 Card GPU)</option>
-                  </select>
-                </div>
-
-                <div className='space-y-1'>
-                  <Label className='text-xs font-semibold'>Hạn ngạch VRAM yêu cầu</Label>
-                  <select
-                    value={vramQuotaGb}
-                    onChange={(e) => setVramQuotaGb(Number(e.target.value))}
-                    className='w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs font-mono'
-                  >
-                    <option value={8}>8 GB VRAM</option>
-                    <option value={12}>12 GB VRAM</option>
-                    <option value={16}>16 GB VRAM</option>
-                    <option value={24}>24 GB VRAM (Toàn bộ)</option>
-                  </select>
-                </div>
-
-                <div className='col-span-2 text-[10px] text-muted-foreground'>
-                  * Chú thích kiến trúc: Hạn ngạch VRAM được kiểm soát và ghi nhận giám sát qua
-                  NVIDIA NVML và driver daemon; không giả lập phần cứng MIG ảo khi driver đang ở chế
-                  độ compute tiêu chuẩn.
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* STEP 5: CẤU HÌNH MẠNG & DEDICATED SSH ENDPOINT */}
-        {step === 5 && (
-          <div className='grid gap-3.5 py-2 text-xs'>
-            <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>
-                Chế độ Cấp phát Cổng SSH (Range 22000 - 29999)
-              </Label>
+              <Label>Vai trò</Label>
               <div className='grid grid-cols-2 gap-2'>
-                <button
-                  type='button'
-                  onClick={() => setPortMode('auto')}
-                  className={`p-2.5 rounded-lg border text-left transition-colors ${
-                    portMode === 'auto'
-                      ? 'border-primary bg-primary/10 font-bold text-foreground'
-                      : 'border-border bg-card text-muted-foreground'
-                  }`}
-                >
-                  <div className='text-xs'>Tự động cấp phát cổng</div>
-                  <div className='text-[10px] font-mono text-primary mt-0.5'>
-                    Cổng khả dụng: {nextAutoPort}
-                  </div>
-                </button>
-
-                <button
-                  type='button'
-                  onClick={() => setPortMode('manual')}
-                  className={`p-2.5 rounded-lg border text-left transition-colors ${
-                    portMode === 'manual'
-                      ? 'border-primary bg-primary/10 font-bold text-foreground'
-                      : 'border-border bg-card text-muted-foreground'
-                  }`}
-                >
-                  <div className='text-xs'>Tự chỉ định cổng thủ công</div>
-                  <div className='text-[10px] text-muted-foreground mt-0.5'>
-                    Kiểm tra xung đột tự động
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {portMode === 'manual' && (
-              <div className='space-y-1'>
-                <Label className='text-xs font-semibold'>Nhập số cổng SSH (22000 - 29999)</Label>
-                <Input
-                  type='number'
-                  min={22000}
-                  max={29999}
-                  value={customPort}
-                  onChange={(e) => setCustomPort(Number(e.target.value))}
-                  className='h-8 text-xs font-mono'
-                />
-              </div>
-            )}
-
-            {/* Dedicated SSH Endpoint Preview Card */}
-            <Card className='p-3.5 bg-card border rounded-lg space-y-2'>
-              <div className='font-bold text-xs flex items-center gap-1.5'>
-                <Icons.network className='size-4 text-primary' />
-                Điểm cuối kết nối SSH chuyên dụng (Dedicated SSH Endpoint)
-              </div>
-
-              <div className='grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] pt-1'>
-                <div>
-                  <span className='text-muted-foreground'>Địa chỉ lắng nghe VPN Host:</span>
-                  <div className='font-mono font-bold text-foreground'>
-                    {currentServer?.vpnIp}:{allocatedPort}
-                  </div>
-                </div>
-                <div>
-                  <span className='text-muted-foreground'>Ánh xạ Incus Proxy tới:</span>
-                  <div className='font-mono font-medium text-foreground'>
-                    Container Port 22 (SSH)
-                  </div>
-                </div>
-                <div>
-                  <span className='text-muted-foreground'>Dải mạng nội bộ cho phép:</span>
-                  <div className='font-mono text-emerald-600 dark:text-emerald-400'>
-                    10.200.0.0/16 (WireGuard Only)
-                  </div>
-                </div>
-                <div>
-                  <span className='text-muted-foreground'>Internet công cộng:</span>
-                  <div className='font-mono text-rose-600 dark:text-rose-400 font-semibold'>
-                    Bị chặn hoàn toàn (Blocked)
-                  </div>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-
-        {/* STEP 6: BẢO MẬT SSH DUAL-AUTH (MẬT KHẨU LINUX & KHÓA SSH) */}
-        {step === 6 && (
-          <div className='grid gap-3.5 py-2 text-xs'>
-            {/* BANNER NGUYÊN TẮC BẢO MẬT BẮT BUỘC DUAL-AUTH */}
-            <div className='p-3 rounded-lg border border-primary/30 bg-primary/5 flex items-start gap-2.5'>
-              <div className='p-1.5 rounded-md bg-primary/10 text-primary shrink-0 mt-0.5'>
-                <Icons.shield className='size-4' />
-              </div>
-              <div className='space-y-1 text-xs'>
-                <div className='flex items-center gap-2 flex-wrap'>
-                  <span className='font-bold text-foreground'>
-                    Chính sách Bảo mật Bắt buộc Hai Phương thức (Dual-Method SSH)
-                  </span>
-                  <Badge
-                    variant='outline'
-                    className='bg-primary/20 text-primary border-primary/40 font-mono text-[10px]'
-                  >
-                    PUBLICKEY + PASSWORD
-                  </Badge>
-                </div>
-                <p className='text-muted-foreground text-[11px] leading-relaxed'>
-                  Mọi thành viên đăng nhập vào container nghiên cứu bắt buộc phải vượt qua{' '}
-                  <strong>CẢ HAI</strong> lớp xác thực: (1) Khóa công khai{' '}
-                  <code>SSH Public Key</code> hợp lệ VÀ (2) Mật khẩu Linux tài khoản{' '}
-                  <code>PAM Password</code>. Thiếu bất kỳ phương thức nào, OpenSSH daemon sẽ từ chối
-                  truy cập ngay lập tức (<code>AuthenticationMethods publickey,password</code>).
-                </p>
-              </div>
-            </div>
-
-            {/* PHẦN 1: THIẾT LẬP MẬT KHẨU LINUX SSH */}
-            <Card className='p-3.5 bg-muted/20 border space-y-3'>
-              <div className='flex items-center justify-between flex-wrap gap-2'>
-                <div className='flex items-center gap-1.5 font-bold text-xs text-foreground'>
-                  <Icons.key className='size-3.5 text-primary' />
-                  <span>1. Thiết lập Mật khẩu Linux SSH cho @{username || 'user'}</span>
-                </div>
-                <Button
-                  type='button'
-                  size='sm'
-                  variant='outline'
-                  onClick={handleGeneratePassword}
-                  className='h-7 text-[11px] gap-1 font-semibold text-primary hover:text-primary'
-                >
-                  <Icons.sparkles className='size-3' /> Tạo mật khẩu an toàn ngẫu nhiên
-                </Button>
-              </div>
-
-              <div className='space-y-1.5'>
-                <div className='flex items-center justify-between'>
-                  <Label className='text-xs font-semibold'>
-                    Mật khẩu khởi tạo (Tối thiểu 12 ký tự) *
-                  </Label>
-                  <span
-                    className={`text-[10px] font-mono font-medium ${
-                      initialPassword.length === 0
-                        ? 'text-muted-foreground'
-                        : initialPassword.length < 12
-                          ? 'text-rose-600 dark:text-rose-400 font-bold'
-                          : 'text-emerald-600 dark:text-emerald-400 font-bold'
-                    }`}
-                  >
-                    {initialPassword.length === 0
-                      ? 'Chưa nhập mật khẩu'
-                      : initialPassword.length < 12
-                        ? `${initialPassword.length}/12 ký tự (Chưa đạt tiêu chuẩn)`
-                        : `${initialPassword.length} ký tự (Đạt chuẩn PAM Enterprise)`}
-                  </span>
-                </div>
-
-                <div className='relative'>
-                  <Input
-                    type={showPassword ? 'text' : 'password'}
-                    value={initialPassword}
-                    onChange={(e) => setInitialPassword(e.target.value)}
-                    placeholder='Nhập mật khẩu Linux hoặc bấm "Tạo mật khẩu an toàn ngẫu nhiên"...'
-                    className='h-8 text-xs font-mono pr-16'
-                  />
-                  <button
-                    type='button'
-                    onClick={() => setShowPassword(!showPassword)}
-                    className='absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-[10px] font-medium px-2 py-0.5 rounded bg-muted/80'
-                  >
-                    {showPassword ? 'Ẩn' : 'Hiện'}
+                {(['RESEARCHER', 'ADMIN'] as const).map((value) => (
+                  <button key={value} type='button' onClick={() => setRole(value)} className={`rounded-md border p-3 text-left text-sm ${role === value ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                    <span className='font-semibold'>{value === 'ADMIN' ? 'Quản trị viên' : 'Nghiên cứu viên'}</span>
+                    <span className='mt-1 block text-xs text-muted-foreground'>{value === 'ADMIN' ? 'TTL tối đa 2 giờ, MFA mỗi phiên' : 'TTL tối đa 12 giờ, chỉ workspace được cấp'}</span>
                   </button>
-                </div>
-
-                {/* Password Strength Indicator */}
-                {initialPassword.length > 0 && (
-                  <div className='flex items-center gap-2 pt-0.5'>
-                    <div className='flex-1 h-1.5 bg-muted rounded-full overflow-hidden flex gap-0.5'>
-                      <div
-                        className={`h-full transition-all duration-300 ${
-                          initialPassword.length < 12
-                            ? 'w-1/3 bg-rose-500'
-                            : initialPassword.length < 16
-                              ? 'w-2/3 bg-amber-500'
-                              : 'w-full bg-emerald-500'
-                        }`}
-                      />
-                    </div>
-                    <span className='text-[10px] text-muted-foreground font-mono'>
-                      {initialPassword.length < 12
-                        ? 'Yếu (Không cho phép)'
-                        : initialPassword.length < 16
-                          ? 'Đạt yêu cầu'
-                          : 'Rất mạnh (16+ ký tự)'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              <div className='flex items-center gap-2 p-2 rounded bg-background border'>
-                <input
-                  type='checkbox'
-                  id='wizard-req-change'
-                  checked={requirePasswordChange}
-                  onChange={(e) => setRequirePasswordChange(e.target.checked)}
-                  className='rounded border-border size-3.5 text-primary'
-                />
-                <label
-                  htmlFor='wizard-req-change'
-                  className='text-xs text-foreground cursor-pointer select-none'
-                >
-                  Bắt buộc thành viên đổi mật khẩu khi đăng nhập SSH lần đầu (PAM password expired)
-                </label>
-              </div>
-            </Card>
-
-            {/* PHẦN 2: CẤU HÌNH KHÓA SSH (PUBLIC KEY) */}
-            <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>
-                2. Phương thức Đăng ký Khóa SSH (Public Key)
-              </Label>
-              <div className='grid grid-cols-3 gap-2'>
-                <button
-                  type='button'
-                  onClick={() => setEnrollmentMode('generate')}
-                  className={`p-2 rounded-md border text-center transition-colors ${
-                    enrollmentMode === 'generate'
-                      ? 'border-primary bg-primary/10 font-bold text-foreground'
-                      : 'border-border bg-card text-muted-foreground'
-                  }`}
-                >
-                  Tạo trên thiết bị (Khuyến nghị)
-                </button>
-
-                <button
-                  type='button'
-                  onClick={() => setEnrollmentMode('import')}
-                  className={`p-2 rounded-md border text-center transition-colors ${
-                    enrollmentMode === 'import'
-                      ? 'border-primary bg-primary/10 font-bold text-foreground'
-                      : 'border-border bg-card text-muted-foreground'
-                  }`}
-                >
-                  Nhập khóa công khai
-                </button>
-
-                <button
-                  type='button'
-                  onClick={() => setEnrollmentMode('pending')}
-                  className={`p-2 rounded-md border text-center transition-colors ${
-                    enrollmentMode === 'pending'
-                      ? 'border-primary bg-primary/10 font-bold text-foreground'
-                      : 'border-border bg-card text-muted-foreground'
-                  }`}
-                >
-                  Đăng ký sau
-                </button>
+                ))}
               </div>
             </div>
-
-            {/* Option A: Generate Ed25519 on device */}
-            {enrollmentMode === 'generate' && (
-              <Card className='p-3 bg-muted/20 border space-y-2.5'>
-                <div className='flex items-center justify-between'>
-                  <span className='font-semibold text-xs text-foreground'>
-                    Khóa bí mật Ed25519 đã tạo sẵn:
-                  </span>
-                  <Button
-                    type='button'
-                    size='sm'
-                    onClick={handleDownloadPrivateKey}
-                    className={`h-7 text-xs gap-1 font-semibold ${
-                      keyDownloaded
-                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                        : 'bg-primary'
-                    }`}
-                  >
-                    <Icons.download className='size-3.5' />{' '}
-                    {keyDownloaded ? 'Đã tải khóa (id_ed25519)' : 'Tải xuống Private Key'}
-                  </Button>
-                </div>
-
-                <div className='text-[11px] text-muted-foreground'>
-                  Khóa Ed25519 được sinh ra an toàn ngay trên trình duyệt của bạn.{' '}
-                  <strong>Private Key không bao giờ được gửi hay lưu trữ tại máy chủ.</strong>
-                </div>
-
-                <div className='space-y-1'>
-                  <span className='text-[10px] text-muted-foreground font-mono'>
-                    Public Key sẽ nạp vào authorized_keys:
-                  </span>
-                  <div className='p-1.5 rounded bg-background border font-mono text-[10px] truncate'>
-                    {generatedPublicKey || 'Đang tạo khóa...'}
-                  </div>
-                </div>
-              </Card>
-            )}
-
-            {/* Option B: Import Public Key */}
-            {enrollmentMode === 'import' && (
-              <div className='space-y-1.5'>
-                <Label className='text-xs font-semibold'>
-                  Dán Public Key của Thành viên (Ed25519 hoặc RSA ≥ 3072-bit)
-                </Label>
-                <textarea
-                  rows={3}
-                  value={importedPublicKey}
-                  onChange={(e) => setImportedPublicKey(e.target.value)}
-                  placeholder='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@device'
-                  className='w-full rounded-md border border-input bg-background p-2 text-xs font-mono'
-                />
-              </div>
-            )}
-
-            {/* Option C: Pending enrollment */}
-            {enrollmentMode === 'pending' && (
-              <div className='p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-900 dark:text-amber-200'>
-                Tài khoản sẽ được tạo ở trạng thái <strong>PENDING_KEY_ENROLLMENT</strong>. Cổng SSH
-                proxy sẽ bị vô hiệu hóa cho tới khi người dùng nạp khóa hợp lệ qua cổng thông tin.
-              </div>
-            )}
-
-            {/* Connection Preview Snippets */}
-            <div className='space-y-1.5 pt-1'>
-              <Label className='text-xs font-semibold'>
-                Lệnh kết nối SSH mẫu (Yêu cầu cả Key & Password):
-              </Label>
-              <div className='flex items-center justify-between p-2 rounded bg-muted/40 border font-mono text-[11px]'>
-                <code>
-                  ssh -i ~/.ssh/id_ed25519 -p {allocatedPort} {username || 'user'}@
-                  {currentServer?.vpnIp}
-                </code>
-                <Button
-                  type='button'
-                  size='sm'
-                  variant='ghost'
-                  className='h-6 px-2 text-[10px]'
-                  onClick={async () => {
-                    const cmd = `ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username || 'user'}@${currentServer?.vpnIp}`;
-                    const copied = await copyToClipboard(cmd);
-                    if (copied) {
-                      toast.success('Đã sao chép lệnh SSH');
-                    } else {
-                      toast.info(`Lệnh SSH: ${cmd}`);
-                    }
-                  }}
-                >
-                  <Icons.forms className='size-3 mr-1' /> Copy
-                </Button>
-              </div>
-              <p className='text-[10px] text-muted-foreground'>
-                * Ghi chú: Terminal sẽ gửi chữ ký Private Key trước. Khi được sshd chấp nhận,
-                terminal sẽ tiếp tục hiển thị lời nhắc nhập mật khẩu Linux của @{username || 'user'}
-                .
-              </p>
-            </div>
+            <div className='space-y-1.5'><Label htmlFor='access-expiry'>Ngày hết hạn (tùy chọn)</Label><Input id='access-expiry' type='date' value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></div>
           </div>
         )}
 
-        {/* STEP 7: TIẾN TRÌNH KHỞI TẠO TỰ ĐỘNG & KIỂM TRA CÁCH LY */}
-        {step === 7 && (
-          <div className='py-6 px-2 flex flex-col items-center justify-center text-center space-y-4'>
-            <div className='size-14 rounded-full bg-primary/10 flex items-center justify-center text-primary'>
-              {isProvisionDone ? (
-                <Icons.circleCheck className='size-8 text-emerald-600 dark:text-emerald-400' />
-              ) : (
-                <Icons.spinner className='size-8 animate-spin text-primary' />
-              )}
+        {step === 2 && (
+          <div className='grid gap-4'>
+            <div className='space-y-1.5'><Label>Server</Label><div className='grid gap-2 sm:grid-cols-2'>{servers.map((server) => <button key={server.id} type='button' onClick={() => { setServerId(server.id); setStoragePoolId(''); setSelectedGpu('NONE'); }} className={`rounded-md border p-3 text-left ${serverId === server.id ? 'border-primary bg-primary/10' : 'border-border'}`}><span className='block font-semibold'>{server.name}</span><span className='text-xs text-muted-foreground'>{server.status === 'online' ? 'Đang phản hồi' : server.status === 'offline' ? 'Không phản hồi' : 'Chưa xác minh kết nối'}</span></button>)}</div></div>
+            <div className='space-y-1.5'><Label htmlFor='workspace-name'>Workspace</Label><Input id='workspace-name' value={workspaceName || `ws-${username}`} onChange={(event) => setWorkspaceName(event.target.value)} /></div>
+            <div className='space-y-1.5'><Label htmlFor='storage-pool'>Storage pool</Label><select id='storage-pool' className='h-9 w-full rounded-md border bg-background px-3 text-sm' value={storagePoolId} onChange={(event) => setStoragePoolId(event.target.value)}><option value=''>Backend chọn pool mặc định</option>{assignedPools.map((pool) => <option key={pool.id} value={pool.id}>{pool.label} · còn {pool.freeGb} GB</option>)}</select></div>
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <div className='space-y-1.5'><Label htmlFor='mount-path'>Mount path</Label><select id='mount-path' className='h-9 w-full rounded-md border bg-background px-3 text-sm' value={mountPath} onChange={(event) => setMountPath(event.target.value)}><option value='/workspace'>/workspace</option><option value={`/home/${username}`}>/home/{username || 'username'}</option><option value='/data'>/data</option></select></div>
+              <div className='space-y-1.5'><Label htmlFor='storage-quota'>Storage quota (GB)</Label><Input id='storage-quota' type='number' min={1} value={storageQuotaGb} onChange={(event) => setStorageQuotaGb(Number(event.target.value))} /></div>
             </div>
-
-            <div className='space-y-1 w-full max-w-lg'>
-              <h4 className='text-base font-bold text-foreground'>
-                {isProvisionDone
-                  ? 'Khởi tạo Workspace Thành công!'
-                  : 'Đang thực thi quy trình Atomic Provisioning...'}
-              </h4>
-              <p className='text-xs text-muted-foreground font-mono min-h-[32px]'>
-                {execStatusText}
-              </p>
-            </div>
-
-            <div className='w-full max-w-lg bg-muted rounded-full h-2.5 overflow-hidden'>
-              <div
-                className='bg-primary h-2.5 rounded-full transition-all duration-300'
-                style={{ width: `${execStep}%` }}
-              />
-            </div>
-
-            {isProvisionDone && (
-              <Card className='w-full max-w-lg p-4 text-left border bg-card text-xs space-y-3'>
-                <div className='font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 text-sm'>
-                  <Icons.circleCheck className='size-4' /> Khởi tạo Môi trường & Thiết lập Tài khoản
-                  Thành công!
-                </div>
-
-                <div className='p-2.5 rounded-lg border bg-muted/30 space-y-2 text-[11px]'>
-                  <div className='font-bold text-xs text-foreground flex items-center justify-between border-b pb-1.5'>
-                    <span>Thông tin Bàn giao Tài khoản (@{username})</span>
-                    <Badge
-                      variant='outline'
-                      className='bg-primary/10 text-primary border-primary/30 font-mono text-[10px]'
-                    >
-                      DUAL-AUTH BẮT BUỘC
-                    </Badge>
-                  </div>
-
-                  <div className='grid grid-cols-2 gap-2 text-muted-foreground'>
-                    <div>
-                      Họ và tên: <strong className='text-foreground'>{fullName}</strong>
-                    </div>
-                    <div>
-                      Vai trò: <strong className='text-foreground'>{role}</strong>
-                    </div>
-                    <div>
-                      Máy chủ: <strong className='text-foreground'>{currentServer?.name}</strong>
-                    </div>
-                    <div>
-                      Cổng SSH Endpoint:{' '}
-                      <strong className='text-foreground font-mono'>
-                        {currentServer?.vpnIp}:{allocatedPort}
-                      </strong>
-                    </div>
-                    <div>
-                      Lưu trữ ZFS:{' '}
-                      <strong className='text-foreground font-mono'>
-                        {storageQuotaGb}GB ({mountPath})
-                      </strong>
-                    </div>
-                    <div>
-                      Quyền hạn:{' '}
-                      <strong className='text-emerald-600 dark:text-emerald-400'>
-                        Unprivileged (No sudo)
-                      </strong>
-                    </div>
-                    {correlationId && (
-                      <div className='col-span-2 text-[10px] text-muted-foreground'>
-                        Mã phiên cấp phát (Correlation ID):{' '}
-                        <code className='font-mono text-foreground font-semibold'>
-                          {correlationId}
-                        </code>
-                      </div>
-                    )}
-
-                    <div className='col-span-2 flex items-center justify-between p-2 rounded bg-background border'>
-                      <div>
-                        <div className='text-[10px] text-muted-foreground'>
-                          Mật khẩu Linux khởi tạo:
-                        </div>
-                        <div className='font-mono font-bold text-sm text-foreground'>
-                          {initialPassword}
-                        </div>
-                      </div>
-                      <Button
-                        type='button'
-                        size='sm'
-                        variant='outline'
-                        className='h-7 text-xs gap-1 font-medium'
-                        onClick={async () => {
-                          const copied = await copyToClipboard(initialPassword);
-                          if (copied) toast.success('Đã sao chép mật khẩu Linux');
-                        }}
-                      >
-                        <Icons.forms className='size-3 mr-1' /> Copy Mật khẩu
-                      </Button>
-                    </div>
-
-                    <div className='col-span-2 text-[10px] text-muted-foreground'>
-                      • Chính sách mật khẩu:{' '}
-                      <strong>
-                        {requirePasswordChange
-                          ? 'Bắt buộc đổi mật khẩu khi đăng nhập SSH lần đầu'
-                          : 'Hoạt động bình thường'}
-                      </strong>
-                    </div>
-                  </div>
-                </div>
-
-                <div className='space-y-1.5'>
-                  <Label className='text-xs font-semibold'>Lệnh kết nối SSH:</Label>
-                  <div className='flex items-center justify-between p-2 rounded bg-muted/40 border font-mono text-[11px]'>
-                    <code>
-                      ssh -i ~/.ssh/id_ed25519 -p {allocatedPort} {username}@{currentServer?.vpnIp}
-                    </code>
-                    <Button
-                      type='button'
-                      size='sm'
-                      variant='ghost'
-                      className='h-6 px-2 text-[10px]'
-                      onClick={async () => {
-                        const cmd = `ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username}@{currentServer?.vpnIp}`;
-                        const copied = await copyToClipboard(cmd);
-                        if (copied) toast.success('Đã sao chép lệnh SSH');
-                      }}
-                    >
-                      <Icons.forms className='size-3 mr-1' /> Copy Lệnh
-                    </Button>
-                  </div>
-                </div>
-
-                <div className='flex items-center gap-2 pt-1 flex-wrap'>
-                  <Button
-                    type='button'
-                    size='sm'
-                    variant='outline'
-                    className='h-7 text-xs gap-1 font-medium'
-                    onClick={async () => {
-                      const summary = [
-                        '=== THÔNG TIN BÀN GIAO MÔI TRƯỜNG LABOPS ===',
-                        `Họ và tên: ${fullName}`,
-                        `Tên đăng nhập: ${username}`,
-                        `Máy chủ: ${currentServer?.name} (${currentServer?.vpnIp})`,
-                        `Cổng SSH Endpoint: ${allocatedPort}`,
-                        `Mật khẩu khởi tạo Linux: ${initialPassword}`,
-                        `Yêu cầu đổi mật khẩu lần đầu: ${requirePasswordChange ? 'Bắt buộc' : 'Không'}`,
-                        `Dung lượng lưu trữ ZFS: ${storageQuotaGb} GB (${mountPath})`,
-                        `Quyền GPU: ${selectedGpu !== 'NONE' ? selectedGpu : 'Chỉ CPU'}`,
-                        `Lệnh kết nối SSH: ssh -i ~/.ssh/id_ed25519 -p ${allocatedPort} ${username}@${currentServer?.vpnIp}`,
-                        'Lưu ý bảo mật: Mọi đăng nhập SSH bắt buộc vượt qua cả SSH Public Key và Mật khẩu Linux.'
-                      ].join('\n');
-                      const copied = await copyToClipboard(summary);
-                      if (copied) toast.success('Đã sao chép toàn bộ thông tin bàn giao');
-                    }}
-                  >
-                    <Icons.forms className='size-3.5' /> Sao chép toàn bộ thông tin bàn giao
-                  </Button>
-
-                  {enrollmentMode === 'generate' && generatedPrivateKey && (
-                    <Button
-                      type='button'
-                      size='sm'
-                      variant='outline'
-                      className='h-7 text-xs gap-1 font-medium'
-                      onClick={handleDownloadPrivateKey}
-                    >
-                      <Icons.download className='size-3.5' /> Tải Private Key (id_ed25519)
-                    </Button>
-                  )}
-                </div>
-              </Card>
-            )}
+            <div className='space-y-1.5'><Label htmlFor='backup-policy'>Backup policy</Label><select id='backup-policy' className='h-9 w-full rounded-md border bg-background px-3 text-sm' value={backupPolicy} onChange={(event) => setBackupPolicy(event.target.value as typeof backupPolicy)}><option value='DAILY_SNAPSHOT'>Daily snapshot</option><option value='WEEKLY_SYNC'>Weekly sync</option><option value='NONE'>None</option></select></div>
+            <p className='text-xs text-muted-foreground'>{assignedPools.length ? 'Backend sẽ kiểm tra quota trên pool đã quan sát; đây chưa phải cấp phát storage thực tế.' : 'Chưa có storage pool được xác minh; request vẫn có thể được ghi nhận ở trạng thái pending.'}</p>
           </div>
         )}
 
-        <DialogFooter className='gap-2 sm:gap-0 pt-2 border-t'>
-          {step > 1 && step < 7 && (
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={() => setStep(step - 1)}
-              className='text-xs'
-            >
-              Quay lại
-            </Button>
-          )}
+        {step === 3 && (
+          <div className='grid gap-4 sm:grid-cols-2'>
+            <div className='space-y-1.5'><Label htmlFor='cpu-limit'>CPU cores</Label><Input id='cpu-limit' type='number' min={1} value={cpuLimitCores} onChange={(event) => setCpuLimitCores(Number(event.target.value))} /></div>
+            <div className='space-y-1.5'><Label htmlFor='ram-limit'>RAM (GB)</Label><Input id='ram-limit' type='number' min={1} value={ramLimitGb} onChange={(event) => setRamLimitGb(Number(event.target.value))} /></div>
+            <div className='space-y-1.5'><Label htmlFor='gpu-choice'>GPU</Label><select id='gpu-choice' className='h-9 w-full rounded-md border bg-background px-3 text-sm' value={selectedGpu} onChange={(event) => setSelectedGpu(event.target.value)}><option value='NONE'>Chỉ CPU</option>{assignedGpus.map((gpu) => <option key={gpu.id} value={gpu.id}>{gpu.displayLabel} · {gpu.model}</option>)}</select>{!assignedGpus.length && <p className='text-xs text-muted-foreground'>Chưa có GPU telemetry xác minh cho server này.</p>}</div>
+            <div className='space-y-1.5'><Label htmlFor='gpu-mode'>GPU mode</Label><select id='gpu-mode' className='h-9 w-full rounded-md border bg-background px-3 text-sm' value={gpuAllocationMode} onChange={(event) => setGpuAllocationMode(event.target.value as GpuAllocationMode)}><option value='SHARED'>Shared</option><option value='EXCLUSIVE'>Exclusive</option></select></div>
+            <div className='space-y-1.5 sm:col-span-2'><Label htmlFor='vram-quota'>VRAM quota (GB)</Label><Input id='vram-quota' type='number' min={0} value={selectedGpu === 'NONE' ? 0 : vramQuotaGb} disabled={selectedGpu === 'NONE'} onChange={(event) => setVramQuotaGb(Number(event.target.value))} /></div>
+            <Card className='sm:col-span-2 p-3 text-xs text-muted-foreground'>CPU/RAM/GPU là yêu cầu ghi nhận. Backend hiện chưa kết nối bộ cấp phát workspace nên không trừ quota hay báo tài nguyên đã cấp.</Card>
+          </div>
+        )}
 
-          {step < 6 && (
-            <Button
-              type='button'
-              size='sm'
-              disabled={
-                (step === 1 && (!fullName || !username || !email || !usernameValidation.valid)) ||
-                (step === 3 && currentPool && storageQuotaGb > currentPool.freeGb)
-              }
-              onClick={() => {
-                if (step === 5) {
-                  if (enrollmentMode === 'generate' && !generatedPublicKey) {
-                    handleGenerateKeypair();
-                  }
-                  if (!initialPassword) {
-                    handleGeneratePassword();
-                  }
-                }
-                setStep(step + 1);
-              }}
-              className='text-xs font-semibold bg-primary'
-            >
-              Tiếp tục
-            </Button>
-          )}
+        {step === 4 && (
+          <div className='grid gap-3'>
+            <Card className='flex gap-3 p-4'><Icons.shield className='size-5 shrink-0 text-primary' /><div><p className='font-semibold'>WireGuard theo thiết bị</p><p className='mt-1 text-sm text-muted-foreground'>Private key phải được tạo trên thiết bị. Gateway, route chỉ tới Teleport Proxy và workspace hiện chưa được xác minh; vì vậy bước đăng ký peer đang chờ.</p></div></Card>
+            <Card className='flex gap-3 p-4'><Icons.lock className='size-5 shrink-0 text-primary' /><div><p className='font-semibold'>Teleport Community</p><p className='mt-1 text-sm text-muted-foreground'>Cần cluster HTTPS riêng tư. WebAuthn bắt buộc khi đăng nhập; certificate researcher tối đa 12 giờ, admin tối đa 2 giờ. Chưa gửi lời mời cho đến khi workspace và WireGuard được xác minh.</p></div></Card>
+            <p className='text-xs text-muted-foreground'>Không tạo mật khẩu Linux, SSH port, khóa SSH hay file cấu hình chứa private key.</p>
+          </div>
+        )}
 
-          {step === 6 && (
-            <Button
-              type='button'
-              size='sm'
-              disabled={!initialPassword || initialPassword.length < 12}
-              onClick={handleStartProvision}
-              className='text-xs font-semibold bg-primary gap-1.5'
-            >
-              <Icons.server className='size-3.5' /> Xác nhận & Cấp phát Tự động
-            </Button>
-          )}
+        {step === 5 && (
+          <div className='grid gap-3'>
+            {created ? (
+              <Card className='border-amber-500/40 bg-amber-500/5 p-4'>
+                <p className='font-semibold'>Đã ghi nhận yêu cầu của @{created.username}</p>
+                <p className='mt-1 text-sm'>Trạng thái: <code>{created.status}</code> · Provisioning: <code>{created.provisioningState}</code></p>
+                <p className='mt-2 text-sm text-muted-foreground'>Workspace, peer WireGuard, Teleport MFA và SSH chưa được xác minh. Tài khoản chưa ACTIVE.</p>
+              </Card>
+            ) : (
+              <Card className='space-y-2 p-4 text-sm'><p className='font-semibold'>Xem lại yêu cầu</p><p>{fullName} · @{username} · {email} · {role}</p><p>Server: {serverId} · Workspace: {workspaceName || `ws-${username}`}</p><p>Storage: {assignedPools.find((pool) => pool.id === storagePoolId)?.label || 'Pool mặc định'} · {storageQuotaGb} GB · {mountPath} · {backupPolicy}</p><p>CPU: {cpuLimitCores} cores · RAM: {ramLimitGb} GB · GPU: {selectedGpu}{selectedGpu !== 'NONE' && ` · ${gpuAllocationMode} · ${vramQuotaGb} GB VRAM`}</p><p>Nhóm: {researchGroup || '—'} · Hết hạn: {expiresAt || 'Không đặt'}</p></Card>
+            )}
+            {!created && <div className='text-sm text-muted-foreground'>Yêu cầu chỉ tạo bản ghi <code>PENDING_PROVISIONING</code>. Backend chưa đánh dấu tài khoản ACTIVE khi hạ tầng chưa xác minh.</div>}
+          </div>
+        )}
 
-          {isProvisionDone && (
-            <Button
-              type='button'
-              size='sm'
-              onClick={() => onOpenChange(false)}
-              className='text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white'
-            >
-              Đóng & Hoàn tất
-            </Button>
-          )}
+        <DialogFooter className='gap-2 border-t pt-3'>
+          {step > 1 && !created && <Button type='button' variant='outline' onClick={() => setStep(step - 1)}>Quay lại</Button>}
+          {step < 4 && <Button type='button' disabled={step === 1 && (!fullName || !usernameIsValid || !email.includes('@'))} onClick={() => setStep(step + 1)}>Tiếp tục</Button>}
+          {step === 4 && <Button type='button' onClick={() => setStep(5)}>Xem lại yêu cầu</Button>}
+          {step === 5 && !created && <Button type='button' disabled={submitting || DEMO_MODE || !fullName || !usernameIsValid || !email.includes('@') || storageQuotaGb < 1 || cpuLimitCores < 1 || ramLimitGb < 1} onClick={createAccessRequest}>{submitting ? 'Đang gửi…' : 'Ghi nhận yêu cầu'}</Button>}
+          {step === 5 && created && <Button type='button' onClick={() => onOpenChange(false)}>Đóng</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

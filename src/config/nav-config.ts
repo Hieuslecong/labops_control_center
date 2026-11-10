@@ -1,15 +1,15 @@
 import { NavGroup } from '@/types';
 
 /**
- * LabOps Control Center - Navigation Configuration
- * 9 primary sections in Vietnamese with RBAC and shortcut support.
+ * LabOps Control Center V2 - Cấu hình Điều hướng 11 Mục Tiếng Việt (Mục 20 prompt.md)
+ * Phân tách rõ khu vực Quản trị Hạ tầng (Admin) và Cổng Nghiên cứu viên (Researcher Portal).
  */
 export const navGroups: NavGroup[] = [
   {
-    label: 'Hạ tầng & Điều hành',
+    label: 'Điều hành & Hạ tầng LabOps',
     items: [
       {
-        title: 'Tổng quan',
+        title: '1. Tổng quan',
         url: '/dashboard/overview',
         icon: 'dashboard',
         isActive: true,
@@ -17,15 +17,15 @@ export const navGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Máy chủ',
+        title: '2. Hạ tầng và GPU',
         url: '/dashboard/servers',
         icon: 'server',
         isActive: false,
-        shortcut: ['m', 'c'],
+        shortcut: ['h', 't'],
         items: []
       },
       {
-        title: 'Thành viên',
+        title: '3. Thành viên và môi trường',
         url: '/dashboard/users',
         icon: 'teams',
         isActive: false,
@@ -33,28 +33,44 @@ export const navGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Tài nguyên',
-        url: '/dashboard/resources',
-        icon: 'gpu',
-        isActive: false,
-        shortcut: ['t', 'n'],
-        items: []
-      },
-      {
-        title: 'Công việc',
+        title: '4. Tác vụ và lịch GPU',
         url: '/dashboard/jobs',
         icon: 'job',
         isActive: false,
-        shortcut: ['c', 'v'],
+        shortcut: ['t', 'c'],
+        items: []
+      },
+      {
+        title: '5. Giám sát và cảnh báo',
+        url: '/dashboard/monitoring',
+        icon: 'gauge',
+        isActive: false,
+        shortcut: ['g', 's'],
         items: []
       }
     ]
   },
   {
-    label: 'Quản trị & An toàn',
+    label: 'Truy cập, Lưu trữ & Bảo mật',
     items: [
       {
-        title: 'Bảo mật',
+        title: '6. Truy cập VPN và SSH',
+        url: '/dashboard/vpn-ssh',
+        icon: 'key',
+        isActive: false,
+        shortcut: ['v', 's'],
+        items: []
+      },
+      {
+        title: '7. Container và lưu trữ',
+        url: '/dashboard/resources',
+        icon: 'database',
+        isActive: false,
+        shortcut: ['c', 'l'],
+        items: []
+      },
+      {
+        title: '8. Bảo mật mã nguồn',
         url: '/dashboard/security',
         icon: 'shield',
         isActive: false,
@@ -62,27 +78,48 @@ export const navGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Lịch Lab',
-        url: '/dashboard/calendar',
-        icon: 'calendar',
+        title: '9. Báo cáo sử dụng',
+        url: '/dashboard/usage',
+        icon: 'activity',
         isActive: false,
-        shortcut: ['l', 'l'],
+        shortcut: ['b', 'c'],
         items: []
       },
       {
-        title: 'Nhật ký',
+        title: '10. Nhật ký và cài đặt',
         url: '/dashboard/audit-logs',
         icon: 'audit',
         isActive: false,
         shortcut: ['n', 'k'],
-        items: []
-      },
+        items: [
+          {
+            title: 'Nhật ký kiểm toán',
+            url: '/dashboard/audit-logs',
+            icon: 'audit'
+          },
+          {
+            title: 'Lịch Lab & Bảo trì',
+            url: '/dashboard/calendar',
+            icon: 'calendar'
+          },
+          {
+            title: 'Cài đặt hệ thống',
+            url: '/dashboard/settings',
+            icon: 'settings'
+          }
+        ]
+      }
+    ]
+  },
+  {
+    label: 'Không gian Nghiên cứu viên',
+    items: [
       {
-        title: 'Cài đặt',
-        url: '/dashboard/settings',
-        icon: 'settings',
+        title: '11. Cổng nghiên cứu viên',
+        url: '/dashboard/researcher',
+        icon: 'terminal',
         isActive: false,
-        shortcut: ['c', 'd'],
+        shortcut: ['n', 'v'],
         items: []
       }
     ]

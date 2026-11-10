@@ -17,7 +17,7 @@ export default function ExclusiveView() {
           <Icons.badgeCheck className='h-6 w-6 text-emerald-600' />
           <h2 className='text-lg font-bold'>Đặc quyền Hạ tầng Máy chủ AI</h2>
           <Badge variant='outline' className='bg-primary/10 text-primary text-[10px]'>
-            ENTERPRISE PRO
+            NOT VERIFIED
           </Badge>
         </div>
 
@@ -28,13 +28,13 @@ export default function ExclusiveView() {
                 <Icons.server className='size-4 text-primary' /> Cấu hình Cụm Vật lý Độc lập
               </CardTitle>
               <CardDescription className='text-xs'>
-                Kiểm soát cấp độ Kernel, IOMMU Groups và PCIe Passthrough cho NVIDIA A30
+                Các khả năng quản trị phần cứng chưa được nối với host controller
               </CardDescription>
             </CardHeader>
             <CardContent className='text-xs text-muted-foreground space-y-2'>
-              <p>• Phân chia VRAM phần cứng MIG (Multi-Instance GPU) hoặc Driver-enforced MPS.</p>
-              <p>• Giao thức WireGuard Site-to-Site giữa Hà Nội và TP.HCM với MTU tối ưu hóa.</p>
-              <p>• ZFS Storage Pool với nén zstd và kiểm tra toàn vẹn Scrub định kỳ.</p>
+              <p>• MIG, MPS, IOMMU và PCIe passthrough chưa được xác minh.</p>
+              <p>• WireGuard Site-to-Site và Gateway chưa được cấu hình qua LabOps.</p>
+              <p>• Storage pool, nén và scrub chưa có controller đã xác minh.</p>
             </CardContent>
           </Card>
 
@@ -49,9 +49,9 @@ export default function ExclusiveView() {
               </CardDescription>
             </CardHeader>
             <CardContent className='text-xs text-muted-foreground space-y-2'>
-              <p>• 100% Containers chạy ở chế độ Unprivileged (security.idmap.isolated=true).</p>
-              <p>• Cổng SSH trung gian chuyên biệt theo dải 22000-29999 cho từng thành viên.</p>
-              <p>• Khóa riêng tư Ed25519 được sinh phía Client, không lưu trữ trên máy chủ.</p>
+              <p>• Workspace isolation và quyền Linux/container chưa được xác minh.</p>
+              <p>• SSH qua Teleport chưa được triển khai; không cấp cổng SSH riêng cho user mới.</p>
+              <p>• LabOps chỉ nhận WireGuard public key; private key phải ở thiết bị người dùng.</p>
             </CardContent>
           </Card>
         </div>

@@ -1,4 +1,6 @@
 'use client';
+import { labopsCall } from '@/features/labops/api';
+import { toast } from 'sonner';
 
 import React from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -52,7 +54,7 @@ function getSecurityStatusBadge(status: string) {
 
 export function SecuritySummaryPanel() {
   const reviews = useLabOpsStore((state) => state.securityReviews);
-  const updateSecurityReview = useLabOpsStore((state) => state.updateSecurityReview);
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
   return (
     <Card className='border bg-card h-full flex flex-col justify-between min-w-0'>
@@ -81,7 +83,8 @@ export function SecuritySummaryPanel() {
       <CardContent className='pt-0 pb-4 space-y-3 flex-1 flex flex-col justify-between'>
         {/* Repo review list */}
         <div className='space-y-2'>
-          {reviews.slice(0, 3).map((item) => (
+          {!isDemoMode && <p className='rounded-md border border-dashed p-4 text-sm text-muted-foreground'>Chưa cấu hình security scanner; không có kết quả quét hoặc cảnh báo production đã xác minh.</p>}
+          {isDemoMode && reviews.slice(0, 3).map((item) => (
             <div
               key={item.id}
               className='p-2.5 rounded-lg border bg-muted/20 flex flex-col gap-1.5 text-xs'
@@ -117,7 +120,7 @@ export function SecuritySummaryPanel() {
                       size='sm'
                       variant='outline'
                       onClick={() =>
-                        updateSecurityReview(item.id, 'APPROVED', 'Lê Chí Hiếu (Admin)')
+                        void labopsCall(`security/scans/${encodeURIComponent(item.id)}/decision`, { method: 'POST', body: { decision: 'APPROVED' } }).then((res) => res.ok ? toast.success('Đã ghi nhận quyết định') : toast.error('Không thể ghi nhận quyết định', { description: res.error }))
                       }
                       className='h-6 text-[10px] px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10'
                     >
@@ -127,7 +130,7 @@ export function SecuritySummaryPanel() {
                       size='sm'
                       variant='ghost'
                       onClick={() =>
-                        updateSecurityReview(item.id, 'REJECTED', 'Lê Chí Hiếu (Admin)')
+                        void labopsCall(`security/scans/${encodeURIComponent(item.id)}/decision`, { method: 'POST', body: { decision: 'REJECTED' } }).then((res) => res.ok ? toast.success('Đã ghi nhận quyết định') : toast.error('Không thể ghi nhận quyết định', { description: res.error }))
                       }
                       className='h-6 text-[10px] px-2 text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
                     >
@@ -143,21 +146,21 @@ export function SecuritySummaryPanel() {
         {/* ZFS Backup status */}
         <div className='p-2.5 rounded-lg border bg-background flex items-center justify-between text-xs'>
           <div className='flex items-center gap-2'>
-            <div className='flex size-6 items-center justify-center rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'>
+            <div className='flex size-6 items-center justify-center rounded bg-amber-500/10 text-amber-600 dark:text-amber-400'>
               <Icons.database className='size-3.5' />
             </div>
             <div>
               <span className='font-semibold block text-xs'>Sao lưu ZFS Snapshots</span>
               <span className='text-[10px] text-muted-foreground'>
-                Track: 4.3 TB (Snapshot 04:00 hôm nay) • WS: 1.5 TB (OK)
+                Chưa tích hợp nguồn xác minh sao lưu
               </span>
             </div>
           </div>
           <Badge
             variant='outline'
-            className='text-emerald-600 border-emerald-500/30 text-[10px] font-mono'
+            className='text-amber-600 border-amber-500/30 text-[10px] font-mono'
           >
-            ĐỒNG BỘ 100%
+            NOT_CONFIGURED
           </Badge>
         </div>
       </CardContent>

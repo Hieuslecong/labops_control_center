@@ -1,0 +1,50 @@
+{
+  "binhtg": {
+    "username": "binhtg",
+    "public_key": "ZIF0jjjRBuF2l3mOR7QaqFYnbUFnKGFZiTh33bbrHG4=",
+    "client_ip": "10.200.1.11",
+    "vpn_ip": "10.200.1.11/24",
+    "server_id": "track",
+    "server_public_key": "TRK+sErvEr1x2y3z4a5b6c7d8e9f0g1h2i3j4k5l6m7=",
+    "server_endpoint": "118.70.169.236:51821",
+    "allowed_subnets": "10.200.0.0/16",
+    "status": "ACTIVE",
+    "created_at": "Vừa xong"
+  },
+  "intern_sv": {
+    "username": "intern_sv",
+    "public_key": "1PRXGdXdbu6rWiMrFMQAAqfJEL+89/8o85SAYJ3UN3c=",
+    "client_ip": "10.66.66.12",
+    "vpn_ip": "10.66.66.12/24",
+    "server_id": "workstation",
+    "server_public_key": "WS+sErvEr9aB8c7D6e5F4g3H2j1K0lZ9yX8w7v6u5t4=",
+    "server_endpoint": "118.70.169.236:51820",
+    "allowed_subnets": "10.66.66.0/24, 192.168.160.0/21",
+    "status": "ACTIVE",
+    "created_at": "Vừa xong"
+  },
+  "test_user_dual": {
+    "username": "test_user_dual",
+    "public_key": "lk486Nn9muKOPjL7WrmPf9otaLRnm1E4DhCstXjnP00=",
+    "client_ip": "10.200.1.12",
+    "vpn_ip": "10.200.1.12/24",
+    "server_id": "track",
+    "server_public_key": "TRK+sErvEr1x2y3z4a5b6c7d8e9f0g1h2i3j4k5l6m7=",
+    "server_endpoint": "118.70.169.236:51821",
+    "allowed_subnets": "10.200.0.0/16",
+    "status": "ACTIVE",
+    "created_at": "Vừa xong"
+  },
+  "test_wg_user": {
+    "username": "test_wg_user",
+    "public_key": "WquMg5z0FtGnH1HEFl2+fg+6RWY8nnUH7QN+3VMa1wg=",
+    "client_ip": "10.66.66.11",
+    "vpn_ip": "10.66.66.11/24",
+    "server_id": "workstation",
+    "server_public_key": "WS+sErvEr9aB8c7D6e5F4g3H2j1K0lZ9yX8w7v6u5t4=",
+    "server_endpoint": "118.70.169.236:51820",
+    "allowed_subnets": "10.66.66.0/24, 192.168.160.0/21",
+    "status": "ACTIVE",
+    "created_at": "Vừa xong"
+  }
+}

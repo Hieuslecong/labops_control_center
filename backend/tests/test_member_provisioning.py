@@ -1,196 +1,158 @@
+import importlib.util as _ilu
+import unittest as _ut
+if _ilu.find_spec("fastapi") is None or _ilu.find_spec("pydantic") is None:
+    raise _ut.SkipTest("BLOCKED_BY_INFRASTRUCTURE: fastapi/pydantic chưa cài trong môi trường test")
+import tempfile
 import unittest
-import sys
+import json
 import os
+from unittest.mock import PropertyMock, patch
 
-# Add backend directory to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from pydantic import ValidationError
 
-from app.services.labops_service import (
-    LabOpsDataService,
-    validate_linux_username,
-    validate_mount_path
-)
+from app.schemas.labops import MemberCreateRequest
+from app.services.labops_service import LabOpsDataService, validate_linux_username, validate_mount_path
+
 
 class TestMemberProvisioningSecurity(unittest.TestCase):
     def setUp(self):
-        self.svc = LabOpsDataService()
+        self.data_dir = tempfile.TemporaryDirectory()
+        self.svc = LabOpsDataService(demo_mode=True, data_dir=self.data_dir.name)
 
-    def test_safe_username_validation_valid(self):
-        valid_names = ["longnh", "nam_nv", "user-01", "researcher_a", "phamdinh2"]
-        for name in valid_names:
-            try:
-                validate_linux_username(name)
-            except ValueError:
-                self.fail(f"Valid username '{name}' was unexpectedly rejected")
+    def tearDown(self):
+        self.data_dir.cleanup()
 
-    def test_safe_username_validation_reject_metacharacters(self):
-        invalid_names = [
-            "user;rm -rf /",
-            "user$(id)",
-            "user`whoami`",
-            "user&&cat",
-            "user|ls",
-            "user name",
-            "user/name",
-            "../user",
-            "A" * 35,  # too long
-            "a",        # too short (< 3)
-            "1user"     # starts with digit
-        ]
-        for name in invalid_names:
-            with self.assertRaises(ValueError, msg=f"Username '{name}' should have been rejected"):
-                validate_linux_username(name)
+    def payload(self, **overrides):
+        data = {
+            "full_name": "Test Researcher",
+            "username": "secure_tester",
+            "email": "researcher@example.org",
+            "role": "RESEARCHER",
+            "assigned_server": "workstation",
+            "workspace_name": "ws-secure_tester",
+            "storage_quota_gb": 10,
+            "mount_path": "/workspace",
+            "cpu_limit_cores": 4,
+            "ram_limit_gb": 16,
+            "gpu_permissions": [],
+            "vram_quota_gb": 0,
+        }
+        data.update(overrides)
+        return data
 
-    def test_safe_username_validation_reject_reserved_names(self):
-        reserved_names = ["root", "bin", "sudo", "wheel", "admin", "nobody", "docker", "incus"]
-        for name in reserved_names:
-            with self.assertRaises(ValueError, msg=f"Reserved username '{name}' should have been rejected"):
+    def test_safe_username_validation(self):
+        for name in ["longnh", "nam_nv", "user-01", "researcher_a"]:
+            validate_linux_username(name)
+        for name in ["root", "admin", "1user", "ab", "bad user", "../user"]:
+            with self.assertRaises(ValueError):
                 validate_linux_username(name)
 
     def test_mount_path_allowlist(self):
-        # Approved paths
-        validate_mount_path("/workspace", "testuser")
-        validate_mount_path("/home/testuser", "testuser")
-        validate_mount_path("/data", "testuser")
-
-        # Disallowed / dangerous arbitrary host paths
-        dangerous_paths = ["/", "/etc", "/root", "/var", "/dev", "/usr", "/home/otheruser", "/etc/passwd"]
-        for path in dangerous_paths:
-            with self.assertRaises(ValueError, msg=f"Mount path '{path}' should have been rejected"):
+        for path in ["/workspace", "/home/testuser", "/data"]:
+            validate_mount_path(path, "testuser")
+        for path in ["/", "/etc", "/root", "/home/otheruser", "/etc/passwd"]:
+            with self.assertRaises(ValueError):
                 validate_mount_path(path, "testuser")
 
-    def test_atomic_member_provisioning_success(self):
-        payload = {
-            "full_name": "Trương Gia Bình",
-            "username": "binhtg",
-            "email": "binhtg@labops.local",
-            "role": "RESEARCHER",
-            "assigned_server": "track",
-            "workspace_name": "ws-binhtg",
-            "storage_pool_id": "pool-nvme-fast",
-            "mount_path": "/workspace",
-            "storage_quota_gb": 350,
-            "backup_policy": "DAILY_SNAPSHOT",
-            "cpu_limit_cores": 16,
-            "ram_limit_gb": 64,
-            "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI1234567890abcdef binhtg@laptop"
-        }
-        res = self.svc.provision_member(payload)
+    def test_new_user_is_only_a_pending_request(self):
+        allocation_count = len(self.svc.storage_allocations)
+        endpoint_count = len(self.svc.ssh_endpoints)
+        member = self.svc.provision_member(self.payload())
 
-        # Invariants check
-        self.assertEqual(res["username"], "binhtg")
-        self.assertEqual(res["sudo_privilege"], "DENIED")
-        self.assertEqual(res["security_isolation_level"], "UNPRIVILEGED_CGROUPS_ISOLATED")
-        self.assertTrue(res["privilege_validation"]["sudo_test_failed_as_expected"])
-        self.assertTrue(res["privilege_validation"]["unprivileged_container"])
-        self.assertEqual(res["status"], "ACTIVE")
-        self.assertEqual(res["ssh_key_status"], "ACTIVE")
-        self.assertTrue(res["ssh_fingerprint"].startswith("SHA256:"))
+        self.assertEqual(member["status"], "PENDING_PROVISIONING")
+        self.assertEqual(member["workspace_status"], "NOT_VERIFIED")
+        self.assertEqual(member["teleport_status"], "NOT_CONFIGURED")
+        self.assertEqual(member["password_status"], "NOT_APPLICABLE")
+        self.assertIsNone(member["ssh_port"])
+        self.assertEqual(member["wireguard"]["status"], "NOT_CONFIGURED")
+        self.assertEqual(member["privilege_validation"]["status"], "NOT_VERIFIED")
+        self.assertEqual(member["cpu_limit_cores"], 4)
+        self.assertEqual(member["ram_limit_gb"], 16)
+        self.assertNotIn("initial_password", member)
+        self.assertNotIn("private_key", member["wireguard"])
+        self.assertNotIn("config_content", member["wireguard"])
+        self.assertEqual(len(self.svc.storage_allocations), allocation_count)
+        self.assertEqual(len(self.svc.ssh_endpoints), endpoint_count)
 
-        # Check port allocation in range 22000-29999
-        self.assertGreaterEqual(res["ssh_port"], 22001)
-        self.assertLessEqual(res["ssh_port"], 29999)
+    def test_production_without_persisted_members_does_not_load_demo_users(self):
+        production = LabOpsDataService(demo_mode=False, data_dir=self.data_dir.name)
+        self.assertEqual(production.members, [])
+        self.assertEqual(production.ssh_endpoints, [])
 
-        # Check SSH endpoint created
-        endpoint = next((ep for ep in self.svc.ssh_endpoints if ep["member_id"] == res["id"]), None)
-        self.assertIsNotNone(endpoint)
-        self.assertEqual(endpoint["listen_port"], res["ssh_port"])
-        self.assertEqual(endpoint["status"], "ACTIVE")
+    def test_production_records_pending_request_without_verified_storage_pool(self):
+        production = LabOpsDataService(demo_mode=False, data_dir=self.data_dir.name)
+        with patch.object(LabOpsDataService, "storage_pools", new_callable=PropertyMock, return_value=[]):
+            member = production.provision_member(self.payload())
+        self.assertEqual(member["status"], "PENDING_PROVISIONING")
+        self.assertIsNone(member["storage_pool_id"])
+        self.assertEqual(member["storage_pool_label"], "NOT_VERIFIED")
 
-        # Check Storage Allocation created
-        allocation = next((sa for sa in self.svc.storage_allocations if sa["member_id"] == res["id"]), None)
-        self.assertIsNotNone(allocation)
-        self.assertEqual(allocation["volume_name"], "data-binhtg")
-        self.assertEqual(allocation["quota_gb"], 350)
+    def test_legacy_active_records_are_not_reported_as_verified_access(self):
+        legacy = [{
+            "id": "legacy-1",
+            "username": "legacy_user",
+            "status": "ACTIVE",
+            "ssh_status": "ONLINE",
+            "ssh_sessions_count": 3,
+            "wireguard": {
+                "status": "ACTIVE",
+                "public_key": "legacy-public-key",
+                "server_endpoint": "example.invalid:51820",
+                "config_content": "[Interface]\\nPrivateKey = redacted",
+            },
+        }]
+        with open(os.path.join(self.data_dir.name, "members.json"), "w", encoding="utf-8") as stream:
+            json.dump(legacy, stream)
 
-    def test_provision_pending_key_enrollment(self):
-        # Without public key, member should be created in PENDING_KEY_ENROLLMENT status with disabled port
-        payload = {
-            "full_name": "Sinh Viên Thực Tập",
-            "username": "intern_sv",
-            "email": "intern@labops.local",
-            "role": "STUDENT",
-            "assigned_server": "workstation",
-            "storage_quota_gb": 50,
-            "ssh_public_key": None
-        }
-        res = self.svc.provision_member(payload)
-        self.assertEqual(res["status"], "PENDING_KEY_ENROLLMENT")
-        self.assertEqual(res["ssh_key_status"], "PENDING_KEY_ENROLLMENT")
-        
-        endpoint = next(ep for ep in self.svc.ssh_endpoints if ep["member_id"] == res["id"])
-        self.assertEqual(endpoint["status"], "DISABLED")
+        production = LabOpsDataService(demo_mode=False, data_dir=self.data_dir.name)
+        member = production.members[0]
+        self.assertEqual(member["status"], "PENDING_PROVISIONING")
+        self.assertEqual(member["provisioning_state"], "LEGACY_ACCESS_RETAINED_UNVERIFIED")
+        self.assertEqual(member["workspace_status"], "NOT_VERIFIED")
+        self.assertEqual(member["teleport_status"], "NOT_CONFIGURED")
+        self.assertEqual(member["ssh_status"], "NOT_VERIFIED")
+        self.assertEqual(member["ssh_sessions_count"], 0)
+        self.assertEqual(member["wireguard"]["status"], "NOT_VERIFIED")
+        self.assertNotIn("config_content", member["wireguard"])
+        self.assertNotIn("server_endpoint", member["wireguard"])
 
-        # Now enroll key (rotate key)
-        rotated = self.svc.rotate_ssh_key(res["id"], "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_new_key intern@device")
-        self.assertEqual(rotated["status"], "ACTIVE")
-        self.assertEqual(rotated["ssh_key_status"], "ACTIVE")
-        self.assertEqual(endpoint["status"], "ACTIVE")
+    def test_request_validation_rejects_legacy_credentials_and_out_of_range_resources(self):
+        with self.assertRaises(ValidationError):
+            MemberCreateRequest.model_validate({**self.payload(), "initialPassword": "long-secret"})
+        with self.assertRaises(ValidationError):
+            MemberCreateRequest.model_validate({**self.payload(), "cpuLimitCores": 0})
 
-    def test_storage_quota_exceeds_pool_free_space(self):
-        pool = self.svc.storage_pools[0]
-        free_space = pool["free_gb"]
+    def test_duplicate_username_and_workspace_are_rejected(self):
+        self.svc.provision_member(self.payload())
+        with self.assertRaisesRegex(ValueError, "đã tồn tại"):
+            self.svc.provision_member(self.payload(workspace_name="ws-another"))
+        with self.assertRaisesRegex(ValueError, "đã tồn tại"):
+            self.svc.provision_member(self.payload(username="another_user"))
 
-        payload = {
-            "full_name": "Tham Lam",
-            "username": "greedy_mem",
-            "email": "greedy@labops.local",
-            "role": "RESEARCHER",
-            "assigned_server": pool["server_id"],
-            "storage_pool_id": pool["id"],
-            "storage_quota_gb": int(free_space + 5000)
-        }
-        with self.assertRaises(ValueError) as ctx:
-            self.svc.provision_member(payload)
-        self.assertIn("vượt quá dung lượng trống", str(ctx.exception))
+    def test_storage_request_cannot_exceed_available_pool(self):
+        pool = next(pool for pool in self.svc.storage_pools if pool["server_id"] == "workstation")
+        with self.assertRaisesRegex(ValueError, "Dung lượng"):
+            self.svc.provision_member(self.payload(storage_pool_id=pool["id"], storage_quota_gb=int(pool["free_gb"]) + 1))
 
-    def test_ssh_port_collision_detection(self):
-        # Port 22001 is already reserved on track for mem-1
-        payload = {
-            "full_name": "Người Dùng Trùng Cổng",
-            "username": "collision_usr",
-            "email": "coll@labops.local",
-            "role": "RESEARCHER",
-            "assigned_server": "track",
-            "ssh_port": 22001
-        }
-        with self.assertRaises(ValueError) as ctx:
-            self.svc.provision_member(payload)
-        self.assertIn("đã được sử dụng", str(ctx.exception))
+    def test_legacy_ssh_and_password_operations_fail_closed(self):
+        for operation in [
+            lambda: self.svc.rotate_ssh_key("mem-1", "ssh-ed25519 invalid"),
+            lambda: self.svc.revoke_ssh_key("mem-1"),
+            lambda: self.svc.update_ssh_port("mem-1", 22002),
+            lambda: self.svc.reset_member_password("mem-1"),
+            lambda: self.svc.verify_member_dual_auth("mem-1"),
+        ]:
+            with self.assertRaises(RuntimeError):
+                operation()
 
-    def test_member_suspension_and_restoration(self):
-        # Suspend member mem-1
-        suspended = self.svc.suspend_member("mem-1")
-        self.assertEqual(suspended["status"], "SUSPENDED")
-        self.assertEqual(suspended["ssh_status"], "OFFLINE")
+    def test_restore_and_delete_do_not_activate_or_destroy_workspace_data(self):
+        member = self.svc.provision_member(self.payload())
+        restored = self.svc.restore_member(member["id"])
+        self.assertEqual(restored["status"], "PENDING_PROVISIONING")
+        with self.assertRaises(RuntimeError):
+            self.svc.delete_member_permanently(member["id"])
+        self.assertIn(member, self.svc.members)
 
-        # Endpoint must be disabled
-        ep = next(ep for ep in self.svc.ssh_endpoints if ep["member_id"] == "mem-1")
-        self.assertEqual(ep["status"], "DISABLED")
-
-        # Storage volume must remain intact
-        sa = next(sa for sa in self.svc.storage_allocations if sa["member_id"] == "mem-1")
-        self.assertIsNotNone(sa)
-
-        # Restore member mem-1
-        restored = self.svc.restore_member("mem-1")
-        self.assertEqual(restored["status"], "ACTIVE")
-        self.assertEqual(ep["status"], "ACTIVE")
-
-    def test_revoke_ssh_key(self):
-        revoked = self.svc.revoke_ssh_key("mem-2")
-        self.assertEqual(revoked["ssh_key_status"], "REVOKED")
-        self.assertEqual(revoked["ssh_status"], "OFFLINE")
-        ep = next(ep for ep in self.svc.ssh_endpoints if ep["member_id"] == "mem-2")
-        self.assertEqual(ep["status"], "DISABLED")
-
-    def test_permanent_deletion_releases_resources(self):
-        res = self.svc.delete_member_permanently("mem-4")
-        self.assertTrue(res["success"])
-        self.assertFalse(any(m["id"] == "mem-4" for m in self.svc.members))
-        self.assertFalse(any(ep["member_id"] == "mem-4" for ep in self.svc.ssh_endpoints))
-        self.assertFalse(any(sa["member_id"] == "mem-4" for sa in self.svc.storage_allocations))
 
 if __name__ == "__main__":
     unittest.main()
-

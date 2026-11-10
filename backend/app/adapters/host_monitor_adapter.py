@@ -18,6 +18,7 @@ class HostMonitorAdapter:
 
     def __init__(self, is_demo_mode: bool = False):
         self.is_demo_mode = is_demo_mode
+        self.is_containerized = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
 
     def _get_cpu_model(self) -> str:
         try:
@@ -27,7 +28,7 @@ class HostMonitorAdapter:
                         return line.split(":", 1)[1].strip()
         except Exception:
             pass
-        return platform.processor() or "Intel Xeon Scalable Processor"
+        return platform.processor() or "Unknown CPU"
 
     def _get_uptime_string(self) -> str:
         try:
@@ -49,7 +50,7 @@ class HostMonitorAdapter:
             driver = subprocess.check_output(cmd, text=True, timeout=2).strip().split("\n")[0]
             # Get CUDA version from nvidia-smi banner
             out = subprocess.check_output(["nvidia-smi"], text=True, timeout=2)
-            cuda = "13.2"
+            cuda = "Unknown"
             for line in out.split("\n"):
                 if "CUDA Version:" in line:
                     parts = line.split("CUDA Version:")
@@ -58,7 +59,7 @@ class HostMonitorAdapter:
             return {"driver": driver, "cuda": cuda}
         except Exception as e:
             logger.warning(f"Failed to query NVIDIA versions: {e}")
-            return {"driver": "595.71.05", "cuda": "13.2"}
+            return {"driver": "Unavailable", "cuda": "Unavailable"}
 
     def _get_disk_telemetry(self) -> Dict[str, Any]:
         """Inspect real host disk partitions and usage"""
@@ -90,19 +91,32 @@ class HostMonitorAdapter:
         except Exception as e:
             logger.warning(f"Failed to query disk telemetry: {e}")
             return {
-                "disk_total_tb": 1.79,
-                "disk_used_tb": 1.15,
-                "disk_usage_percent": 64.2,
-                "disk_type": "LVM Ext4"
+                "disk_total_tb": 0.0,
+                "disk_used_tb": 0.0,
+                "disk_usage_percent": 0.0,
+                "disk_type": "Unavailable"
             }
+
+    def _get_gpu_count(self) -> int:
+        nvidia_smi = shutil.which("nvidia-smi")
+        if not nvidia_smi:
+            return 0
+        try:
+            output = subprocess.check_output(
+                [nvidia_smi, "--query-gpu=index", "--format=csv,noheader"], text=True, timeout=2
+            )
+            return sum(bool(line.strip()) for line in output.splitlines())
+        except Exception as exc:
+            logger.warning("Failed to query GPU count: %s", exc)
+            return 0
 
     def get_local_workstation_telemetry(self) -> Dict[str, Any]:
         """
         Produce real-time telemetry for the local Ubuntu host (Server 02 — Workstation).
         """
         cpu_model = self._get_cpu_model()
-        logical_cpus = psutil.cpu_count(logical=True) or 40
-        physical_cores = psutil.cpu_count(logical=False) or 20
+        logical_cpus = psutil.cpu_count(logical=True) or 0
+        physical_cores = psutil.cpu_count(logical=False) or 0
         cpu_pct = psutil.cpu_percent(interval=None)
 
         mem = psutil.virtual_memory()
@@ -127,11 +141,11 @@ class HostMonitorAdapter:
         return {
             "id": "workstation",
             "name": "Server 02 — Workstation (Cục bộ)",
-            "hostname": "workstation.lab.local",
+            "hostname": platform.node() or "unknown",
             "location": "Phòng Lab TP.HCM (Khu B)",
-            "status": "online",
+            "status": "degraded" if self.is_containerized else "online",
             "ip_address": "127.0.0.1",
-            "vpn_ip": "10.200.0.2",
+            "vpn_ip": "",
             "uptime": uptime_str,
             "cpu_model": f"{cpu_model} ({logical_cpus} vCPUs, {physical_cores} Cores)",
             "cpu_cores": physical_cores,
@@ -143,16 +157,16 @@ class HostMonitorAdapter:
             "disk_used_tb": disk_info["disk_used_tb"],
             "disk_usage_percent": disk_info["disk_usage_percent"],
             "disk_type": disk_info["disk_type"],
-            "network_in_mbps": 45,
-            "network_out_mbps": 62,
-            "gpu_count": 1,
+            "network_in_mbps": 0,
+            "network_out_mbps": 0,
+            "gpu_count": self._get_gpu_count(),
             "active_members": 0,
-            "active_jobs": 3,
+            "active_jobs": 0,
             "incus_version": incus_status,
             "driver_version": nv_versions["driver"],
             "cuda_version": nv_versions["cuda"],
-            "last_updated": "Vừa xong (Live Telemetry)",
-            "is_real_host": True
+            "last_updated": "Container telemetry; host not verified" if self.is_containerized else "Live host telemetry",
+            "is_real_host": not self.is_containerized
         }
 
     def get_remote_track_telemetry(self) -> Dict[str, Any]:
@@ -193,35 +207,35 @@ class HostMonitorAdapter:
                 "is_real_host": False
             }
 
-        # Real Production Mode: Server Track is currently offline / unreachable over WireGuard tunnel
+        # No remote Track telemetry agent or Gateway API is configured here.
         return {
             "id": "track",
             "name": "Server 01 — Track (Từ xa)",
-            "hostname": "track.lab.internal",
-            "location": "Phòng Lab Hà Nội (Khu A)",
-            "status": "offline",
-            "ip_address": "10.10.1.10",
-            "vpn_ip": "10.200.0.1",
-            "uptime": "Không khả dụng (Mất kết nối)",
-            "cpu_model": "3x NVIDIA A30 Cluster Node",
-            "cpu_cores": 64,
+            "hostname": "Chưa xác minh",
+            "location": "Chưa xác minh",
+            "status": "unknown",
+            "ip_address": "",
+            "vpn_ip": "",
+            "uptime": "Chưa xác minh",
+            "cpu_model": "Chưa xác minh",
+            "cpu_cores": 0,
             "cpu_usage_percent": 0.0,
-            "ram_total_gb": 256.0,
+            "ram_total_gb": 0.0,
             "ram_used_gb": 0.0,
             "ram_usage_percent": 0.0,
-            "disk_total_tb": 8.0,
+            "disk_total_tb": 0.0,
             "disk_used_tb": 0.0,
             "disk_usage_percent": 0.0,
-            "disk_type": "ZFS RAID-Z2 (Chưa kết nối)",
+            "disk_type": "Chưa xác minh",
             "network_in_mbps": 0,
             "network_out_mbps": 0,
             "gpu_count": 0,
             "active_members": 0,
             "active_jobs": 0,
-            "incus_version": "Chưa kết nối",
-            "driver_version": "Chưa kết nối",
-            "cuda_version": "Chưa kết nối",
-            "last_updated": "Mất kết nối (Chưa kết nối WireGuard VPN)",
+            "incus_version": "Chưa xác minh",
+            "driver_version": "Chưa xác minh",
+            "cuda_version": "Chưa xác minh",
+            "last_updated": "Remote telemetry chưa được cấu hình",
             "is_real_host": False
         }
 

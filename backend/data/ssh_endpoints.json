@@ -38,5 +38,15 @@
     "container_port": 22,
     "protocol": "tcp",
     "status": "ACTIVE"
+  },
+  {
+    "id": "ep-400d7d",
+    "member_id": "mem-59d520",
+    "server_id": "workstation",
+    "listen_address": "10.200.0.2",
+    "listen_port": 22002,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "ACTIVE"
   }
 ]

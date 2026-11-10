@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { JobsMonitoringView } from '@/features/jobs/components/jobs-monitoring-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Giám sát tiến trình PyTorch, CUDA kernels và tác vụ tính toán đang chạy'
 };
 
-export default function JobsPage() {
+export default async function JobsPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Công việc Đang chạy & Giám sát Tiến trình'

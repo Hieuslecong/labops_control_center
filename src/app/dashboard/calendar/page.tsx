@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { CalendarManagementView } from '@/features/calendar/components/calendar-management-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Quản lý lịch seminar, bảo trì máy chủ và các sự kiện khoa học'
 };
 
-export default function CalendarPage() {
+export default async function CalendarPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Lịch Hoạt động & Kế hoạch Lab'

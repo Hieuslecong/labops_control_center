@@ -4,7 +4,7 @@
 
 export type ServerId = 'track' | 'workstation';
 
-export type ServerStatus = 'online' | 'offline' | 'degraded';
+export type ServerStatus = 'online' | 'offline' | 'degraded' | 'unknown';
 
 export interface PhysicalServer {
   id: ServerId;
@@ -75,18 +75,20 @@ export interface PhysicalGpu {
   associatedJobs: string[];
 }
 
-export type MemberRole = 'SUPER_ADMIN' | 'LAB_MANAGER' | 'RESEARCHER' | 'STUDENT' | 'GUEST';
+export type MemberRole = 'SUPER_ADMIN' | 'LAB_MANAGER' | 'RESEARCHER' | 'STUDENT' | 'GUEST' | 'ADMIN';
 export type MemberStatus =
   | 'CREATED'
   | 'PROVISIONING'
+  | 'PENDING_PROVISIONING'
+  | 'PARTIAL_FAILURE'
   | 'PENDING_KEY_ENROLLMENT'
   | 'ACTIVE'
   | 'SUSPENDED'
   | 'PROVISIONING_FAILED'
   | 'ARCHIVED'
   | 'DELETED';
-export type SshStatus = 'ONLINE' | 'OFFLINE';
-export type SshKeyEnrollmentStatus = 'PENDING_KEY_ENROLLMENT' | 'ACTIVE' | 'ROTATING' | 'REVOKED';
+export type SshStatus = 'ONLINE' | 'OFFLINE' | 'PARTIAL_FAILURE' | 'NOT_VERIFIED';
+export type SshKeyEnrollmentStatus = 'PENDING_KEY_ENROLLMENT' | 'ACTIVE' | 'ROTATING' | 'REVOKED' | 'NOT_CONFIGURED';
 
 export interface StoragePool {
   id: string;
@@ -144,8 +146,8 @@ export interface SshCredential {
   expiresAt?: string;
 }
 
-export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD';
-export type SshPasswordStatus = 'ACTIVE' | 'CHANGE_REQUIRED' | 'LOCKED' | 'EXPIRED';
+export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD' | 'TELEPORT_CERTIFICATE_PENDING';
+export type SshPasswordStatus = 'ACTIVE' | 'CHANGE_REQUIRED' | 'LOCKED' | 'EXPIRED' | 'NOT_APPLICABLE';
 export type SshAccessStatus = 'ACTIVE' | 'SUSPENDED' | 'LOCKED';
 
 export interface SshLoginEvent {
@@ -195,7 +197,35 @@ export interface PrivilegeValidationResult {
   noDockerSocketAccess: boolean;
   noIncusSocketAccess: boolean;
   verificationTimestamp: string;
-  status: 'VERIFIED_SAFE' | 'VIOLATION_DETECTED';
+  status: 'VERIFIED_SAFE' | 'VIOLATION_DETECTED' | 'NOT_VERIFIED';
+}
+
+export interface WireGuardDevice {
+  deviceId: string;
+  name: string;
+  publicKey: string;
+  clientIp: string;
+  serverId: ServerId;
+  serverPublicKey: string;
+  serverEndpoint: string;
+  allowedSubnets: string;
+  status: 'ACTIVE' | 'PENDING_HANDSHAKE' | 'REVOKED' | 'PARTIAL_FAILURE';
+  createdAt?: number;
+  lastHandshake?: number | null;
+}
+
+export interface WireGuardProfile {
+  vpnIp?: string;
+  clientIp?: string;
+  publicKey?: string;
+  serverPublicKey?: string;
+  serverEndpoint?: string;
+  allowedSubnets?: string;
+  status: 'ACTIVE' | 'PENDING' | 'PENDING_HANDSHAKE' | 'NOT_CONFIGURED' | 'NOT_VERIFIED' | 'REVOKED' | 'PARTIAL_FAILURE';
+  lastHandshake?: string;
+  transferRxBytes?: number;
+  transferTxBytes?: number;
+  devices?: WireGuardDevice[];
 }
 
 export interface LabMember {
@@ -208,6 +238,11 @@ export interface LabMember {
   assignedServer: ServerId;
   workspaceName: string;
   status: MemberStatus;
+  provisioningState?: string;
+  workspaceStatus?: string;
+  teleportStatus?: string;
+  // WireGuard VPN Mesh
+  wireguard?: WireGuardProfile;
   // Storage Details
   storagePoolId: string;
   storagePoolLabel: string;
@@ -219,10 +254,10 @@ export interface LabMember {
   // SSH & Networking
   sshStatus: SshStatus;
   sshSessionsCount: number;
-  sshIp: string;
-  sshPort: number;
+  sshIp?: string;
+  sshPort?: number | null;
   sshKeyStatus: SshKeyEnrollmentStatus;
-  sshFingerprint: string;
+  sshFingerprint?: string;
   sshPublicKeyPreview: string;
   sshPublicKey?: string;
   // Mandatory Dual SSH Authentication
@@ -233,7 +268,7 @@ export interface LabMember {
   lastLoginSourceIp?: string;
   // Security & Privileges
   sudoPrivilege: 'DENIED'; // Strict: always DENIED
-  securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED';
+  securityIsolationLevel: 'UNPRIVILEGED_CGROUPS_ISOLATED' | 'NOT_VERIFIED';
   privilegeValidation?: PrivilegeValidationResult;
   // Hardware Quotas
   cpuLimitCores: number;
@@ -342,39 +377,4 @@ export interface AuditLog {
   result: 'SUCCESS' | 'FAILED' | 'WARNING';
   correlationId: string;
   details: string;
-}
-
-export interface DashboardSummary {
-  servers: {
-    total: number;
-    online: number;
-    offline: number;
-  };
-  gpus: {
-    totalCount: number;
-    model: string;
-    aggregateVramGb: number;
-    activeCount: number;
-    usedVramGb: number;
-  };
-  members: {
-    onlineSsh: number;
-    activeSessions: number;
-    totalRegistered: number;
-  };
-  jobs: {
-    running: number;
-    pending: number;
-    failed: number;
-  };
-  gpuHours: {
-    today: number;
-    last7Days: number;
-    previousPeriodChangePercent: number;
-  };
-  alerts: {
-    critical: number;
-    warnings: number;
-    unresolvedIncidents: number;
-  };
 }

@@ -11,17 +11,20 @@ import Link from 'next/link';
 
 export default function WorkspacesView() {
   const members = useLabOpsStore((state) => state.members);
+  const memberSyncError = useLabOpsStore((state) => state.memberSyncError);
+  const fetchAccessMembers = useLabOpsStore((state) => state.fetchAccessMembers);
+
+  React.useEffect(() => { void fetchAccessMembers(); }, [fetchAccessMembers]);
 
   return (
     <PageContainer
-      pageTitle='Không gian Làm việc (Incus Workspaces)'
-      pageDescription='Danh sách các Container môi trường độc lập cho từng thành viên nghiên cứu'
+      pageTitle='Workspace được cấp'
+      pageDescription='Mapping workspace từ backend; trạng thái container chỉ hiển thị khi agent xác minh.'
     >
       <div className='flex flex-col gap-4'>
         <div className='flex items-center justify-between'>
           <p className='text-xs text-muted-foreground'>
-            Mỗi thành viên sở hữu 1 Workspace riêng biệt trên storage pool ZFS với cgroups CPU/RAM
-            cô lập
+            Bản ghi cấp phát không đồng nghĩa container đã được tạo hoặc cô lập.
           </p>
           <Button
             size='sm'
@@ -70,16 +73,20 @@ export default function WorkspacesView() {
                     <span className='font-semibold uppercase'>{m.assignedServer}</span>
                   </div>
                   <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Mount point:</span>
+                    <span className='text-muted-foreground'>Mount point yêu cầu:</span>
                     <span>{m.mountPath}</span>
                   </div>
                   <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Storage Quota:</span>
-                    <span>{m.storageQuotaGb} GB (ZFS)</span>
+                    <span className='text-muted-foreground'>Quota yêu cầu:</span>
+                    <span>{m.storageQuotaGb} GB</span>
                   </div>
                   <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>SSH Port:</span>
-                    <span className='text-primary font-bold'>:{m.sshPort}</span>
+                    <span className='text-muted-foreground'>Workspace:</span>
+                    <span>{m.workspaceStatus || 'NOT_VERIFIED'}</span>
+                  </div>
+                  <div className='flex justify-between'>
+                    <span className='text-muted-foreground'>Teleport:</span>
+                    <span>{m.teleportStatus || 'NOT_CONFIGURED'}</span>
                   </div>
                 </div>
 
@@ -98,6 +105,8 @@ export default function WorkspacesView() {
             </Card>
           ))}
         </div>
+        {memberSyncError && <p className='text-sm text-amber-700'>{memberSyncError}</p>}
+        {!members.length && <p className='rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground'>Chưa có workspace record đã tải từ backend.</p>}
       </div>
     </PageContainer>
   );

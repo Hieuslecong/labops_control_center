@@ -1,5 +1,11 @@
 import os
 import subprocess
+from datetime import datetime, timezone
+
+
+def settings_local_host_id() -> str:
+    return os.getenv("LABOPS_LOCAL_HOST_ID", "workstation")
+
 import shutil
 import logging
 from typing import Dict, Any, List, Optional
@@ -34,7 +40,7 @@ class NvmlAdapter:
         try:
             cmd = [
                 "nvidia-smi",
-                "--query-compute-apps=pid,process_name,used_memory",
+                "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
                 "--format=csv,noheader,nounits"
             ]
             output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=3)
@@ -43,14 +49,15 @@ class NvmlAdapter:
                 if not line:
                     continue
                 parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     try:
-                        pid = int(parts[0])
-                        pname = parts[1]
-                        vram_mb = int(parts[2])
+                        proc_gpu_uuid = parts[0]
+                        pid = int(parts[1])
+                        pname = parts[2]
+                        vram_mb = int(parts[3])
 
                         username = "Chưa xác định"
-                        workspace = "Trực tiếp trên Host"
+                        workspace = "Unattributed host process"
                         cpu_pct = 0.0
                         displayName = pname
 
@@ -59,7 +66,6 @@ class NvmlAdapter:
                             try:
                                 proc = psutil.Process(pid)
                                 username = proc.username() or "unknown"
-                                workspace = f"ws-{username}"
                                 cpu_pct = round(proc.cpu_percent(), 1)
                                 cmdline = proc.cmdline()
                                 if cmdline:
@@ -78,6 +84,7 @@ class NvmlAdapter:
                             displayName = "python (Tác vụ nghiên cứu AI)"
 
                         processes.append({
+                            "gpu_uuid": proc_gpu_uuid,
                             "pid": pid,
                             "name": displayName,
                             "username": username,
@@ -98,7 +105,7 @@ class NvmlAdapter:
         Synchronously query real nvidia-smi for live physical GPU telemetry.
         Never fabricates metrics in production mode.
         """
-        if not self.demo_mode and self.has_nvidia_smi and self.server_id == "workstation":
+        if not self.demo_mode and self.has_nvidia_smi and self.server_id == settings_local_host_id():
             try:
                 cmd = [
                     "nvidia-smi",
@@ -122,12 +129,18 @@ class NvmlAdapter:
                         power_w = int(float(parts[8]))
                         power_limit_w = int(float(parts[9]))
                         
+                        gpu_uuid = parts[2]
+                        gpu_procs = [p for p in live_processes if p.get("gpu_uuid") == gpu_uuid]
                         gpus.append({
                             "index": idx,
-                            "id": "ws-gpu-01",
-                            "display_label": "WS-GPU-01",
-                            "server_id": "workstation",
-                            "server_name": "Server 02 — Workstation",
+                            "id": f"{self.server_id}-gpu-{idx:02d}",
+                            "display_label": f"{self.server_id.upper()}-GPU-{idx:02d}",
+                            "server_id": self.server_id,
+                            "server_name": self.server_id,
+                            "source": "nvidia-smi",
+                            "collected_at": datetime.now(timezone.utc).isoformat(),
+                            "freshness": "ONLINE",
+                            "vram_unit": "MiB",
                             "model": parts[1],
                             "uuid": parts[2],
                             "pci_bus_id": parts[3],
@@ -137,11 +150,11 @@ class NvmlAdapter:
                             "temp_celsius": temp_c,
                             "power_watts": power_w,
                             "power_limit_watts": power_limit_w,
-                            "allocation_mode": "SHARED",
-                            "enforcement_state": "DRIVER_ENFORCED_VERIFIED",
-                            "active_processes": live_processes,
-                            "active_users": list(dict.fromkeys(p["username"] for p in live_processes if p.get("username") and p["username"] != "Chưa xác định")) or (["Chưa xác định (Workload ngoại vi)"] if live_processes else []),
-                            "associated_jobs": [f"proc-{p['pid']}" for p in live_processes],
+                            "allocation_mode": "FULL_GPU_EXCLUSIVE",
+                            "enforcement_state": "MONITOR_ONLY",
+                            "active_processes": gpu_procs,
+                            "active_users": list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username") and p["username"] != "Chưa xác định")) or (["Chưa xác định (Workload ngoại vi)"] if gpu_procs else []),
+                            "associated_jobs": [f"proc-{p['pid']}" for p in gpu_procs],
                             "live": True
                         })
                 if gpus:

@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { ResourcesManagementView } from '@/features/resources/components/resources-management-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Quản trị hạn ngạch tính toán và cấp phát 4 GPU NVIDIA A30'
 };
 
-export default function ResourcesPage() {
+export default async function ResourcesPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Quản trị Tài nguyên & Cấp phát GPU'

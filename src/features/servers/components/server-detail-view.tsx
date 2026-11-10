@@ -33,6 +33,7 @@ const TIME_SERIES_CPU_RAM = [
   { time: '19:00', cpu: 44, ram: 68, net: 590 },
   { time: '20:00', cpu: 42, ram: 68, net: 620 }
 ];
+const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
 export function ServerDetailView() {
   const servers = useLabOpsStore((state) => state.servers);
@@ -107,18 +108,18 @@ export function ServerDetailView() {
             <h2 className='text-xl font-bold tracking-tight'>{server.name}</h2>
             <Badge
               variant='outline'
-              className={
-                server.status === 'online'
-                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
-                  : 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
-              }
+              className={server.status === 'online'
+                ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
+                : server.status === 'offline'
+                  ? 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
+                  : 'bg-amber-500/10 text-amber-800 border-amber-500/30 font-mono text-[11px]'}
             >
               <span
                 className={`size-2 rounded-full mr-1 ${
-                  server.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-destructive'
+                  server.status === 'online' ? 'bg-emerald-500 animate-pulse' : server.status === 'offline' ? 'bg-destructive' : 'bg-amber-500'
                 }`}
               ></span>
-              {server.status === 'online' ? 'TRỰC TUYẾN' : 'MẤT KẾT NỐI (Chưa kết nối VPN)'}
+              {server.status === 'online' ? 'TRỰC TUYẾN' : server.status === 'offline' ? 'MẤT KẾT NỐI' : 'CHƯA XÁC MINH'}
             </Badge>
             <Badge variant='secondary' className='font-mono text-xs'>
               {server.hostname}
@@ -131,12 +132,10 @@ export function ServerDetailView() {
             • Uptime: {server.uptime}
           </p>
           {server.status !== 'online' && (
-            <div className='mt-2.5 p-2 rounded-md bg-destructive/10 border border-destructive/20 text-xs text-destructive flex items-center gap-2'>
+            <div className={`mt-2.5 p-2 rounded-md border text-xs flex items-center gap-2 ${server.status === 'offline' ? 'bg-destructive/10 border-destructive/20 text-destructive' : 'bg-amber-500/10 border-amber-500/20 text-amber-800'}`}>
               <Icons.warning className='size-4 shrink-0' />
               <span>
-                <strong>Cảnh báo kết nối:</strong> Máy chủ này hiện không phản hồi qua đường hầm
-                WireGuard VPN. LabOps từ chối hiển thị dữ liệu giả định. Vui lòng kiểm tra dịch vụ{' '}
-                <code>wg-quick@wg0</code> trên máy chủ từ xa.
+                <strong>Trạng thái:</strong> {server.status === 'offline' ? 'Backend xác nhận máy chủ không phản hồi.' : 'Chưa có telemetry xác minh cho máy chủ này.'}
               </span>
             </div>
           )}
@@ -262,7 +261,7 @@ export function ServerDetailView() {
 
             <Card className='p-4 flex items-center justify-between bg-card'>
               <div>
-                <span className='text-xs font-medium text-muted-foreground'>ZFS Pools Lưu trữ</span>
+                <span className='text-xs font-medium text-muted-foreground'>Ổ đĩa đã báo cáo</span>
                 <div className='text-2xl font-bold font-mono mt-1'>
                   {server.diskUsedTb.toFixed(1)} / {server.diskTotalTb} TB
                 </div>
@@ -294,7 +293,7 @@ export function ServerDetailView() {
               </div>
               <div className='p-2.5 rounded border bg-muted/20'>
                 <span className='text-muted-foreground block text-[11px]'>Kernel Linux</span>
-                <span className='font-mono font-bold text-foreground'>5.15.0-126-generic</span>
+                <span className='font-mono font-bold text-foreground'>Chưa được API cung cấp</span>
               </div>
             </div>
           </Card>
@@ -306,14 +305,10 @@ export function ServerDetailView() {
             <div className='p-8 rounded-lg border border-dashed text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-2 bg-muted/20'>
               <Icons.warning className='size-6 text-amber-500' />
               <span className='font-semibold text-foreground text-sm'>
-                {selectedServerId === 'track'
-                  ? 'Server Track (3x NVIDIA A30) hiện ngoại tuyến qua WireGuard VPN'
-                  : 'Không có thiết bị GPU nào được tìm thấy trên máy chủ này'}
+                {server.status === 'offline' ? 'Máy chủ không phản hồi' : 'Chưa có GPU được xác minh'}
               </span>
               <span className='max-w-md text-[11px]'>
-                {selectedServerId === 'track'
-                  ? 'Toàn bộ 3x GPU NVIDIA A30 (72 GB VRAM) trên Server Track sẽ tự động xuất hiện khi kết nối VPN 10.200.0.1 được thiết lập.'
-                  : 'Kiểm tra driver NVIDIA hoặc quyền truy cập của agent giám sát.'}
+                {server.status === 'offline' ? 'Kiểm tra kết nối backend tới máy chủ.' : 'Số liệu GPU chưa được xác minh từ agent giám sát.'}
               </span>
             </div>
           ) : (
@@ -323,7 +318,7 @@ export function ServerDetailView() {
                   gpu.vramUsedMb > 512 ||
                   gpu.gpuUtilPercent > 0 ||
                   (gpu.activeProcesses && gpu.activeProcesses.length > 0);
-                const vramPercent = Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100);
+                const vramPercent = gpu.vramTotalMb ? Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100) : 0;
 
                 return (
                   <Card
@@ -361,7 +356,7 @@ export function ServerDetailView() {
                       <div className='flex justify-between text-xs mb-1'>
                         <span className='text-muted-foreground font-medium'>Bộ nhớ VRAM:</span>
                         <span className='font-mono font-bold text-foreground'>
-                          {(gpu.vramUsedMb / 1024).toFixed(1)} / 24 GB{' '}
+                          {(gpu.vramUsedMb / 1024).toFixed(1)} / {(gpu.vramTotalMb / 1024).toFixed(1)} GB{' '}
                           <span className='font-normal text-[11px] text-muted-foreground'>
                             ({vramPercent}%)
                           </span>
@@ -454,7 +449,7 @@ export function ServerDetailView() {
             <CardDescription className='text-xs mb-4'>
               Dữ liệu giám sát thời gian thực từ Netdata Agent
             </CardDescription>
-            <div className='h-[260px] w-full'>
+            {isDemoMode ? <div className='h-[260px] w-full'>
               <ChartContainer config={cpuRamChartConfig} className='aspect-auto h-[260px] w-full'>
                 <AreaChart data={TIME_SERIES_CPU_RAM}>
                   <CartesianGrid strokeDasharray='3 3' opacity={0.2} />
@@ -479,13 +474,13 @@ export function ServerDetailView() {
                   />
                 </AreaChart>
               </ChartContainer>
-            </div>
+            </div> : <p className='rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground'>Chưa có bộ thu thập lịch sử CPU/RAM đã xác minh.</p>}
           </Card>
         </TabsContent>
 
         {/* TAB 4: STORAGE */}
         <TabsContent value='storage' className='mt-4 space-y-3'>
-          <Card className='p-4 bg-card'>
+          {isDemoMode ? <Card className='p-4 bg-card'>
             <CardTitle className='text-sm font-bold mb-2'>Trạng thái ZFS Storage Pool</CardTitle>
             <div className='space-y-2 text-xs'>
               <div className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'>
@@ -513,7 +508,7 @@ export function ServerDetailView() {
                 <span className='font-mono font-bold text-xs'>1.8 TB</span>
               </div>
             </div>
-          </Card>
+          </Card> : <Card className='p-4 bg-card text-sm text-muted-foreground'>Thông tin storage pool chưa được xác minh bởi workspace controller.</Card>}
         </TabsContent>
 
         {/* TAB 5: WORKSPACES */}
@@ -542,9 +537,9 @@ export function ServerDetailView() {
                   </div>
                   <Badge
                     variant='outline'
-                    className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                    className={m.workspaceStatus === 'VERIFIED' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]' : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px]'}
                   >
-                    RUNNING
+                    {m.workspaceStatus || 'NOT_VERIFIED'}
                   </Badge>
                 </div>
               ))}
@@ -554,7 +549,7 @@ export function ServerDetailView() {
 
         {/* TAB 6: SSH */}
         <TabsContent value='ssh' className='mt-4 space-y-3'>
-          <Card className='p-4 bg-card'>
+          {!isDemoMode ? <Card className='p-4 bg-card text-sm text-muted-foreground'>Chưa có collector phiên Teleport đã xác minh. Các phiên SSH host cũ không được hiển thị như phiên Teleport.</Card> : <Card className='p-4 bg-card'>
             <CardTitle className='text-sm font-bold mb-3'>Phiên SSH Đang Kết Nối</CardTitle>
             <div className='space-y-2 text-xs'>
               {serverMembers.filter((m) => m.sshSessionsCount > 0).length === 0 ? (
@@ -588,7 +583,7 @@ export function ServerDetailView() {
                   ))
               )}
             </div>
-          </Card>
+          </Card>}
         </TabsContent>
 
         {/* TAB 7: JOBS */}
@@ -755,21 +750,10 @@ export function ServerDetailView() {
         {/* TAB 8: LOGS */}
         <TabsContent value='logs' className='mt-4 space-y-3'>
           <Card className='p-4 bg-card'>
-            <CardTitle className='text-sm font-bold mb-2'>
-              Nhật ký Kernel & NVML (Trích xuất 5 bản ghi gần nhất)
-            </CardTitle>
-            <div className='bg-muted/80 p-3 rounded-lg font-mono text-[11px] space-y-1 text-muted-foreground overflow-x-auto'>
-              <div>
-                [45123.120] nvidia-nvml: GPU 0000:3b:00.0 memory allocation verified (21400 MB
-                allocated).
-              </div>
-              <div>[45123.450] incus-daemon: container ws-hieulc network veth42a1 link UP.</div>
-              <div>[45124.010] zfs: pool tank scrub completed with 0 errors.</div>
-              <div>
-                [45125.890] sshd[38192]: Accepted publickey for hieulc from 10.200.0.100 port 54122
-                ssh2.
-              </div>
-              <div>[45129.300] nvidia-uvm: Loaded CUDA driver 550.120 with MPS enabled.</div>
+            <CardTitle className='text-sm font-bold mb-2'>Nhật ký Kernel &amp; NVML</CardTitle>
+            <div className='p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs'>
+              Chưa cấu hình nguồn thu thập nhật ký (NOT_CONFIGURED). Nhật ký sẽ hiển thị khi Node
+              Agent được triển khai và cho phép thao tác đọc nhật ký trên máy chủ này.
             </div>
           </Card>
         </TabsContent>
@@ -778,10 +762,11 @@ export function ServerDetailView() {
         <TabsContent value='alerts' className='mt-4 space-y-3'>
           <Card className='p-4 bg-card'>
             <CardTitle className='text-sm font-bold mb-2'>Trạng thái Cảnh báo Hạ tầng</CardTitle>
-            <div className='p-3 rounded-lg border bg-emerald-500/10 border-emerald-500/20 text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-2'>
-              <Icons.check className='size-4 text-emerald-600' />
+            <div className='p-3 rounded-lg border border-slate-300 bg-slate-50 text-slate-700 dark:bg-slate-900 dark:text-slate-300 text-xs flex items-center gap-2'>
+              <Icons.info className='size-4' />
               <span>
-                Máy chủ hoạt động tối ưu. Không ghi nhận lỗi quá nhiệt, sụt áp hay lỗi I/O đĩa cứng.
+                Trạng thái cảnh báo: UNKNOWN. Chưa kết nối Beszel/nguồn cảnh báo nên không thể khẳng
+                định máy chủ đang hoạt động bình thường.
               </span>
             </div>
           </Card>

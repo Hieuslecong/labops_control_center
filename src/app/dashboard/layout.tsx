@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import KBar from '@/components/kbar';
 import AppSidebar from '@/components/layout/app-sidebar';
 import Header from '@/components/layout/header';
@@ -5,7 +6,6 @@ import { GlobalTelemetryPoller } from '@/components/layout/global-telemetry-poll
 import { InfoSidebar } from '@/components/layout/info-sidebar';
 import { InfobarProvider } from '@/components/ui/infobar';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { auth } from '@clerk/nextjs/server';
 import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
 
@@ -19,23 +19,7 @@ export const metadata: Metadata = {
 };
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
-  const hasRealClerkKeys = Boolean(
-    !isDemoMode &&
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
-    process.env.CLERK_SECRET_KEY &&
-    !process.env.CLERK_SECRET_KEY.includes('mock')
-  );
-
-  if (hasRealClerkKeys) {
-    try {
-      await auth.protect();
-    } catch {
-      // In local demo mode or offline, continue to demo interface
-    }
-  }
-
+  await protectRoute();
   const cookieStore = await cookies();
   const defaultOpen = cookieStore.get('sidebar_state')?.value !== 'false';
   return (

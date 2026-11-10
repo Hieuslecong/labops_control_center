@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,18 +5,22 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-labops}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labops_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Bắt buộc thiết lập POSTGRES_PASSWORD trong .env}
       POSTGRES_DB: ${POSTGRES_DB:-labops_db}
     ports:
-      - "5432:5432"
+      # Tuyệt đối không phơi cổng cơ sở dữ liệu 5432 ra 0.0.0.0
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+      - ./backend/migrations/004_labops_v2_complete.sql:/docker-entrypoint-initdb.d/004_labops_v2_complete.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-labops} -d ${POSTGRES_DB:-labops_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - labops_internal
 
   backend:
     build:
@@ -30,30 +32,40 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      PROJECT_NAME: "LabOps Control Center API"
-      VERSION: "1.0.0"
+      PROJECT_NAME: "LabOps Control Center API V2"
+      VERSION: "2.0.0"
       API_V1_STR: "/api/v1"
-      DEMO_MODE: ${DEMO_MODE:-true}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-labops}:${POSTGRES_PASSWORD:-labops_secret}@postgres:5432/${POSTGRES_DB:-labops_db}
-      TRACK_SERVER_URL: ${TRACK_SERVER_URL:-https://10.10.1.10:8443}
-      WORKSTATION_SERVER_URL: ${WORKSTATION_SERVER_URL:-https://10.10.2.20:8443}
-      NETDATA_TRACK_URL: ${NETDATA_TRACK_URL:-http://10.200.0.1:19999}
-      NETDATA_WS_URL: ${NETDATA_WS_URL:-http://10.200.0.2:19999}
-      BACKEND_CORS_ORIGINS: '["http://localhost:3000","http://localhost:3001","http://127.0.0.1:3000"]'
+      LABOPS_MODE: ${LABOPS_MODE:-production}
+      LABOPS_ALLOW_MOCK_DATA: ${LABOPS_ALLOW_MOCK_DATA:-false}
+      LABOPS_SESSION_SECRET: ${LABOPS_SESSION_SECRET:?Bắt buộc thiết lập LABOPS_SESSION_SECRET}
+      LABOPS_ADMIN_API_TOKEN: ${LABOPS_ADMIN_API_TOKEN:?Bắt buộc thiết lập LABOPS_ADMIN_API_TOKEN}
+      LABOPS_NODE_AGENT_TOKEN: ${LABOPS_NODE_AGENT_TOKEN:?Bắt buộc thiết lập LABOPS_NODE_AGENT_TOKEN}
+      LABOPS_LOCAL_HOST_ID: ${LABOPS_LOCAL_HOST_ID:-workstation}
+      LABOPS_CORS_ORIGINS: ${LABOPS_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      ARCANE_BASE_URL: ${ARCANE_BASE_URL:-}
+      ARCANE_API_KEY: ${ARCANE_API_KEY:-}
+      BESZEL_HUB_URL: ${BESZEL_HUB_URL:-}
+      BESZEL_API_TOKEN: ${BESZEL_API_TOKEN:-}
+      WIREGUARD_SERVERS_JSON: ${WIREGUARD_SERVERS_JSON:-}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-labops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-labops_db}
     ports:
-      - "8000:8000"
+      # Chỉ bind loopback; trình duyệt người dùng gọi qua BFF của Next.js
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3
+    networks:
+      - labops_internal
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.bun
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-false}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
         BUILD_STANDALONE: "true"
     container_name: labops-frontend
     restart: unless-stopped
@@ -63,16 +75,26 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_DEMO_MODE: "false"
+      LABOPS_BACKEND_URL: http://backend:8000
+      LABOPS_SESSION_SECRET: ${LABOPS_SESSION_SECRET}
+      LABOPS_ADMIN_API_TOKEN: ${LABOPS_ADMIN_API_TOKEN}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
     ports:
-      - "3000:3000"
+      - "${FRONTEND_BIND_ADDR:-127.0.0.1}:3000:3000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 30s
       timeout: 5s
       retries: 3
+    networks:
+      - labops_internal
+
+networks:
+  labops_internal:
+    driver: bridge
 
 volumes:
   postgres_data:
     driver: local
-

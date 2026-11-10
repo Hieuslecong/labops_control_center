@@ -24,17 +24,17 @@ class NetdataAdapter:
                     if res.status_code == 200:
                         data = res.json()
                         return {
-                            "status": "online",
-                            "cpu_util": data.get("cpu_utilization", 42.5),
-                            "ram_used_gb": data.get("ram_used_gb", 174.2),
-                            "uptime": data.get("uptime", "45d 12h")
+                            "status": "AVAILABLE",
+                            "cpu_util": data.get("cpu_utilization"),
+                            "ram_used_gb": data.get("ram_used_gb"),
+                            "uptime": data.get("uptime")
                         }
-            except Exception as e:
-                logger.info(f"Netdata at {self.base_url} simulated: {e}")
+            except Exception as exc:
+                logger.info("Netdata at %s is unavailable: %s", self.base_url, exc)
 
         return {
-            "status": "simulated",
-            "cpu_util": 42.5,
-            "ram_used_gb": 174.2,
-            "uptime": "45d 12h"
+            "status": "UNAVAILABLE",
+            "cpu_util": None,
+            "ram_used_gb": None,
+            "uptime": None
         }

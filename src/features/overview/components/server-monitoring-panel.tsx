@@ -36,17 +36,16 @@ export function ServerMonitoringPanel() {
           const diskGaugeColor =
             server.diskUsagePercent > 80 ? 'stroke-amber-500' : 'stroke-cyan-600';
 
-          const serverGpu = gpus.find((g) => g.serverId === server.id);
+          const serverGpus = gpus.filter((g) => g.serverId === server.id);
+          const serverGpu = serverGpus[0];
+          const gpuVramTotalGb = serverGpus.reduce((total, gpu) => total + gpu.vramTotalMb, 0) / 1024;
+          const gpuVramUsedGb = serverGpus.reduce((total, gpu) => total + gpu.vramUsedMb, 0) / 1024;
           const isGpuRunning = Boolean(
-            serverGpu &&
-            (serverGpu.vramUsedMb > 512 ||
-              serverGpu.gpuUtilPercent > 0 ||
-              (serverGpu.activeProcesses?.length || 0) > 0)
+            serverGpus.some((gpu) => gpu.vramUsedMb > 512 || gpu.gpuUtilPercent > 0 || gpu.activeProcesses.length > 0)
           );
-          const gpuUsedGb = serverGpu ? (serverGpu.vramUsedMb / 1024).toFixed(1) : '0';
-          const gpuVramPercent = serverGpu
-            ? Math.round((serverGpu.vramUsedMb / (serverGpu.vramTotalMb || 24576)) * 100)
-            : 0;
+          const gpuUsedGb = gpuVramUsedGb.toFixed(1);
+          const gpuVramPercent = gpuVramTotalGb ? Math.round((gpuVramUsedGb / gpuVramTotalGb) * 100) : 0;
+          const statusLabel = server.status === 'online' ? 'ONLINE' : server.status === 'offline' ? 'MẤT KẾT NỐI' : 'CHƯA XÁC MINH';
 
           return (
             <Card
@@ -71,17 +70,19 @@ export function ServerMonitoringPanel() {
                         className={
                           server.status === 'online'
                             ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
-                            : 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
+                            : server.status === 'offline'
+                              ? 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
+                              : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
                         }
                       >
                         <span
                           className={`size-1.5 rounded-full mr-1 ${
                             server.status === 'online'
                               ? 'bg-emerald-500 animate-pulse'
-                              : 'bg-destructive'
+                              : server.status === 'offline' ? 'bg-destructive' : 'bg-amber-500'
                           }`}
                         ></span>
-                        {server.status === 'online' ? 'ONLINE' : 'MẤT KẾT NỐI'}
+                        {statusLabel}
                       </Badge>
                       <Badge variant='secondary' className='text-[10px] font-mono shrink-0'>
                         {server.hostname}
@@ -111,10 +112,10 @@ export function ServerMonitoringPanel() {
                 {/* 3 Circular Gauges or Offline alert */}
                 {server.status !== 'online' ? (
                   <div className='py-6 px-3 text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-1.5 bg-destructive/5 rounded-lg border border-destructive/20'>
-                    <Icons.warning className='size-5 text-destructive' />
-                    <p className='font-semibold text-destructive'>Máy chủ từ xa hiện mất kết nối</p>
+                    <Icons.warning className={`size-5 ${server.status === 'offline' ? 'text-destructive' : 'text-amber-600'}`} />
+                    <p className={`font-semibold ${server.status === 'offline' ? 'text-destructive' : 'text-amber-700'}`}>{server.status === 'offline' ? 'Máy chủ không phản hồi' : 'Chưa có telemetry xác minh'}</p>
                     <p className='text-[11px] text-muted-foreground'>
-                      Chưa kết nối đường hầm WireGuard VPN. LabOps từ chối hiển thị dữ liệu giả lập.
+                      {server.status === 'offline' ? 'Backend xác nhận máy chủ hiện không phản hồi.' : 'LabOps chưa xác minh trạng thái kết nối; dữ liệu phần cứng bị ẩn.'}
                     </p>
                   </div>
                 ) : (
@@ -164,7 +165,7 @@ export function ServerMonitoringPanel() {
                           isGpuRunning ? 'text-indigo-600 dark:text-indigo-400' : 'text-primary'
                         }`}
                       />
-                      {server.gpuCount}x NVIDIA A30
+                      {server.gpuCount} GPU · {serverGpu?.model || 'mẫu chưa xác minh'}
                     </span>
                     <span className='text-[10px] font-mono truncate'>
                       {isGpuRunning ? (
@@ -173,9 +174,9 @@ export function ServerMonitoringPanel() {
                         </span>
                       ) : (
                         <span className='text-muted-foreground'>
-                          {server.status === 'online'
-                            ? `${server.gpuCount * 24} GB (Rỗi)`
-                            : 'Mất kết nối'}
+                          {server.status === 'online' && gpuVramTotalGb > 0
+                            ? `${gpuVramUsedGb.toFixed(1)} / ${gpuVramTotalGb.toFixed(1)} GB VRAM`
+                            : server.status === 'offline' ? 'Mất kết nối' : 'Chưa xác minh'}
                         </span>
                       )}
                     </span>

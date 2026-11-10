@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { ServerDetailView } from '@/features/servers/components/server-detail-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Giám sát chi tiết phần cứng, container và GPU của Server Track và Workstation'
 };
 
-export default function ServersPage() {
+export default async function ServersPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Quản trị Máy chủ Vật lý'

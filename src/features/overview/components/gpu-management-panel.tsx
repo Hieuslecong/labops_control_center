@@ -26,12 +26,12 @@ export function GpuManagementPanel({ onOpenAllocateDialog }: GpuManagementPanelP
             <h3 className='text-lg font-bold tracking-tight'>
               {isDemoMode
                 ? 'Quản trị 4 GPU Vật lý (NVIDIA A30)'
-                : `Giám sát GPU Vật lý (${gpus.length} GPU Khả dụng)`}
+                : `Giám sát GPU Vật lý (${gpus.length} GPU được báo cáo)`}
             </h3>
             <p className='text-xs text-muted-foreground'>
               {isDemoMode
                 ? 'Hạ tầng độc lập: 3x A30 trên Server Track (72GB) • 1x A30 trên Server Workstation (24GB)'
-                : `Workstation Cục bộ: 1x NVIDIA A30 (24GB HBM2) • Server Track: Mất kết nối WireGuard`}
+                : 'Thông tin phần cứng lấy từ collector; chưa có telemetry thì không hiển thị GPU giả.'}
             </p>
           </div>
         </div>

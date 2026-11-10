@@ -1,3 +1,7 @@
+from fastapi import Depends
+from app.api.dependencies import require_user
+from app.core.security import Principal
+from app.services.gpu_scheduler import SchedulerError
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from app.schemas.labops import JobResponse
@@ -54,11 +58,9 @@ async def list_active_jobs(
     return _filter_jobs(service.jobs, resource=resource, username=username, server_id=server_id, search=search)
 
 @router.post("/{job_id}/stop")
-async def stop_job(job_id: str) -> Dict[str, Any]:
-    """Gracefully terminate a running compute job (SIGTERM -> SIGKILL) and release its GPU memory"""
+async def stop_job(job_id: str, p: Principal = Depends(require_user)) -> Dict[str, Any]:
+    """Yêu cầu dừng tác vụ; chỉ chủ sở hữu hoặc quản trị viên. Kết quả phản ánh trạng thái xác minh thật."""
     try:
-        result = service.stop_job(job_id)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
+        return service.stop_job(job_id, actor=p.username, is_admin=p.is_admin)
+    except SchedulerError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})

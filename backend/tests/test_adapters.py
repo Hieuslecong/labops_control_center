@@ -43,6 +43,8 @@ class TestAdapters(unittest.TestCase):
 
     def test_nvml_adapter_live_hardware(self):
         # Test real local hardware detection
+        if os.getenv("LABOPS_TEST_REAL_HARDWARE") != "1":
+            self.skipTest("set LABOPS_TEST_REAL_HARDWARE=1 on a verified GPU host")
         adapter = NvmlAdapter(server_id="workstation", demo_mode=False)
         telemetry = self.loop.run_until_complete(adapter.get_gpu_telemetry())
         self.assertGreater(len(telemetry), 0)
@@ -70,10 +72,9 @@ class TestAdapters(unittest.TestCase):
     def test_wireguard_adapter(self):
         adapter = WireGuardAdapter(interface="wg0")
         status = self.loop.run_until_complete(adapter.get_peer_status())
-        self.assertEqual(status["status"], "active")
-        self.assertIn("site_to_site", status)
-        self.assertEqual(status["site_to_site"]["track"]["vpn_ip"], "10.200.0.1")
-        self.assertEqual(status["site_to_site"]["workstation"]["vpn_ip"], "10.200.0.2")
+        self.assertIn(status["status"], {"ACTIVE", "NOT_CONFIGURED"})
+        self.assertIn("live", status)
+        self.assertNotIn("site_to_site", status)
 
 if __name__ == "__main__":
     unittest.main()

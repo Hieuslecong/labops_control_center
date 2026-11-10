@@ -1,5 +1,7 @@
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from app.api.dependencies import require_admin, require_user
+from app.core.security import Principal
 from typing import List, Dict, Any
 from app.schemas.labops import SecurityReviewResponse
 from app.services.labops_service import service
@@ -7,13 +9,15 @@ from app.services.labops_service import service
 router = APIRouter()
 
 @router.get("/reviews", response_model=List[SecurityReviewResponse])
-async def list_security_reviews():
+async def list_security_reviews(p: Principal = Depends(require_admin)):
     """List GitHub repository security reviews and sandbox verification reports"""
     return service.security_reviews
 
 @router.post("/reviews", response_model=SecurityReviewResponse)
-async def submit_security_review(payload: Dict[str, str]):
+async def submit_security_review(payload: Dict[str, str], p: Principal = Depends(require_admin)):
     """Submit a GitHub repo to the isolated security sandbox for AST static analysis"""
+    if not service.demo_mode:
+        raise HTTPException(status_code=503, detail="Security scanner is not configured")
     repo_url = payload.get("repo_url") or payload.get("repoUrl")
     if not repo_url:
         raise HTTPException(status_code=400, detail="Thiếu URL kho lưu trữ GitHub")
@@ -59,7 +63,9 @@ async def submit_security_review(payload: Dict[str, str]):
     return new_review
 
 @router.post("/reviews/{review_id}/decision")
-async def update_security_review_decision(review_id: str, payload: Dict[str, str]):
+async def update_security_review_decision(review_id: str, payload: Dict[str, str], p: Principal = Depends(require_admin)):
+    if not service.demo_mode:
+        raise HTTPException(status_code=503, detail="Security review decisions are unavailable without a configured scanner")
     """Approve or reject a repository submitted for review"""
     decision = payload.get("decision")
     if decision not in ["APPROVED", "REJECTED"]:
@@ -86,3 +92,28 @@ async def update_security_review_decision(review_id: str, payload: Dict[str, str
 
     return {"success": True, "id": review_id, "status": decision}
 
+
+
+# ---------------- V2: Trivy scans ----------------
+@router.get("/scans")
+async def list_scans(p: Principal = Depends(require_user)):
+    """Admin thấy mọi bản quét; nghiên cứu viên chỉ thấy bản quét của mình."""
+    return service.security_scanner.list_scans(None if p.is_admin else p.username)
+
+
+@router.post("/scans")
+async def submit_scan(payload: Dict[str, str], p: Principal = Depends(require_user)):
+    try:
+        return service.security_scanner.submit(payload.get("repo_url", ""), payload.get("commit_sha", ""), p.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/scans/{scan_id}/decision")
+async def decide_scan(scan_id: str, payload: Dict[str, str], p: Principal = Depends(require_admin)):
+    try:
+        return service.security_scanner.decide(scan_id, payload.get("decision", ""), p.username)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))

@@ -12,21 +12,22 @@ export function KpiSummary() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const members = useLabOpsStore((state) => state.members);
   const jobs = useLabOpsStore((state) => state.jobs);
+  const securityReviews = useLabOpsStore((state) => state.securityReviews);
+  const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
   const summary = React.useMemo(() => {
-    const totalVramGb = Math.round(
-      gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0) / 1024
-    );
+    const totalVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramTotalMb, 0) / 1024);
     const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0) / 1024);
+    const gpuModels = [...new Set(gpus.map((gpu) => gpu.model).filter(Boolean))];
     const activeGpus = gpus.filter(
       (g) =>
         (g.vramUsedMb || 0) > 512 ||
         (g.gpuUtilPercent || 0) > 0 ||
         (g.activeProcesses?.length || 0) > 0
     ).length;
-    const onlineSsh = members.filter((m) => m.sshStatus === 'ONLINE').length;
-    const activeSessions = members.reduce((acc, m) => acc + m.sshSessionsCount, 0);
     const runningJobs = jobs.filter((j) => j.status === 'RUNNING').length;
+    const pendingJobs = jobs.filter((j) => j.status === 'PENDING').length;
+    const failedJobs = jobs.filter((j) => j.status === 'FAILED').length;
     const cudaProcCount = Math.max(
       gpus.reduce((acc, g) => acc + (g.activeProcesses?.length || 0), 0),
       jobs.filter((j) => j.isGpu || (j.vramUsedMb || 0) > 0).length
@@ -36,38 +37,33 @@ export function KpiSummary() {
       servers: {
         total: servers.length,
         online: servers.filter((s) => s.status === 'online').length,
-        offline: servers.filter((s) => s.status !== 'online').length
+        offline: servers.filter((s) => s.status === 'offline').length,
+        unknown: servers.filter((s) => s.status === 'unknown' || s.status === 'degraded').length
       },
       gpus: {
         totalCount: gpus.length,
-        model: 'NVIDIA A30 24GB',
-        aggregateVramGb: totalVramGb > 0 ? totalVramGb : 24,
+        model: gpuModels.length === 1 ? gpuModels[0] : gpuModels.length ? 'Nhiều mẫu GPU' : 'Chưa xác minh',
+        aggregateVramGb: totalVramGb,
         activeCount: activeGpus,
         usedVramGb
       },
       members: {
-        onlineSsh,
-        activeSessions,
         totalRegistered: members.length
       },
       jobs: {
         running: runningJobs,
         cudaProcs: cudaProcCount,
-        pending: 0,
-        failed: 0
+        pending: pendingJobs,
+        failed: failedJobs
       },
-      gpuHours: {
-        today: 48.6,
-        last7Days: 384.2,
-        previousPeriodChangePercent: 14.8
-      },
+      gpuHours: isDemoMode ? { today: 48.6, last7Days: 384.2, previousPeriodChangePercent: 14.8 } : null,
       alerts: {
-        critical: 0,
-        warnings: 1,
-        unresolvedIncidents: 0
+        warnings: isDemoMode
+          ? securityReviews.filter((review) => review.status === 'MANUAL_REVIEW').length
+          : null
       }
     };
-  }, [servers, gpus, members, jobs]);
+  }, [servers, gpus, members, jobs, securityReviews, isDemoMode]);
 
   return (
     <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 min-w-0 w-full'>
@@ -95,27 +91,12 @@ export function KpiSummary() {
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs min-w-0'>
-            {summary.servers.offline > 0 ? (
-              <>
-                <div className='flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium truncate'>
-                  <span className='size-2 shrink-0 rounded-full bg-amber-500 animate-pulse'></span>
-                  <span className='truncate'>{summary.servers.offline} Cụm Mất kết nối VPN</span>
-                </div>
-                <p className='text-muted-foreground text-[11px] mt-1 truncate'>
-                  Workstation: Online • Track: Offline
-                </p>
-              </>
-            ) : (
-              <>
-                <div className='flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium truncate'>
-                  <span className='size-2 shrink-0 rounded-full bg-emerald-500 animate-pulse'></span>
-                  <span className='truncate'>100% Hoạt động bình thường</span>
-                </div>
-                <p className='text-muted-foreground text-[11px] mt-1 truncate'>
-                  Track: Online • WS: Online
-                </p>
-              </>
-            )}
+            <div className={`font-medium truncate ${summary.servers.unknown ? 'text-amber-600' : summary.servers.offline ? 'text-destructive' : 'text-emerald-600'}`}>
+              {summary.servers.unknown ? `${summary.servers.unknown} chưa xác minh` : summary.servers.offline ? `${summary.servers.offline} mất kết nối` : 'Máy chủ đã phản hồi'}
+            </div>
+            <p className='text-muted-foreground text-[11px] mt-1 truncate'>
+              {summary.servers.offline} mất kết nối · {summary.servers.unknown} chưa xác minh
+            </p>
           </CardContent>
         </Card>
       </Link>
@@ -123,14 +104,14 @@ export function KpiSummary() {
       {/* Card 2: GPU */}
       <Link
         href='/dashboard/resources'
-        aria-label='Xem chi tiết GPU NVIDIA A30'
+        aria-label='Xem chi tiết GPU'
         className='group min-w-0'
       >
         <Card className='h-full min-w-0 transition-all duration-200 hover:shadow-md hover:border-primary/40 bg-card overflow-hidden'>
           <CardHeader className='pb-2'>
             <div className='flex items-center justify-between'>
               <CardDescription className='text-xs font-medium text-muted-foreground uppercase tracking-wider truncate'>
-                NVIDIA GPU (A30)
+                GPU ({summary.gpus.model})
               </CardDescription>
               <div className='flex size-7 shrink-0 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'>
                 <Icons.gpu className='size-4' />
@@ -154,7 +135,7 @@ export function KpiSummary() {
               <div
                 className='bg-indigo-600 h-1.5 rounded-full transition-all duration-500'
                 style={{
-                  width: `${Math.min(100, (summary.gpus.usedVramGb / summary.gpus.aggregateVramGb) * 100)}%`
+                  width: `${summary.gpus.aggregateVramGb ? Math.min(100, (summary.gpus.usedVramGb / summary.gpus.aggregateVramGb) * 100) : 0}%`
                 }}
               ></div>
             </div>
@@ -175,22 +156,20 @@ export function KpiSummary() {
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5 truncate'>
-              {summary.members.onlineSsh}
+              {summary.members.totalRegistered}
               <span className='text-xs font-normal text-muted-foreground truncate'>
-                / {summary.members.totalRegistered} Online
+                tài khoản
               </span>
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs min-w-0'>
             <div className='flex items-center justify-between gap-1'>
-              <span className='text-muted-foreground shrink-0'>Phiên SSH:</span>
+              <span className='text-muted-foreground shrink-0'>Phiên Teleport:</span>
               <Badge variant='secondary' className='text-[10px] font-mono px-1.5 py-0 shrink-0'>
-                {summary.members.activeSessions} active
+                Chưa xác minh
               </Badge>
             </div>
-            <p className='text-muted-foreground text-[11px] mt-1 truncate'>
-              Incus container cgroups
-            </p>
+            <p className='text-muted-foreground text-[11px] mt-1 truncate'>Chưa có audit collector Teleport</p>
           </CardContent>
         </Card>
       </Link>
@@ -219,7 +198,7 @@ export function KpiSummary() {
               <span className='size-2 shrink-0 rounded-full bg-amber-500 animate-pulse'></span>
               <span className='truncate'>{summary.jobs.cudaProcs} tiến trình CUDA active</span>
             </div>
-            <p className='text-muted-foreground text-[11px] mt-1 truncate'>0 chờ • 0 thất bại</p>
+            <p className='text-muted-foreground text-[11px] mt-1 truncate'>{summary.jobs.pending} chờ • {summary.jobs.failed} thất bại</p>
           </CardContent>
         </Card>
       </Link>
@@ -241,17 +220,17 @@ export function KpiSummary() {
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5 truncate'>
-              {summary.gpuHours.last7Days}
+              {summary.gpuHours?.last7Days ?? '—'}
               <span className='text-xs font-normal text-muted-foreground'>giờ</span>
             </CardTitle>
           </CardHeader>
           <CardContent className='pt-0 text-xs min-w-0'>
             <div className='flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-medium truncate'>
-              <span>+{summary.gpuHours.previousPeriodChangePercent}%</span>
-              <span className='text-muted-foreground font-normal truncate'>so với tuần trước</span>
+              <span>{summary.gpuHours ? `+${summary.gpuHours.previousPeriodChangePercent}%` : 'Chưa thu thập'}</span>
+              {summary.gpuHours && <span className='text-muted-foreground font-normal truncate'>so với tuần trước</span>}
             </div>
             <p className='text-muted-foreground text-[11px] mt-1 truncate'>
-              Hôm nay: {summary.gpuHours.today}h
+              {summary.gpuHours ? `Hôm nay: ${summary.gpuHours.today}h` : 'Chưa có nguồn GPU-hours'}
             </p>
           </CardContent>
         </Card>
@@ -270,7 +249,7 @@ export function KpiSummary() {
               </div>
             </div>
             <CardTitle className='text-2xl font-bold tracking-tight mt-1 flex items-baseline gap-1.5 truncate'>
-              {summary.alerts.warnings}
+              {summary.alerts.warnings ?? '—'}
               <span className='text-xs font-normal text-muted-foreground truncate'>
                 Cần kiểm duyệt
               </span>
@@ -279,10 +258,10 @@ export function KpiSummary() {
           <CardContent className='pt-0 text-xs min-w-0'>
             <div className='flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-medium truncate'>
               <span className='size-2 shrink-0 rounded-full bg-rose-500'></span>
-              <span className='truncate'>1 repo chờ duyệt AST</span>
+              <span className='truncate'>{summary.alerts.warnings === null ? 'Nguồn cảnh báo chưa kết nối' : `${summary.alerts.warnings} repo cần kiểm duyệt`}</span>
             </div>
             <p className='text-muted-foreground text-[11px] mt-1 truncate'>
-              0 sự cố bảo mật nghiêm trọng
+              Không có collector sự cố đã xác minh
             </p>
           </CardContent>
         </Card>

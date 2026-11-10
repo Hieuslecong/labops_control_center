@@ -30,13 +30,12 @@ class Settings(BaseSettings):
     LABOPS_ALLOW_MOCK_DATA: bool = os.getenv("LABOPS_ALLOW_MOCK_DATA", "false").lower() == "true"
     
     # Local Machine Identification
-    LOCAL_HOST_ID: str = "workstation"
+    LOCAL_HOST_ID: str = os.getenv("LABOPS_LOCAL_HOST_ID", "workstation")
+    LABOPS_ADMIN_API_TOKEN: str = os.getenv("LABOPS_ADMIN_API_TOKEN", "")
     
     # Legacy flag for backward-compatibility
     @property
     def DEMO_MODE(self) -> bool:
-        if "unittest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-            return True
         return self.LABOPS_MODE.lower() == "demo" and self.LABOPS_ALLOW_MOCK_DATA
     
     # Database
@@ -47,11 +46,12 @@ class Settings(BaseSettings):
     
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001"
+        o.strip() for o in os.getenv(
+            "LABOPS_CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000"
+        ).split(",") if o.strip()
     ]
+    LABOPS_NODE_AGENT_TOKEN: str = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
 
     class Config:
         case_sensitive = True

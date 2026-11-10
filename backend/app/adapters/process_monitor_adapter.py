@@ -117,16 +117,16 @@ class ProcessMonitorAdapter:
         now = time.time()
         now_dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # In production mode for Track server (remote & currently disconnected):
+        # Track has no configured remote process collector in this deployment.
         if not self.demo_mode and self.server_id == "track":
             return {
                 "source_host": "track",
                 "collection_timestamp": now_dt_str,
-                "collector_status": "UNAVAILABLE",
+                "collector_status": "NOT_CONFIGURED",
                 "filter": filter_type,
                 "total_count": 0,
                 "actual_observations": [],
-                "error_details": "Mất kết nối: Server 01 — Track chưa kết nối qua WireGuard VPN (10.200.0.1)"
+                "error_details": "Remote process collector is not configured; connection state is not verified."
             }
 
         gpu_pids = self._get_gpu_compute_pids()
@@ -247,10 +247,10 @@ class ProcessMonitorAdapter:
             return {
                 "source_host": "track",
                 "collection_timestamp": now_dt_str,
-                "collector_status": "UNAVAILABLE",
+                "collector_status": "NOT_CONFIGURED",
                 "total_count": 0,
                 "actual_observations": [],
-                "error_details": "Mất kết nối: Server 01 — Track chưa kết nối qua WireGuard VPN"
+                "error_details": "Remote SSH session collector is not configured; connection state is not verified."
             }
 
         sessions = []

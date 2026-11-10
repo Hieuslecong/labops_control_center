@@ -1,0 +1,38 @@
+{
+  "hosts": [
+    {
+      "id": "workstation",
+      "hostname": "labops-workstation",
+      "display_name": "Máy chủ 02 — Workstation (Local Node)",
+      "role": "HYBRID",
+      "management_ip": "127.0.0.1",
+      "vpn_ip": "10.200.0.2",
+      "ssh_legacy_port": 22,
+      "agent_url": "http://127.0.0.1:8091",
+      "desired_state": "ACTIVE",
+      "observed_state": "ONLINE",
+      "telemetry_source": "labops_node_agent",
+      "last_heartbeat_at": "2026-11-10T03:33:43.789819+00:00",
+      "created_at": "2026-11-10T03:23:47.887756+00:00",
+      "updated_at": "2026-11-10T03:33:43.789836+00:00",
+      "agent_version": "2.0.0"
+    },
+    {
+      "id": "track",
+      "hostname": "labops-track",
+      "display_name": "Máy chủ 01 — Track (Remote Compute Node)",
+      "role": "COMPUTE_NODE",
+      "management_ip": "10.10.1.10",
+      "vpn_ip": "10.200.0.1",
+      "ssh_legacy_port": 22,
+      "agent_url": "http://10.200.0.1:8091",
+      "desired_state": "ACTIVE",
+      "observed_state": "UNKNOWN",
+      "telemetry_source": "NOT_CONFIGURED",
+      "last_heartbeat_at": null,
+      "created_at": "2026-11-10T03:23:47.887764+00:00",
+      "updated_at": "2026-11-10T03:23:47.887766+00:00"
+    }
+  ],
+  "reconciled_at": "2026-11-10T03:23:47.887769+00:00"
+}

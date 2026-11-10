@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { SecurityManagementView } from '@/features/security/components/security-management-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Kiểm duyệt an toàn mã nguồn, quy trình sandbox cách ly và giám sát sao lưu dữ liệu'
 };
 
-export default function SecurityPage() {
+export default async function SecurityPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Quản trị An ninh & Kiểm duyệt Mã nguồn'

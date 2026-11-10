@@ -1,25 +1,47 @@
 [
   {
-    "id": "aud-b256b9",
+    "id": "aud-4e8c7e",
     "actor": "admin@labops.local",
-    "action": "SSH_ACCESS_RESTORED",
-    "target_type": "SECURITY",
-    "target_id": "hieulc",
-    "timestamp": "2026-11-04 09:52:11",
+    "action": "WIREGUARD_KEY_ROTATED",
+    "target_type": "MEMBER",
+    "target_id": "test_wg_user",
+    "timestamp": "2026-11-04 19:25:34",
     "result": "SUCCESS",
-    "correlation_id": "corr-1fafc447e798",
-    "details": "Đã mở khóa quyền truy cập SSH của @hieulc (Tái kích hoạt Incus proxy endpoint)"
+    "correlation_id": "corr-af4e201a67c3",
+    "details": "Đã sinh lại hồ sơ WireGuard VPN cho @test_wg_user (IP: 10.66.66.11)"
   },
   {
-    "id": "aud-15eafd",
+    "id": "aud-60fcd5",
     "actor": "admin@labops.local",
-    "action": "SSH_ACCESS_SUSPENDED",
-    "target_type": "SECURITY",
-    "target_id": "hieulc",
-    "timestamp": "2026-11-04 09:52:11",
-    "result": "WARNING",
-    "correlation_id": "corr-94a9faa1d168",
-    "details": "Đã khóa quyền truy cập SSH của @hieulc (Tạm dừng container proxy endpoint)"
+    "action": "MEMBER_RESTORED",
+    "target_type": "MEMBER",
+    "target_id": "test_wg_user",
+    "timestamp": "2026-11-04 19:25:34",
+    "result": "SUCCESS",
+    "correlation_id": "corr-665063d1bfb6",
+    "details": "Đã mở khóa tài khoản @test_wg_user, kích hoạt lại cổng SSH 22002 và phục hồi WireGuard peer"
+  },
+  {
+    "id": "aud-3fab03",
+    "actor": "admin@labops.local",
+    "action": "MEMBER_SUSPENDED",
+    "target_type": "MEMBER",
+    "target_id": "test_wg_user",
+    "timestamp": "2026-11-04 19:25:34",
+    "result": "SUCCESS",
+    "correlation_id": "corr-559df4402b12",
+    "details": "Đã tạm khóa tài khoản @test_wg_user, ngắt cổng SSH 22002 và thu hồi WireGuard peer"
+  },
+  {
+    "id": "aud-7b9495",
+    "actor": "admin@labops.local",
+    "action": "MEMBER_PROVISIONED",
+    "target_type": "MEMBER",
+    "target_id": "test_wg_user",
+    "timestamp": "2026-11-04 19:25:34",
+    "result": "SUCCESS",
+    "correlation_id": "corr-703373e912dd",
+    "details": "Đã khởi tạo workspace ws-test_wg_user cho @test_wg_user trên workstation: ZFS volume data-test_wg_user (250GB), Incus proxy port 22002, quyền Standard User (Không sudo)."
   },
   {
     "id": "aud-1",

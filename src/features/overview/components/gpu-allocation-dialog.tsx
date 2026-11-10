@@ -34,40 +34,49 @@ export function GpuAllocationDialog({
     () => allMembers.filter((m) => m.status === 'ACTIVE'),
     [allMembers]
   );
-  const allocateGpu = useLabOpsStore((state) => state.allocateGpu);
-
   const [customGpuId, setCustomGpuId] = useState<string | null>(null);
-  const [selectedUsername, setSelectedUsername] = useState('tuanpm');
-  const [mode, setMode] = useState<'SHARED' | 'EXCLUSIVE'>('SHARED');
-  const [vramGb, setVramGb] = useState(12);
-  const [jobName, setJobName] = useState('fine_tune_vision_encoder.py');
+  const [selectedUsername, setSelectedUsername] = useState('');
+  const [jobName, setJobName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const selectedGpuId = customGpuId ?? (defaultGpuId || 'track-gpu-03');
+  const selectedGpuId = customGpuId ?? (defaultGpuId || gpus[0]?.id || '');
   const setSelectedGpuId = (id: string) => setCustomGpuId(id);
 
   const selectedGpu = gpus.find((g) => g.id === selectedGpuId) || gpus[0];
-  const selectedMember = members.find((m) => m.username === selectedUsername) || members[0];
 
-  const handleSubmit = (e: React.SyntheticEvent) => {
+  const handleSubmit = async (e: React.SyntheticEvent) => {
     e.preventDefault();
+    if (!selectedGpu) return;
     setIsSubmitting(true);
-
-    setTimeout(() => {
-      allocateGpu({
-        gpuId: selectedGpuId,
-        username: selectedUsername,
-        mode,
-        requestedVramGb: vramGb,
-        jobName
+    try {
+      const res = await fetch('/api/labops/gpus/allocate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({
+          gpu_id: selectedGpuId,
+          username: selectedUsername || undefined,
+          mode: 'FULL_GPU_EXCLUSIVE',
+          job_name: jobName
+        })
       });
-
-      setIsSubmitting(false);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data?.detail;
+        toast.error('Không thể giữ GPU', {
+          description: typeof detail === 'string' ? detail : detail?.message || `Lỗi HTTP ${res.status}`
+        });
+        return;
+      }
       onOpenChange(false);
-      toast.success(`Cấp phát thành công GPU ${selectedGpu.displayLabel}`, {
-        description: `Đã cấp ${vramGb}GB VRAM (${mode}) cho thành viên ${selectedMember.fullName}`
+      toast.info(`Đã giữ GPU ${selectedGpu.displayLabel} — chờ xác minh`, {
+        description:
+          'Trạng thái: PENDING_VERIFICATION. Tác vụ chỉ được coi là đang chạy khi Node Agent xác minh process thật.'
       });
-    }, 400);
+    } catch {
+      toast.error('Không kết nối được backend LabOps');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -82,7 +91,7 @@ export function GpuAllocationDialog({
               <div>
                 <DialogTitle className='text-base font-bold'>Cấp phát Tài nguyên GPU</DialogTitle>
                 <DialogDescription className='text-xs'>
-                  Phân bổ bộ nhớ VRAM và gán quyền truy cập GPU vật lý cho thành viên nghiên cứu
+                  Giữ độc quyền một GPU vật lý (theo UUID) cho thành viên nghiên cứu
                 </DialogDescription>
               </div>
             </div>
@@ -95,7 +104,7 @@ export function GpuAllocationDialog({
               <div className='grid grid-cols-2 gap-2'>
                 {gpus.map((gpu) => {
                   const isSelected = gpu.id === selectedGpuId;
-                  const freeGb = Math.max(0, (gpu.vramTotalMb - gpu.vramUsedMb) / 1024).toFixed(1);
+                  const busy = (gpu.activeProcesses?.length ?? 0) > 0;
                   return (
                     <button
                       key={gpu.id}
@@ -114,7 +123,11 @@ export function GpuAllocationDialog({
                         </Badge>
                       </div>
                       <div className='text-[10px] text-muted-foreground mt-1'>
-                        Còn trống: <strong className='text-foreground'>{freeGb} GB</strong> / 24GB
+                        {busy ? (
+                          <span className='text-amber-600'>Đang có process — không thể giữ</span>
+                        ) : (
+                          <span className='text-emerald-600'>Không có process quan sát được</span>
+                        )}
                       </div>
                     </button>
                   );
@@ -128,80 +141,31 @@ export function GpuAllocationDialog({
               <select
                 value={selectedUsername}
                 onChange={(e) => setSelectedUsername(e.target.value)}
+                aria-label='Thành viên tiếp nhận'
                 className='w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-medium focus:ring-1 focus:ring-primary'
               >
+                <option value=''>Chính tôi (người đang đăng nhập)</option>
                 {members.map((m) => (
                   <option key={m.id} value={m.username}>
                     {m.fullName} (@{m.username} •{' '}
-                    {m.assignedServer === 'track' ? 'Server Track' : 'Server Workstation'})
+                    {m.assignedServer})
                   </option>
                 ))}
               </select>
             </div>
 
-            {/* Chế độ cấp phát */}
-            <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>Chế độ phân bổ</Label>
-              <div className='grid grid-cols-2 gap-2'>
-                <button
-                  type='button'
-                  onClick={() => setMode('SHARED')}
-                  className={`p-2 rounded-md border text-left text-xs ${
-                    mode === 'SHARED'
-                      ? 'border-primary bg-primary/10 font-semibold'
-                      : 'border-border'
-                  }`}
-                >
-                  <div className='font-bold text-foreground'>Shared (Chia sẻ)</div>
-                  <div className='text-[10px] text-muted-foreground'>
-                    Nhiều user chạy song song qua MPS/Quota
-                  </div>
-                </button>
-                <button
-                  type='button'
-                  onClick={() => setMode('EXCLUSIVE')}
-                  className={`p-2 rounded-md border text-left text-xs ${
-                    mode === 'EXCLUSIVE'
-                      ? 'border-purple-600 bg-purple-500/10 font-semibold'
-                      : 'border-border'
-                  }`}
-                >
-                  <div className='font-bold text-foreground'>Exclusive (Độc quyền)</div>
-                  <div className='text-[10px] text-muted-foreground'>
-                    Chiếm toàn bộ 24GB VRAM cho 1 tác vụ lớn
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {/* VRAM Limit */}
-            <div className='space-y-1.5'>
-              <div className='flex justify-between items-center'>
-                <Label className='text-xs font-semibold'>Hạn ngạch VRAM yêu cầu</Label>
-                <span className='font-mono font-bold text-primary text-xs'>{vramGb} GB</span>
-              </div>
-              <input
-                type='range'
-                min={4}
-                max={24}
-                step={2}
-                value={vramGb}
-                onChange={(e) => setVramGb(Number(e.target.value))}
-                className='w-full accent-primary'
-              />
-              <div className='flex justify-between text-[10px] text-muted-foreground'>
-                <span>4 GB</span>
-                <span>8 GB</span>
-                <span>12 GB</span>
-                <span>16 GB</span>
-                <span>20 GB</span>
-                <span>24 GB (Toàn bộ)</span>
+            {/* Chế độ cấp phát: V1 chỉ hỗ trợ độc quyền toàn bộ GPU */}
+            <div className='rounded-md border border-blue-200 bg-blue-50 p-2.5 text-[11px] text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200'>
+              <div className='font-semibold'>Chế độ: Độc quyền toàn bộ GPU (FULL_GPU_EXCLUSIVE)</div>
+              <div className='mt-0.5'>
+                Docker không giới hạn VRAM theo GB, nên hệ thống không cho chọn hạn ngạch VRAM. GPU
+                chỉ được giữ khi NVML xác nhận không có process ngoài đang chạy.
               </div>
             </div>
 
             {/* Tên Script / Job */}
             <div className='space-y-1.5'>
-              <Label className='text-xs font-semibold'>Tên lệnh / Script thực thi</Label>
+              <Label className='text-xs font-semibold'>Tên tác vụ (ghi chú)</Label>
               <Input
                 value={jobName}
                 onChange={(e) => setJobName(e.target.value)}
@@ -228,7 +192,7 @@ export function GpuAllocationDialog({
               disabled={isSubmitting}
               className='text-xs font-semibold bg-primary'
             >
-              {isSubmitting ? 'Đang xử lý...' : 'Xác nhận cấp phát'}
+              {isSubmitting ? 'Đang xử lý...' : 'Giữ GPU'}
             </Button>
           </DialogFooter>
         </form>

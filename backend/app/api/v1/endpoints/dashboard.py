@@ -12,12 +12,5 @@ async def get_dashboard_summary():
 @router.get("/health")
 async def get_system_health():
     """Health check for backend API and node integrations"""
-    return {
-        "status": "healthy",
-        "mode": "DEMO" if getattr(service, "demo_mode", True) else "PRODUCTION",
-        "nodes": {
-            "track": "online",
-            "workstation": "online"
-        }
-    }
+    return service.get_monitoring_health()
 

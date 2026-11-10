@@ -1,3 +1,4 @@
+import { protectRoute } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { MemberManagementView } from '@/features/users/components/member-management-view';
 
@@ -6,7 +7,8 @@ export const metadata = {
   description: 'Quản trị danh sách thành viên nghiên cứu, cấp phát container Incus và khóa SSH'
 };
 
-export default function UsersPage() {
+export default async function UsersPage() {
+  await protectRoute();
   return (
     <PageContainer
       pageTitle='Quản trị Thành viên & Quyền truy cập'

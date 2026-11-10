@@ -369,8 +369,8 @@ export function JobsMonitoringView() {
             className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
           >
             <option value='all'>Tất cả máy chủ</option>
-            <option value='workstation'>Server 02 — Workstation (Online)</option>
-            <option value='track'>Server 01 — Track (Mất kết nối)</option>
+            <option value='workstation'>Server 02 — Workstation</option>
+            <option value='track'>Server 01 — Track</option>
           </select>
 
           {/* Lọc theo Trạng thái */}

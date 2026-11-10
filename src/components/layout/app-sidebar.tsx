@@ -45,10 +45,6 @@ export default function AppSidebar() {
     emailAddresses: [{ emailAddress: 'admin@labops.local' }]
   };
 
-  const handleSignOut = () => {
-    router.push('/auth/sign-in');
-  };
-
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='group-data-[collapsible=icon]:pt-4'>
@@ -112,13 +108,6 @@ export default function AppSidebar() {
                   <DropdownMenuItem onClick={() => router.push('/dashboard/audit-logs')}>
                     <Icons.audit className='mr-2 h-4 w-4' />
                     Nhật ký thao tác
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={handleSignOut}>
-                    <Icons.logout aria-hidden className='mr-2 h-4 w-4 text-destructive' />
-                    Đăng xuất
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>

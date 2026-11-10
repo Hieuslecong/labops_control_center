@@ -7,7 +7,6 @@ import {
   SecurityReview,
   LabEvent,
   AuditLog,
-  DashboardSummary,
   StoragePool,
   StorageAllocation,
   SshEndpoint,
@@ -26,6 +25,7 @@ interface LabOpsState {
   activeSshSessions: RealSshSession[];
   lastSyncTime: string | null;
   syncError: string | null;
+  memberSyncError: string | null;
   isLivePolling: boolean;
   securityReviews: SecurityReview[];
   events: LabEvent[];
@@ -40,38 +40,9 @@ interface LabOpsState {
   setLivePolling: (enabled: boolean) => void;
   fetchLiveJobs: () => Promise<void>;
   fetchLiveSshSessions: () => Promise<void>;
+  fetchAccessMembers: () => Promise<void>;
 
   // Computed summary
-  getSummary: () => DashboardSummary;
-
-  // Actions that mutate state in Demo Mode
-  addMember: (
-    member: Omit<LabMember, 'id' | 'createdAt' | 'activeJobsCount' | 'totalGpuHours'>
-  ) => void;
-  updateMemberStatus: (id: string, status: LabMember['status']) => void;
-  updateMemberQuotas: (
-    id: string,
-    quotas: Partial<
-      Pick<LabMember, 'cpuLimitCores' | 'ramLimitGb' | 'storageQuotaGb' | 'vramPolicy'>
-    >
-  ) => void;
-  deleteMember: (id: string) => void;
-  deleteMemberPermanently: (id: string) => void;
-
-  rotateSshKey: (id: string, newPublicKey: string, newFingerprint: string) => void;
-  revokeSshKey: (id: string) => void;
-  resetMemberSshPassword: (
-    id: string,
-    initialPassword?: string,
-    requireChange?: boolean
-  ) => { success: boolean; tempPassword?: string; message: string };
-  requirePasswordChange: (id: string) => void;
-  suspendSshAccess: (id: string, reason?: string) => void;
-  restoreSshAccess: (id: string) => void;
-  getMemberLoginEvents: (username: string) => SshLoginEvent[];
-  changeStorageQuota: (id: string, newQuotaGb: number) => { success: boolean; message: string };
-  changeSshPort: (id: string, newPort: number) => { success: boolean; message: string };
-  archiveWorkspace: (id: string) => void;
 
   allocateGpu: (payload: {
     gpuId: string;
@@ -320,6 +291,10 @@ const INITIAL_STORAGE_POOLS: StoragePool[] = [
   }
 ];
 
+function createInitialWireGuardProfile(_username: string, _serverId: ServerId, _ipOctet: number) {
+  return { status: 'NOT_CONFIGURED' as const, devices: [] };
+}
+
 const INITIAL_MEMBERS: LabMember[] = [
   {
     id: 'mem-001',
@@ -331,6 +306,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'track',
     workspaceName: 'ws-hieulc',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('hieulc', 'track', 10),
     storagePoolId: 'pool-nvme-fast',
     storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
     mountPath: '/workspace',
@@ -385,6 +361,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'track',
     workspaceName: 'ws-namnv',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('namnv', 'track', 11),
     storagePoolId: 'pool-nvme-fast',
     storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
     mountPath: '/workspace',
@@ -437,6 +414,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'workstation',
     workspaceName: 'ws-lanpt',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('lanpt', 'workstation', 12),
     storagePoolId: 'pool-workstation-ssd',
     storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
     mountPath: '/workspace',
@@ -490,6 +468,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'track',
     workspaceName: 'ws-tuanpm',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('tuanpm', 'track', 13),
     storagePoolId: 'pool-nvme-fast',
     storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
     mountPath: '/workspace',
@@ -543,6 +522,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'track',
     workspaceName: 'ws-anhhd',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('anhhd', 'track', 14),
     storagePoolId: 'pool-nvme-fast',
     storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
     mountPath: '/workspace',
@@ -596,6 +576,7 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'workstation',
     workspaceName: 'ws-linhvm',
     status: 'ACTIVE',
+    wireguard: createInitialWireGuardProfile('linhvm', 'workstation', 15),
     storagePoolId: 'pool-workstation-ssd',
     storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
     mountPath: '/workspace',
@@ -649,6 +630,10 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'track',
     workspaceName: 'ws-huydq',
     status: 'SUSPENDED',
+    wireguard: {
+      ...createInitialWireGuardProfile('huydq', 'track', 16),
+      status: 'REVOKED'
+    },
     storagePoolId: 'pool-nvme-fast',
     storagePoolLabel: 'SSD NVMe Siêu tốc (Pool A)',
     mountPath: '/workspace',
@@ -701,6 +686,10 @@ const INITIAL_MEMBERS: LabMember[] = [
     assignedServer: 'workstation',
     workspaceName: 'ws-chaunb',
     status: 'PENDING_KEY_ENROLLMENT',
+    wireguard: {
+      ...createInitialWireGuardProfile('chaunb', 'workstation', 17),
+      status: 'PENDING'
+    },
     storagePoolId: 'pool-workstation-ssd',
     storagePoolLabel: 'SSD Doanh nghiệp (Pool A)',
     mountPath: '/workspace',
@@ -1412,131 +1401,60 @@ const PROD_SERVERS: PhysicalServer[] = [
   {
     id: 'track',
     name: 'Server 01 — Track (Từ xa)',
-    hostname: 'track.lab.internal',
-    location: 'Phòng Lab Hà Nội (Khu A)',
-    status: 'offline',
-    ipAddress: '10.10.1.10',
-    vpnIp: '10.200.0.1',
-    uptime: 'Không khả dụng (Mất kết nối)',
-    cpuModel: '3x NVIDIA A30 Cluster Node',
-    cpuCores: 64,
-    cpuUsagePercent: 0.0,
-    ramTotalGb: 256,
+    hostname: 'Chưa xác minh',
+    location: 'Chưa xác minh',
+    status: 'unknown',
+    ipAddress: '',
+    vpnIp: '',
+    uptime: 'Chưa xác minh',
+    cpuModel: 'Chưa xác minh',
+    cpuCores: 0,
+    cpuUsagePercent: 0,
+    ramTotalGb: 0,
     ramUsedGb: 0.0,
     ramUsagePercent: 0.0,
-    diskTotalTb: 8.0,
+    diskTotalTb: 0,
     diskUsedTb: 0.0,
     diskUsagePercent: 0.0,
-    diskType: 'ZFS RAID-Z2 (Chưa kết nối)',
+    diskType: 'Chưa xác minh',
     networkInMbps: 0,
     networkOutMbps: 0,
     gpuCount: 0,
     activeMembers: 0,
     activeJobs: 0,
-    incusVersion: 'Chưa kết nối',
-    driverVersion: 'Chưa kết nối',
-    cudaVersion: 'Chưa kết nối',
-    lastUpdated: 'Mất kết nối (Chưa kết nối WireGuard VPN)'
+    incusVersion: 'Chưa xác minh',
+    driverVersion: 'Chưa xác minh',
+    cudaVersion: 'Chưa xác minh',
+    lastUpdated: 'Chưa xác minh kết nối thật'
   },
   {
     id: 'workstation',
     name: 'Server 02 — Workstation (Cục bộ)',
-    hostname: 'workstation.lab.local',
-    location: 'Phòng Lab TP.HCM (Khu B)',
-    status: 'online',
-    ipAddress: '127.0.0.1',
-    vpnIp: '10.200.0.2',
-    uptime: '14 ngày 14 giờ',
-    cpuModel: 'Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz (40 vCPUs)',
-    cpuCores: 20,
-    cpuUsagePercent: 15.7,
-    ramTotalGb: 125.5,
-    ramUsedGb: 49.4,
-    ramUsagePercent: 39.4,
-    diskTotalTb: 1.79,
-    diskUsedTb: 1.15,
-    diskUsagePercent: 64.2,
-    diskType: 'LVM Ext4 (Primary) + Ext4 (Secondary Data)',
-    networkInMbps: 45,
-    networkOutMbps: 62,
-    gpuCount: 1,
+    hostname: 'Chưa xác minh',
+    location: 'Chưa xác minh',
+    status: 'unknown',
+    ipAddress: '',
+    vpnIp: '',
+    uptime: 'Chưa xác minh',
+    cpuModel: 'Chưa xác minh',
+    cpuCores: 0,
+    cpuUsagePercent: 0,
+    ramTotalGb: 0,
+    ramUsedGb: 0,
+    ramUsagePercent: 0,
+    diskTotalTb: 0,
+    diskUsedTb: 0,
+    diskUsagePercent: 0,
+    diskType: 'Chưa xác minh',
+    networkInMbps: 0,
+    networkOutMbps: 0,
+    gpuCount: 0,
     activeMembers: 0,
-    activeJobs: 4,
-    incusVersion: 'Chưa cài đặt',
-    driverVersion: '595.71.05',
-    cudaVersion: '13.2',
-    lastUpdated: 'Vừa xong (Live Telemetry)'
-  }
-];
-
-const PROD_GPUS: PhysicalGpu[] = [
-  {
-    id: 'ws-gpu-01',
-    displayLabel: 'WS-GPU-01',
-    serverId: 'workstation',
-    serverName: 'Server 02 — Workstation',
-    model: 'NVIDIA A30 24GB HBM2',
-    pciBusId: '00000000:D8:00.0',
-    uuid: 'GPU-1f6ba03b-45e9-8d99-1d7d-7c76412f3cfc',
-    vramTotalMb: 24576,
-    vramUsedMb: 0,
-    gpuUtilPercent: 0,
-    tempCelsius: 0,
-    powerWatts: 0,
-    powerLimitWatts: 165,
-    allocationMode: 'SHARED',
-    enforcementState: 'DRIVER_ENFORCED_VERIFIED',
-    activeProcesses: [],
-    activeUsers: [],
-    associatedJobs: []
-  }
-];
-
-const PROD_STORAGE_POOLS: StoragePool[] = [
-  {
-    id: 'pool-root',
-    serverId: 'workstation',
-    serverName: 'Server 02 — Workstation (Cục bộ)',
-    name: 'pool-root',
-    label: 'Ổ đĩa Hệ thống (LVM Ext4 /)',
-    diskIdentifier: '/dev/mapper/ubuntu--vg-ubuntu--lv',
-    mountPoint: '/',
-    driver: 'dir',
-    capacityGb: 876.1,
-    usedGb: 747.9,
-    freeGb: 83.6,
-    healthStatus: 'HEALTHY',
-    isDefault: true
-  },
-  {
-    id: 'pool-data-sdb',
-    serverId: 'workstation',
-    serverName: 'Server 02 — Workstation (Cục bộ)',
-    name: 'pool-data-sdb',
-    label: 'Ổ cứng Lưu trữ Thứ cấp (/hdd1/hieulc/tmp)',
-    diskIdentifier: '/dev/sdb',
-    mountPoint: '/hdd1/hieulc/tmp',
-    driver: 'dir',
-    capacityGb: 915.8,
-    usedGb: 402.4,
-    freeGb: 466.8,
-    healthStatus: 'HEALTHY',
-    isDefault: false
-  },
-  {
-    id: 'pool-nvme-fast',
-    serverId: 'track',
-    serverName: 'Server 01 — Track (Từ xa)',
-    name: 'pool-nvme-fast',
-    label: 'SSD NVMe — Track (Mất kết nối VPN)',
-    diskIdentifier: 'wwn-0x5002538f411b4101',
-    mountPoint: '/var/lib/incus/storage-pools/pool-nvme-fast',
-    driver: 'zfs',
-    capacityGb: 8000.0,
-    usedGb: 0.0,
-    freeGb: 0.0,
-    healthStatus: 'FAULTED',
-    isDefault: false
+    activeJobs: 0,
+    incusVersion: 'Chưa xác minh',
+    driverVersion: 'Chưa xác minh',
+    cudaVersion: 'Chưa xác minh',
+    lastUpdated: 'Chưa xác minh kết nối thật'
   }
 ];
 
@@ -1666,27 +1584,50 @@ function mapRawGpu(g: Record<string, any>): PhysicalGpu {
 
 export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   servers: isDemoMode ? INITIAL_SERVERS : PROD_SERVERS,
-  gpus: isDemoMode ? INITIAL_GPUS : PROD_GPUS,
-  members: INITIAL_MEMBERS,
+  gpus: isDemoMode ? INITIAL_GPUS : [],
+  members: isDemoMode ? INITIAL_MEMBERS : [],
   jobs: isDemoMode ? INITIAL_JOBS : PROD_JOBS,
   activeSshSessions: [],
   lastSyncTime: null,
   syncError: null,
+  memberSyncError: null,
   isLivePolling: true,
-  securityReviews: INITIAL_SECURITY_REVIEWS,
-  events: INITIAL_EVENTS,
-  auditLogs: INITIAL_AUDIT_LOGS,
-  storagePools: isDemoMode ? INITIAL_STORAGE_POOLS : PROD_STORAGE_POOLS,
-  sshEndpoints: INITIAL_SSH_ENDPOINTS,
-  storageAllocations: INITIAL_STORAGE_ALLOCATIONS,
-  sshPolicies: INITIAL_SSH_POLICIES,
-  sshLoginEvents: INITIAL_SSH_LOGIN_EVENTS,
+  securityReviews: isDemoMode ? INITIAL_SECURITY_REVIEWS : [],
+  events: isDemoMode ? INITIAL_EVENTS : [],
+  auditLogs: isDemoMode ? INITIAL_AUDIT_LOGS : [],
+  storagePools: isDemoMode ? INITIAL_STORAGE_POOLS : [],
+  sshEndpoints: isDemoMode ? INITIAL_SSH_ENDPOINTS : [],
+  storageAllocations: isDemoMode ? INITIAL_STORAGE_ALLOCATIONS : [],
+  sshPolicies: isDemoMode ? INITIAL_SSH_POLICIES : [],
+  sshLoginEvents: isDemoMode ? INITIAL_SSH_LOGIN_EVENTS : [],
 
   setLivePolling: (enabled: boolean) => set({ isLivePolling: enabled }),
 
+  fetchAccessMembers: async () => {
+    if (isDemoMode) {
+      set({ memberSyncError: 'Dữ liệu thành viên đang ở chế độ DEMO, không phải trạng thái hệ thống thật.' });
+      return;
+    }
+    try {
+      const response = await fetch('/api/access/users', { cache: 'no-store' });
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('Quản lý truy cập cần phiên quản trị viên Clerk; dashboard hiện không yêu cầu đăng nhập.');
+      }
+      if (response.status === 503) {
+        throw new Error('Xác thực hoặc kết nối backend quản lý truy cập chưa được cấu hình.');
+      }
+      if (!response.ok) throw new Error(`Không thể tải danh sách thành viên (HTTP ${response.status}).`);
+      const data = await response.json();
+      if (!Array.isArray(data)) throw new Error('Invalid member response');
+      set({ members: data as LabMember[], memberSyncError: null });
+    } catch (error) {
+      set({ members: [], memberSyncError: error instanceof Error ? error.message : 'Không thể kết nối backend quản lý truy cập.' });
+    }
+  },
+
   fetchLiveJobs: async () => {
     try {
-      const res = await fetch('/api/v1/jobs/active').catch(() => null);
+      const res = await fetch('/api/labops/jobs/active').catch(() => null);
       if (res && res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -1706,7 +1647,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   fetchLiveSshSessions: async () => {
     try {
-      const res = await fetch('/api/v1/servers/workstation/ssh-sessions').catch(() => null);
+      const res = await fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null);
       if (res && res.ok) {
         const data = await res.json();
         const obs = data.actual_observations || [];
@@ -1718,587 +1659,64 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   fetchLiveState: async () => {
+    if (isDemoMode) return;
     try {
       const [resServers, resGpus, resJobs, resSsh] = await Promise.all([
-        fetch('/api/v1/servers').catch(() => null),
-        fetch('/api/v1/gpus').catch(() => null),
-        fetch('/api/v1/jobs/active').catch(() => null),
-        fetch('/api/v1/servers/workstation/ssh-sessions').catch(() => null)
+        fetch('/api/labops/servers').catch(() => null),
+        fetch('/api/labops/gpus').catch(() => null),
+        fetch('/api/labops/jobs/active').catch(() => null),
+        fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null)
       ]);
       const updates: Partial<LabOpsState> = {
         lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
-        syncError: null
+        syncError: null,
+        servers: PROD_SERVERS,
+        gpus: [],
+        jobs: [],
+        activeSshSessions: []
       };
+      const failures: string[] = [];
 
       if (resServers && resServers.ok) {
         const data = await resServers.json();
-        if (Array.isArray(data) && data.length > 0) {
-          updates.servers = data.map(mapRawServer);
-        }
+        if (Array.isArray(data)) updates.servers = data.map(mapRawServer);
+        else failures.push('servers');
+      } else {
+        failures.push('servers');
       }
       if (resGpus && resGpus.ok) {
         const data = await resGpus.json();
-        if (Array.isArray(data) && data.length > 0) {
-          updates.gpus = data.map(mapRawGpu);
-        }
+        if (Array.isArray(data)) updates.gpus = data.map(mapRawGpu);
+        else failures.push('gpus');
+      } else {
+        failures.push('gpus');
       }
       if (resJobs && resJobs.ok) {
         const data = await resJobs.json();
-        if (Array.isArray(data)) {
-          updates.jobs = data.map(mapRawJob);
-        }
+        if (Array.isArray(data)) updates.jobs = data.map(mapRawJob);
+        else failures.push('jobs');
+      } else {
+        failures.push('jobs');
       }
       if (resSsh && resSsh.ok) {
         const data = await resSsh.json();
         const obs = data.actual_observations || [];
         updates.activeSshSessions = obs.map(mapRawSshSession);
+      } else {
+        failures.push('SSH sessions');
       }
+      if (failures.length) updates.syncError = `Không thể xác minh dữ liệu: ${failures.join(', ')}`;
       set(updates);
     } catch (err: any) {
-      set({ syncError: err?.message || 'Mất kết nối tới máy chủ giám sát' });
+      set({
+        servers: PROD_SERVERS, gpus: [], jobs: [], activeSshSessions: [],
+        syncError: err?.message || 'Mất kết nối tới máy chủ giám sát'
+      });
     }
-  },
-
-  getSummary: () => {
-    const { servers, gpus, members, jobs } = get();
-    const onlineServers = servers.filter((s) => s.status === 'online').length;
-    const offlineServers = servers.filter((s) => s.status === 'offline').length;
-
-    const activeGpus = gpus.filter(
-      (g) =>
-        (g.vramUsedMb || 0) > 512 ||
-        (g.gpuUtilPercent || 0) > 0 ||
-        (g.activeProcesses?.length || 0) > 0
-    ).length;
-    const usedVramGb = Math.round(gpus.reduce((acc, g) => acc + g.vramUsedMb, 0) / 1024);
-
-    const onlineMembers = members.filter((m) => m.sshStatus === 'ONLINE').length;
-    const totalSessions = members.reduce((acc, m) => acc + m.sshSessionsCount, 0);
-
-    const runningJobs = jobs.filter((j) => j.status === 'RUNNING').length;
-    const pendingJobs = jobs.filter((j) => j.status === 'PENDING').length;
-    const failedJobs = jobs.filter((j) => j.status === 'FAILED').length;
-
-    return {
-      servers: {
-        total: servers.length,
-        online: onlineServers,
-        offline: offlineServers
-      },
-      gpus: {
-        totalCount: gpus.length,
-        model: 'NVIDIA A30 24GB',
-        aggregateVramGb: 96,
-        activeCount: activeGpus,
-        usedVramGb
-      },
-      members: {
-        onlineSsh: onlineMembers,
-        activeSessions: totalSessions,
-        totalRegistered: members.length
-      },
-      jobs: {
-        running: runningJobs,
-        pending: pendingJobs,
-        failed: failedJobs
-      },
-      gpuHours: {
-        today: 58.4,
-        last7Days: 412.8,
-        previousPeriodChangePercent: 14.2
-      },
-      alerts: {
-        critical: 0,
-        warnings: 2,
-        unresolvedIncidents: 0
-      }
-    };
-  },
-
-  addMember: (memberData) => {
-    const newId = `mem-${String(Date.now()).slice(-4)}`;
-    const newMember: LabMember = {
-      ...memberData,
-      id: newId,
-      activeJobsCount: 0,
-      totalGpuHours: 0,
-      createdAt: new Date().toISOString().split('T')[0]
-    };
-
-    const newEndpoint: SshEndpoint = {
-      id: `ep-${Date.now()}`,
-      memberId: newId,
-      serverId: newMember.assignedServer,
-      listenAddress: newMember.sshIp,
-      listenPort: newMember.sshPort,
-      containerPort: 22,
-      protocol: 'tcp',
-      status: newMember.status === 'ACTIVE' ? 'ACTIVE' : 'DISABLED'
-    };
-
-    const newAllocation: StorageAllocation = {
-      id: `sa-${Date.now()}`,
-      memberId: newId,
-      poolId: newMember.storagePoolId,
-      volumeName: `data-${newMember.username}`,
-      mountPath: newMember.mountPath || '/workspace',
-      quotaGb: newMember.storageQuotaGb,
-      usedGb: newMember.storageUsedGb || 0,
-      readOnly: false,
-      backupPolicy: newMember.backupPolicy || 'DAILY_SNAPSHOT',
-      sharedDatasets: newMember.sharedDatasets || ['/shared/datasets'],
-      createdAt: new Date().toISOString().split('T')[0]
-    };
-
-    const newPolicy: SshAccountPolicy = {
-      workspaceId: `ws-${newMember.username}`,
-      linuxUsername: newMember.username,
-      authenticationMode: 'PUBLIC_KEY_AND_PASSWORD',
-      passwordStatus: newMember.passwordStatus || 'ACTIVE',
-      keyEnrollmentStatus:
-        newMember.sshKeyStatus === 'ACTIVE' ? 'ACTIVE' : 'PENDING_KEY_ENROLLMENT',
-      accessStatus: 'ACTIVE',
-      minPasswordLength: 12,
-      failedLoginAttempts: 0,
-      updatedAt: new Date().toISOString()
-    };
-
-    set((state) => ({
-      members: [newMember, ...state.members],
-      sshEndpoints: [newEndpoint, ...state.sshEndpoints],
-      storageAllocations: [newAllocation, ...state.storageAllocations],
-      sshPolicies: [newPolicy, ...state.sshPolicies],
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Thêm thành viên mới',
-          targetType: 'MEMBER',
-          targetId: newMember.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'SUCCESS',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã tạo tài khoản cho ${newMember.fullName} (@${newMember.username}) trên ${newMember.assignedServer}, Cổng SSH ${newMember.sshPort}, Dung lượng ${newMember.storageQuotaGb}GB ZFS`
-        },
-        ...state.auditLogs
-      ]
-    }));
-  },
-
-  updateMemberStatus: (id, status) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      const updatedMembers = state.members.map((m) =>
-        m.id === id
-          ? { ...m, status, sshStatus: status === 'SUSPENDED' ? ('OFFLINE' as const) : m.sshStatus }
-          : m
-      );
-
-      const auditAction = status === 'SUSPENDED' ? 'Tạm khóa tài khoản' : 'Khôi phục tài khoản';
-      return {
-        members: updatedMembers,
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: auditAction,
-            targetType: 'MEMBER',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Trạng thái tài khoản chuyển sang ${status}`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
-  },
-
-  updateMemberQuotas: (id, quotas) => {
-    set((state) => ({
-      members: state.members.map((m) => (m.id === id ? { ...m, ...quotas } : m))
-    }));
-  },
-
-  deleteMember: (id) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      return {
-        members: state.members.filter((m) => m.id !== id),
-        sshEndpoints: state.sshEndpoints.filter((ep) => ep.memberId !== id),
-        storageAllocations: state.storageAllocations.filter((sa) => sa.memberId !== id),
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Xóa thành viên',
-            targetType: 'MEMBER',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Đã xóa thành viên @${member?.username || id} khỏi hệ thống`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
-  },
-
-  deleteMemberPermanently: (id) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      return {
-        members: state.members.filter((m) => m.id !== id),
-        sshEndpoints: state.sshEndpoints.filter((ep) => ep.memberId !== id),
-        storageAllocations: state.storageAllocations.filter((sa) => sa.memberId !== id),
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Hủy vĩnh viễn thành viên & Workspace',
-            targetType: 'MEMBER',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Đã hủy container ${member?.workspaceName}, xóa ZFS volume và thu hồi cổng SSH ${member?.sshPort}`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
-  },
-
-  rotateSshKey: (id, newPublicKey, newFingerprint) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      const updatedMembers = state.members.map((m) =>
-        m.id === id
-          ? {
-              ...m,
-              sshPublicKey: newPublicKey,
-              sshFingerprint: newFingerprint,
-              sshPublicKeyPreview: newPublicKey.slice(0, 30) + '...',
-              sshKeyStatus: 'ACTIVE' as const
-            }
-          : m
-      );
-
-      return {
-        members: updatedMembers,
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Cập nhật/Đổi khóa SSH (Key Rotation)',
-            targetType: 'SSH_KEY',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Đã cập nhật khóa SSH Ed25519 mới, fingerprint: ${newFingerprint}`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
-  },
-
-  revokeSshKey: (id) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      const updatedMembers = state.members.map((m) =>
-        m.id === id
-          ? {
-              ...m,
-              sshKeyStatus: 'REVOKED' as const,
-              sshStatus: 'OFFLINE' as const,
-              sshPublicKeyPreview: '(Khóa đã bị thu hồi)'
-            }
-          : m
-      );
-
-      return {
-        members: updatedMembers,
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Thu hồi khóa SSH',
-            targetType: 'SSH_KEY',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'WARNING',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Đã thu hồi và xóa khóa khỏi authorized_keys của @${member?.username}`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
-  },
-
-  resetMemberSshPassword: (id, initialPassword, requireChange = true) => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
-
-    const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*';
-    let tempPass = initialPassword;
-    if (!tempPass || tempPass.length < 12) {
-      tempPass = Array.from(
-        { length: 16 },
-        () => chars[Math.floor(Math.random() * chars.length)]
-      ).join('');
-    }
-
-    set((s) => ({
-      members: s.members.map((m) =>
-        m.id === id
-          ? {
-              ...m,
-              passwordStatus: requireChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
-              failedLoginAttempts: 0
-            }
-          : m
-      ),
-      sshPolicies: s.sshPolicies.map((p) =>
-        p.linuxUsername === member.username
-          ? {
-              ...p,
-              passwordStatus: requireChange ? 'CHANGE_REQUIRED' : 'ACTIVE',
-              failedLoginAttempts: 0,
-              updatedAt: new Date().toISOString()
-            }
-          : p
-      ),
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Đặt lại Mật khẩu Linux SSH',
-          targetType: 'SSH_PASSWORD',
-          targetId: member.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'SUCCESS',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã thiết lập mật khẩu PAM an toàn mới (${tempPass.length} ký tự, PAM shadow hash cập nhật)`
-        },
-        ...s.auditLogs
-      ]
-    }));
-
-    return {
-      success: true,
-      tempPassword: tempPass,
-      message: 'Đặt lại mật khẩu Linux SSH thành công'
-    };
-  },
-
-  requirePasswordChange: (id) => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return;
-    set((s) => ({
-      members: s.members.map((m) =>
-        m.id === id ? { ...m, passwordStatus: 'CHANGE_REQUIRED' } : m
-      ),
-      sshPolicies: s.sshPolicies.map((p) =>
-        p.linuxUsername === member.username ? { ...p, passwordStatus: 'CHANGE_REQUIRED' } : p
-      )
-    }));
-  },
-
-  suspendSshAccess: (id, reason = 'Quản trị viên tạm khóa truy cập') => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return;
-    set((s) => ({
-      members: s.members.map((m) =>
-        m.id === id ? { ...m, sshStatus: 'OFFLINE', status: 'SUSPENDED' } : m
-      ),
-      sshPolicies: s.sshPolicies.map((p) =>
-        p.linuxUsername === member.username ? { ...p, accessStatus: 'SUSPENDED' } : p
-      ),
-      sshEndpoints: s.sshEndpoints.map((ep) =>
-        ep.memberId === id ? { ...ep, status: 'DISABLED' } : ep
-      ),
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Khóa truy cập SSH (Suspend SSH)',
-          targetType: 'SSH_ACCESS',
-          targetId: member.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'WARNING',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã vô hiệu hóa cổng SSH proxy container và khóa tài khoản: ${reason}`
-        },
-        ...s.auditLogs
-      ]
-    }));
-  },
-
-  restoreSshAccess: (id) => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return;
-    set((s) => ({
-      members: s.members.map((m) => (m.id === id ? { ...m, status: 'ACTIVE' } : m)),
-      sshPolicies: s.sshPolicies.map((p) =>
-        p.linuxUsername === member.username
-          ? { ...p, accessStatus: 'ACTIVE', failedLoginAttempts: 0 }
-          : p
-      ),
-      sshEndpoints: s.sshEndpoints.map((ep) =>
-        ep.memberId === id ? { ...ep, status: 'ACTIVE' } : ep
-      ),
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Khôi phục truy cập SSH (Restore SSH)',
-          targetType: 'SSH_ACCESS',
-          targetId: member.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'SUCCESS',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã mở khóa cổng SSH proxy và khôi phục quyền truy cập hai lớp (Dual-Auth)`
-        },
-        ...s.auditLogs
-      ]
-    }));
-  },
-
-  getMemberLoginEvents: (username) => {
-    return get().sshLoginEvents.filter((e) => e.linuxUsername === username);
-  },
-
-  changeStorageQuota: (id, newQuotaGb) => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
-
-    const pool = state.storagePools.find((p) => p.id === member.storagePoolId);
-    if (pool) {
-      const quotaDiff = newQuotaGb - member.storageQuotaGb;
-      if (quotaDiff > pool.freeGb) {
-        return {
-          success: false,
-          message: `Storage Pool chỉ còn trống ${pool.freeGb} GB, không đủ cấp phát thêm ${quotaDiff} GB!`
-        };
-      }
-    }
-
-    set((s) => ({
-      members: s.members.map((m) => (m.id === id ? { ...m, storageQuotaGb: newQuotaGb } : m)),
-      storageAllocations: s.storageAllocations.map((sa) =>
-        sa.memberId === id ? { ...sa, quotaGb: newQuotaGb } : sa
-      ),
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Điều chỉnh Hạn ngạch Ổ đĩa',
-          targetType: 'STORAGE',
-          targetId: member.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'SUCCESS',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Thay đổi quota ZFS của @${member.username} từ ${member.storageQuotaGb}GB lên ${newQuotaGb}GB`
-        },
-        ...s.auditLogs
-      ]
-    }));
-
-    return { success: true, message: `Đã cập nhật hạn ngạch thành ${newQuotaGb} GB thành công` };
-  },
-
-  changeSshPort: (id, newPort) => {
-    const state = get();
-    const member = state.members.find((m) => m.id === id);
-    if (!member) return { success: false, message: 'Không tìm thấy thành viên' };
-
-    if (newPort < 22000 || newPort > 29999) {
-      return { success: false, message: 'Cổng SSH phải nằm trong dải hợp lệ 22000 - 29999' };
-    }
-
-    const collision = state.sshEndpoints.find(
-      (ep) =>
-        ep.serverId === member.assignedServer && ep.listenPort === newPort && ep.memberId !== id
-    );
-
-    if (collision) {
-      return {
-        success: false,
-        message: `Cổng ${newPort} đã được sử dụng bởi thành viên khác trên máy chủ ${member.assignedServer}!`
-      };
-    }
-
-    set((s) => ({
-      members: s.members.map((m) => (m.id === id ? { ...m, sshPort: newPort } : m)),
-      sshEndpoints: s.sshEndpoints.map((ep) =>
-        ep.memberId === id ? { ...ep, listenPort: newPort } : ep
-      ),
-      auditLogs: [
-        {
-          id: `log-${Date.now()}`,
-          actor: 'Quản trị viên (Demo)',
-          action: 'Đổi Cổng SSH Endpoint',
-          targetType: 'NETWORK',
-          targetId: member.username,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          result: 'SUCCESS',
-          correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-          details: `Đã chuyển cổng SSH Incus proxy từ ${member.sshPort} sang ${newPort} cho @${member.username}`
-        },
-        ...s.auditLogs
-      ]
-    }));
-
-    return { success: true, message: `Đã chuyển sang cổng SSH ${newPort} thành công` };
-  },
-
-  archiveWorkspace: (id) => {
-    set((state) => {
-      const member = state.members.find((m) => m.id === id);
-      const updatedMembers = state.members.map((m) =>
-        m.id === id
-          ? {
-              ...m,
-              status: 'ARCHIVED' as const,
-              sshStatus: 'OFFLINE' as const
-            }
-          : m
-      );
-
-      return {
-        members: updatedMembers,
-        sshEndpoints: state.sshEndpoints.map((ep) =>
-          ep.memberId === id ? { ...ep, status: 'DISABLED' as const } : ep
-        ),
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Lưu trữ Workspace (Archive)',
-            targetType: 'WORKSPACE',
-            targetId: member?.username || id,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Đã dừng container ${member?.workspaceName}, ngắt kết nối SSH và lưu trữ volume ZFS`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
   },
 
   allocateGpu: ({ gpuId, username, mode, requestedVramGb, jobName }) => {
+    if (!isDemoMode) return;
     set((state) => {
       const targetGpu = state.gpus.find((g) => g.id === gpuId);
       if (!targetGpu) return state;
@@ -2372,6 +1790,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   stopJob: (jobId) => {
+    if (!isDemoMode) return;
     set((state) => {
       const targetJob = state.jobs.find((j) => j.id === jobId);
       if (!targetJob) return state;
@@ -2418,6 +1837,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   updateSecurityReview: (id, status, reviewer) => {
+    if (!isDemoMode) return;
     set((state) => ({
       securityReviews: state.securityReviews.map((r) =>
         r.id === id ? { ...r, status, reviewedBy: reviewer } : r
@@ -2440,6 +1860,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   addSecurityReview: (repoUrl, submitter) => {
+    if (!isDemoMode) return;
     const repoParts = repoUrl.replace('https://github.com/', '').split('/');
     const repoName = repoParts.slice(0, 2).join('/') || 'custom-repo';
     const newReview: SecurityReview = {

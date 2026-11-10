@@ -18,6 +18,7 @@ import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { SecurityReviewStatus } from '@/types/labops';
 import { toast } from 'sonner';
+import { labopsCall } from '@/features/labops/api';
 
 function getSecurityStatusBadge(status: SecurityReviewStatus) {
   switch (status) {
@@ -72,12 +73,10 @@ function getSecurityStatusBadge(status: SecurityReviewStatus) {
 
 export function SecurityManagementView() {
   const reviews = useLabOpsStore((state) => state.securityReviews);
-  const updateSecurityReview = useLabOpsStore((state) => state.updateSecurityReview);
-  const addSecurityReview = useLabOpsStore((state) => state.addSecurityReview);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [repoUrl, setRepoUrl] = useState('');
-  const [submitter, setSubmitter] = useState('hieulc');
+  const [submitter, setSubmitter] = useState(''); // commit SHA (40 ký tự)
 
   const approvedCount = reviews.filter((r) => r.status === 'APPROVED').length;
   const manualCount = reviews.filter((r) => r.status === 'MANUAL_REVIEW').length;
@@ -87,12 +86,21 @@ export function SecurityManagementView() {
     e.preventDefault();
     if (!repoUrl) return;
 
-    addSecurityReview(repoUrl, submitter);
-    setDialogOpen(false);
-    toast.success('Đã đưa Repository vào Sandbox Kiểm duyệt', {
-      description: 'Hệ thống SAST và AI Reviewer đang tiến hành quét mã độc và socket ngoại vi.'
-    });
-    setRepoUrl('');
+    void (async () => {
+      const r = await labopsCall<{ state?: string; error?: string }>('security/scans', {
+        method: 'POST',
+        body: { repo_url: repoUrl, commit_sha: submitter }
+      });
+      if (!r.ok) {
+        toast.error('Không thể gửi yêu cầu quét', { description: r.error });
+        return;
+      }
+      setDialogOpen(false);
+      toast.info(`Đã tiếp nhận yêu cầu quét — trạng thái ${r.data?.state ?? 'SUBMITTED'}`, {
+        description: r.data?.error ?? 'Kết quả sẽ cập nhật khi Trivy hoàn tất; không có kết quả nào được giả lập.'
+      });
+      setRepoUrl('');
+    })();
   };
 
   return (
@@ -134,9 +142,9 @@ export function SecurityManagementView() {
           </span>
           <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
             <Icons.database className='size-5' />
-            100% OK
+            CHƯA CẤU HÌNH
           </div>
-          <span className='text-[10px] text-muted-foreground'>Bảo toàn dữ liệu nghiên cứu</span>
+          <span className='text-[10px] text-muted-foreground'>Chưa có nguồn xác minh sao lưu (NOT_CONFIGURED)</span>
         </Card>
       </div>
 
@@ -283,8 +291,7 @@ export function SecurityManagementView() {
                             size='sm'
                             variant='outline'
                             onClick={() => {
-                              updateSecurityReview(r.id, 'APPROVED', 'Lê Chí Hiếu (Admin)');
-                              toast.success(`Đã phê duyệt repo ${r.repoName}`);
+                              void labopsCall(`security/scans/${encodeURIComponent(r.id)}/decision`, { method: 'POST', body: { decision: 'APPROVED' } }).then((res) => res.ok ? toast.success('Đã ghi nhận quyết định APPROVED') : toast.error('Không thể ghi nhận quyết định', { description: res.error }));
                             }}
                             className='h-7 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10'
                           >
@@ -296,8 +303,7 @@ export function SecurityManagementView() {
                             size='sm'
                             variant='ghost'
                             onClick={() => {
-                              updateSecurityReview(r.id, 'REJECTED', 'Lê Chí Hiếu (Admin)');
-                              toast.error(`Đã từ chối repo ${r.repoName}`);
+                              void labopsCall(`security/scans/${encodeURIComponent(r.id)}/decision`, { method: 'POST', body: { decision: 'REJECTED' } }).then((res) => res.ok ? toast.success('Đã ghi nhận quyết định REJECTED') : toast.error('Không thể ghi nhận quyết định', { description: res.error }));
                             }}
                             className='h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
                           >
@@ -347,18 +353,21 @@ export function SecurityManagementView() {
               </div>
 
               <div className='space-y-1.5'>
-                <Label className='text-xs font-semibold'>Thành viên gửi đề xuất</Label>
+                <Label className='text-xs font-semibold'>Commit SHA (40 ký tự hex)</Label>
                 <Input
                   value={submitter}
                   onChange={(e) => setSubmitter(e.target.value)}
+                  placeholder='ví dụ: 3f2a…(đủ 40 ký tự)'
+                  pattern='[0-9a-fA-F]{40}'
                   className='h-8 text-xs font-mono'
                   required
                 />
               </div>
 
               <div className='p-2.5 rounded-lg border bg-muted/20 text-[11px] text-muted-foreground'>
-                Repository sẽ được clone vào container cách ly ephemeral không có kết nối internet
-                để phân tích AST và SAST trước khi tạo quyền clone vào workspace của thành viên.
+                Kho mã được quét tĩnh bằng Trivy (lỗ hổng, secret, cấu hình sai) tại đúng commit đã
+                nêu; không chạy bất kỳ script nào của repo. Lưu ý: kết quả chỉ áp dụng cho commit đã
+                quét — mã bị sửa sau đó qua SSH không được bao phủ.
               </div>
             </div>
 

@@ -59,5 +59,20 @@
       "/shared/datasets"
     ],
     "created_at": "2024-03-01"
+  },
+  {
+    "id": "sa-8e835a",
+    "member_id": "mem-59d520",
+    "pool_id": "pool-workstation-ssd",
+    "volume_name": "data-test_wg_user",
+    "mount_path": "/workspace",
+    "quota_gb": 250,
+    "used_gb": 0.0,
+    "read_only": false,
+    "backup_policy": "DAILY_SNAPSHOT",
+    "shared_datasets": [
+      "/shared/datasets"
+    ],
+    "created_at": "2026-11-04"
   }
 ]

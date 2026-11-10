@@ -20,12 +20,6 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
           <h2 className='text-xl font-bold tracking-tight text-foreground'>
             Bảng Điều khiển LabOps
           </h2>
-          <Badge
-            variant='outline'
-            className='bg-primary/10 text-primary border-primary/30 text-[11px] font-semibold'
-          >
-            Ubuntu 22.04 LTS
-          </Badge>
           {isDemoMode ? (
             <Badge
               variant='outline'
@@ -34,25 +28,15 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
               Incus 6.0 LTS • CUDA 12.4
             </Badge>
           ) : (
-            <>
-              <Badge
-                variant='outline'
-                className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-mono'
-              >
-                Workstation Cục bộ • CUDA 13.2
-              </Badge>
-              <Badge
-                variant='outline'
-                className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[11px] font-mono'
-              >
-                Track: Mất kết nối VPN
-              </Badge>
-            </>
+            <Badge variant='outline' className='bg-amber-500/10 text-amber-700 border-amber-500/30 text-[11px] font-mono'>
+              Trạng thái phần cứng theo API
+            </Badge>
           )}
         </div>
         <p className='text-xs text-muted-foreground mt-0.5'>
-          Hạ tầng phân tán 2 cụm vật lý: <strong>Server Track</strong> (3x NVIDIA A30 24GB) &{' '}
-          <strong>Server Workstation</strong> (1x NVIDIA A30 24GB)
+          {isDemoMode
+            ? <>Hạ tầng minh họa: <strong>Server Track</strong> (3x NVIDIA A30 24GB) & <strong>Server Workstation</strong> (1x NVIDIA A30 24GB)</>
+            : 'Thông tin máy chủ và GPU chỉ được hiển thị khi backend xác minh telemetry.'}
         </p>
       </div>
 

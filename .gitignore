@@ -61,3 +61,13 @@ next-env.d.ts
 
 # Runtime Telemetry Data
 backend/data/process_history.json
+
+# LabOps runtime locks
+backend/data/*.lock
+backend/data/*.tmp
+graphify-out/
+
+# LabOps runtime locks & cache
+backend/data/*.lock
+backend/data/*.tmp
+graphify-out/

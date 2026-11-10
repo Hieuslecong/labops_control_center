@@ -58,6 +58,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const activeThemeValue = cookieStore.get('active_theme')?.value;
   const isValidTheme = THEMES.some((t) => t.value === activeThemeValue);
   const themeToApply = isValidTheme ? activeThemeValue! : DEFAULT_THEME;
+  const enableClerk = Boolean(
+    process.env.NEXT_PUBLIC_DEMO_MODE !== 'true' &&
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
+    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
+    process.env.CLERK_SECRET_KEY &&
+    !process.env.CLERK_SECRET_KEY.includes('mock')
+  );
 
   return (
     <html lang='en' suppressHydrationWarning data-theme={themeToApply}>
@@ -90,7 +97,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             disableTransitionOnChange
             enableColorScheme
           >
-            <Providers activeThemeValue={themeToApply}>
+            <Providers activeThemeValue={themeToApply} enableClerk={enableClerk}>
               <Toaster />
               {children}
             </Providers>

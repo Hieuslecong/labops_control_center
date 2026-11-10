@@ -8,11 +8,11 @@ import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { GpuAllocationDialog } from '@/features/overview/components/gpu-allocation-dialog';
 import { toast } from 'sonner';
+import { labopsCall, toastVerification } from '@/features/labops/api';
 
 export function ResourcesManagementView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
-  const stopJob = useLabOpsStore((state) => state.stopJob);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
@@ -29,37 +29,36 @@ export function ResourcesManagementView() {
   }, [fetchLiveState]);
 
   const totalUsedVramMb = gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0);
-  const onlineVramMb = gpus.reduce((acc, g) => acc + (g.vramTotalMb || 24576), 0);
-  const totalLabVramMb = 96 * 1024;
+  const reportedVramMb = gpus.reduce((acc, g) => acc + g.vramTotalMb, 0);
   const totalUsedVramGb = (totalUsedVramMb / 1024).toFixed(1);
-  const onlineFreeVramGb = Math.max(0, (onlineVramMb - totalUsedVramMb) / 1024).toFixed(1);
-  const vramPercentOnline =
-    onlineVramMb > 0 ? Math.round((totalUsedVramMb / onlineVramMb) * 100) : 0;
+  const reportedFreeVramGb = Math.max(0, (reportedVramMb - totalUsedVramMb) / 1024).toFixed(1);
+  const reportedVramPercent =
+    reportedVramMb > 0 ? Math.round((totalUsedVramMb / reportedVramMb) * 100) : 0;
 
   return (
     <div className='flex flex-col gap-5 min-w-0 w-full'>
       {/* Overview Statistics Banner */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Tổng số GPU Vật lý</span>
+          <span className='text-[11px] text-muted-foreground font-medium'>GPU được báo cáo</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.gpu className='size-5 text-primary' />
-            4x NVIDIA A30
+            {gpus.length} GPU
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            1x Workstation (Online) • 3x Track (Offline)
+            Số lượng từ telemetry backend
           </span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>
-            Tổng dung lượng VRAM
+            Tổng VRAM được báo cáo
           </span>
           <div className='text-xl font-bold mt-0.5 font-mono text-primary'>
-            {Math.round(onlineVramMb / 1024)} / 96 GB
+            {Math.round(reportedVramMb / 1024)} GB
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            24 GB Workstation • 72 GB Track (Chờ VPN)
+            Dung lượng chưa được xác minh nếu collector không có dữ liệu
           </span>
         </Card>
 
@@ -69,16 +68,16 @@ export function ResourcesManagementView() {
             {totalUsedVramGb} GB
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            {vramPercentOnline}% công suất cụm trực tuyến
+            {gpus.length ? `${reportedVramPercent}% VRAM đang dùng` : 'Chưa có telemetry GPU'}
           </span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>VRAM còn khả dụng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-emerald-600 dark:text-emerald-400'>
-            {onlineFreeVramGb} GB
+            {reportedFreeVramGb} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>Khả dụng trên Workstation</span>
+          <span className='text-[10px] text-muted-foreground'>Phần VRAM trống quan sát được</span>
         </Card>
       </div>
 
@@ -400,9 +399,12 @@ export function ResourcesManagementView() {
                           <Button
                             size='sm'
                             variant='ghost'
-                            onClick={() => {
-                              stopJob(j.id);
-                              toast.success(`Đã dừng tiến trình ${j.pid} và giải phóng VRAM`);
+                            onClick={async () => {
+                              const r = await labopsCall<{ verification?: string; state?: string }>(
+                                `jobs/${encodeURIComponent(j.id)}/stop`,
+                                { method: 'POST' }
+                              );
+                              toastVerification(`Thu hồi tác vụ ${j.id}`, r);
                             }}
                             className='h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
                           >

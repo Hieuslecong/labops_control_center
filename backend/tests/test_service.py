@@ -1,96 +1,92 @@
-import unittest
-import sys
 import os
+import sys
+import tempfile
+import unittest
 
-# Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.core.config import settings
+from app.services.gpu_scheduler import SchedulerError
 from app.services.labops_service import LabOpsDataService
 
-class TestLabOpsDataService(unittest.TestCase):
+FAKE_UUID = "GPU-test-0000-0000-0000-000000000001"
+
+
+class TestLabOpsDataServiceV2(unittest.TestCase):
     def setUp(self):
-        self.svc = LabOpsDataService()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.svc = LabOpsDataService(demo_mode=False, data_dir=self.tmp.name)
+        self.telemetry = [{"id": "h1-gpu-00", "uuid": FAKE_UUID, "server_id": "h1", "active_processes": []}]
+        self.svc.nvml_adapter.get_live_gpu_telemetry_sync = lambda: self.telemetry
+        self.svc.gpu_scheduler.telemetry_fn = lambda: self.telemetry
+        self.base_gpu = [{"id": "h1-gpu-00", "uuid": FAKE_UUID, "server_id": "h1", "active_processes": []}]
+        type(self.svc).gpus  # property dựa trên NVML adapter đã patch
 
-    def test_summary_calculation(self):
-        summary = self.svc.get_summary()
-        self.assertEqual(summary["servers"]["total"], 2)
-        self.assertEqual(summary["servers"]["online"], 2)
-        self.assertEqual(summary["gpus"]["totalCount"], 4)
-        self.assertEqual(summary["gpus"]["aggregateVramGb"], 96)
-        self.assertGreater(summary["members"]["totalRegistered"], 0)
-        self.assertGreater(summary["jobs"]["running"], 0)
+    def tearDown(self):
+        self.tmp.cleanup()
 
-    def test_gpu_allocation_success(self):
-        # Initial VRAM used on track-gpu-03 is 0
-        gpu3 = next(g for g in self.svc.gpus if g["id"] == "track-gpu-03")
-        self.assertEqual(gpu3["vram_used_mb"], 0)
+    def test_demo_mode_not_implicit_under_unittest(self):
+        os.environ.pop("LABOPS_MODE", None)
+        self.assertFalse(settings.DEMO_MODE)
 
-        # Allocate 12 GB
-        res = self.svc.allocate_gpu(
-            gpu_id="track-gpu-03",
-            username="testresearcher",
-            mode="EXCLUSIVE",
-            requested_vram_gb=12,
-            job_name="test_experiment.py"
-        )
-        self.assertTrue(res["success"])
-        self.assertIn("job_id", res)
+    def test_allocate_creates_reservation_without_fake_pid(self):
+        res = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="train.py")
+        self.assertEqual(res["verification"], "PENDING_VERIFICATION")
+        self.assertEqual(res["reservation"]["state"], "RESERVED")
+        self.assertIsNone(res["reservation"]["pid"])
+        self.assertFalse(res["reservation"]["runtime_verified"])
 
-        # Verify GPU VRAM updated
-        self.assertEqual(gpu3["vram_used_mb"], 12 * 1024)
-        self.assertIn("testresearcher", gpu3["active_users"])
+    def test_double_allocation_rejected(self):
+        self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.allocate_gpu("h1-gpu-00", "bob", "FULL_GPU_EXCLUSIVE")
+        self.assertEqual(ctx.exception.code, "GPU_ALREADY_RESERVED")
 
-        # Verify job was created
-        created_job = next(j for j in self.svc.jobs if j["id"] == res["job_id"])
-        self.assertEqual(created_job["username"], "testresearcher")
-        self.assertEqual(created_job["vram_used_mb"], 12 * 1024)
+    def test_external_process_blocks_exclusive(self):
+        self.telemetry[0]["active_processes"] = [{"pid": 42}]
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+        self.assertEqual(ctx.exception.code, "GPU_BUSY_EXTERNAL")
 
-    def test_gpu_allocation_insufficient_vram(self):
-        # Attempting to allocate 30GB on 24GB GPU must raise ValueError
-        with self.assertRaises(ValueError) as ctx:
-            self.svc.allocate_gpu(
-                gpu_id="track-gpu-03",
-                username="greedy_user",
-                mode="EXCLUSIVE",
-                requested_vram_gb=30,
-                job_name="overallocate.py"
-            )
-        self.assertIn("VRAM không đủ", str(ctx.exception))
+    def test_unobserved_gpu_fails_closed(self):
+        self.svc.gpu_scheduler.telemetry_fn = lambda: []
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+        self.assertEqual(ctx.exception.code, "GPU_NOT_OBSERVED")
 
-    def test_gpu_allocation_invalid_gpu_id(self):
-        with self.assertRaises(ValueError) as ctx:
-            self.svc.allocate_gpu(
-                gpu_id="invalid-gpu-99",
-                username="test",
-                mode="SHARED",
-                requested_vram_gb=8,
-                job_name="test.py"
-            )
-        self.assertIn("Không tìm thấy GPU", str(ctx.exception))
+    def test_shared_vram_mode_rejected(self):
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "SHARED", requested_vram_gb=8)
+        self.assertEqual(ctx.exception.code, "MODE_NOT_SUPPORTED")
 
-    def test_stop_job_success(self):
-        # Stop existing job-101 (uses 12GB on track-gpu-01)
-        job101 = next(j for j in self.svc.jobs if j["id"] == "job-101")
-        gpu1 = next(g for g in self.svc.gpus if g["id"] == "track-gpu-01")
-        initial_vram = gpu1["vram_used_mb"]
+    def test_idempotency_key_returns_same_reservation(self):
+        a = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", idempotency_key="k1")
+        b = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", idempotency_key="k1")
+        self.assertEqual(a["reservation"]["id"], b["reservation"]["id"])
 
-        res = self.svc.stop_job("job-101")
-        self.assertTrue(res["success"])
+    def test_researcher_cannot_stop_others_job(self):
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.stop_job(r["id"], actor="bob", is_admin=False)
+        self.assertEqual(ctx.exception.http_status, 403)
 
-        # Check job status
-        self.assertEqual(job101["status"], "STOPPED")
+    def test_stop_unstarted_reservation_releases(self):
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
+        res = self.svc.stop_job(r["id"], actor="alice", is_admin=False)
+        self.assertEqual(res["state"], "RELEASED")
 
-        # Check VRAM freed on GPU
-        self.assertEqual(gpu1["vram_used_mb"], initial_vram - 12288)
+    def test_stop_running_requires_agent_verification(self):
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
+        self.svc.gpu_scheduler.confirm_from_agent(r["id"], "RUNNING", 999)
+        res = self.svc.stop_job(r["id"], actor="admin", is_admin=True)
+        self.assertEqual(res["state"], "STOP_REQUESTED")
+        self.assertEqual(res["verification"], "PENDING_VERIFICATION")
 
-        # Check PID removed from active processes
-        self.assertNotIn(job101["pid"], [p["pid"] for p in gpu1["active_processes"]])
+    def test_stop_nonexistent(self):
+        with self.assertRaises(SchedulerError) as ctx:
+            self.svc.stop_job("nope", actor="admin")
+        self.assertEqual(ctx.exception.http_status, 404)
 
-    def test_stop_nonexistent_job(self):
-        with self.assertRaises(ValueError) as ctx:
-            self.svc.stop_job("nonexistent-job-xyz")
-        self.assertIn("Không tìm thấy job", str(ctx.exception))
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -89,6 +89,17 @@ const legendFormatter = (value: string) =>
 export function GpuHoursChart() {
   const [viewMode, setViewMode] = useState<'timeline' | 'users'>('timeline');
 
+  if (process.env.NEXT_PUBLIC_DEMO_MODE !== 'true') {
+    return (
+      <Card className='border bg-card min-w-0 w-full'>
+        <CardHeader>
+          <CardTitle>GPU-hours</CardTitle>
+          <CardDescription>Chưa có bộ thu thập GPU-hours đã xác minh.</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
   const handleExportCsv = () => {
     const csvContent =
       'data:text/csv;charset=utf-8,' +

@@ -131,6 +131,45 @@ def _format_gpu(g: Dict[str, Any]) -> Dict[str, Any]:
     res["associatedJobs"] = g.get("associated_jobs", g.get("associatedJobs", []))
     return res
 
+def _format_member(m: Dict[str, Any]) -> Dict[str, Any]:
+    res = dict(m)
+    res["fullName"] = m.get("full_name", m.get("fullName", ""))
+    res["researchGroup"] = m.get("research_group", m.get("researchGroup", ""))
+    res["assignedServer"] = m.get("assigned_server", m.get("assignedServer", settings.LOCAL_HOST_ID))
+    res["workspaceName"] = m.get("workspace_name", m.get("workspaceName", ""))
+    res["provisioningState"] = m.get("provisioning_state", m.get("provisioningState", "PENDING"))
+    res["workspaceStatus"] = m.get("workspace_status", m.get("workspaceStatus", "NOT_VERIFIED"))
+    res["teleportStatus"] = m.get("teleport_status", m.get("teleportStatus", "NOT_CONFIGURED"))
+    res["storagePoolId"] = m.get("storage_pool_id", m.get("storagePoolId"))
+    res["storagePoolLabel"] = m.get("storage_pool_label", m.get("storagePoolLabel", "NOT_VERIFIED"))
+    res["mountPath"] = m.get("mount_path", m.get("mountPath", "/workspace"))
+    res["storageQuotaGb"] = m.get("storage_quota_gb", m.get("storageQuotaGb", 100))
+    res["storageUsedGb"] = m.get("storage_used_gb", m.get("storageUsedGb", 0.0))
+    res["backupPolicy"] = m.get("backup_policy", m.get("backupPolicy", "DAILY_SNAPSHOT"))
+    res["sharedDatasets"] = m.get("shared_datasets", m.get("sharedDatasets", []))
+    res["sshStatus"] = m.get("ssh_status", m.get("sshStatus", "OFFLINE"))
+    res["sshSessionsCount"] = m.get("ssh_sessions_count", m.get("sshSessionsCount", 0))
+    res["sshIp"] = m.get("ssh_ip", m.get("sshIp"))
+    res["sshPort"] = m.get("ssh_port", m.get("sshPort"))
+    res["sshKeyStatus"] = m.get("ssh_key_status", m.get("sshKeyStatus", "NOT_CONFIGURED"))
+    res["sshFingerprint"] = m.get("ssh_fingerprint", m.get("sshFingerprint"))
+    res["sshPublicKeyPreview"] = m.get("ssh_public_key_preview", m.get("sshPublicKeyPreview", ""))
+    res["sshPublicKey"] = m.get("ssh_public_key", m.get("sshPublicKey"))
+    res["sshAuthMode"] = m.get("ssh_auth_mode", m.get("sshAuthMode", "OPENSSH_PUBLIC_KEY"))
+    res["passwordStatus"] = m.get("password_status", m.get("passwordStatus", "NOT_APPLICABLE"))
+    res["cpuLimitCores"] = m.get("cpu_limit_cores", m.get("cpuLimitCores", 8))
+    res["ramLimitGb"] = m.get("ram_limit_gb", m.get("ramLimitGb", 16))
+    res["gpuPermissions"] = m.get("gpu_permissions", m.get("gpuPermissions", []))
+    res["vramPolicy"] = m.get("vram_policy", m.get("vramPolicy", "Quota 12GB (Shared)"))
+    res["vramQuotaGb"] = m.get("vram_quota_gb", m.get("vramQuotaGb", 12))
+    res["gpuAllocationMode"] = m.get("gpu_allocation_mode", m.get("gpuAllocationMode", "SHARED"))
+    res["maxRuntimeHours"] = m.get("max_runtime_hours", m.get("maxRuntimeHours", 48))
+    res["activeJobsCount"] = m.get("active_jobs_count", m.get("activeJobsCount", 0))
+    res["totalGpuHours"] = m.get("total_gpu_hours", m.get("totalGpuHours", 0.0))
+    res["createdAt"] = m.get("created_at", m.get("createdAt", ""))
+    res["expiresAt"] = m.get("expires_at", m.get("expiresAt"))
+    return res
+
 class LabOpsRequestHandler(BaseHTTPRequestHandler):
     def _send_cors_headers(self):
         origin = self.headers.get("Origin", "")
@@ -226,11 +265,39 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, service.host_registry.reconcile_json_stores())
             return
 
-        principal = self._authenticate(path)
-        if principal is None:
+        if path == "/api/v1/users":
+            self._send_json(200, [_format_member(m) for m in service.members])
             return
-        if path.startswith(("/api/v1/users", "/api/v1/admin/members", "/api/v1/ssh/endpoints", "/api/v1/access")):
-            self._send_json(501, {"detail": "Secure access routes require the FastAPI backend"})
+        if path.startswith("/api/v1/users/"):
+            parts = path.split("/")
+            user_id = parts[4]
+            if len(parts) == 5:
+                member = next((m for m in service.members if m["id"] == user_id or m.get("username") == user_id), None)
+                if not member:
+                    self._send_json(404, {"detail": "Không tìm thấy thành viên"})
+                else:
+                    self._send_json(200, _format_member(member))
+                return
+            if path.endswith("/wireguard/devices"):
+                try:
+                    self._send_json(200, service.refresh_wireguard_devices(user_id))
+                except ValueError as e:
+                    self._send_json(404, {"detail": str(e)})
+                except RuntimeError as e:
+                    self._send_json(503, {"detail": str(e)})
+                return
+        if path == "/api/v1/access/health":
+            import asyncio
+            try:
+                health_data = asyncio.run(service.get_access_health())
+            except Exception:
+                health_data = {
+                    "wireguard": {"status": "NOT_CONFIGURED", "live": False, "peers_count": 0},
+                    "teleport": {"status": "NOT_CONFIGURED", "version": None},
+                    "workspace_agents": "NOT_CONFIGURED",
+                    "network_policy": "NOT_VERIFIED",
+                }
+            self._send_json(200, health_data)
             return
 
         if path == "" or path == "/":
@@ -336,9 +403,6 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         principal = self._authenticate(path)
         if principal is None:
             return
-        if path.startswith(("/api/v1/users", "/api/v1/admin/members", "/api/v1/ssh/endpoints", "/api/v1/access")):
-            self._send_json(501, {"detail": "Secure access routes require the FastAPI backend"})
-            return
         
         content_length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
@@ -346,6 +410,48 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             body = json.loads(raw_body)
         except Exception:
             body = {}
+
+        if path in ("/api/v1/users", "/api/v1/admin/members/provision"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép tạo thành viên và cấp quyền SSH"})
+                return
+            try:
+                body["_actor_id"] = principal.username
+                created = service.provision_member(body)
+                self._send_json(200, _format_member(created))
+            except ValueError as e:
+                self._send_json(400, {"detail": str(e)})
+            except WorkspaceSecurityError as e:
+                self._send_json(e.http_status, {"detail": e.message})
+            return
+        if path.startswith("/api/v1/users/") and path.endswith("/revoke"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép thu hồi quyền truy cập"})
+                return
+            user_id = path.split("/")[4]
+            import asyncio
+            try:
+                result = asyncio.run(service.revoke_member_access(user_id, actor=principal.username))
+                self._send_json(200, {"id": user_id, "status": result["status"]})
+            except ValueError as e:
+                self._send_json(404, {"detail": str(e)})
+            except RuntimeError as e:
+                self._send_json(200, {"status": "PARTIAL_FAILURE", "detail": str(e), "id": user_id})
+            return
+        if path.startswith("/api/v1/users/") and path.endswith("/wireguard/devices"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép đăng ký thiết bị VPN"})
+                return
+            user_id = path.split("/")[4]
+            pub_key = str(body.get("publicKey") or body.get("public_key") or "").strip()
+            dev_name = str(body.get("name") or "").strip()
+            try:
+                self._send_json(200, service.register_wireguard_device(user_id, pub_key, dev_name, actor=principal.username))
+            except ValueError as e:
+                self._send_json(400, {"detail": str(e)})
+            except RuntimeError as e:
+                self._send_json(409, {"detail": str(e)})
+            return
 
         if path == "/api/v1/gpus/allocate":
             try:
@@ -429,7 +535,7 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/v1/v2/ssh-keys":
             owner = str(body.get("username") or principal.username) if principal.is_admin else principal.username
             try:
-                self._send_json(200, service.ssh_key_registry.register_key(
+                self._send_json(200, service.enroll_member_ssh_key(
                     username=owner,
                     label=str(body.get("label", "Khóa cá nhân")),
                     public_key=str(body.get("public_key", "")),
@@ -437,6 +543,8 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 ))
             except ValueError as e:
                 self._send_json(400, {"detail": str(e)})
+            except WorkspaceSecurityError as e:
+                self._send_json(e.http_status, {"detail": e.message})
         elif path.startswith("/api/v1/v2/ssh-keys/") and path.endswith("/revoke"):
             key_id = path.split("/")[5]
             try:

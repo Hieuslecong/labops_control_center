@@ -127,6 +127,18 @@ class TestHttpEndpoints(unittest.TestCase):
         self.assertIn("collectors", health)
         self.assertEqual(health["collectors"]["process_monitor"], "OK")
 
+    def test_users_and_ssh_enrollment_endpoints(self):
+        status, users = self._get("/api/v1/users")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(users, list)
+        self.assertGreaterEqual(len(users), 1)
+        self.assertIn("fullName", users[0])
+        self.assertIn("sshKeyStatus", users[0])
+
+        status_h, access_health = self._get("/api/v1/access/health")
+        self.assertEqual(status_h, 200)
+        self.assertIn("wireguard", access_health)
+
 if __name__ == "__main__":
     unittest.main()
 

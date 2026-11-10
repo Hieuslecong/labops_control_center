@@ -93,8 +93,15 @@ class SshKeyRegistry:
     def register_key(self, *, username: str, label: str, public_key: str, actor: str) -> Dict[str, Any]:
         meta = compute_ssh_fingerprint(public_key)
         with self._locked() as st:
-            if any(k["fingerprint_sha256"] == meta["fingerprint_sha256"] and k["desired_state"] == "ACTIVE" for k in st["keys"]):
-                raise ValueError("Khóa công khai SSH này đã được đăng ký")
+            existing = next(
+                (k for k in st["keys"] if k["fingerprint_sha256"] == meta["fingerprint_sha256"] and k["desired_state"] == "ACTIVE"),
+                None,
+            )
+            if existing:
+                if existing.get("username") == username:
+                    existing["fingerprint"] = existing["fingerprint_sha256"]
+                    return dict(existing)
+                raise ValueError("Khóa công khai SSH này đã được đăng ký cho một thành viên khác")
             record = {
                 "id": f"sshkey-{uuid.uuid4().hex[:10]}",
                 "username": username,
@@ -102,6 +109,7 @@ class SshKeyRegistry:
                 "key_type": meta["key_type"],
                 "public_key": public_key.strip(),
                 "fingerprint_sha256": meta["fingerprint_sha256"],
+                "fingerprint": meta["fingerprint_sha256"],
                 "desired_state": "ACTIVE",
                 "observed_state": "PENDING_SYNC",
                 "created_by": actor,

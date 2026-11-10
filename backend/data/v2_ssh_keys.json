@@ -1,0 +1,19 @@
+{
+  "keys": [
+    {
+      "id": "sshkey-b623aa4195",
+      "username": "hieulc",
+      "label": "Canary Test Key",
+      "key_type": "ssh-ed25519",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+H8q9v8nZ+u8d/2X8s6mXvYq9s7t6r5e4w3q2a1s0 canary@aiotlab-rack",
+      "fingerprint_sha256": "SHA256:36OeaovE3RPQwXzyJ7Rz8QwxTUw7yBLgms0fyhvYq8w",
+      "desired_state": "REVOKED",
+      "observed_state": "REVOKED",
+      "created_by": "admin",
+      "created_at": "2026-11-10T04:48:09.085263+00:00",
+      "revoked_at": "2026-11-10T04:49:16.466104+00:00",
+      "fingerprint": "SHA256:36OeaovE3RPQwXzyJ7Rz8QwxTUw7yBLgms0fyhvYq8w",
+      "revoked_by": "admin"
+    }
+  ]
+}

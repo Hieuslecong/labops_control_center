@@ -270,7 +270,7 @@ class TestV2HttpNegativeSecurity(unittest.TestCase):
         # Admin user token không được phép giả mạo làm Node Agent
         status, _, _ = self._call(
             "POST",
-            "/api/v1/v2/hosts/workstation/agent/heartbeat",
+            "/api/v1/v2/hosts/track/agent/heartbeat",
             role="ADMIN",
             username="root",
             body={"agent_version": "2.0.0"},
@@ -279,7 +279,7 @@ class TestV2HttpNegativeSecurity(unittest.TestCase):
 
         # Machine token thật được chấp nhận cho heartbeat nhưng bị chặn khi gọi endpoint người dùng
         req = Request(
-            f"http://127.0.0.1:{self.port}/api/v1/v2/hosts/workstation/agent/heartbeat",
+            f"http://127.0.0.1:{self.port}/api/v1/v2/hosts/track/agent/heartbeat",
             data=json.dumps({"agent_version": "2.0.0"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",

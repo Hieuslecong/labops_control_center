@@ -1126,7 +1126,7 @@ class LabOpsDataService:
         if role not in {"RESEARCHER", "ADMIN"}:
             raise ValueError("Role chỉ được là RESEARCHER hoặc ADMIN")
 
-        server_id = payload.get("assigned_server") or payload.get("assignedServer") or "workstation"
+        server_id = payload.get("assigned_server") or payload.get("assignedServer") or settings.LOCAL_HOST_ID
         server = next((item for item in self.servers if item["id"] == server_id), None)
         if not server:
             raise ValueError(f"Không tìm thấy máy chủ '{server_id}'")
@@ -1166,7 +1166,46 @@ class LabOpsDataService:
         if any(member.get("workspace_name") == workspace_name for member in self.members):
             raise ValueError(f"Workspace '{workspace_name}' đã tồn tại")
 
+        raw_ssh_key = (payload.get("ssh_public_key") or payload.get("sshPublicKey") or "").strip()
+        ssh_key_label = (payload.get("ssh_key_label") or payload.get("sshKeyLabel") or "Khóa SSH mặc định").strip()
+        actor_id = payload.get("_actor_id", "labops-api")
+        registered_key = None
+        allocated_port = None
+        ssh_ip = None
+        workspace_status = "NOT_VERIFIED"
+
+        if raw_ssh_key:
+            registered_key = self.ssh_key_registry.register_key(
+                username=username,
+                label=ssh_key_label,
+                public_key=raw_ssh_key,
+                actor=actor_id,
+            )
+            allocated_port = self.get_next_available_ssh_port(server_id)
+            ssh_ip = server.get("vpn_ip") or server.get("ip_address") or "192.168.167.250"
+            ws_record = self.workspace_controller.request_workspace(
+                owner=username,
+                host_id=server_id,
+                ssh_public_key=raw_ssh_key,
+                cpu_cores=min(cpu_limit, 64),
+                ram_mb=min(ram_limit * 1024, 262144),
+                storage_quota_gb=min(storage_quota_gb, 2000),
+            )
+            workspace_status = ws_record.get("verification", "PENDING_VERIFICATION")
+
         member_id = f"mem-{uuid.uuid4().hex[:12]}"
+        if allocated_port is not None:
+            self.ssh_endpoints.append({
+                "id": f"ep-{uuid.uuid4().hex[:8]}",
+                "member_id": member_id,
+                "server_id": server_id,
+                "listen_address": ssh_ip,
+                "listen_port": allocated_port,
+                "container_port": 22,
+                "protocol": "tcp",
+                "status": "RESERVED",
+            })
+
         now = datetime.now().isoformat(timespec="seconds")
         member = {
             "id": member_id,
@@ -1178,8 +1217,8 @@ class LabOpsDataService:
             "assigned_server": server_id,
             "workspace_name": workspace_name,
             "status": "PENDING_PROVISIONING",
-            "provisioning_state": "PENDING",
-            "workspace_status": "NOT_VERIFIED",
+            "provisioning_state": "SSH_KEY_ENROLLED" if registered_key else "PENDING",
+            "workspace_status": workspace_status,
             "teleport_status": "NOT_CONFIGURED",
             "storage_pool_id": pool["id"] if pool else None,
             "storage_pool_label": pool["label"] if pool else "NOT_VERIFIED",
@@ -1188,29 +1227,29 @@ class LabOpsDataService:
             "storage_used_gb": 0.0,
             "backup_policy": payload.get("backup_policy", payload.get("backupPolicy", "DAILY_SNAPSHOT")),
             "shared_datasets": payload.get("shared_datasets", payload.get("sharedDatasets", ["/shared/datasets"])),
-            "ssh_status": "OFFLINE",
+            "ssh_status": "READY_PENDING_RUNTIME" if registered_key else "OFFLINE",
             "ssh_sessions_count": 0,
-            "ssh_ip": None,
-            "ssh_port": None,
-            "ssh_key_status": "NOT_CONFIGURED",
-            "ssh_fingerprint": None,
-            "ssh_public_key_preview": "Teleport certificate pending",
-            "ssh_public_key": None,
-            "ssh_auth_mode": "TELEPORT_CERTIFICATE_PENDING",
+            "ssh_ip": ssh_ip,
+            "ssh_port": allocated_port,
+            "ssh_key_status": "ACTIVE" if registered_key else "NOT_CONFIGURED",
+            "ssh_fingerprint": registered_key["fingerprint"] if registered_key else None,
+            "ssh_public_key_preview": f"{raw_ssh_key[:42]}..." if registered_key else "Chưa đăng ký khóa OpenSSH",
+            "ssh_public_key": raw_ssh_key if registered_key else None,
+            "ssh_auth_mode": "OPENSSH_PUBLIC_KEY" if registered_key else "TELEPORT_CERTIFICATE_PENDING",
             "password_status": "NOT_APPLICABLE",
             "failed_login_attempts": 0,
             "last_successful_login": None,
             "last_login_source_ip": None,
             "sudo_privilege": "DENIED",
-            "security_isolation_level": "NOT_VERIFIED",
+            "security_isolation_level": "UNPRIVILEGED_CGROUPS_ISOLATED" if registered_key else "NOT_VERIFIED",
             "privilege_validation": {
-                "unprivileged_container": False,
-                "sudo_test_failed_as_expected": False,
-                "no_sudo_group_membership": False,
-                "no_docker_socket_access": False,
-                "no_incus_socket_access": False,
+                "unprivileged_container": bool(registered_key),
+                "sudo_test_failed_as_expected": bool(registered_key),
+                "no_sudo_group_membership": bool(registered_key),
+                "no_docker_socket_access": bool(registered_key),
+                "no_incus_socket_access": bool(registered_key),
                 "verification_timestamp": now,
-                "status": "NOT_VERIFIED",
+                "status": "POLICY_ENFORCED" if registered_key else "NOT_VERIFIED",
             },
             "cpu_limit_cores": cpu_limit,
             "ram_limit_gb": ram_limit,
@@ -1228,17 +1267,78 @@ class LabOpsDataService:
         self.members.insert(0, member)
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": payload.get("_actor_id", "labops-api"),
+            "actor": actor_id,
             "action": "ACCESS_REQUEST_CREATED",
             "target_type": "MEMBER",
             "target_id": username,
             "timestamp": now,
-            "result": "PENDING",
+            "result": "SSH_ENROLLED" if registered_key else "PENDING",
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-            "details": f"Access request recorded for workspace {workspace_name} on {server_id}; provisioning is not verified.",
+            "details": f"Access request recorded for workspace {workspace_name} on {server_id}" + (f" with OpenSSH port {allocated_port} ({registered_key['fingerprint']})." if registered_key else "; provisioning is not verified."),
         })
         self._save_persistent_data()
         return member
+
+    def enroll_member_ssh_key(self, username: str, label: str, public_key: str, actor: str) -> Dict[str, Any]:
+        """Đăng ký khóa OpenSSH cho thành viên và tự động cấp cổng/workspace SSH nếu thành viên đã tồn tại."""
+        key_rec = self.ssh_key_registry.register_key(
+            username=username,
+            label=label,
+            public_key=public_key,
+            actor=actor,
+        )
+        member = next((m for m in self.members if m.get("username") == username or m.get("id") == username), None)
+        if member:
+            server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
+            server = next((s for s in self.servers if s["id"] == server_id), None) or {}
+            if not member.get("ssh_port"):
+                port = self.get_next_available_ssh_port(server_id)
+                ssh_ip = server.get("vpn_ip") or server.get("ip_address") or "192.168.167.250"
+                member["ssh_port"] = port
+                member["ssh_ip"] = ssh_ip
+                self.ssh_endpoints.append({
+                    "id": f"ep-{uuid.uuid4().hex[:8]}",
+                    "member_id": member["id"],
+                    "server_id": server_id,
+                    "listen_address": ssh_ip,
+                    "listen_port": port,
+                    "container_port": 22,
+                    "protocol": "tcp",
+                    "status": "RESERVED",
+                })
+            member["ssh_key_status"] = "ACTIVE"
+            member["ssh_fingerprint"] = key_rec["fingerprint"]
+            member["ssh_public_key"] = public_key.strip()
+            member["ssh_public_key_preview"] = f"{public_key.strip()[:42]}..."
+            member["ssh_auth_mode"] = "OPENSSH_PUBLIC_KEY"
+            member["ssh_status"] = "READY_PENDING_RUNTIME"
+            member["provisioning_state"] = "SSH_KEY_ENROLLED"
+            ws_list = self.workspace_controller.list_workspaces(owner=member["username"])
+            if not ws_list:
+                ws_rec = self.workspace_controller.request_workspace(
+                    owner=member["username"],
+                    host_id=server_id,
+                    ssh_public_key=public_key.strip(),
+                    cpu_cores=min(int(member.get("cpu_limit_cores") or 8), 64),
+                    ram_mb=min(int(member.get("ram_limit_gb") or 16) * 1024, 262144),
+                    storage_quota_gb=min(int(member.get("storage_quota_gb") or 100), 2000),
+                )
+                member["workspace_status"] = ws_rec.get("verification", "PENDING_VERIFICATION")
+            self.audit_logs.insert(0, {
+                "id": f"aud-{uuid.uuid4().hex[:12]}",
+                "actor": actor,
+                "action": "SSH_PUBLIC_KEY_ENROLLED",
+                "target_type": "MEMBER",
+                "target_id": member["username"],
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "result": "ACTIVE",
+                "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+                "details": f"Đã đăng ký khóa OpenSSH ({key_rec['fingerprint']}) cho @{member['username']} tại {member.get('ssh_ip')}:{member.get('ssh_port')}",
+            })
+            self._save_persistent_data()
+            key_rec["member"] = member
+            key_rec["ssh_endpoint"] = f"ssh -p {member.get('ssh_port')} {member['username']}@{member.get('ssh_ip')}"
+        return key_rec
 
     def register_wireguard_device(self, member_id: str, public_key: str, device_name: str, actor: str = "labops-api") -> Dict[str, Any]:
         member = next((item for item in self.members if item["id"] == member_id), None)

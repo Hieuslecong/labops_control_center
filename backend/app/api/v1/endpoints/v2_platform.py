@@ -95,7 +95,7 @@ async def list_ssh_keys(p: Principal = Depends(require_user)) -> List[Dict[str, 
 async def register_ssh_key(payload: Dict[str, Any], p: Principal = Depends(require_user)) -> Dict[str, Any]:
     owner = str(payload.get("username") or p.username) if p.is_admin else p.username
     try:
-        return service.ssh_key_registry.register_key(
+        return service.enroll_member_ssh_key(
             username=owner,
             label=str(payload.get("label", "Khóa cá nhân")),
             public_key=str(payload.get("public_key", "")),

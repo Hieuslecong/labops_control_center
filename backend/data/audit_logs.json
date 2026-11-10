@@ -1,5 +1,16 @@
 [
   {
+    "id": "aud-c0577fb40aa0",
+    "actor": "admin",
+    "action": "SSH_PUBLIC_KEY_ENROLLED",
+    "target_type": "MEMBER",
+    "target_id": "hieulc",
+    "timestamp": "2026-11-10T11:49:16",
+    "result": "ACTIVE",
+    "correlation_id": "corr-eeee3e430674",
+    "details": "Đã đăng ký khóa OpenSSH (SHA256:36OeaovE3RPQwXzyJ7Rz8QwxTUw7yBLgms0fyhvYq8w) cho @hieulc tại 10.200.0.1:22001"
+  },
+  {
     "id": "aud-4e8c7e",
     "actor": "admin@labops.local",
     "action": "WIREGUARD_KEY_ROTATED",

@@ -6,23 +6,74 @@ import subprocess
 import logging
 from typing import Dict, Any, List, Optional
 import psutil
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def get_real_hostname() -> str:
+    try:
+        if os.path.exists("/etc/hostname"):
+            with open("/etc/hostname", "r", encoding="utf-8") as _hf:
+                name = _hf.read().strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    return platform.node() or "unknown"
+
+
+def get_real_primary_ip() -> str:
+    try:
+        for iface, addrs in psutil.net_if_addrs().items():
+            if iface == "lo" or iface.startswith(("docker", "veth", "br-")):
+                continue
+            for addr in addrs:
+                if getattr(addr, "family", None) == 2 and addr.address and not addr.address.startswith("127."):
+                    return addr.address
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def get_real_root_mount_info() -> Dict[str, str]:
+    """Đọc thiết bị đĩa thực tế từ /proc/mounts thay vì gán cứng LVM Ubuntu."""
+    target_path = os.path.abspath(__file__)
+    best_mount = "/"
+    best_dev = "unknown"
+    best_fstype = "ext4"
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    dev, mnt, fstype = parts[0], parts[1], parts[2]
+                    if fstype in ("tmpfs", "proc", "sysfs", "devtmpfs", "devpts", "cgroup2", "efivarfs"):
+                        continue
+                    if target_path.startswith(mnt.rstrip("/") + "/") or mnt == "/":
+                        if len(mnt) >= len(best_mount):
+                            best_mount = mnt
+                            best_dev = dev
+                            best_fstype = fstype
+    except Exception:
+        pass
+    return {"device": best_dev, "mount_point": best_mount, "fstype": best_fstype}
+
 
 class HostMonitorAdapter:
     """
     Lightweight, read-only host telemetry adapter for LabOps Control Center.
-    Directly queries host Linux metrics via /proc, psutil, and nvidia-smi without
-    requiring third-party monitoring daemons.
+    Directly queries host Linux metrics via /proc, psutil, and nvidia-smi.
     """
 
-    def __init__(self, is_demo_mode: bool = False):
+    def __init__(self, is_demo_mode: bool = False, local_host_id: Optional[str] = None):
         self.is_demo_mode = is_demo_mode
+        self.local_host_id = local_host_id or settings.LOCAL_HOST_ID
         self.is_containerized = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
 
     def _get_cpu_model(self) -> str:
         try:
-            with open("/proc/cpuinfo", "r") as f:
+            with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
                 for line in f:
                     if "model name" in line:
                         return line.split(":", 1)[1].strip()
@@ -48,7 +99,6 @@ class HostMonitorAdapter:
         try:
             cmd = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
             driver = subprocess.check_output(cmd, text=True, timeout=2).strip().split("\n")[0]
-            # Get CUDA version from nvidia-smi banner
             out = subprocess.check_output(["nvidia-smi"], text=True, timeout=2)
             cuda = "Unknown"
             for line in out.split("\n"):
@@ -62,22 +112,19 @@ class HostMonitorAdapter:
             return {"driver": "Unavailable", "cuda": "Unavailable"}
 
     def _get_disk_telemetry(self) -> Dict[str, Any]:
-        """Inspect real host disk partitions and usage"""
+        """Inspect real host disk partition containing the workspace/system."""
         try:
-            root_usage = psutil.disk_usage("/")
-            total_bytes = root_usage.total
-            used_bytes = root_usage.used
+            mnt_info = get_real_root_mount_info()
+            probe_path = mnt_info["mount_point"] if os.path.exists(mnt_info["mount_point"]) else "/"
+            usage = psutil.disk_usage(probe_path)
+            # If "/" is tmpfs in a sandbox namespace, fallback to /etc or current directory
+            if mnt_info["device"] != "unknown" and usage.total < 100 * (1024**3) and os.path.exists("/etc"):
+                etc_usage = psutil.disk_usage("/etc")
+                if etc_usage.total > usage.total:
+                    usage = etc_usage
 
-            # Check secondary partition /dev/sdb mounted on /hdd1/hieulc/tmp if exists
-            sdb_path = "/hdd1/hieulc/tmp"
-            if os.path.exists(sdb_path):
-                try:
-                    sdb_usage = psutil.disk_usage(sdb_path)
-                    total_bytes += sdb_usage.total
-                    used_bytes += sdb_usage.used
-                except Exception:
-                    pass
-
+            total_bytes = usage.total
+            used_bytes = usage.used
             total_tb = round(total_bytes / (1024**4), 2)
             used_tb = round(used_bytes / (1024**4), 2)
             pct = round((used_bytes / total_bytes) * 100, 1) if total_bytes > 0 else 0.0
@@ -86,7 +133,7 @@ class HostMonitorAdapter:
                 "disk_total_tb": total_tb,
                 "disk_used_tb": used_tb,
                 "disk_usage_percent": pct,
-                "disk_type": "LVM Ext4 (Primary) + Ext4 (Secondary Data)"
+                "disk_type": f"{mnt_info['fstype'].upper()} ({mnt_info['device']})"
             }
         except Exception as e:
             logger.warning(f"Failed to query disk telemetry: {e}")
@@ -110,10 +157,7 @@ class HostMonitorAdapter:
             logger.warning("Failed to query GPU count: %s", exc)
             return 0
 
-    def get_local_workstation_telemetry(self) -> Dict[str, Any]:
-        """
-        Produce real-time telemetry for the local Ubuntu host (Server 02 — Workstation).
-        """
+    def _build_local_telemetry(self, server_id: str, display_name: str, location: str) -> Dict[str, Any]:
         cpu_model = self._get_cpu_model()
         logical_cpus = psutil.cpu_count(logical=True) or 0
         physical_cores = psutil.cpu_count(logical=False) or 0
@@ -127,24 +171,28 @@ class HostMonitorAdapter:
         disk_info = self._get_disk_telemetry()
         nv_versions = self._get_nvidia_versions()
         uptime_str = self._get_uptime_string()
+        real_hostname = get_real_hostname()
+        real_ip = get_real_primary_ip()
 
-        # Check incus installation
         incus_bin = shutil.which("incus")
-        incus_status = "Chưa cài đặt"
-        if incus_bin:
+        docker_bin = shutil.which("docker")
+        runtime_status = "Chưa cài đặt Docker/Incus"
+        if docker_bin:
+            runtime_status = "Docker Engine"
+        elif incus_bin:
             try:
                 res = subprocess.check_output([incus_bin, "version"], text=True, timeout=2).strip()
-                incus_status = f"v{res}"
+                runtime_status = f"Incus v{res}"
             except Exception:
-                incus_status = "Đã cài đặt (Dịch vụ chưa chạy)"
+                runtime_status = "Incus (Dịch vụ chưa chạy)"
 
         return {
-            "id": "workstation",
-            "name": "Server 02 — Workstation (Cục bộ)",
-            "hostname": platform.node() or "unknown",
-            "location": "Phòng Lab TP.HCM (Khu B)",
+            "id": server_id,
+            "name": display_name,
+            "hostname": real_hostname,
+            "location": location,
             "status": "degraded" if self.is_containerized else "online",
-            "ip_address": "127.0.0.1",
+            "ip_address": real_ip,
             "vpn_ip": "",
             "uptime": uptime_str,
             "cpu_model": f"{cpu_model} ({logical_cpus} vCPUs, {physical_cores} Cores)",
@@ -162,55 +210,18 @@ class HostMonitorAdapter:
             "gpu_count": self._get_gpu_count(),
             "active_members": 0,
             "active_jobs": 0,
-            "incus_version": incus_status,
+            "incus_version": runtime_status,
             "driver_version": nv_versions["driver"],
             "cuda_version": nv_versions["cuda"],
             "last_updated": "Container telemetry; host not verified" if self.is_containerized else "Live host telemetry",
-            "is_real_host": not self.is_containerized
+            "is_real_host": not self.is_containerized,
         }
 
-    def get_remote_track_telemetry(self) -> Dict[str, Any]:
-        """
-        Telemetry for Server 01 — Track.
-        In production mode, if WireGuard / remote API is unreachable, report honestly as offline.
-        """
-        # In Demo Mode, realistic simulated values may be returned for development only.
-        if self.is_demo_mode:
-            return {
-                "id": "track",
-                "name": "Server 01 — Track (Demo)",
-                "hostname": "track.lab.internal",
-                "location": "Phòng Lab Hà Nội (Khu A)",
-                "status": "online",
-                "ip_address": "10.10.1.10",
-                "vpn_ip": "10.200.0.1",
-                "uptime": "45 ngày 12 giờ",
-                "cpu_model": "AMD EPYC 7763 64-Core Processor (128 vCPUs)",
-                "cpu_cores": 64,
-                "cpu_usage_percent": 42.5,
-                "ram_total_gb": 256.0,
-                "ram_used_gb": 174.2,
-                "ram_usage_percent": 68.0,
-                "disk_total_tb": 8.0,
-                "disk_used_tb": 4.32,
-                "disk_usage_percent": 54.0,
-                "disk_type": "ZFS RAID-Z2 (NVMe Pools)",
-                "network_in_mbps": 620,
-                "network_out_mbps": 580,
-                "gpu_count": 3,
-                "active_members": 4,
-                "active_jobs": 5,
-                "incus_version": "6.0.2 LTS",
-                "driver_version": "550.120",
-                "cuda_version": "12.4",
-                "last_updated": "Vừa xong",
-                "is_real_host": False
-            }
-
-        # No remote Track telemetry agent or Gateway API is configured here.
+    @staticmethod
+    def _build_unverified_remote(server_id: str, display_name: str) -> Dict[str, Any]:
         return {
-            "id": "track",
-            "name": "Server 01 — Track (Từ xa)",
+            "id": server_id,
+            "name": display_name,
             "hostname": "Chưa xác minh",
             "location": "Chưa xác minh",
             "status": "unknown",
@@ -235,7 +246,26 @@ class HostMonitorAdapter:
             "incus_version": "Chưa xác minh",
             "driver_version": "Chưa xác minh",
             "cuda_version": "Chưa xác minh",
-            "last_updated": "Remote telemetry chưa được cấu hình",
-            "is_real_host": False
+            "last_updated": "Chưa xác minh kết nối tới máy chủ từ xa",
+            "is_real_host": False,
         }
 
+    def get_remote_track_telemetry(self) -> Dict[str, Any]:
+        """Telemetry for Server 01 — Track / Server-Rack (aiotlab-rack)."""
+        if self.local_host_id == "track":
+            return self._build_local_telemetry(
+                server_id="track",
+                display_name="Server 01 — Server Rack (aiotlab-rack • Cục bộ)",
+                location="Phòng Máy chủ AIoT Lab (Rack)",
+            )
+        return self._build_unverified_remote("track", "Server 01 — Server Rack (Từ xa)")
+
+    def get_local_workstation_telemetry(self) -> Dict[str, Any]:
+        """Telemetry for Server 02 — Workstation."""
+        if self.local_host_id == "workstation":
+            return self._build_local_telemetry(
+                server_id="workstation",
+                display_name="Server 02 — Workstation (Cục bộ)",
+                location="Phòng Lab (Workstation)",
+            )
+        return self._build_unverified_remote("workstation", "Server 02 — Workstation (Từ xa)")

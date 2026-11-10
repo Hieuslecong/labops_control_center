@@ -3,8 +3,9 @@ import subprocess
 from datetime import datetime, timezone
 
 
+from app.core.config import settings
 def settings_local_host_id() -> str:
-    return os.getenv("LABOPS_LOCAL_HOST_ID", "workstation")
+    return settings.LOCAL_HOST_ID
 
 import shutil
 import logging
@@ -136,7 +137,7 @@ class NvmlAdapter:
                             "id": f"{self.server_id}-gpu-{idx:02d}",
                             "display_label": f"{self.server_id.upper()}-GPU-{idx:02d}",
                             "server_id": self.server_id,
-                            "server_name": self.server_id,
+                            "server_name": "Server 01 — Server Rack (aiotlab-rack)" if self.server_id == "track" else "Server 02 — Workstation",
                             "source": "nvidia-smi",
                             "collected_at": datetime.now(timezone.utc).isoformat(),
                             "freshness": "ONLINE",

@@ -45,7 +45,7 @@ def compute_freshness(collected_at: Optional[str]) -> str:
 
 
 class HostRegistry:
-    def __init__(self, data_dir: str, local_host_id: str = "workstation"):
+    def __init__(self, data_dir: str, local_host_id: str = "track"):
         self.data_dir = data_dir
         self.local_host_id = local_host_id
         self.state_path = os.path.join(data_dir, "v2_hosts.json")
@@ -80,36 +80,37 @@ class HostRegistry:
         with self._locked() as state:
             if state["hosts"]:
                 return
+            is_track_local = self.local_host_id == "track"
             state["hosts"] = [
                 {
-                    "id": "workstation",
-                    "hostname": "labops-workstation",
-                    "display_name": "Máy chủ 02 — Workstation (Local Node)",
+                    "id": "track",
+                    "hostname": "aiotlab-rack",
+                    "display_name": "Máy chủ 01 — Server Rack (aiotlab-rack • 3x NVIDIA A30)",
                     "role": "HYBRID",
-                    "management_ip": "127.0.0.1",
-                    "vpn_ip": "10.200.0.2",
+                    "management_ip": "192.168.167.250",
+                    "vpn_ip": None,
                     "ssh_legacy_port": 22,
-                    "agent_url": "http://127.0.0.1:8091",
+                    "agent_url": "http://127.0.0.1:8091" if is_track_local else None,
                     "desired_state": "ACTIVE",
-                    "observed_state": "ONLINE",
-                    "telemetry_source": "local_psutil_nvml",
-                    "last_heartbeat_at": _now(),
+                    "observed_state": "ONLINE" if is_track_local else "UNKNOWN",
+                    "telemetry_source": "local_psutil_nvml" if is_track_local else "NOT_CONFIGURED",
+                    "last_heartbeat_at": _now() if is_track_local else None,
                     "created_at": _now(),
                     "updated_at": _now(),
                 },
                 {
-                    "id": "track",
-                    "hostname": "labops-track",
-                    "display_name": "Máy chủ 01 — Track (Remote Compute Node)",
+                    "id": "workstation",
+                    "hostname": "Chưa xác minh",
+                    "display_name": "Máy chủ 02 — Workstation (Từ xa • Chưa kết nối)",
                     "role": "COMPUTE_NODE",
-                    "management_ip": "10.10.1.10",
-                    "vpn_ip": "10.200.0.1",
+                    "management_ip": "",
+                    "vpn_ip": None,
                     "ssh_legacy_port": 22,
-                    "agent_url": "http://10.200.0.1:8091",
+                    "agent_url": None,
                     "desired_state": "ACTIVE",
-                    "observed_state": "UNKNOWN",
-                    "telemetry_source": "NOT_CONFIGURED",
-                    "last_heartbeat_at": None,
+                    "observed_state": "UNKNOWN" if is_track_local else "ONLINE",
+                    "telemetry_source": "NOT_CONFIGURED" if is_track_local else "local_psutil_nvml",
+                    "last_heartbeat_at": None if is_track_local else _now(),
                     "created_at": _now(),
                     "updated_at": _now(),
                 },

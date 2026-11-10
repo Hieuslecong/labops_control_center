@@ -89,28 +89,32 @@ class TestHttpEndpoints(unittest.TestCase):
         self.assertEqual(formatted_gpu["gpuUtilPercent"], 50)
 
     def test_processes_endpoints(self):
-        # Workstation processes
-        status, data = self._get("/api/v1/servers/workstation/processes")
+        from app.core.config import settings
+        local_id = settings.LOCAL_HOST_ID
+        remote_id = "workstation" if local_id == "track" else "track"
+
+        status, data = self._get(f"/api/v1/servers/{local_id}/processes")
         self.assertEqual(status, 200)
-        self.assertEqual(data["source_host"], "workstation")
+        self.assertEqual(data["source_host"], local_id)
         self.assertEqual(data["collector_status"], "OK")
         self.assertIn("actual_observations", data)
 
-        # Track process collection is not configured in this deployment.
-        status, data_track = self._get("/api/v1/servers/track/processes")
+        status, data_remote = self._get(f"/api/v1/servers/{remote_id}/processes")
         self.assertEqual(status, 200)
-        self.assertEqual(data_track["source_host"], "track")
-        self.assertEqual(data_track["collector_status"], "NOT_CONFIGURED")
-        self.assertIn("not configured", data_track["error_details"])
+        self.assertEqual(data_remote["source_host"], remote_id)
+        self.assertEqual(data_remote["collector_status"], "NOT_CONFIGURED")
+        self.assertIn("not configured", data_remote["error_details"])
 
     def test_gpu_processes_and_ssh_sessions(self):
-        status, gpu_procs = self._get("/api/v1/servers/workstation/gpu-processes")
+        from app.core.config import settings
+        local_id = settings.LOCAL_HOST_ID
+        status, gpu_procs = self._get(f"/api/v1/servers/{local_id}/gpu-processes")
         self.assertEqual(status, 200)
-        self.assertEqual(gpu_procs["source_host"], "workstation")
+        self.assertEqual(gpu_procs["source_host"], local_id)
 
-        status, ssh_sessions = self._get("/api/v1/servers/workstation/ssh-sessions")
+        status, ssh_sessions = self._get(f"/api/v1/servers/{local_id}/ssh-sessions")
         self.assertEqual(status, 200)
-        self.assertEqual(ssh_sessions["source_host"], "workstation")
+        self.assertEqual(ssh_sessions["source_host"], local_id)
         self.assertIn("actual_observations", ssh_sessions)
 
     def test_jobs_active_and_monitoring_health(self):

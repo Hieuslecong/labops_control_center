@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from app.core.config import settings
-from app.adapters.host_monitor_adapter import HostMonitorAdapter
+from app.adapters.host_monitor_adapter import HostMonitorAdapter, get_real_root_mount_info
 from app.adapters.nvml_adapter import NvmlAdapter
 from app.services.gpu_scheduler import GpuScheduler, SchedulerError
 from app.services.security_scanner import SecurityScanner
@@ -56,7 +56,7 @@ class LabOpsDataService:
         self.demo_mode = settings.DEMO_MODE if demo_mode is None else demo_mode
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
-        self.process_monitor = ProcessMonitorAdapter(server_id="workstation", demo_mode=self.demo_mode)
+        self.process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
         self.data_dir = os.path.abspath(data_dir or os.path.join(os.path.dirname(__file__), "..", "..", "data"))
         os.makedirs(self.data_dir, exist_ok=True)
         self.wireguard_adapter = WireGuardAdapter(interface="wg0", data_dir=self.data_dir)
@@ -154,21 +154,24 @@ class LabOpsDataService:
                 return []
             import psutil
             try:
-                root_u = psutil.disk_usage("/")
+                mnt_info = get_real_root_mount_info()
+                root_u = psutil.disk_usage("/etc" if psutil.disk_usage("/").total < 100 * (1024**3) and os.path.exists("/etc") else "/")
+                local_id = settings.LOCAL_HOST_ID
+                local_name = "Server 01 — Server Rack (aiotlab-rack)" if local_id == "track" else "Server 02 — Workstation (Cục bộ)"
                 pools = [
                     {
                         "id": "pool-root",
-                        "server_id": "workstation",
-                        "server_name": "Server 02 — Workstation (Cục bộ)",
+                        "server_id": local_id,
+                        "server_name": local_name,
                         "name": "pool-root",
-                        "label": "Ổ đĩa Hệ thống (LVM Ext4 /)",
-                        "disk_identifier": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+                        "label": f"Ổ đĩa Hệ thống ({mnt_info['fstype'].upper()} {mnt_info['device']})",
+                        "disk_identifier": mnt_info["device"],
                         "mount_point": "/",
                         "driver": "dir",
                         "capacity_gb": round(root_u.total / (1024**3), 1),
                         "used_gb": round(root_u.used / (1024**3), 1),
                         "free_gb": round(root_u.free / (1024**3), 1),
-                        "health_status": "HEALTHY",
+                        "health_status": "ONLINE_LOCAL_FS",
                         "is_default": True
                     }
                 ]
@@ -980,10 +983,10 @@ class LabOpsDataService:
         }
 
     def get_server_processes(self, server_id: str, filter_type: str = "all") -> Dict[str, Any]:
-        if server_id == "workstation":
+        if server_id == settings.LOCAL_HOST_ID:
             return self.process_monitor.get_real_processes(filter_type=filter_type)
         return {
-            "source_host": "track",
+            "source_host": server_id,
             "collection_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "collector_status": "NOT_CONFIGURED",
             "filter": filter_type,
@@ -996,10 +999,10 @@ class LabOpsDataService:
         return self.get_server_processes(server_id, filter_type="gpu")
 
     def get_server_ssh_sessions(self, server_id: str) -> Dict[str, Any]:
-        if server_id == "workstation":
+        if server_id == settings.LOCAL_HOST_ID:
             return self.process_monitor.get_real_ssh_sessions()
         return {
-            "source_host": "track",
+            "source_host": server_id,
             "collection_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "collector_status": "NOT_CONFIGURED",
             "total_count": 0,
@@ -1008,7 +1011,7 @@ class LabOpsDataService:
         }
 
     def get_workspace_processes(self, workspace_id: str) -> Dict[str, Any]:
-        all_procs = self.get_server_processes("workstation", filter_type="all")
+        all_procs = self.get_server_processes(settings.LOCAL_HOST_ID, filter_type="all")
         obs = [
             p for p in all_procs.get("actual_observations", [])
             if p.get("workspace") == workspace_id or p.get("container_id") == workspace_id

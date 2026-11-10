@@ -1,3 +1,4 @@
+from app.core.config import settings
 import os
 import re
 import time
@@ -118,9 +119,9 @@ class ProcessMonitorAdapter:
         now_dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Track has no configured remote process collector in this deployment.
-        if not self.demo_mode and self.server_id == "track":
+        if not self.demo_mode and self.server_id != settings.LOCAL_HOST_ID:
             return {
-                "source_host": "track",
+                "source_host": self.server_id,
                 "collection_timestamp": now_dt_str,
                 "collector_status": "NOT_CONFIGURED",
                 "filter": filter_type,
@@ -208,7 +209,7 @@ class ProcessMonitorAdapter:
                     "memory_percent": round(info.get('memory_percent') or 0.0, 1),
                     "status": (info.get('status') or "running").upper(),
                     "is_gpu_process": is_gpu,
-                    "gpu_id": "ws-gpu-01" if is_gpu else None,
+                    "gpu_id": f"{self.server_id}-gpu-00" if is_gpu else None,
                     "vram_mb": vram_mb,
                     "container_id": container,
                     "workspace": workspace,
@@ -243,9 +244,9 @@ class ProcessMonitorAdapter:
         """
         now_dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        if not self.demo_mode and self.server_id == "track":
+        if not self.demo_mode and self.server_id != settings.LOCAL_HOST_ID:
             return {
-                "source_host": "track",
+                "source_host": self.server_id,
                 "collection_timestamp": now_dt_str,
                 "collector_status": "NOT_CONFIGURED",
                 "total_count": 0,
@@ -400,4 +401,4 @@ class ProcessMonitorAdapter:
 
         return jobs
 
-process_monitor = ProcessMonitorAdapter(server_id="workstation", demo_mode=False)
+process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=False)

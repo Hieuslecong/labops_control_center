@@ -1400,7 +1400,7 @@ const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 const PROD_SERVERS: PhysicalServer[] = [
   {
     id: 'track',
-    name: 'Server 01 — Track (Từ xa)',
+    name: 'Server 01 — Server Rack (aiotlab-rack)',
     hostname: 'Chưa xác minh',
     location: 'Chưa xác minh',
     status: 'unknown',
@@ -1429,7 +1429,7 @@ const PROD_SERVERS: PhysicalServer[] = [
   },
   {
     id: 'workstation',
-    name: 'Server 02 — Workstation (Cục bộ)',
+    name: 'Server 02 — Workstation (Từ xa)',
     hostname: 'Chưa xác minh',
     location: 'Chưa xác minh',
     status: 'unknown',
@@ -1647,7 +1647,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   fetchLiveSshSessions: async () => {
     try {
-      const res = await fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null);
+      const res = await fetch('/api/labops/servers/track/ssh-sessions').catch(() => null);
       if (res && res.ok) {
         const data = await res.json();
         const obs = data.actual_observations || [];
@@ -1665,7 +1665,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         fetch('/api/labops/servers').catch(() => null),
         fetch('/api/labops/gpus').catch(() => null),
         fetch('/api/labops/jobs/active').catch(() => null),
-        fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null)
+        fetch('/api/labops/servers/track/ssh-sessions').catch(() => null)
       ]);
       const updates: Partial<LabOpsState> = {
         lastSyncTime: new Date().toLocaleTimeString('vi-VN'),

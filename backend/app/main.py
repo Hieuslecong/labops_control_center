@@ -3,9 +3,6 @@ import sys
 import json
 import logging
 import secrets
-from app.core.security import AuthError, principal_from_authorization, require_node_agent, require_role
-from app.services.gpu_scheduler import GpuScheduler, SchedulerError
-from app.services.workspace_controller import WorkspaceSecurityError
 from typing import Dict, Any
 
 # Ensure backend root is in sys.path
@@ -14,6 +11,9 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from app.core.config import settings
+from app.core.security import AuthError, principal_from_authorization, require_node_agent, require_role
+from app.services.gpu_scheduler import GpuScheduler, SchedulerError
+from app.services.workspace_controller import WorkspaceSecurityError
 from app.services.labops_service import service
 
 logger = logging.getLogger(__name__)

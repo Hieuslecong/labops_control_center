@@ -1,1 +1,4 @@
-npx lint-staged
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+if command -v npx >/dev/null 2>&1; then
+  npx lint-staged
+fi

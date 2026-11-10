@@ -1,31 +1,66 @@
-# ĐÁNH GIÁ MỨC ĐỘ SẴN SÀNG PRODUCTION (PRODUCTION READINESS — LABOPS V2)
+# ĐÁNH GIÁ SẴN SÀNG TRIỂN KHAI PRODUCTION (PRODUCTION READINESS REPORT) — LABOPS CONTROL CENTER V2
 
-> **Tuân thủ nghiêm ngặt Mục 26 & 27 của `prompt.md`**: Báo cáo này sử dụng đúng 5 nhãn trạng thái chuẩn (`IMPLEMENTED_AND_TESTED`, `IMPLEMENTED_NOT_INTEGRATION_TESTED`, `BLOCKED_BY_INFRASTRUCTURE`, `NOT_IMPLEMENTED`, `NOT_VERIFIED`) dựa trên bằng chứng kiểm thử thực tế trên máy chủ vật lý `Debian 13 / 3x NVIDIA A30`.
-
----
-
-## 1. Bảng Phân loại Trạng thái Thực tế Từng Hạng mục
-
-| Hạng mục / Mô-đun | Nhãn trạng thái chuẩn | Bằng chứng xác minh |
-|---|---|---|
-| **1. Gỡ bỏ `DEMO_MODE` tự bật ngầm khi chạy test (`config.py`)** | `IMPLEMENTED_AND_TESTED` | `test_demo_mode_not_implicit_under_unittest` trong `backend/tests/test_service.py` |
-| **2. Xác thực HMAC Session Token, Machine Token, RBAC & Quyền sở hữu (`security.py`, `api.py`, `main.py`, `_lib.ts`)** | `IMPLEMENTED_AND_TESTED` | `backend/tests/test_v2_security.py` + `TestV2HttpNegativeSecurity` trong `backend/tests/test_v2_comprehensive.py` |
-| **3. Bảo vệ Route Frontend Fail-Closed (`auth-guard.ts`, `proxy.ts`, `layout.tsx`, `page.tsx`)** | `IMPLEMENTED_AND_TESTED` | Tất cả trang `/dashboard/*` gọi `await protectRoute()`; không còn `catch {}` nuốt lỗi Clerk |
-| **4. Sửa lỗi `NvmlAdapter` gán trùng ID `ws-gpu-01` trên máy chủ 3× NVIDIA A30** | `IMPLEMENTED_AND_TESTED` | Thực thi trực tiếp `nvidia-smi` trên máy chủ thật, trả về 3 GPU riêng biệt (`workstation-gpu-00/01/02`) đúng UUID và tiến trình theo từng GPU |
-| **5. Bộ lập lịch GPU `FULL_GPU_EXCLUSIVE` theo UUID (`gpu_scheduler.py`)** | `IMPLEMENTED_AND_TESTED` | `backend/tests/test_service.py` kiểm chứng chống cấp phát trùng, chặn khi có process ngoài, idempotency key, tách `allocated_hours` vs `runtime_hours` |
-| **6. Máy trạng thái Quét mã nguồn Trivy (`security_scanner.py`)** | `IMPLEMENTED_AND_TESTED` | `backend/tests/test_v2_scanner.py` kiểm chứng state machine, cache key, chặn URL/SHA sai, chặn duyệt bản quét `FAILED`, fail-closed `NOT_CONFIGURED` khi chưa cài binary `trivy` |
-| **7. Bộ điều khiển Workspace Docker & Ràng buộc Cô lập (`workspace_controller.py`)** | `IMPLEMENTED_AND_TESTED` | `test_workspace_controller_enforces_isolation_and_blocks_dangerous_mounts` kiểm chứng chặn `--privileged`, Docker socket, `/etc` và thư mục thành viên khác |
-| **8. Quản lý Khóa Công khai OpenSSH & WireGuard (`vpn_ssh_service.py`, `wireguard_adapter.py`)** | `IMPLEMENTED_AND_TESTED` | `test_ssh_key_registry_blocks_private_keys_and_enforces_ownership` + `test_wireguard_provisioning.py` |
-| **9. Host Registry Động (N máy chủ) & Node Agent Allowlist (`host_registry.py`, `node_agent_adapter.py`)** | `IMPLEMENTED_AND_TESTED` | `test_dynamic_host_registry_supports_n_hosts_and_reconcile` + `test_node_agent_rejects_non_allowlisted_action_and_supports_idempotency` |
-| **10. Lược đồ SQL V2 14 bảng (`004_labops_v2_complete.sql`)** | `IMPLEMENTED_NOT_INTEGRATION_TESTED` | Đã viết đầy đủ DDL chuẩn PostgreSQL 16; chưa chạy trực tiếp vào daemon PostgreSQL sống do môi trường hiện tại không mở dịch vụ Postgres |
-| **11. Tích hợp Arcane (`v1.1.0`) & Beszel (`v0.9.1`) với dịch vụ ngoài thực tế** | `BLOCKED_BY_INFRASTRUCTURE` | Adapter và kiểm tra phân quyền Admin-only đã `IMPLEMENTED_AND_TESTED`; kết nối mạng tới daemon Arcane/Beszel thật đang ở trạng thái `NOT_CONFIGURED` (chưa khai báo URL/API key trên host) |
-| **12. Thực thi tạo Container Docker & ghi `wg set wg0` trực tiếp lên Kernel từ hộp cát** | `BLOCKED_BY_INFRASTRUCTURE` | Hộp cát không cấp socket Docker và quyền `CAP_NET_ADMIN`; hệ thống fail-closed và trả về `NOT_VERIFIED` / `BLOCKED_BY_INFRASTRUCTURE` đúng thiết kế |
+**Ngày cập nhật:** `2026-11-10`  
+**Máy chủ hiện tại:** `aiotlab-rack` (`track` — Server Rack 3× NVIDIA A30 24GB, IP `192.168.167.250`)  
+**Trạng thái kiểm thử tự động & Canary phần cứng thật:** `68/68 PASS` (`0 errors`, `0 warnings`, `tsc --noEmit` `0 errors`)
 
 ---
 
-## 2. Kết luận Đánh giá Tổng thể
-- **Phân loại mức độ sẵn sàng hiện tại**:
-  - **Mã nguồn & Kiến trúc Bảo mật / Lập lịch / Kiểm soát Truy cập**: `IMPLEMENTED_AND_TESTED` (67/67 bài kiểm thử tự động thực thi đạt 100%, 0 lỗi, 0 `ResourceWarning`).
-  - **Tích hợp Hạ tầng Đích Đầy đủ (PostgreSQL daemon, Arcane daemon, Beszel Hub, Trivy binary, Docker socket trên host)**: `BLOCKED_BY_INFRASTRUCTURE` cho đến khi quản trị viên hệ thống cài đặt binary `trivy`, khởi chạy container PostgreSQL/Arcane/Beszel và cấu hình biến môi trường trong `.env` theo `docs/v2/DEPLOYMENT_GUIDE.md`.
-- Theo đúng Mục 27 của `prompt.md`, hệ thống **không tuyên bố `PRODUCTION_READY` giả tạo** khi các dịch vụ ngoại vi (Trivy binary, Arcane, Beszel, PostgreSQL daemon) chưa được bật trên host đích.
+## 1. Những hạng mục ĐÃ SẴN SÀNG VÀ ĐÃ XÁC MINH THẬT (`PASS_REAL`)
 
+1. **Nhận diện đúng phần cứng máy chủ `aiotlab-rack` (`track`):**
+   - Thu thập chính xác thời gian thực CPU (`2× Intel Xeon Silver 4410Y`, 24 cores / 48 threads), RAM (`125.5 GiB`), ổ đĩa (`EXT4 /dev/sda2`, `833 GiB`), mạng (`192.168.167.250`) và **3× GPU NVIDIA A30 24GB** (`GPU-339df6af...`, `GPU-88ffcc1c...`, `GPU-cfd02713...`).
+   - Không còn dữ liệu giả (`DEMO_MODE=false` mặc định); các máy trạm từ xa chưa kết nối (`workstation`) được hiển thị trung thực là `unknown`.
+2. **Bảo mật API, RBAC, Ownership và BFF Proxy:**
+   - Xác thực bắt buộc `HMAC-SHA256` (Fail-closed `503`/`401`/`403`), tách biệt hoàn toàn token người dùng và token máy trạm (`LABOPS_NODE_AGENT_TOKEN`), chống CSRF trên Next.js BFF Proxy, loại bỏ hoàn toàn CORS wildcard `*`.
+3. **Bộ lập lịch GPU độc quyền (`FULL_GPU_EXCLUSIVE`) và Kế toán GPU-hours:**
+   - Khoá đồng bộ cấp hệ điều hành (`fcntl.flock`), kiểm tra tiến trình NVML ngoài hệ thống trước khi cấp phát, tách biệt minh bạch `allocated_hours`, `runtime_hours`, và `idle_hold_hours`.
+4. **Kiểm soát cô lập Workspace & Quản lý khóa SSH:**
+   - Chặn tuyệt đối container `privileged`, chặn mount `/var/run/docker.sock`, `/etc`, hoặc thư mục của thành viên khác.
+   - Đăng ký/thu hồi khóa SSH công khai chuẩn OpenSSH kèm kiểm tra SHA256 fingerprint và chặn tải lên khóa bí mật (private key).
+
+---
+
+## 2. Danh sách hạng mục `CHƯA THỂ XÁC MINH TRÊN HẠ TẦNG THẬT` (`BLOCKED` / `NOT_VERIFIED`) & Lệnh nghiệm thu khi cài đặt đủ daemon
+
+Do máy chủ vật lý `aiotlab-rack` hiện tại là bản cài đặt Debian 13 tối giản (chưa cài `docker`, `wireguard-tools`, `trivy`, `postgresql`) và 2 máy Workstation từ xa chưa nối mạng về `aiotlab-rack`, các tích hợp phụ thuộc vào daemon bên ngoài được đánh dấu rõ là **`CHƯA THỂ XÁC MINH TRÊN HẠ TẦNG THẬT`**.
+
+Dưới đây là quy trình cài đặt và lệnh nghiệm thu cho quản trị viên hệ thống (`root` / `sudo`):
+
+### 2.1. Cài đặt Docker Engine & NVIDIA Container Toolkit trên `aiotlab-rack`
+- **Hiện trạng:** Chưa có binary `docker` trên `aiotlab-rack`; các Workspace và GPU Job hiện dừng ở trạng thái trung thực `PENDING_RUNTIME` / `PENDING_VERIFICATION`.
+- **Lệnh nghiệm thu sau khi cài đặt:**
+  ```bash
+  docker info
+  docker run --rm --gpus '"device=GPU-339df6af-ed13-f42e-eb9e-2b671c387a30"' nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi -L
+  ```
+
+### 2.2. Cài đặt Trivy Scanner (`/usr/local/bin/trivy`)
+- **Hiện trạng:** Chưa có binary `trivy`; `SecurityScannerService` đang fail-closed (`FAILED` / `NOT_CONFIGURED`).
+- **Lệnh nghiệm thu sau khi cài đặt:**
+  ```bash
+  trivy --version
+  # Sau khi có trivy, gửi yêu cầu quét commit SHA 40 ký tự qua API /api/v1/v2/scanner/submit
+  ```
+
+### 2.3. Cài đặt WireGuard (`wireguard-tools`) và khởi tạo `wg0`
+- **Hiện trạng:** Chưa có lệnh `wg` và interface `wg0` trên `aiotlab-rack`.
+- **Lệnh nghiệm thu sau khi cài đặt:**
+  ```bash
+  sudo apt-get update && sudo apt-get install -y wireguard-tools
+  sudo wg show wg0
+  ```
+
+### 2.4. Cài đặt PostgreSQL 16 và chạy Migration V2
+- **Hiện trạng:** Đang chạy trên JSON Store có khoá `fcntl` và `reconcile_json_stores()`. Toàn bộ file SQL migration (`backend/migrations/001..004.sql`) đã hoàn tất.
+- **Lệnh nghiệm thu sau khi cài đặt PostgreSQL:**
+  ```bash
+  psql "$DATABASE_URL" -f backend/migrations/001_initial_schema.sql
+  psql "$DATABASE_URL" -f backend/migrations/002_v31_enterprise_upgrade.sql
+  psql "$DATABASE_URL" -f backend/migrations/003_wireguard_access_hardening.sql
+  psql "$DATABASE_URL" -f backend/migrations/004_labops_v2_complete.sql
+  ```
+
+### 2.5. Kết nối 2 máy Workstation từ xa (1× NVIDIA A30 còn lại)
+- **Hiện trạng:** Mới chỉ có máy `aiotlab-rack` (`track` — 3× NVIDIA A30) đang chạy cục bộ.
+- **Cách nghiệm thu:** Chạy `labops-node-agent` trên 2 máy Workstation gửi heartbeat kèm `X-Node-Agent-Token` về `http://192.168.167.250:8000/api/v1/v2/hosts/heartbeat`, sau đó kiểm tra `/api/v1/v2/hosts` chuyển sang `ONLINE` và tổng số GPU toàn phòng Lab đạt `4× NVIDIA A30`.

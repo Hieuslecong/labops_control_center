@@ -171,6 +171,42 @@ class TestV2ModulesAndSecurity(unittest.TestCase):
         self.assertEqual(bob_view["ssh_keys"][0]["username"], "bob")
 
 
+    # 7. Real Host (aiotlab-rack) 3x NVIDIA A30 Inventory & Canary Reservation/Release
+    def test_real_host_aiotlab_rack_gpu_inventory_and_canary_reservation(self):
+        import shutil
+        if not shutil.which("nvidia-smi"):
+            self.skipTest("BLOCKED: nvidia-smi not available")
+        svc = LabOpsDataService(demo_mode=False, data_dir=self.data_dir)
+        servers = {srv["id"]: srv for srv in svc.servers}
+        self.assertEqual(servers["track"]["hostname"], "aiotlab-rack")
+        self.assertEqual(servers["track"]["status"], "online")
+        self.assertEqual(servers["track"]["gpu_count"], 3)
+        self.assertEqual(servers["workstation"]["status"], "unknown")
+
+        gpus = svc.gpus
+        self.assertEqual(len(gpus), 3)
+        self.assertEqual([g["id"] for g in gpus], ["track-gpu-00", "track-gpu-01", "track-gpu-02"])
+        for g in gpus:
+            self.assertEqual(g["server_id"], "track")
+            self.assertTrue(g["uuid"].startswith("GPU-"))
+            self.assertEqual(g["vram_total_mb"], 24576)
+
+        # Canary reservation & release against live NVML telemetry on track-gpu-00
+        if not gpus[0].get("active_processes"):
+            alloc = svc.allocate_gpu("track-gpu-00", "canary_user", "FULL_GPU_EXCLUSIVE", job_name="canary_verify.py")
+            rsv_id = alloc["reservation"]["id"]
+            self.assertEqual(alloc["state"], "RESERVED")
+            self.assertEqual(alloc["verification"], "PENDING_VERIFICATION")
+            # Second concurrent exclusive request on same GPU UUID must be rejected
+            from app.services.gpu_scheduler import SchedulerError
+            with self.assertRaises(SchedulerError) as ctx:
+                svc.allocate_gpu("track-gpu-00", "other_user", "FULL_GPU_EXCLUSIVE", job_name="conflict.py")
+            self.assertEqual(ctx.exception.code, "GPU_ALREADY_RESERVED")
+            # Release canary reservation cleanly
+            rel = svc.stop_job(rsv_id, actor="canary_user", is_admin=False)
+            self.assertEqual(rel["state"], "RELEASED")
+
+
 class TestV2HttpNegativeSecurity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -280,12 +280,13 @@ class TestV2HttpNegativeSecurity(unittest.TestCase):
         self.assertEqual(status, 403)
 
         # Machine token thật được chấp nhận cho heartbeat nhưng bị chặn khi gọi endpoint người dùng
+        agent_token = os.environ.get("LABOPS_NODE_AGENT_TOKEN", "v2-node-agent-machine-token-xyz")
         req = Request(
             f"http://127.0.0.1:{self.port}/api/v1/v2/hosts/track/agent/heartbeat",
             data=json.dumps({"agent_version": "2.0.0"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": "Bearer v2-node-agent-machine-token-xyz",
+                "Authorization": f"Bearer {agent_token}",
             },
             method="POST",
         )

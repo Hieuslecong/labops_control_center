@@ -1234,12 +1234,13 @@ class LabOpsDataService:
         for port in range(22001, 29999):
             if port in used_ports:
                 continue
-            # Kiểm tra xem cổng có đang bị chiếm dụng trên máy chủ thật không
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.1)
-                if s.connect_ex(('127.0.0.1', port)) == 0:
-                    used_ports.add(port)
-                    continue
+            # Kiểm tra xem cổng có đang bị chiếm dụng trên máy chủ thật không (bind check)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('0.0.0.0', port))
+            except OSError:
+                used_ports.add(port)
+                continue
             return port
         raise ValueError(f"Không còn cổng SSH khả dụng trên máy chủ {server_id}")
 
@@ -2031,11 +2032,11 @@ class LabOpsDataService:
                         'echo "$USERNAME:$TEMPPW" | chpasswd;'
                         'mkdir -p /workspace/.ssh;'
                         'echo "$PUBKEY" > /workspace/.ssh/authorized_keys;'
-                        'chmod 770 /workspace;'
+                        'chmod 700 /workspace;'
                         'chmod 700 /workspace/.ssh;'
                         'chmod 600 /workspace/.ssh/authorized_keys;'
                         'chown -R "$USERNAME:$USERNAME" /workspace;'
-                        'chmod 770 /workspace;'
+                        'chmod 700 /workspace;'
                         'cat << "EOF" > /etc/pam.d/sshd\n'
                         'auth      required   pam_unix.so nullok\n'
                         'account   required   pam_unix.so\n'

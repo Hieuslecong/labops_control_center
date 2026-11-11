@@ -36,7 +36,7 @@ class TestWireGuardProvisioning(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.adapter = WireGuardAdapter(
-            interface="wg0", data_dir=self.temp.name, server_configs=SERVER
+            interface="wg0", data_dir=self.temp.name, server_configs=SERVER, local_host_id="workstation"
         )
         self.adapter.has_wg = True
 

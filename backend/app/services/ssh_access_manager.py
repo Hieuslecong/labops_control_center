@@ -923,12 +923,12 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
         meta_path = os.path.join(ws_dir, ".workspace_meta.json")
 
-        os.makedirs(ws_dir, mode=0o770, exist_ok=True)
-        os.makedirs(work_dir, mode=0o770, exist_ok=True)
+        os.makedirs(ws_dir, mode=0o700, exist_ok=True)
+        os.makedirs(work_dir, mode=0o700, exist_ok=True)
         os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
         for _p in (ws_dir, work_dir):
             try:
-                os.chmod(_p, 0o770)
+                os.chmod(_p, 0o700)
             except OSError:
                 pass
         try:

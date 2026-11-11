@@ -9,6 +9,8 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
+import { Icons } from '@/components/icons';
+import { RepositoryGuardRequest } from '@/types/labops';
 
 interface SshKeyRecord {
   id: string;
@@ -105,6 +107,7 @@ interface ResearcherPortalViewProps {
 export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPortalViewProps) {
   const [activeTab, setActiveTab] = useState<string>(initialTab);
   const [snapshot, setSnapshot] = useState<ResearcherSnapshot | null>(null);
+  const [repoRequests, setRepoRequests] = useState<RepositoryGuardRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [keyLabel, setKeyLabel] = useState('Laptop Nghiên cứu');
@@ -113,13 +116,19 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
 
   const loadSnapshot = async () => {
     setLoading(true);
-    const res = await labopsCall<ResearcherSnapshot>('v2/researcher/me');
+    const [res, repoRes] = await Promise.all([
+      labopsCall<ResearcherSnapshot>('v2/researcher/me'),
+      labopsCall<RepositoryGuardRequest[]>('repositories/requests')
+    ]);
     if (!res.ok || !res.data) {
       setErrorMsg(res.error || 'Chưa xác thực hoặc không thể tải dữ liệu Cổng nghiên cứu viên');
       setSnapshot(null);
     } else {
       setSnapshot(res.data);
       setErrorMsg(null);
+    }
+    if (repoRes.ok && Array.isArray(repoRes.data)) {
+      setRepoRequests(repoRes.data);
     }
     setLoading(false);
   };
@@ -293,7 +302,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 {(snapshot?.jobs?.length ?? 0) + (snapshot?.reservations?.length ?? 0)} tác vụ
               </div>
               <div className='mt-2 text-[11px] text-muted-foreground'>
-                Quét mã nguồn: {snapshot?.security_scans.length ?? 0} lượt hoàn tất
+                Kiểm duyệt kho mã: {repoRequests.length > 0 ? `${repoRequests.length} yêu cầu` : `${snapshot?.security_scans.length ?? 0} lượt`}
               </div>
             </Card>
           </div>
@@ -625,6 +634,80 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
               </CardContent>
             </Card>
           </div>
+
+          {/* Kiểm duyệt và Tải Kho Mã Nguồn An Toàn (Repository Security Gateway) */}
+          <Card>
+            <CardHeader className='pb-3'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <div>
+                  <CardTitle className='text-sm font-bold flex items-center gap-2'>
+                    <Icons.shield className='size-4 text-emerald-600' /> Tải Kho Mã An Toàn (Repository Security Gateway)
+                  </CardTitle>
+                  <CardDescription className='text-xs'>
+                    Mã nguồn từ GitHub/GitLab được tự động quét mã độc, lộ bí mật và CVE trước khi tải vào workspace
+                  </CardDescription>
+                </div>
+                <Badge variant='outline' className='text-[10px] font-mono border-emerald-300 text-emerald-700 bg-emerald-500/10'>
+                  Zero-Trust Supply Chain Gate
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className='space-y-4 text-xs'>
+              <div className='rounded-md border bg-muted/30 p-3 space-y-2'>
+                <div className='font-semibold text-foreground text-xs'>
+                  Cách tải kho mã vào thư mục làm việc bằng CLI:
+                </div>
+                <div className='rounded bg-black p-2.5 font-mono text-[11px] text-emerald-400 select-all'>
+                  labops clone https://github.com/organization/your-repo --dest /workspace/work/your-repo
+                </div>
+                <p className='text-[11px] text-muted-foreground'>
+                  Hệ thống sẽ tự động quét bằng Trivy scanner, xác minh SHA-256 digest và tự động phê duyệt nếu an toàn.
+                </p>
+              </div>
+
+              {repoRequests.length > 0 ? (
+                <div className='space-y-2 pt-1'>
+                  <div className='font-semibold text-xs text-foreground'>
+                    Yêu cầu kiểm duyệt của bạn ({repoRequests.length}):
+                  </div>
+                  <div className='divide-y rounded-md border'>
+                    {repoRequests.map((req) => (
+                      <div key={req.id} className='flex flex-wrap items-center justify-between p-2.5 gap-2 hover:bg-muted/30'>
+                        <div className='space-y-0.5 min-w-0'>
+                          <div className='font-mono font-medium text-xs truncate max-w-md'>
+                            {req.repo_url} <span className='text-muted-foreground'>({req.requested_ref || 'HEAD'})</span>
+                          </div>
+                          <div className='text-[10px] text-muted-foreground font-mono'>
+                            Commit: {req.commit_sha ? req.commit_sha.substring(0, 10) : 'Đang phân giải'} • {new Date(req.submitted_at).toLocaleString('vi-VN')}
+                          </div>
+                        </div>
+                        <div className='flex items-center gap-2 shrink-0'>
+                          <Badge
+                            variant='outline'
+                            className={`text-[10px] font-mono ${
+                              req.state === 'AUTO_APPROVED' || req.state === 'MANUALLY_APPROVED' || req.state === 'DELIVERED'
+                                ? 'bg-emerald-500/10 text-emerald-700 border-emerald-300'
+                                : req.state === 'REVIEW_REQUIRED'
+                                ? 'bg-amber-500/10 text-amber-700 border-amber-300'
+                                : req.state === 'REJECTED' || req.state === 'FAILED'
+                                ? 'bg-rose-500/10 text-rose-700 border-rose-300'
+                                : 'bg-muted text-muted-foreground'
+                            }`}
+                          >
+                            {req.state}
+                          </Badge>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className='text-[11px] text-muted-foreground'>
+                  Bạn chưa có yêu cầu kiểm duyệt kho mã nào. Sử dụng lệnh <code>labops clone</code> trong workspace để tải kho mã an toàn.
+                </p>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* ============================================================== */}

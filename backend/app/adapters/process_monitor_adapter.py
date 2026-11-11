@@ -77,24 +77,33 @@ class ProcessMonitorAdapter:
         self.history_file = os.path.join(self.data_dir, "process_history.json")
 
     def _query_go_agent(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-        """Gọi nội bộ sang Go Agent trên port 9100."""
-        try:
-            url = f"{self.agent_url}{path}"
-            data = json.dumps(payload).encode("utf-8") if payload else None
-            req = urllib.request.Request(url, data=data, method=method)
-            req.add_header("Content-Type", "application/json")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.status in (200, 201):
-                    return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as he:
+        """Gọi nội bộ sang Go Agent trên port 9150 hoặc 9100."""
+        configured_ports = [int(os.environ.get("LABOPS_AGENT_PORT", 9150)), 9150, 9100]
+        ports = []
+        for p in configured_ports:
+            if p not in ports:
+                ports.append(p)
+
+        last_error_res = None
+        for port in ports:
             try:
-                body = json.loads(he.read().decode("utf-8"))
-                return {"_error_status": he.code, "_error_body": body}
-            except Exception:
-                return {"_error_status": he.code, "_error_body": str(he)}
-        except Exception as e:
-            logger.debug(f"Go Agent offline or unreachable at {path}: {e}")
-        return None
+                url = f"http://127.0.0.1:{port}{path}"
+                data = json.dumps(payload).encode("utf-8") if payload else None
+                req = urllib.request.Request(url, data=data, method=method)
+                req.add_header("Content-Type", "application/json")
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if resp.status in (200, 201):
+                        return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as he:
+                try:
+                    body = json.loads(he.read().decode("utf-8"))
+                    return {"_error_status": he.code, "_error_body": body}
+                except Exception:
+                    return {"_error_status": he.code, "_error_body": str(he)}
+            except Exception as e:
+                logger.debug(f"Go Agent offline or unreachable at port {port}{path}: {e}")
+                continue
+        return last_error_res
 
     def _get_container_for_pid(self, pid: int) -> Optional[str]:
         """Detect container name or namespace from /proc/{pid}/cgroup."""

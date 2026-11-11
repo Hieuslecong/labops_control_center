@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLabOpsStore } from '@/features/labops/store';
 import { MemberProvisioningWizard } from './member-provisioning-wizard';
 import { LabMember, WireGuardDevice, WireGuardVpnOverview } from '@/types/labops';
@@ -748,8 +749,97 @@ export function MemberManagementView() {
                       {expanded && (
                         <tr key={`${member.id}-details`} className='border-b bg-muted/20'>
                           <td colSpan={7} className='p-4' aria-label='Chi tiết tài khoản'>
-                            <div className='grid gap-5 lg:grid-cols-2'>
-                              {/* CỘT 1: VÒNG ĐỜI QUYỀN SSH DO ADMIN QUẢN LÝ */}
+                            <Tabs defaultValue='access' className='w-full'>
+                              <TabsList className='grid grid-cols-2 sm:grid-cols-5 w-full h-auto p-1 bg-muted/60'>
+                                <TabsTrigger value='overview' className='text-xs py-1.5'>
+                                  1. Tổng quan
+                                </TabsTrigger>
+                                <TabsTrigger value='access' className='text-xs py-1.5'>
+                                  2. Truy cập VPN &amp; SSH
+                                </TabsTrigger>
+                                <TabsTrigger value='workspace' className='text-xs py-1.5'>
+                                  3. Workspace
+                                </TabsTrigger>
+                                <TabsTrigger value='gpu_jobs' className='text-xs py-1.5'>
+                                  4. GPU &amp; Tiến trình
+                                </TabsTrigger>
+                                <TabsTrigger value='logs' className='text-xs py-1.5'>
+                                  5. Nhật ký
+                                </TabsTrigger>
+                              </TabsList>
+
+                              {/* TAB 1: TỔNG QUAN TÀI KHOẢN */}
+                              <TabsContent value='overview' className='mt-3 space-y-4'>
+                                <div className='grid gap-4 md:grid-cols-2'>
+                                  <div className='rounded-lg border bg-background p-4 space-y-3'>
+                                    <h4 className='text-xs font-bold uppercase text-muted-foreground'>
+                                      Thông tin định danh &amp; Trạng thái
+                                    </h4>
+                                    <div className='space-y-2 text-xs'>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Họ và tên:</span>
+                                        <span className='font-semibold'>{member.fullName || 'Chưa cập nhật'}</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Username:</span>
+                                        <span className='font-mono font-bold'>@{member.username}</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Email:</span>
+                                        <span>{member.email || 'N/A'}</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Vai trò hệ thống:</span>
+                                        <Badge variant='outline' className='text-[10px] font-mono'>
+                                          {member.role || 'RESEARCHER'}
+                                        </Badge>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Trạng thái tài khoản:</span>
+                                        {statusBadge(member.status)}
+                                      </div>
+                                      <div className='flex justify-between'>
+                                        <span className='text-muted-foreground'>Ngày kích hoạt:</span>
+                                        <span>{member.createdAt ? new Date(member.createdAt).toLocaleDateString() : 'Chưa xác định'}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className='rounded-lg border bg-background p-4 space-y-3'>
+                                    <h4 className='text-xs font-bold uppercase text-muted-foreground'>
+                                      Hạn ngạch &amp; Thư mục lưu trữ máy chủ
+                                    </h4>
+                                    <div className='space-y-2 text-xs'>
+                                      <div className='rounded-md border bg-muted/30 p-2.5 space-y-1'>
+                                        <div className='text-muted-foreground text-[11px]'>Đường dẫn thư mục riêng trên máy chủ:</div>
+                                        <div className='font-mono font-bold text-xs select-all text-foreground'>
+                                          /media/LabOps-Data/{member.username}
+                                        </div>
+                                        <p className='text-[10px] text-muted-foreground'>
+                                          Thư mục cô lập, chỉ tài khoản này và admin có quyền truy xuất.
+                                        </p>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5 pt-1'>
+                                        <span className='text-muted-foreground'>Hạn mức CPU (vCPU):</span>
+                                        <span className='font-semibold'>{member.cpuLimitCores || 8} vCPU</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1.5'>
+                                        <span className='text-muted-foreground'>Hạn mức RAM:</span>
+                                        <span className='font-semibold'>{member.ramLimitGb || 32} GB</span>
+                                      </div>
+                                      <div className='flex justify-between'>
+                                        <span className='text-muted-foreground'>Hạn mức Lưu trữ (Storage):</span>
+                                        <span className='font-semibold'>{member.storageQuotaGb || 100} GB</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </TabsContent>
+
+                              {/* TAB 2: TRUY CẬP VPN & SSH */}
+                              <TabsContent value='access' className='mt-3'>
+                                <div className='grid gap-5 lg:grid-cols-2'>
+                                  {/* CỘT 1: VÒNG ĐỜI QUYỀN SSH DO ADMIN QUẢN LÝ */}
                               <section className='space-y-3 rounded-lg border bg-background p-4'>
                                 <div className='flex items-center justify-between'>
                                   <h3 className='font-semibold text-sm'>
@@ -1169,28 +1259,114 @@ export function MemberManagementView() {
                                   <span>Last VPN handshake: {latestHandshake(devices)}</span>
                                 </div>
                               </section>
-
-                              {/* KHU VỰC NGUY HIỂM: XÓA VĨNH VIỄN TÀI KHOẢN */}
-                              <div className='lg:col-span-2 rounded-lg border border-rose-500/40 bg-rose-500/5 p-4 flex flex-wrap items-center justify-between gap-3'>
-                                <div>
-                                  <h4 className='text-sm font-semibold text-rose-600 dark:text-rose-400'>
-                                    Khu vực nguy hiểm: Xóa vĩnh viễn tài khoản @{member.username}
-                                  </h4>
-                                  <p className='text-xs text-muted-foreground mt-0.5'>
-                                    Dừng và xóa container workspace ws-{member.username}, thu hồi và xóa toàn bộ VPN peers trên wg-easy, hủy bỏ các khóa SSH và dọn dẹp thư mục trên máy chủ.
-                                  </p>
                                 </div>
-                                <Button
-                                  type='button'
-                                  size='sm'
-                                  variant='destructive'
-                                  disabled={busy || DEMO_MODE}
-                                  onClick={() => void deleteMemberAction(member)}
-                                >
-                                  Xóa vĩnh viễn tài khoản @{member.username}
-                                </Button>
-                              </div>
-                            </div>
+
+                                {/* KHU VỰC NGUY HIỂM: XÓA VĨNH VIỄN TÀI KHOẢN */}
+                                <div className='mt-4 rounded-lg border border-rose-500/40 bg-rose-500/5 p-4 flex flex-wrap items-center justify-between gap-3'>
+                                  <div>
+                                    <h4 className='text-sm font-semibold text-rose-600 dark:text-rose-400'>
+                                      Khu vực nguy hiểm: Xóa vĩnh viễn tài khoản @{member.username}
+                                    </h4>
+                                    <p className='text-xs text-muted-foreground mt-0.5'>
+                                      Dừng và xóa container workspace ws-{member.username}, thu hồi và xóa toàn bộ VPN peers trên wg-easy, hủy bỏ các khóa SSH và dọn dẹp thư mục trên máy chủ.
+                                    </p>
+                                  </div>
+                                  <Button
+                                    type='button'
+                                    size='sm'
+                                    variant='destructive'
+                                    disabled={busy || DEMO_MODE}
+                                    onClick={() => void deleteMemberAction(member)}
+                                  >
+                                    Xóa vĩnh viễn tài khoản @{member.username}
+                                  </Button>
+                                </div>
+                              </TabsContent>
+
+                              {/* TAB 3: WORKSPACE */}
+                              <TabsContent value='workspace' className='mt-3 space-y-3'>
+                                <div className='rounded-lg border bg-background p-4 space-y-3'>
+                                  <div className='flex items-center justify-between'>
+                                    <h4 className='text-sm font-semibold'>Thông tin Container Workspace</h4>
+                                    {statusBadge(member.workspaceStatus)}
+                                  </div>
+                                  <div className='grid gap-4 md:grid-cols-2 text-xs'>
+                                    <div className='space-y-2'>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Tên Container:</span>
+                                        <span className='font-mono font-bold'>ws-{member.username}</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Máy chủ vật lý:</span>
+                                        <span className='font-semibold'>aiotlab-rack (192.168.167.250)</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Cổng SSH ánh xạ:</span>
+                                        <span className='font-mono font-bold text-foreground'>{member.sshPort || 'Chưa cấp'}</span>
+                                      </div>
+                                    </div>
+                                    <div className='space-y-2'>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Giới hạn vCPU:</span>
+                                        <span>{member.cpuLimitCores || 8} cores</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Giới hạn RAM:</span>
+                                        <span>{member.ramLimitGb || 32} GB</span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1'>
+                                        <span className='text-muted-foreground'>Thư mục Mount:</span>
+                                        <code className='font-mono'>/media/LabOps-Data/{member.username}</code>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </TabsContent>
+
+                              {/* TAB 4: GPU & TIẾN TRÌNH */}
+                              <TabsContent value='gpu_jobs' className='mt-3 space-y-3'>
+                                <div className='rounded-lg border bg-background p-4 space-y-3 text-xs'>
+                                  <div className='flex items-center justify-between'>
+                                    <h4 className='text-sm font-semibold'>Tài nguyên GPU &amp; Tiến trình đang chạy</h4>
+                                    <Badge variant='outline' className='font-mono text-[10px]'>FULL_GPU_EXCLUSIVE</Badge>
+                                  </div>
+                                  <p className='text-muted-foreground'>
+                                    Thành viên @{member.username} được cấp quyền giữ chỗ GPU độc quyền theo UUID.
+                                    Mọi tiến trình chạy trên GPU đều được xác minh thực tế qua Go Node Agent và NVIDIA NVML.
+                                  </p>
+                                  <div className='pt-2 flex gap-2'>
+                                    <Button
+                                      size='sm'
+                                      variant='outline'
+                                      onClick={() => window.open('/dashboard/jobs', '_self')}
+                                    >
+                                      Xem danh sách tiến trình trên Dashboard Công việc →
+                                    </Button>
+                                  </div>
+                                </div>
+                              </TabsContent>
+
+                              {/* TAB 5: NHẬT KÝ */}
+                              <TabsContent value='logs' className='mt-3 space-y-3'>
+                                <div className='rounded-lg border bg-background p-4 space-y-3 text-xs'>
+                                  <h4 className='text-sm font-semibold'>Nhật ký bảo mật &amp; Hoạt động gần đây</h4>
+                                  <div className='space-y-2'>
+                                    <div className='flex justify-between border-b pb-1'>
+                                      <span className='text-muted-foreground'>Lần handshake VPN mới nhất:</span>
+                                      <span className='font-mono'>{latestHandshake(devices)}</span>
+                                    </div>
+                                    <div className='flex justify-between border-b pb-1'>
+                                      <span className='text-muted-foreground'>Trạng thái mật khẩu tạm:</span>
+                                      <span className='font-mono'>{member.passwordStatus || 'NOT_APPLICABLE'}</span>
+                                    </div>
+                                    <div className='flex justify-between border-b pb-1'>
+                                      <span className='text-muted-foreground'>SSH Key Fingerprint:</span>
+                                      <span className='font-mono'>{member.sshFingerprint || 'Chưa ghi nhận'}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </TabsContent>
+                            </Tabs>
                           </td>
                         </tr>
                       )}

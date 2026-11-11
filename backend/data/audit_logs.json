@@ -1,5 +1,38 @@
 [
   {
+    "id": "aud-6bcf27d0e9a1",
+    "actor": "user_3LfPSgPfD8RnVTsNHx3QSv8gKWO",
+    "action": "MEMBER_DELETED_PERMANENTLY",
+    "target_type": "MEMBER",
+    "target_id": "anhlt",
+    "timestamp": "2026-11-11T07:11:33.174151+00:00",
+    "result": "SUCCESS",
+    "correlation_id": "op-del-c2f3bb1b2b33",
+    "details": "Admin 'user_3LfPSgPfD8RnVTsNHx3QSv8gKWO' đã xóa vĩnh viễn tài khoản @anhlt (ID: mem-4) cùng toàn bộ container, WireGuard peers và SSH access."
+  },
+  {
+    "id": "aud-cb7dac1b1208",
+    "actor": "user_3LfPSgPfD8RnVTsNHx3QSv8gKWO",
+    "action": "MEMBER_DELETED_PERMANENTLY",
+    "target_type": "MEMBER",
+    "target_id": "tuanpm",
+    "timestamp": "2026-11-11T07:11:30.085650+00:00",
+    "result": "SUCCESS",
+    "correlation_id": "op-del-ff4d4a27f1eb",
+    "details": "Admin 'user_3LfPSgPfD8RnVTsNHx3QSv8gKWO' đã xóa vĩnh viễn tài khoản @tuanpm (ID: mem-3) cùng toàn bộ container, WireGuard peers và SSH access."
+  },
+  {
+    "id": "aud-f3890eecc966",
+    "actor": "user_3LfPSgPfD8RnVTsNHx3QSv8gKWO",
+    "action": "MEMBER_DELETED_PERMANENTLY",
+    "target_type": "MEMBER",
+    "target_id": "namnv",
+    "timestamp": "2026-11-11T07:11:27.009158+00:00",
+    "result": "SUCCESS",
+    "correlation_id": "op-del-88b1306b0d18",
+    "details": "Admin 'user_3LfPSgPfD8RnVTsNHx3QSv8gKWO' đã xóa vĩnh viễn tài khoản @namnv (ID: mem-2) cùng toàn bộ container, WireGuard peers và SSH access."
+  },
+  {
     "id": "aud-d5a95bafdfa1",
     "actor": "admin",
     "action": "MEMBER_DELETED_PERMANENTLY",

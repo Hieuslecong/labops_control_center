@@ -64,6 +64,10 @@ func (ctrl *Controller) TerminateProcess(ref string, timeoutSec int, terminateTr
 		return nil, fmt.Errorf("INVALID_PROCESS_REF: %w", err)
 	}
 
+	if parsedRef.PID <= 1 {
+		return nil, fmt.Errorf("PROTECTED_PROCESS_DENIED: từ chối dừng: PID %d là tiến trình khởi tạo gốc (init/systemd)", parsedRef.PID)
+	}
+
 	// 1. Kiểm tra pre-flight trên /proc
 	realTicks, pgid, procName, _, err := readProcessStartTimeTicks(parsedRef.PID)
 	if err != nil {
@@ -155,6 +159,10 @@ func (ctrl *Controller) KillProcess(ref string, force bool, killTree bool) (*Con
 	parsedRef, err := ParseRef(ref)
 	if err != nil {
 		return nil, fmt.Errorf("INVALID_PROCESS_REF: %w", err)
+	}
+
+	if parsedRef.PID <= 1 {
+		return nil, fmt.Errorf("PROTECTED_PROCESS_DENIED: từ chối buộc dừng: PID %d là tiến trình khởi tạo gốc (init/systemd)", parsedRef.PID)
 	}
 
 	realTicks, pgid, procName, _, err := readProcessStartTimeTicks(parsedRef.PID)

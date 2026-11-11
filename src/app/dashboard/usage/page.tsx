@@ -1,5 +1,5 @@
 import PageContainer from '@/components/layout/page-container';
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 
@@ -9,7 +9,7 @@ export const metadata = {
 };
 
 export default async function UsageReportPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer
       pageTitle='Báo cáo Sử dụng Tài nguyên & Kế toán GPU-Hours'

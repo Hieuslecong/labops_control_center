@@ -1,4 +1,4 @@
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { CalendarManagementView } from '@/features/calendar/components/calendar-management-view';
 
@@ -8,7 +8,7 @@ export const metadata = {
 };
 
 export default async function CalendarPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer
       pageTitle='Lịch Hoạt động & Kế hoạch Lab'

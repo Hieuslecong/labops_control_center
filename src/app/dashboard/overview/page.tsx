@@ -1,4 +1,4 @@
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { OverviewContent } from '@/features/overview/components/overview-content';
 
@@ -8,7 +8,7 @@ export const metadata = {
 };
 
 export default async function OverviewPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer>
       <OverviewContent />

@@ -1,5 +1,5 @@
 import PageContainer from '@/components/layout/page-container';
-import { protectRoute } from '@/lib/auth-guard';
+import { requireResearcherOrAdmin } from '@/lib/auth-guard';
 import { ResearcherPortalView } from '@/features/researcher/components/researcher-portal-view';
 
 export const metadata = {
@@ -9,13 +9,13 @@ export const metadata = {
 };
 
 export default async function ResearcherPage() {
-  await protectRoute();
+  await requireResearcherOrAdmin();
   return (
     <PageContainer
       pageTitle='Cổng Nghiên cứu viên (Researcher Portal)'
       pageDescription='Quản lý khóa công khai OpenSSH cá nhân, thông tin kết nối workspace qua WireGuard VPN, lượt giữ chỗ GPU độc quyền và lịch sử sử dụng của riêng bạn'
     >
-      <ResearcherPortalView />
+      <ResearcherPortalView initialTab='overview' />
     </PageContainer>
   );
 }

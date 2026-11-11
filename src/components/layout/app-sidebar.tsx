@@ -26,29 +26,44 @@ import {
   useSidebar
 } from '@/components/ui/sidebar';
 import { UserAvatarProfile } from '@/components/user-avatar-profile';
-import { navGroups } from '@/config/nav-config';
 import { useFilteredNavGroups } from '@/hooks/use-nav';
+import { useAuthSession } from '@/hooks/use-auth-session';
 import type { NavItem } from '@/types';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Icons } from '../icons';
 import { OrgSwitcher } from '../org-switcher';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 
 export default function AppSidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const filteredGroups = useFilteredNavGroups(navGroups);
-
-  const displayUser = {
-    fullName: 'Quản trị viên LabOps',
-    imageUrl: '',
-    emailAddresses: [{ emailAddress: 'admin@labops.local' }]
-  };
+  const filteredGroups = useFilteredNavGroups();
+  const { user, role, actualRole, isPreviewMode, setPreviewRole } = useAuthSession();
 
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='group-data-[collapsible=icon]:pt-4'>
         <OrgSwitcher />
+        {isPreviewMode && (
+          <div className='mx-2 my-1.5 p-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-md text-[11px] text-amber-800 dark:text-amber-200 group-data-[collapsible=icon]:hidden'>
+            <div className='flex items-center justify-between font-semibold'>
+              <span>Chế độ Xem thử</span>
+              <Button
+                size='sm'
+                variant='ghost'
+                className='h-5 px-1.5 text-[10px] text-amber-900 dark:text-amber-100 hover:bg-amber-200/50'
+                onClick={() => setPreviewRole(null)}
+              >
+                Thoát
+              </Button>
+            </div>
+            <p className='mt-0.5 text-[10px] text-amber-700/80 dark:text-amber-300/70'>
+              Đang mô phỏng giao diện Nghiên cứu viên.
+            </p>
+          </div>
+        )}
       </SidebarHeader>
       <SidebarContent className='overflow-x-hidden'>
         {filteredGroups.map((group) => (
@@ -74,7 +89,7 @@ export default function AppSidebar() {
                   />
                 }
               >
-                <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={displayUser} />
+                <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />
                 <Icons.chevronsDown className='ml-auto size-4' />
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -85,30 +100,84 @@ export default function AppSidebar() {
               >
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className='p-0 font-normal'>
-                    <div className='px-1 py-1.5'>
+                    <div className='px-1 py-1.5 flex flex-col gap-1.5'>
                       <UserAvatarProfile
                         className='h-8 w-8 rounded-lg'
                         showInfo
-                        user={displayUser}
+                        user={user}
                       />
+                      <div className='flex items-center gap-1.5 px-1'>
+                        <Badge
+                          variant='outline'
+                          className={`text-[10px] font-medium ${
+                            role === 'ADMIN'
+                              ? 'bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30'
+                              : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30'
+                          }`}
+                        >
+                          {role === 'ADMIN' ? 'Quản trị viên' : 'Nghiên cứu viên'}
+                        </Badge>
+                        {isPreviewMode && (
+                          <Badge variant='outline' className='text-[10px] bg-amber-500/10 text-amber-700 border-amber-500/30'>
+                            Xem thử
+                          </Badge>
+                        )}
+                      </div>
                     </div>
                   </DropdownMenuLabel>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
 
+                {actualRole === 'ADMIN' && (
+                  <>
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          if (isPreviewMode) {
+                            setPreviewRole(null);
+                            router.push('/dashboard/overview');
+                          } else {
+                            setPreviewRole('RESEARCHER');
+                            router.push('/dashboard/researcher');
+                          }
+                        }}
+                      >
+                        <Icons.user className='mr-2 h-4 w-4' />
+                        {isPreviewMode ? 'Quay lại chế độ Quản trị' : 'Xem thử giao diện Nghiên cứu viên'}
+                      </DropdownMenuItem>
+                    </DropdownMenuGroup>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
+
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => router.push('/dashboard/settings')}>
-                    <Icons.settings className='mr-2 h-4 w-4' />
-                    Cài đặt tài khoản
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
-                    <Icons.key className='mr-2 h-4 w-4' />
-                    Khóa SSH & Quyền truy cập
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => router.push('/dashboard/audit-logs')}>
-                    <Icons.audit className='mr-2 h-4 w-4' />
-                    Nhật ký thao tác
-                  </DropdownMenuItem>
+                  {role === 'ADMIN' ? (
+                    <>
+                      <DropdownMenuItem onClick={() => router.push('/dashboard/settings')}>
+                        <Icons.settings className='mr-2 h-4 w-4' />
+                        Cài đặt hệ thống
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => router.push('/dashboard/users')}>
+                        <Icons.teams className='mr-2 h-4 w-4' />
+                        Quản trị thành viên
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => router.push('/dashboard/audit-logs')}>
+                        <Icons.audit className='mr-2 h-4 w-4' />
+                        Nhật ký kiểm toán
+                      </DropdownMenuItem>
+                    </>
+                  ) : (
+                    <>
+                      <DropdownMenuItem onClick={() => router.push('/dashboard/researcher/connect')}>
+                        <Icons.key className='mr-2 h-4 w-4' />
+                        Khóa SSH & Kết nối
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => router.push('/dashboard/researcher/workspace')}>
+                        <Icons.database className='mr-2 h-4 w-4' />
+                        Workspace của tôi
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>

@@ -1,4 +1,4 @@
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { SecurityManagementView } from '@/features/security/components/security-management-view';
 
@@ -8,7 +8,7 @@ export const metadata = {
 };
 
 export default async function SecurityPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer
       pageTitle='Quản trị An ninh & Kiểm duyệt Mã nguồn'

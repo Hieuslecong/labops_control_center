@@ -1,18 +1,18 @@
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { ResourcesManagementView } from '@/features/resources/components/resources-management-view';
 
 export const metadata = {
-  title: 'Tài nguyên - LabOps Control Center',
-  description: 'Quản trị hạn ngạch tính toán và cấp phát 4 GPU NVIDIA A30'
+  title: 'Workspace & Lưu trữ - LabOps Control Center',
+  description: 'Quản trị vòng đời container Docker/Incus, hạn mức vCPU/RAM và hạn ngạch dung lượng đĩa'
 };
 
 export default async function ResourcesPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer
-      pageTitle='Quản trị Tài nguyên & Cấp phát GPU'
-      pageDescription='Giám sát độc lập 4 GPU NVIDIA A30 (96GB VRAM), thiết lập chế độ Shared/Exclusive và kiểm soát hạn ngạch VRAM'
+      pageTitle='Quản trị Workspace & Lưu trữ'
+      pageDescription='Quản trị vòng đời container Docker, phân bổ tài nguyên vCPU/RAM, giới hạn PIDs và hạn ngạch lưu trữ dữ liệu'
     >
       <ResourcesManagementView />
     </PageContainer>

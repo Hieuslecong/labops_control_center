@@ -1,4 +1,4 @@
-import { protectRoute } from '@/lib/auth-guard';
+import { requireAdmin } from '@/lib/auth-guard';
 import PageContainer from '@/components/layout/page-container';
 import { JobsMonitoringView } from '@/features/jobs/components/jobs-monitoring-view';
 
@@ -8,7 +8,7 @@ export const metadata = {
 };
 
 export default async function JobsPage() {
-  await protectRoute();
+  await requireAdmin();
   return (
     <PageContainer
       pageTitle='Công việc Đang chạy & Giám sát Tiến trình'

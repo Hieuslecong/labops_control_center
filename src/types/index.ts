@@ -20,6 +20,7 @@ export interface NavItem {
   isActive?: boolean;
   items?: NavItem[];
   access?: PermissionCheck;
+  roles?: ('ADMIN' | 'RESEARCHER')[];
 }
 
 export interface NavGroup {

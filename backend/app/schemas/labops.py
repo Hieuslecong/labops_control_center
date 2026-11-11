@@ -368,6 +368,9 @@ class JobResponse(BaseSchema):
     ssh_status: str = Field(alias="sshStatus")
     container_state: str = Field(alias="containerState")
     is_gpu: Optional[bool] = Field(False, alias="isGpu")
+    children_count: Optional[int] = Field(0, alias="childrenCount")
+    attribution: Optional[str] = Field("VERIFIED_USER_WORKLOAD", alias="attribution")
+    is_root_workload: Optional[bool] = Field(True, alias="isRootWorkload")
 
 class SecurityReviewResponse(BaseSchema):
     id: str

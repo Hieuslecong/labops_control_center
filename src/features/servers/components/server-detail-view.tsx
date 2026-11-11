@@ -204,7 +204,7 @@ export function ServerDetailView() {
             value='jobs'
             className='data-[state=active]:border-primary data-[state=active]:bg-background border-b-2 border-transparent rounded-none px-4 py-2.5 text-xs font-medium'
           >
-            Tiến trình ({serverJobs.length})
+            Tác vụ đang chạy ({serverJobs.length})
           </TabsTrigger>
           <TabsTrigger
             value='logs'
@@ -592,10 +592,10 @@ export function ServerDetailView() {
             <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3'>
               <div>
                 <CardTitle className='text-sm font-bold'>
-                  Tiến trình Tính toán trên {server.name}
+                  Tác vụ Tính toán trên {server.name}
                 </CardTitle>
                 <p className='text-xs text-muted-foreground'>
-                  {filteredServerJobs.length} / {serverJobs.length} tiến trình đang thực thi
+                  {filteredServerJobs.length} / {serverJobs.length} tác vụ đang thực thi
                 </p>
               </div>
 

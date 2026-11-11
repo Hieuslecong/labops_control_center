@@ -147,14 +147,22 @@ export function RunningJobsTable() {
               <div>
                 <div className='flex items-center gap-2'>
                   <CardTitle className='text-base font-bold tracking-tight'>
-                    Tiến trình & Workloads Đang Chạy
+                    Tác vụ & Workloads Đang Chạy
                   </CardTitle>
                   <Badge
                     variant='outline'
-                    className='bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono'
+                    className={`${
+                      jobs.length > 0
+                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                        : 'bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-500/30'
+                    } text-[10px] font-mono`}
                   >
-                    <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse mr-1' />
-                    {jobs.length} TIẾN TRÌNH THỰC TẾ
+                    <span
+                      className={`size-1.5 rounded-full ${
+                        jobs.length > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'
+                      } mr-1`}
+                    />
+                    {jobs.length > 0 ? `${jobs.length} TÁC VỤ ĐANG CHẠY` : 'HỆ THỐNG RẢNH (IDLE)'}
                   </Badge>
                 </div>
                 <p className='text-xs text-muted-foreground mt-0.5'>

@@ -1506,7 +1506,10 @@ function mapRawJob(raw: Record<string, unknown>): ComputeJob {
     ),
     isGpu,
     classification: j.classification ? String(j.classification) : undefined,
-    isProtected: Boolean(j.isProtected ?? j.is_protected ?? false)
+    isProtected: Boolean(j.isProtected ?? j.is_protected ?? false),
+    childrenCount: Number(j.childrenCount ?? j.children_count ?? 0),
+    attribution: j.attribution ? String(j.attribution) : undefined,
+    isRootWorkload: Boolean(j.isRootWorkload ?? j.is_root_workload ?? true)
   };
 }
 

@@ -393,6 +393,9 @@ export interface ComputeJob {
   isGpu?: boolean;
   classification?: 'RESEARCH_JOB' | 'GPU_PROCESS' | 'MEMBER_PROCESS' | 'SYSTEM_PROCESS' | string;
   isProtected?: boolean;
+  childrenCount?: number;
+  attribution?: string;
+  isRootWorkload?: boolean;
   children?: ComputeJob[];
 }
 

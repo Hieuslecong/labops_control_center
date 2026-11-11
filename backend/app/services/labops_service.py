@@ -1143,7 +1143,9 @@ class LabOpsDataService:
         """Lấy danh sách tiến trình chi tiết từ Go Node Agent kết hợp danh bạ thành viên."""
         filter_type = "all"
         if classification:
-            if classification == "RESEARCH_JOB":
+            if classification in ("WORKLOAD", "USER_WORKLOAD", "workloads"):
+                filter_type = "workloads"
+            elif classification == "RESEARCH_JOB":
                 filter_type = "research"
             elif classification == "GPU_PROCESS":
                 filter_type = "gpu"

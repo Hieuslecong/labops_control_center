@@ -205,7 +205,13 @@ class ProcessMonitorAdapter:
                     "container_id": p.get("container_id"),
                     "workspace": p.get("workspace") or (f"docker-{p.get('container_id')}" if p.get("container_id") else None),
                     "is_protected": p.get("is_protected", False),
-                    "is_research_workload": p.get("classification") == "RESEARCH_JOB"
+                    "is_research_workload": p.get("classification") == "RESEARCH_JOB",
+                    "attribution": p.get("attribution", "UNKNOWN"),
+                    "is_user_workload": p.get("is_user_workload", False),
+                    "is_root_workload": p.get("is_root_workload", True),
+                    "children_count": p.get("children_count", 0),
+                    "total_cpu_percent": p.get("total_cpu_percent", p.get("cpu_percent", 0.0)),
+                    "total_memory_rss_mb": p.get("total_memory_rss_mb", p.get("memory_rss_mb", 0.0))
                 })
             return {
                 "source_host": self.server_id,
@@ -420,9 +426,11 @@ class ProcessMonitorAdapter:
     def get_active_compute_jobs(self, members_db: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
         Produce a list of active compute jobs in the standard LabOps ComputeJob format,
-        sourced directly from verified member and research processes.
+        sourced directly from verified member workloads (filter=workloads).
+        Only user-launched, active compute tasks are included; background services,
+        desktop daemons, and idle shells are excluded.
         """
-        proc_result = self.get_real_processes(filter_type="member")
+        proc_result = self.get_real_processes(filter_type="workloads")
         observations = proc_result.get("actual_observations", [])
         if not observations:
             proc_result_res = self.get_real_processes(filter_type="research")
@@ -432,19 +440,38 @@ class ProcessMonitorAdapter:
         active_ssh_users = {s.get("username") for s in ssh_res.get("actual_observations", [])}
 
         member_lookup: Dict[str, Dict[str, Any]] = {}
+        valid_member_usernames = set()
         if members_db:
             for m in members_db:
-                member_lookup[m.get("username", "")] = m
+                u = m.get("username", "")
+                if u:
+                    member_lookup[u] = m
+                    valid_member_usernames.add(u)
 
         jobs: List[Dict[str, Any]] = []
         for p in observations:
+            # 1. Chỉ nhận tiến trình được đánh dấu là User Workload và là Root Workload
+            if not p.get("is_user_workload", False) and not p.get("is_gpu_process", False):
+                continue
+            if not p.get("is_root_workload", True):
+                continue
+
             uname = p["username"]
+            # 2. Loại bỏ các process hệ thống root không phải container workload
+            if uname == "root" and not p.get("container_id"):
+                continue
+
+            # 3. Lấy thông tin thành viên
             m_info = member_lookup.get(uname, {})
             full_name = m_info.get("full_name") or f"Người dùng @{uname}"
             member_id = m_info.get("id") or f"user-{uname}"
 
             job_id = f"proc-{p['pid']}"
             gpu_id = p.get("gpu_id")
+
+            # Sử dụng CPU & RAM gộp của cả nhóm workload (tránh double-counting)
+            cpu_val = float(p.get("total_cpu_percent") if p.get("total_cpu_percent") is not None else p.get("cpu_percent", 0.0))
+            ram_val = float(p.get("total_memory_rss_mb") if p.get("total_memory_rss_mb") is not None else p.get("memory_rss_mb", 0.0))
 
             jobs.append({
                 "id": job_id,
@@ -465,14 +492,14 @@ class ProcessMonitorAdapter:
                 "gpu_id": gpu_id,
                 "pid": p["pid"],
                 "ppid": p["ppid"],
-                "cpuPercent": p["cpu_percent"],
-                "cpu_percent": p["cpu_percent"],
-                "cpuUsagePercent": p["cpu_percent"],
-                "ramUsedMb": p["memory_rss_mb"],
-                "ram_used_mb": p["memory_rss_mb"],
-                "ramUsageMb": p["memory_rss_mb"],
-                "vramUsedMb": p["vram_mb"],
-                "vram_used_mb": p["vram_mb"],
+                "cpuPercent": cpu_val,
+                "cpu_percent": cpu_val,
+                "cpuUsagePercent": cpu_val,
+                "ramUsedMb": ram_val,
+                "ram_used_mb": ram_val,
+                "ramUsageMb": ram_val,
+                "vramUsedMb": p.get("vram_mb", 0),
+                "vram_used_mb": p.get("vram_mb", 0),
                 "startTime": p["start_time"],
                 "start_time": p["start_time"],
                 "elapsedTime": p["elapsed_time"],
@@ -483,7 +510,12 @@ class ProcessMonitorAdapter:
                 "containerState": "Running" if p["container_id"] else "Trực tiếp trên Host",
                 "container_state": "Running" if p["container_id"] else "Trực tiếp trên Host",
                 "isGpu": p["is_gpu_process"],
-                "is_gpu": p["is_gpu_process"]
+                "is_gpu": p["is_gpu_process"],
+                "childrenCount": p.get("children_count", 0),
+                "children_count": p.get("children_count", 0),
+                "attribution": p.get("attribution", "VERIFIED_USER_WORKLOAD"),
+                "isRootWorkload": p.get("is_root_workload", True),
+                "is_root_workload": p.get("is_root_workload", True)
             })
 
         return jobs

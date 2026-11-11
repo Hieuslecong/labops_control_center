@@ -170,6 +170,132 @@ func extractContainerInfo(pid int) (string, string) {
 	return "", ""
 }
 
+// IsDesktopOrBackgroundService nhận diện các dịch vụ desktop / user systemd / IDE tooling
+func IsDesktopOrBackgroundService(name, cmdline string) bool {
+	nameLower := strings.ToLower(name)
+	cmdLower := strings.ToLower(cmdline)
+
+	// 1. Dịch vụ desktop / systemd user session
+	desktopServices := []string{
+		"systemd", "sd-pam", "pulseaudio", "gnome-keyring-daemon",
+		"dbus-daemon", "dbus-launch", "at-spi-bus-launcher", "at-spi2",
+		"gvfsd", "dconf-service", "xdg-desktop-portal",
+		"xdg-permission-store", "xdg-document-portal", "applet.py",
+	}
+	for _, ds := range desktopServices {
+		if nameLower == ds || strings.HasPrefix(nameLower, ds) || strings.Contains(cmdLower, "/"+ds) {
+			return true
+		}
+	}
+	if strings.Contains(cmdLower, "system-config-printer") {
+		return true
+	}
+
+	// 2. IDE tooling & helpers (VS Code, JetBrains, Copilot)
+	ideHelpers := []string{
+		"code-server",
+		"server-main.js",
+		"bootstrap-fork",
+		"copilot-runtime",
+		"command-shell",
+		"agent host",
+		"vscode-server",
+		".vscode-server",
+	}
+	for _, ih := range ideHelpers {
+		if strings.Contains(cmdLower, ih) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsIdleShell nhận diện shell chờ lệnh (interactive shell không có lệnh script con)
+func IsIdleShell(name, cmdline string) bool {
+	nameLower := strings.ToLower(name)
+	if nameLower != "bash" && nameLower != "sh" && nameLower != "zsh" && nameLower != "-bash" && nameLower != "-sh" {
+		return false
+	}
+	fields := strings.Fields(cmdline)
+	if len(fields) <= 1 {
+		return true
+	}
+	cmdLower := strings.ToLower(cmdline)
+	if strings.Contains(cmdLower, "shellintegration") {
+		if !strings.Contains(cmdLower, " -c ") && !strings.Contains(cmdLower, ".py") {
+			return true
+		}
+	}
+	if strings.Contains(cmdLower, "--login") || strings.Contains(cmdLower, "-i") {
+		if !strings.Contains(cmdLower, " -c ") && !strings.Contains(cmdLower, ".py") && !strings.Contains(cmdLower, ".sh") {
+			return true
+		}
+	}
+	if len(fields) == 2 && (fields[1] == "-i" || fields[1] == "-l" || fields[1] == "--login") {
+		return true
+	}
+	return false
+}
+
+// IsWorkloadCandidate kiểm tra xem tiến trình có phải là workload người dùng chủ động chạy
+func IsWorkloadCandidate(name, cmdline string, isGPU bool, vramMB uint64) (bool, string) {
+	nameLower := strings.ToLower(name)
+	cmdLower := strings.ToLower(cmdline)
+
+	// 1. GPU processes là workload ưu tiên cao
+	if isGPU || vramMB > 0 {
+		return true, AttributionVerifiedWorkload
+	}
+
+	// 2. Machine Learning / AI / Data Scripts
+	if strings.Contains(cmdLower, "python") || strings.Contains(cmdLower, "torchrun") ||
+		strings.Contains(cmdLower, "accelerate") || strings.Contains(cmdLower, "deepspeed") ||
+		strings.Contains(cmdLower, "vllm") || strings.Contains(cmdLower, "ollama") {
+		// Trừ các python applet hệ thống và LabOps control plane backend
+		if strings.Contains(cmdLower, "system-config-printer") || strings.Contains(cmdLower, "applet.py") ||
+			strings.Contains(cmdLower, "backend/app/main") || strings.Contains(cmdLower, "app/main.py") ||
+			strings.Contains(cmdLower, "uvicorn") || strings.Contains(cmdLower, "app.main") ||
+			strings.Contains(cmdLower, "admin_labops_control_center/backend") ||
+			strings.Contains(cmdLower, "backend/.venv") ||
+			strings.Contains(cmdLower, "resource_tracker") {
+			return false, AttributionSystemProcess
+		}
+		return true, AttributionVerifiedWorkload
+	}
+
+	// 3. Jupyter / Notebooks
+	if strings.Contains(cmdLower, "jupyter") || strings.Contains(cmdLower, "ipykernel") {
+		return true, AttributionVerifiedWorkload
+	}
+
+	// 4. Các ngôn ngữ lập trình / công cụ tính toán do user chạy
+	computeKeywords := []string{
+		"pytest", "cargo run", "go run", "julia", "matlab", "octave", "rscript",
+	}
+	for _, kw := range computeKeywords {
+		if strings.Contains(cmdLower, kw) {
+			return true, AttributionVerifiedWorkload
+		}
+	}
+
+	// 5. Script bash/sh người dùng chủ động chạy file (ví dụ: ./run.sh, bash train.sh)
+	if (nameLower == "bash" || nameLower == "sh" || nameLower == "zsh") && (strings.Contains(cmdLower, ".sh") || strings.Contains(cmdLower, ".py")) {
+		if !strings.Contains(cmdLower, "shellintegration") && !strings.Contains(cmdLower, ".vscode-server") {
+			return true, AttributionLikelyWorkload
+		}
+	}
+
+	// 6. User binary chạy trực tiếp (như ./run, ./sim, nohup ./...)
+	if strings.HasPrefix(cmdLower, "./") || strings.Contains(cmdLower, "nohup ") || strings.Contains(cmdLower, "tmux ") || strings.Contains(cmdLower, "screen ") {
+		if !IsDesktopOrBackgroundService(name, cmdline) && !IsIdleShell(name, cmdline) {
+			return true, AttributionLikelyWorkload
+		}
+	}
+
+	return false, AttributionUnknown
+}
+
 // Collect quét danh sách tiến trình từ /proc
 func (c *Collector) Collect(filterType string) *ProcessReport {
 	c.mu.Lock()
@@ -352,98 +478,184 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		// Định danh an toàn ProcessRef
 		ref := BuildRef(c.serverID, containerID, pid, startTimeTicks)
 
-		// PHÂN LOẠI TIẾN TRÌNH CHUẨN XÁC 4 NHÓM
+		// PHÂN LOẠI TIẾN TRÌNH THEO 4 NHÓM VÀ ATTRIBUTION NGUỒN GỐC THỰC THI
 		var classification string
+		var attribution string
 		isProtected := false
+		isUserWorkload := false
 
 		// 1. Kiểm tra nếu là tiến trình hệ thống cốt lõi
-		if pid <= 1 || ppid == 2 || ProtectedProcessNames[strings.ToLower(procName)] {
-			classification = ClassSystemProcess
-			isProtected = true
-		} else if containerID == "" {
-			// Chạy trên host vật lý ngoài container
-			cmdLower := strings.ToLower(cmdline)
-			isHostService := false
-			for _, kw := range ProtectedCmdKeywords {
-				if strings.Contains(cmdLower, kw) {
-					isHostService = true
-					break
-				}
+		cmdLower := strings.ToLower(cmdline)
+		isHostService := false
+		for _, kw := range ProtectedCmdKeywords {
+			if strings.Contains(cmdLower, kw) {
+				isHostService = true
+				break
 			}
-			if isHostService || strings.Contains(procName, "sshd") || uid == 0 || uid < 1000 {
-				classification = ClassSystemProcess
-				isProtected = true
-			} else if isGPU {
-				classification = ClassGPUProcess
-			} else {
-				classification = ClassMemberProcess
-			}
-		} else {
-			// Chạy bên trong Container Workspace của thành viên
-			cmdLower := strings.ToLower(cmdline)
-			isAI := strings.Contains(cmdLower, "python") || strings.Contains(cmdLower, "torch") ||
-				strings.Contains(cmdLower, "train") || strings.Contains(cmdLower, "eval") ||
-				strings.Contains(cmdLower, "jupyter") || strings.Contains(cmdLower, "deepspeed") ||
-				strings.Contains(cmdLower, "vllm") || strings.Contains(cmdLower, "ollama") ||
-				strings.Contains(cmdLower, "accelerate")
+		}
 
-			if isGPU || isAI {
-				classification = ClassResearchJob
-			} else {
+		if pid <= 1 || ppid == 2 || ProtectedProcessNames[strings.ToLower(procName)] || isHostService ||
+			strings.Contains(procName, "sshd") || uid == 0 || uid < 1000 {
+			classification = ClassSystemProcess
+			attribution = AttributionSystemProcess
+			isProtected = true
+			isUserWorkload = false
+		} else {
+			// Thuộc tài khoản user (UID >= 1000) hoặc trong Container
+			// Kiểm tra xem có phải là background/desktop service hay IDE tooling hay idle shell không
+			if IsDesktopOrBackgroundService(procName, cmdline) {
 				classification = ClassMemberProcess
+				attribution = AttributionBackgroundProcess
+				isUserWorkload = false
+			} else if IsIdleShell(procName, cmdline) {
+				classification = ClassMemberProcess
+				attribution = AttributionBackgroundProcess
+				isUserWorkload = false
+			} else {
+				// Ứng viên cho User Workload
+				isWorkload, attr := IsWorkloadCandidate(procName, cmdline, isGPU, vramMB)
+				if isWorkload {
+					isUserWorkload = true
+					attribution = attr
+					if isGPU {
+						classification = ClassGPUProcess
+					} else {
+						classification = ClassResearchJob
+					}
+				} else {
+					// Tiến trình thông thường của member nhưng chưa rõ mục đích
+					classification = ClassMemberProcess
+					attribution = AttributionLikelyWorkload
+					// Nếu CPU > 1.0% hoặc đang chạy tính toán
+					if cpuPct > 1.0 {
+						isUserWorkload = true
+					} else {
+						isUserWorkload = false
+					}
+				}
 			}
 		}
 
 		pInfo := ProcessInfo{
-			Ref:            ref,
-			PID:            pid,
-			PPID:           ppid,
-			PGID:           pgid,
-			UID:            uid,
-			User:           userName,
-			Name:           procName,
-			CommandLine:    cmdline,
-			Classification: classification,
-			ContainerID:    containerID,
-			Workspace:      workspace,
-			CPUPercent:     cpuPct,
-			MemoryRSSMB:    rssMB,
-			MemoryVMSMB:    vmsMB,
-			MemoryPercent:  memPct,
-			State:          state,
-			StartTime:      startTimeStr,
-			StartTimeTicks: startTimeTicks,
-			ElapsedTime:    elapsedStr,
-			IsGPU:          isGPU,
-			GPUIndex:       gpuIdx,
-			GPUUUID:        gpuUUID,
-			VRAMMB:         vramMB,
-			IsProtected:    isProtected,
-		}
-
-		// Áp dụng bộ lọc
-		if filterType == "research" && classification != ClassResearchJob {
-			continue
-		} else if filterType == "gpu" && !isGPU {
-			continue
-		} else if filterType == "system" && classification != ClassSystemProcess {
-			continue
-		} else if filterType == "member" && classification != ClassMemberProcess && classification != ClassResearchJob {
-			continue
+			Ref:               ref,
+			PID:               pid,
+			PPID:              ppid,
+			PGID:              pgid,
+			UID:               uid,
+			User:              userName,
+			Name:              procName,
+			CommandLine:       cmdline,
+			Classification:    classification,
+			Attribution:       attribution,
+			IsUserWorkload:    isUserWorkload,
+			IsRootWorkload:    isUserWorkload, // Tạm thời là root, sẽ gộp theo cây ở bước sau
+			ChildrenCount:     0,
+			TotalCPUPercent:   cpuPct,
+			TotalMemoryRSSMB:  rssMB,
+			ContainerID:       containerID,
+			Workspace:         workspace,
+			CPUPercent:        cpuPct,
+			MemoryRSSMB:       rssMB,
+			MemoryVMSMB:       vmsMB,
+			MemoryPercent:     memPct,
+			State:             state,
+			StartTime:         startTimeStr,
+			StartTimeTicks:    startTimeTicks,
+			ElapsedTime:       elapsedStr,
+			IsGPU:             isGPU,
+			GPUIndex:          gpuIdx,
+			GPUUUID:           gpuUUID,
+			VRAMMB:            vramMB,
+			IsProtected:       isProtected,
 		}
 
 		procs = append(procs, pInfo)
 	}
 
+	// GOM NHÓM TIẾN TRÌNH (PARENT - WORKERS HIERARCHY)
+	// Xây dựng map PID -> index
+	pidMap := make(map[int]int, len(procs))
+	for i := range procs {
+		pidMap[procs[i].PID] = i
+	}
+
+	// Xác định quan hệ Root Workload vs Worker con
+	for i := range procs {
+		p := &procs[i]
+		if p.IsUserWorkload {
+			if parentIdx, ok := pidMap[p.PPID]; ok {
+				parent := &procs[parentIdx]
+				if parent.IsUserWorkload && parent.User == p.User {
+					p.IsRootWorkload = false
+					p.ParentWorkloadPID = parent.PID
+				}
+			}
+		}
+	}
+
+	// Tính tổng CPU và RAM gộp cho Root Workload (tránh double-counting)
+	for i := range procs {
+		root := &procs[i]
+		if root.IsUserWorkload && root.IsRootWorkload {
+			totalCPU := root.CPUPercent
+			totalRSS := root.MemoryRSSMB
+			childrenCount := 0
+
+			var aggregateWorkers func(parentPID int)
+			aggregateWorkers = func(parentPID int) {
+				for j := range procs {
+					child := &procs[j]
+					if child.ParentWorkloadPID == parentPID && child.PID != parentPID {
+						childrenCount++
+						totalCPU += child.CPUPercent
+						totalRSS += child.MemoryRSSMB
+						aggregateWorkers(child.PID)
+					}
+				}
+			}
+			aggregateWorkers(root.PID)
+
+			root.ChildrenCount = childrenCount
+			root.TotalCPUPercent = math.Round(totalCPU*10) / 10
+			root.TotalMemoryRSSMB = math.Round(totalRSS*10) / 10
+		}
+	}
+
 	c.prevCPUTimes = newCPUTimes
 	c.lastScan = time.Now()
+
+	// Áp dụng bộ lọc cho report trả về
+	filtered := make([]ProcessInfo, 0, len(procs))
+	for _, p := range procs {
+		if filterType == "workloads" || filterType == "workload" || filterType == "research" {
+			// Chỉ lấy User Workload gốc (root)
+			if p.IsUserWorkload && p.IsRootWorkload {
+				filtered = append(filtered, p)
+			}
+		} else if filterType == "gpu" {
+			if p.IsGPU {
+				filtered = append(filtered, p)
+			}
+		} else if filterType == "system" {
+			if p.Classification == ClassSystemProcess {
+				filtered = append(filtered, p)
+			}
+		} else if filterType == "member" {
+			if p.Classification == ClassMemberProcess || p.Classification == ClassResearchJob || p.IsUserWorkload {
+				filtered = append(filtered, p)
+			}
+		} else {
+			// "all" hoặc mặc định: trả về tất cả
+			filtered = append(filtered, p)
+		}
+	}
 
 	report := &ProcessReport{
 		Source:      "labops-go-agent",
 		CollectedAt: time.Now().UTC().Format(time.RFC3339),
 		ServerID:    c.serverID,
-		TotalCount:  len(procs),
-		Processes:   procs,
+		TotalCount:  len(filtered),
+		Processes:   filtered,
 	}
 
 	if filterType == "all" {

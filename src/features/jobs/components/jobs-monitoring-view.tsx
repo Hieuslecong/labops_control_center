@@ -20,6 +20,9 @@ export function JobsMonitoringView() {
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const syncError = useLabOpsStore((state) => state.syncError);
 
+  // View Mode: 'workloads' (Mặc định: chỉ tác vụ thành viên) | 'diagnostics' (Chẩn đoán: toàn bộ tiến trình hệ thống)
+  const [viewMode, setViewMode] = useState<'workloads' | 'diagnostics'>('workloads');
+
   const [allProcesses, setAllProcesses] = useState<ComputeJob[]>([]);
   const [loadingProcesses, setLoadingProcesses] = useState(false);
 
@@ -38,7 +41,7 @@ export function JobsMonitoringView() {
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Fetch full processes list from /api/labops/processes
+  // Fetch full processes list from /api/labops/processes (chỉ phục vụ Chẩn đoán Quản trị Nâng cao)
   const fetchProcessesList = useCallback(async () => {
     try {
       setLoadingProcesses(true);
@@ -71,7 +74,10 @@ export function JobsMonitoringView() {
             containerState: p.container_id ? 'Running' : 'Host Process',
             isGpu: Boolean(p.is_gpu_process || Number(p.vram_mb || 0) > 0),
             classification: p.classification ? String(p.classification) : undefined,
-            isProtected: Boolean(p.is_protected)
+            isProtected: Boolean(p.is_protected),
+            childrenCount: Number(p.children_count || 0),
+            attribution: p.attribution ? String(p.attribution) : undefined,
+            isRootWorkload: Boolean(p.is_root_workload ?? true)
           };
         });
         setAllProcesses(mapped);
@@ -100,10 +106,13 @@ export function JobsMonitoringView() {
     return () => clearInterval(timer);
   }, [refreshAll, fetchLiveJobs, fetchLiveState, fetchProcessesList, isAutoRefresh]);
 
-  // Combined source list: Use allProcesses when loaded, fallback to jobs
+  // Nguồn dữ liệu hiển thị theo chế độ
   const displayList = useMemo(() => {
-    return allProcesses.length > 0 ? allProcesses : jobs;
-  }, [allProcesses, jobs]);
+    if (viewMode === 'workloads') {
+      return jobs; // Chỉ trả về tác vụ thành viên thực tế từ Go Node Agent qua backend
+    }
+    return allProcesses; // Chế độ Chẩn đoán nâng cao: toàn bộ raw processes
+  }, [viewMode, jobs, allProcesses]);
 
   // Distinct users and process counts
   const userCounts = useMemo(() => {
@@ -120,16 +129,18 @@ export function JobsMonitoringView() {
   }, [displayList]);
 
   // KPI Calculations
-  const researchJobsCount = displayList.filter(
-    (j) => j.classification === 'RESEARCH_JOB' || (allProcesses.length === 0 && j.isGpu)
-  ).length;
-  const memberProcessesCount = displayList.filter(
-    (j) => j.classification === 'MEMBER_PROCESS' || j.classification === 'RESEARCH_JOB'
-  ).length;
-  const gpuProcessesCount = displayList.filter(
-    (j) => j.isGpu || j.vramUsedMb > 0 || j.classification === 'GPU_PROCESS'
-  ).length;
-  const totalVramMb = displayList.reduce((acc, j) => acc + (j.vramUsedMb || 0), 0);
+  const gpuWorkloadsCount = useMemo(
+    () => displayList.filter((j) => j.isGpu || j.vramUsedMb > 0).length,
+    [displayList]
+  );
+  const cpuWorkloadsCount = useMemo(
+    () => displayList.filter((j) => !j.isGpu && j.vramUsedMb <= 0).length,
+    [displayList]
+  );
+  const totalVramMb = useMemo(
+    () => displayList.reduce((acc, j) => acc + (j.vramUsedMb || 0), 0),
+    [displayList]
+  );
 
   // Filtered List
   const filteredItems = useMemo(() => {
@@ -146,7 +157,7 @@ export function JobsMonitoringView() {
         if (!matchPid && !matchScript && !matchCmd && !matchUser && !matchWorkspace) return false;
       }
 
-      // 2. Classification Filter
+      // 2. Classification Filter (Chỉ áp dụng khi ở chế độ diagnostics hoặc khi người dùng lọc)
       if (classificationFilter !== 'all') {
         if (classificationFilter === 'RESEARCH_JOB') {
           if (j.classification !== 'RESEARCH_JOB') return false;
@@ -171,26 +182,105 @@ export function JobsMonitoringView() {
 
   return (
     <div className='flex flex-col gap-4 font-sans text-foreground'>
+      {/* Top Banner / View Mode Switcher */}
+      <div className='flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-white dark:bg-zinc-950 border rounded-lg shadow-xs'>
+        <div className='flex items-center gap-2 flex-wrap'>
+          <Button
+            size='sm'
+            variant={viewMode === 'workloads' ? 'default' : 'outline'}
+            onClick={() => {
+              setViewMode('workloads');
+              setClassificationFilter('all');
+            }}
+            className='h-8 text-xs font-semibold gap-1.5'
+          >
+            <Icons.activity className='size-3.5' />
+            Tác vụ Thành viên (Mặc định)
+            <Badge
+              variant='secondary'
+              className={`ml-1 text-[10px] px-1.5 py-0 h-4 ${
+                viewMode === 'workloads'
+                  ? 'bg-primary-foreground/20 text-primary-foreground'
+                  : 'bg-zinc-200 dark:bg-zinc-800 text-foreground'
+              }`}
+            >
+              {jobs.length}
+            </Badge>
+          </Button>
+
+          <Button
+            size='sm'
+            variant={viewMode === 'diagnostics' ? 'default' : 'outline'}
+            onClick={() => {
+              setViewMode('diagnostics');
+              setClassificationFilter('all');
+            }}
+            className='h-8 text-xs gap-1.5'
+          >
+            <Icons.settings className='size-3.5 text-muted-foreground' />
+            Chẩn đoán Quản trị (Toàn bộ tiến trình)
+            <Badge variant='outline' className='ml-1 text-[10px] px-1.5 py-0 h-4'>
+              {allProcesses.length}
+            </Badge>
+          </Button>
+        </div>
+
+        <div className='flex items-center gap-2 text-xs'>
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => setIsAutoRefresh(!isAutoRefresh)}
+            className={`h-7 text-xs px-2.5 ${isAutoRefresh ? 'border-emerald-500 text-emerald-600' : ''}`}
+          >
+            <span className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`} />
+            {isAutoRefresh ? 'Tự cập nhật 4s' : 'Đã tạm dừng'}
+          </Button>
+
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={refreshAll}
+            disabled={isRefreshing}
+            className='h-7 text-xs px-2.5'
+          >
+            <Icons.refresh className={`size-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+            Làm mới
+          </Button>
+        </div>
+      </div>
+
+      {/* Chế độ cảnh báo khi ở Diagnostics */}
+      {viewMode === 'diagnostics' && (
+        <div className='p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-800 dark:text-blue-200 text-xs flex items-center gap-2'>
+          <Icons.info className='size-4 text-blue-500 shrink-0' />
+          <span>
+            <strong>Chế độ Chẩn đoán Quản trị:</strong> Đang hiển thị toàn bộ <strong>{allProcesses.length}</strong> tiến trình cấp hệ điều hành (bao gồm system daemons, desktop services và IDE tooling phụ trợ). Không khuyến nghị can thiệp vào các tiến trình hệ thống.
+          </span>
+        </div>
+      )}
+
       {/* KPI Stats Cards - White Clean Theme */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
           <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
-            Tác vụ Nghiên cứu AI
+            {viewMode === 'workloads' ? 'Tác vụ Đang chạy' : 'Tổng Tiến trình'}
           </span>
           <div className='text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
             <Icons.job className='size-5' />
-            {researchJobsCount}
+            {viewMode === 'workloads' ? jobs.length : allProcesses.length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Tác vụ ML có kiểm chứng</span>
+          <span className='text-[10px] text-muted-foreground'>
+            {viewMode === 'workloads' ? 'Tác vụ thành viên chủ động' : 'Bao gồm background daemons'}
+          </span>
         </Card>
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
           <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
-            ⚡ Tiến trình Chiếm GPU
+            ⚡ Chiếm dụng GPU
           </span>
           <div className='text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'>
             <Icons.gpu className='size-5' />
-            {gpuProcessesCount}
+            {gpuWorkloadsCount}
           </div>
           <span className='text-[10px] text-muted-foreground'>
             Đang dùng {(totalVramMb / 1024).toFixed(1)} GB VRAM
@@ -199,13 +289,17 @@ export function JobsMonitoringView() {
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
           <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
-            Tiến trình Thành viên
+            {viewMode === 'workloads' ? 'Tác vụ CPU thuần' : 'Tiến trình Thành viên'}
           </span>
           <div className='text-2xl font-bold mt-1 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
-            <Icons.users className='size-5' />
-            {memberProcessesCount}
+            {viewMode === 'workloads' ? <Icons.cpu className='size-5' /> : <Icons.users className='size-5' />}
+            {viewMode === 'workloads'
+              ? cpuWorkloadsCount
+              : allProcesses.filter((p) => p.classification === 'MEMBER_PROCESS' || p.classification === 'RESEARCH_JOB').length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Trong workspace container</span>
+          <span className='text-[10px] text-muted-foreground'>
+            {viewMode === 'workloads' ? 'Xử lý trên đa luồng CPU' : 'Tiến trình user space'}
+          </span>
         </Card>
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
@@ -217,7 +311,9 @@ export function JobsMonitoringView() {
             {userCounts.length} tài khoản
           </div>
           <span className='text-[10px] text-muted-foreground truncate'>
-            {userCounts.slice(0, 3).map(([u]) => `@${u}`).join(', ')}
+            {userCounts.length > 0
+              ? userCounts.slice(0, 3).map(([u]) => `@${u}`).join(', ')
+              : 'Chưa có hoạt động'}
             {userCounts.length > 3 ? '...' : ''}
           </span>
         </Card>
@@ -235,94 +331,73 @@ export function JobsMonitoringView() {
 
       {/* Filter and Control Bar */}
       <div className='flex flex-col gap-3 p-3 rounded-lg border bg-white dark:bg-zinc-950 shadow-xs'>
-        {/* Row 1: Classification Pills & Refresh Button */}
-        <div className='flex flex-wrap items-center justify-between gap-2'>
-          <div className='flex items-center gap-1.5 flex-wrap'>
-            <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Phân loại:</span>
-            <Button
-              size='sm'
-              variant={classificationFilter === 'all' ? 'default' : 'outline'}
-              onClick={() => setClassificationFilter('all')}
-              className='h-7 text-xs px-2.5 rounded-full'
-            >
-              Tất cả ({displayList.length})
-            </Button>
+        {/* Row 1: Classification Pills khi ở Diagnostics */}
+        {viewMode === 'diagnostics' && (
+          <div className='flex flex-wrap items-center justify-between gap-2 pb-2 border-b'>
+            <div className='flex items-center gap-1.5 flex-wrap'>
+              <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Phân loại:</span>
+              <Button
+                size='sm'
+                variant={classificationFilter === 'all' ? 'default' : 'outline'}
+                onClick={() => setClassificationFilter('all')}
+                className='h-7 text-xs px-2.5 rounded-full'
+              >
+                Tất cả ({displayList.length})
+              </Button>
 
-            <Button
-              size='sm'
-              variant={classificationFilter === 'RESEARCH_JOB' ? 'default' : 'outline'}
-              onClick={() => setClassificationFilter('RESEARCH_JOB')}
-              className={`h-7 text-xs px-2.5 rounded-full ${
-                classificationFilter === 'RESEARCH_JOB'
-                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                  : 'text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10'
-              }`}
-            >
-              <Icons.job className='size-3 mr-1' />
-              Tác vụ AI ({researchJobsCount})
-            </Button>
+              <Button
+                size='sm'
+                variant={classificationFilter === 'RESEARCH_JOB' ? 'default' : 'outline'}
+                onClick={() => setClassificationFilter('RESEARCH_JOB')}
+                className={`h-7 text-xs px-2.5 rounded-full ${
+                  classificationFilter === 'RESEARCH_JOB'
+                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    : 'text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10'
+                }`}
+              >
+                <Icons.job className='size-3 mr-1' />
+                Tác vụ AI
+              </Button>
 
-            <Button
-              size='sm'
-              variant={classificationFilter === 'GPU_PROCESS' ? 'default' : 'outline'}
-              onClick={() => setClassificationFilter('GPU_PROCESS')}
-              className={`h-7 text-xs px-2.5 rounded-full ${
-                classificationFilter === 'GPU_PROCESS'
-                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                  : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
-              }`}
-            >
-              <Icons.gpu className='size-3 mr-1' />
-              Chiếm GPU ({gpuProcessesCount})
-            </Button>
+              <Button
+                size='sm'
+                variant={classificationFilter === 'GPU_PROCESS' ? 'default' : 'outline'}
+                onClick={() => setClassificationFilter('GPU_PROCESS')}
+                className={`h-7 text-xs px-2.5 rounded-full ${
+                  classificationFilter === 'GPU_PROCESS'
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                    : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
+                }`}
+              >
+                <Icons.gpu className='size-3 mr-1' />
+                Chiếm GPU
+              </Button>
 
-            <Button
-              size='sm'
-              variant={classificationFilter === 'MEMBER_PROCESS' ? 'default' : 'outline'}
-              onClick={() => setClassificationFilter('MEMBER_PROCESS')}
-              className='h-7 text-xs px-2.5 rounded-full'
-            >
-              <Icons.user className='size-3 mr-1' />
-              Tiến trình Thành viên ({memberProcessesCount})
-            </Button>
+              <Button
+                size='sm'
+                variant={classificationFilter === 'MEMBER_PROCESS' ? 'default' : 'outline'}
+                onClick={() => setClassificationFilter('MEMBER_PROCESS')}
+                className='h-7 text-xs px-2.5 rounded-full'
+              >
+                <Icons.user className='size-3 mr-1' />
+                Thành viên
+              </Button>
 
-            <Button
-              size='sm'
-              variant={classificationFilter === 'SYSTEM_PROCESS' ? 'default' : 'outline'}
-              onClick={() => setClassificationFilter('SYSTEM_PROCESS')}
-              className='h-7 text-xs px-2.5 rounded-full text-zinc-600'
-            >
-              <Icons.shield className='size-3 mr-1' />
-              Hệ thống
-            </Button>
+              <Button
+                size='sm'
+                variant={classificationFilter === 'SYSTEM_PROCESS' ? 'default' : 'outline'}
+                onClick={() => setClassificationFilter('SYSTEM_PROCESS')}
+                className='h-7 text-xs px-2.5 rounded-full text-zinc-600'
+              >
+                <Icons.shield className='size-3 mr-1' />
+                Hệ thống
+              </Button>
+            </div>
           </div>
+        )}
 
-          <div className='flex items-center gap-2'>
-            <Button
-              size='sm'
-              variant='outline'
-              onClick={() => setIsAutoRefresh(!isAutoRefresh)}
-              className={`h-7 text-xs px-2.5 ${isAutoRefresh ? 'border-emerald-500 text-emerald-600' : ''}`}
-            >
-              <span className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`} />
-              {isAutoRefresh ? 'Tự cập nhật 4s' : 'Đã tạm dừng'}
-            </Button>
-
-            <Button
-              size='sm'
-              variant='outline'
-              onClick={refreshAll}
-              disabled={isRefreshing}
-              className='h-7 text-xs px-2.5'
-            >
-              <Icons.refresh className={`size-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
-              Làm mới
-            </Button>
-          </div>
-        </div>
-
-        {/* Row 2: Search Input and Dropdown Selects */}
-        <div className='grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 border-t'>
+        {/* Search Input and Dropdown Selects */}
+        <div className='grid grid-cols-1 sm:grid-cols-4 gap-2.5'>
           <div className='sm:col-span-2 relative'>
             <Icons.search className='size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground' />
             <Input
@@ -378,16 +453,29 @@ export function JobsMonitoringView() {
               <tbody className='divide-y divide-zinc-200/70 dark:divide-zinc-800/60'>
                 {filteredItems.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className='py-12 text-center text-xs text-muted-foreground'>
-                      {loadingProcesses ? (
-                        <div className='flex flex-col items-center justify-center gap-2'>
-                          <Icons.spinner className='size-5 animate-spin text-primary' />
-                          <span>Đang tải danh sách tiến trình từ Go Node Agent...</span>
-                        </div>
-                      ) : (
-                        <div className='flex flex-col items-center justify-center gap-1'>
-                          <Icons.search className='size-5 text-muted-foreground/60' />
-                          <span>Không tìm thấy tiến trình nào phù hợp với bộ lọc.</span>
+                    <td colSpan={8} className='py-16 text-center text-xs text-muted-foreground'>
+                      <Icons.terminal className='size-10 mx-auto text-muted-foreground/30 mb-3' />
+                      <p className='text-sm font-semibold text-foreground'>
+                        {viewMode === 'workloads'
+                          ? 'Hiện không có tác vụ tính toán hoặc workload nào đang chạy'
+                          : 'Không tìm thấy tiến trình nào phù hợp với bộ lọc'}
+                      </p>
+                      <p className='text-xs text-muted-foreground mt-1 max-w-md mx-auto'>
+                        {viewMode === 'workloads'
+                          ? 'Máy chủ và GPU hiện đang ở trạng thái rảnh (Idle). Khi thành viên khởi chạy Python training, PyTorch workload hoặc script nghiên cứu, hệ thống sẽ tự động hiển thị.'
+                          : 'Thử kiểm tra lại từ khóa tìm kiếm hoặc bỏ bớt các bộ lọc phân loại.'}
+                      </p>
+                      {viewMode === 'workloads' && (
+                        <div className='mt-4'>
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            onClick={() => setViewMode('diagnostics')}
+                            className='h-7 text-xs gap-1.5'
+                          >
+                            <Icons.settings className='size-3 text-primary' />
+                            Mở Chẩn đoán Hệ thống ({allProcesses.length} tiến trình thô)
+                          </Button>
                         </div>
                       )}
                     </td>
@@ -430,15 +518,20 @@ export function JobsMonitoringView() {
 
                         {/* Cột 3: PID / Lệnh */}
                         <td className='py-3 px-3 max-w-sm'>
-                          <div className='flex items-center gap-1.5'>
+                          <div className='flex items-center gap-1.5 flex-wrap'>
                             <span className='font-mono font-bold text-foreground text-[11px]'>
                               PID: {item.pid}
                             </span>
-                            {item.ppid && (
+                            {item.childrenCount && item.childrenCount > 0 ? (
+                              <Badge variant='secondary' className='text-[10px] px-1.5 py-0 h-4 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium'>
+                                +{item.childrenCount} tiến trình con
+                              </Badge>
+                            ) : null}
+                            {item.ppid ? (
                               <span className='text-[10px] text-muted-foreground font-mono'>
                                 (PPID: {item.ppid})
                               </span>
-                            )}
+                            ) : null}
                           </div>
                           <div
                             className='font-mono text-[11px] text-muted-foreground truncate max-w-[280px]'

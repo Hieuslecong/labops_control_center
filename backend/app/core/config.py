@@ -6,7 +6,7 @@ from typing import List
 if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
     try:
         from dotenv import load_dotenv
-        _backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env"))
+        _backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
         if os.path.exists(_backend_env):
             load_dotenv(_backend_env)
     except ImportError:

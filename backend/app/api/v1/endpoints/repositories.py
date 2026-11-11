@@ -12,37 +12,53 @@ from app.services.labops_service import service
 
 router = APIRouter()
 
-AGENT_BASE_URL = os.getenv("LABOPS_AGENT_URL", "http://127.0.0.1:9100/api/v1/agent/repositoryguard")
 AGENT_TOKEN = os.getenv("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026")
 
 
+def _get_agent_urls() -> List[str]:
+    custom = os.getenv("LABOPS_AGENT_URL")
+    if custom:
+        return [custom.rstrip("/")]
+    return [
+        "http://127.0.0.1:9150/api/v1/agent/repositoryguard",
+        "http://127.0.0.1:9100/api/v1/agent/repositoryguard"
+    ]
+
+
 def _agent_call(path: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Any:
-    url = f"{AGENT_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    urls = _get_agent_urls()
     headers = {
         "X-LabOps-Agent-Secret": AGENT_TOKEN,
         "Content-Type": "application/json"
     }
     body = json.dumps(data).encode("utf-8") if data is not None else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            content = resp.read().decode("utf-8")
-            if content:
-                return json.loads(content)
-            return {}
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8")
+    last_err = None
+
+    for base_url in urls:
+        url = f"{base_url}/{path.lstrip('/')}"
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            parsed = json.loads(err_body)
-            detail = parsed.get("error") or parsed.get("detail") or err_body
-        except Exception:
-            detail = err_body
-        raise HTTPException(status_code=e.code, detail=detail)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Không thể kết nối đến LabOps Repository Guard Agent: {str(e)}"
-        )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                content = resp.read().decode("utf-8")
+                if content:
+                    return json.loads(content)
+                return {}
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8")
+            try:
+                parsed = json.loads(err_body)
+                detail = parsed.get("error") or parsed.get("detail") or err_body
+            except Exception:
+                detail = err_body
+            raise HTTPException(status_code=e.code, detail=detail)
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=f"Không thể kết nối đến LabOps Repository Guard Agent: {str(last_err)}"
+    )
 
 
 class SubmitRepoRequest(BaseModel):

@@ -247,8 +247,8 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 	report.Verdict = verdict
 	report.PolicyReasons = reasons
 
-	var artifactDigest string
-	var artifactSize int64
+	artifactDigest := qw.DigestSHA256
+	artifactSize := qw.TotalSize
 
 	// Nếu được Auto-Approved -> Lưu trữ artifact vào Approved Store
 	if verdict == StateAutoApproved {
@@ -257,6 +257,8 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 			artifactDigest = entry.ArtifactDigest
 			artifactSize = entry.ArtifactSize
 		}
+	} else if verdict == StateRejected {
+		_ = qw.PurgeAll()
 	}
 
 	s.updateRequest(reqID, func(r *RepositoryRequest) {
@@ -287,8 +289,38 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 	var finalState ScanState
 	if decision == "APPROVED" {
 		finalState = StateManuallyApproved
+		// Xuất bản artifact từ quarantine vào Approved Store nếu chưa có
+		s.mu.RLock()
+		req := s.requests[reqID]
+		s.mu.RUnlock()
+		if req != nil {
+			if _, found := s.store.GetApproved(req.CanonicalRepo, req.CommitSHA); !found {
+				archiveFile := filepath.Join(s.quarantineDir, reqID, "source.tar.gz")
+				if _, err := os.Stat(archiveFile); err == nil {
+					qw := &QuarantineWorkspace{
+						ArchiveFile:  archiveFile,
+						DigestSHA256: req.ArtifactDigest,
+					}
+					scannerVer := "0.76.2"
+					dbVer := ""
+					if req.Report != nil {
+						scannerVer = req.Report.ScannerVersion
+						dbVer = req.Report.DBVersion
+					}
+					entry, errStore := s.store.StoreApproved(req.CanonicalRepo, req.CommitSHA, scannerVer, dbVer, reviewer, qw)
+					if errStore == nil {
+						s.updateRequest(reqID, func(r *RepositoryRequest) {
+							r.ArtifactDigest = entry.ArtifactDigest
+							r.ArtifactSize = entry.ArtifactSize
+						})
+					}
+				}
+			}
+		}
 	} else {
 		finalState = StateRejected
+		// Dọn dẹp hoàn toàn quarantine nếu bị từ chối
+		_ = os.RemoveAll(filepath.Join(s.quarantineDir, reqID))
 	}
 
 	updated := s.updateRequest(reqID, func(r *RepositoryRequest) {

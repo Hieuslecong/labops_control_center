@@ -158,12 +158,23 @@ func PrepareQuarantine(ctx context.Context, baseQuarantineDir, requestID, repoUR
 		return nil, fmt.Errorf("git archive trả về lỗi: %w", err)
 	}
 
-	digest := hex.EncodeToString(hasher.Sum(nil))
-
 	// 3. Nén thành file archive .tar.gz có chữ ký digest để cache và delivery
 	if err := createTarGz(sourceDir, archivePath); err != nil {
 		return nil, fmt.Errorf("không thể tạo gói phân phối tar.gz: %w", err)
 	}
+
+	// Tính digest SHA-256 chính xác của file archive .tar.gz để đảm bảo tính toàn vẹn tuyệt đối
+	archiveF, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("không thể mở archive để tính digest: %w", err)
+	}
+	defer archiveF.Close()
+
+	archiveHasher := sha256.New()
+	if _, err := io.Copy(archiveHasher, archiveF); err != nil {
+		return nil, fmt.Errorf("lỗi tính checksum archive: %w", err)
+	}
+	digest := hex.EncodeToString(archiveHasher.Sum(nil))
 
 	return &QuarantineWorkspace{
 		BaseDir:      reqDir,
@@ -228,8 +239,16 @@ func createTarGz(srcDir, tarGzPath string) error {
 	})
 }
 
-// Cleanup dọn dẹp thư mục làm việc tạm thời
+// Cleanup dọn dẹp thư mục mã nguồn bung thô nhưng giữ lại source.tar.gz phục vụ Admin review
 func (qw *QuarantineWorkspace) Cleanup() error {
+	if qw.SourceDir == "" {
+		return nil
+	}
+	return os.RemoveAll(qw.SourceDir)
+}
+
+// PurgeAll xóa toàn bộ thư mục request khi bị REJECTED hoặc hủy bỏ
+func (qw *QuarantineWorkspace) PurgeAll() error {
 	if qw.BaseDir == "" || qw.BaseDir == "/" {
 		return errors.New("đường dẫn BaseDir không hợp lệ để cleanup")
 	}

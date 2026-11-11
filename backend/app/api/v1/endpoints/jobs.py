@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from app.schemas.labops import JobResponse
 from app.services.labops_service import service
+from app.services.job_access import visible_jobs
 
 router = APIRouter()
 
@@ -42,20 +43,22 @@ async def list_jobs(
     resource: Optional[str] = Query(None, description="all | gpu | cpu"),
     username: Optional[str] = Query(None, description="Lọc theo Linux username"),
     server_id: Optional[str] = Query(None, description="workstation | track"),
-    search: Optional[str] = Query(None, description="Từ khóa tìm kiếm PID hoặc lệnh")
+    search: Optional[str] = Query(None, description="Từ khóa tìm kiếm PID hoặc lệnh"),
+    p: Principal = Depends(require_user)
 ):
     """List all running and historical compute jobs across the two physical servers"""
-    return _filter_jobs(service.jobs, resource=resource, username=username, server_id=server_id, search=search)
+    return _filter_jobs(visible_jobs(service.jobs, p), resource=resource, username=username, server_id=server_id, search=search)
 
 @router.get("/active", response_model=List[JobResponse])
 async def list_active_jobs(
     resource: Optional[str] = Query(None, description="all | gpu | cpu"),
     username: Optional[str] = Query(None, description="Lọc theo Linux username"),
     server_id: Optional[str] = Query(None, description="workstation | track"),
-    search: Optional[str] = Query(None, description="Từ khóa tìm kiếm PID hoặc lệnh")
+    search: Optional[str] = Query(None, description="Từ khóa tìm kiếm PID hoặc lệnh"),
+    p: Principal = Depends(require_user)
 ):
     """List real currently executing compute jobs across all physical servers"""
-    return _filter_jobs(service.jobs, resource=resource, username=username, server_id=server_id, search=search)
+    return _filter_jobs(visible_jobs(service.jobs, p), resource=resource, username=username, server_id=server_id, search=search)
 
 @router.post("/{job_id}/stop")
 async def stop_job(job_id: str, p: Principal = Depends(require_user)) -> Dict[str, Any]:

@@ -56,3 +56,7 @@
 - **Mức độ**: `P1 (High)`
 - **Trạng thái sửa**: `IMPLEMENTED_AND_TESTED` — Đã giới hạn bind `127.0.0.1:5432:5432` và `127.0.0.1:8000:8000`, bắt buộc khai báo biến bí mật qua `${POSTGRES_PASSWORD:?...}` và `${LABOPS_SESSION_SECRET:?...}`.
 
+
+
+## Bổ sung 2026-11-10
+P0/P1 và bằng chứng hiện tại xem FINAL_CODE_REVIEW.md và FINAL_SECURITY_TEST_REPORT.md; triển khai chưa hoàn tất. Các kết quả cũ không chứng minh nghiệm thu hạ tầng thực.

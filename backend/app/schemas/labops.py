@@ -115,7 +115,7 @@ class PrivilegeValidationResponse(BaseSchema):
     no_sudo_group_membership: bool = Field(False, alias="noSudoGroupMembership")
     no_docker_socket_access: bool = Field(False, alias="noDockerSocketAccess")
     no_incus_socket_access: bool = Field(False, alias="noIncusSocketAccess")
-    verification_timestamp: str = Field(alias="verificationTimestamp")
+    verification_timestamp: Optional[str] = Field(None, alias="verificationTimestamp")
     status: str = "NOT_VERIFIED"
 
 class StoragePoolResponse(BaseSchema):
@@ -229,15 +229,18 @@ class SshDualAuthVerificationResponse(BaseSchema):
 class WireGuardDeviceSchema(BaseSchema):
     device_id: str = Field(alias="deviceId")
     name: str
-    public_key: str = Field(alias="publicKey")
-    client_ip: str = Field(alias="clientIp")
-    server_id: str = Field(alias="serverId")
-    server_public_key: str = Field(alias="serverPublicKey")
-    server_endpoint: str = Field(alias="serverEndpoint")
-    allowed_subnets: str = Field(alias="allowedSubnets")
-    status: str
-    created_at: Optional[int] = Field(None, alias="createdAt")
-    last_handshake: Optional[int] = Field(None, alias="lastHandshake")
+    public_key: Optional[str] = Field("", alias="publicKey")
+    client_ip: Optional[str] = Field("", alias="clientIp")
+    server_id: Optional[str] = Field("track", alias="serverId")
+    server_public_key: Optional[str] = Field("", alias="serverPublicKey")
+    server_endpoint: Optional[str] = Field("118.70.169.236:2204", alias="serverEndpoint")
+    allowed_subnets: Optional[str] = Field("10.88.40.0/24", alias="allowedSubnets")
+    status: str = "ACTIVE"
+    enabled: Optional[bool] = Field(True, alias="enabled")
+    created_at: Optional[Any] = Field(None, alias="createdAt")
+    last_handshake: Optional[Any] = Field(None, alias="lastHandshake")
+    transfer_rx: Optional[int] = Field(0, alias="transferRx")
+    transfer_tx: Optional[int] = Field(0, alias="transferTx")
 
 
 class WireGuardProfileSchema(BaseSchema):
@@ -266,10 +269,10 @@ class MemberCreateRequest(BaseSchema):
 
     full_name: str = Field(alias="fullName", min_length=1, max_length=120)
     username: str = Field(min_length=3, max_length=32, pattern=r"^[a-z_][a-z0-9_-]{2,31}$")
-    email: str = Field(min_length=6, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    email: str = Field(min_length=3, max_length=254)
     role: Literal["RESEARCHER", "ADMIN"] = "RESEARCHER"
     research_group: Optional[str] = Field("AI Research Lab", alias="researchGroup", max_length=120)
-    assigned_server: Literal["track", "workstation"] = Field(alias="assignedServer")
+    assigned_server: Literal["track", "workstation"] = Field("track", alias="assignedServer")
     workspace_name: str = Field(alias="workspaceName", min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_-]{2,63}$")
     storage_pool_id: Optional[str] = Field(None, alias="storagePoolId")
     mount_path: str = Field("/workspace", alias="mountPath", max_length=128)
@@ -282,7 +285,12 @@ class MemberCreateRequest(BaseSchema):
     vram_policy: str = Field("Quota 12GB (Shared)", alias="vramPolicy", max_length=64)
     vram_quota_gb: Optional[int] = Field(12, alias="vramQuotaGb", ge=0, le=256)
     gpu_allocation_mode: Literal["SHARED", "EXCLUSIVE", "MIG"] = Field("SHARED", alias="gpuAllocationMode")
-    expires_at: Optional[str] = Field(None, alias="expiresAt", pattern=r"^\d{4}-\d{2}-\d{2}$")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+    ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    ssh_key_label: Optional[str] = Field(None, alias="sshKeyLabel")
+    provision_ssh_access: Optional[bool] = Field(None, alias="provisionSshAccess")
+    require_passphrase: Optional[bool] = Field(None, alias="requirePassphrase")
+    enforce_canary_runtime: Optional[bool] = Field(None, alias="enforceCanaryRuntime")
 
 class MemberResponse(BaseSchema):
     id: str
@@ -310,8 +318,9 @@ class MemberResponse(BaseSchema):
     ssh_port: Optional[int] = Field(None, alias="sshPort")
     ssh_key_status: str = Field("ACTIVE", alias="sshKeyStatus")
     ssh_fingerprint: Optional[str] = Field(None, alias="sshFingerprint")
-    ssh_public_key_preview: str = Field(alias="sshPublicKeyPreview")
+    ssh_public_key_preview: Optional[str] = Field(None, alias="sshPublicKeyPreview")
     ssh_public_key: Optional[str] = Field(None, alias="sshPublicKey")
+    ssh_key_label: Optional[str] = Field(None, alias="sshKeyLabel")
     ssh_auth_mode: str = Field("PUBLIC_KEY_AND_PASSWORD", alias="sshAuthMode")
     password_status: str = Field("ACTIVE", alias="passwordStatus")
     failed_login_attempts: int = Field(0, alias="failedLoginAttempts")
@@ -332,6 +341,10 @@ class MemberResponse(BaseSchema):
     created_at: str = Field(alias="createdAt")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
     wireguard: Optional[WireGuardProfileSchema] = None
+    workspace_dir: Optional[str] = Field(None, alias="workspaceDir")
+    temp_password_expires_at: Optional[str] = Field(None, alias="tempPasswordExpiresAt")
+    runtime_verification: Optional[Dict[str, Any]] = Field(None, alias="runtimeVerification")
+    one_time_package: Optional[Dict[str, Any]] = Field(None, alias="oneTimePackage")
 
 class JobResponse(BaseSchema):
     id: str

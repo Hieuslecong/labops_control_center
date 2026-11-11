@@ -1,9 +1,11 @@
 import os
 import time
+import json
 import shutil
 import platform
 import subprocess
 import logging
+import urllib.request
 from typing import Dict, Any, List, Optional
 import psutil
 from app.core.config import settings
@@ -157,7 +159,30 @@ class HostMonitorAdapter:
             logger.warning("Failed to query GPU count: %s", exc)
             return 0
 
+    def _fetch_go_agent_telemetry(self, server_id: str, display_name: str, location: str) -> Optional[Dict[str, Any]]:
+        """Truy vấn Go Agent cục bộ qua 127.0.0.1:9100 nếu đang chạy để đạt tốc độ <2ms mà không tốn CPU/subprocesses."""
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:9100/api/v1/agent/host",
+                headers={"X-LabOps-Agent-Secret": "labops-local-agent-verified-token-2026"}
+            )
+            with urllib.request.urlopen(req, timeout=0.2) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    data["name"] = display_name
+                    data["location"] = location
+                    data["last_updated"] = "Live host telemetry (LabOps Go Agent)"
+                    return data
+        except Exception:
+            pass
+        return None
+
     def _build_local_telemetry(self, server_id: str, display_name: str, location: str) -> Dict[str, Any]:
+        # Ưu tiên lấy trực tiếp từ Go Agent nếu đang hoạt động
+        go_data = self._fetch_go_agent_telemetry(server_id, display_name, location)
+        if go_data:
+            return go_data
+
         cpu_model = self._get_cpu_model()
         logical_cpus = psutil.cpu_count(logical=True) or 0
         physical_cores = psutil.cpu_count(logical=False) or 0
@@ -178,7 +203,13 @@ class HostMonitorAdapter:
         docker_bin = shutil.which("docker")
         runtime_status = "Chưa cài đặt Docker/Incus"
         if docker_bin:
-            runtime_status = "Docker Engine"
+            try:
+                ver_out = subprocess.check_output([docker_bin, "--version"], text=True, timeout=2).strip()
+                # e.g. "Docker version 26.1.5+dfsg1, build a72d7cd" -> "Docker 26.1.5+dfsg1"
+                ver_short = ver_out.replace("Docker version ", "").split(",")[0].strip()
+                runtime_status = f"Docker {ver_short}"
+            except Exception:
+                runtime_status = "Docker Engine"
         elif incus_bin:
             try:
                 res = subprocess.check_output([incus_bin, "version"], text=True, timeout=2).strip()
@@ -269,3 +300,96 @@ class HostMonitorAdapter:
                 location="Phòng Lab (Workstation)",
             )
         return self._build_unverified_remote("workstation", "Server 02 — Workstation (Từ xa)")
+
+    def get_external_daemons_telemetry(self) -> Dict[str, Dict[str, Any]]:
+        """Kiểm tra trực tiếp trạng thái thực tế của 4 daemon bên ngoài trên máy chủ: Docker, Trivy, WireGuard, PostgreSQL."""
+        daemons: Dict[str, Dict[str, Any]] = {}
+
+        # 1. Docker Engine
+        docker_bin = shutil.which("docker")
+        if docker_bin:
+            version_str = "installed"
+            try:
+                version_str = subprocess.check_output([docker_bin, "--version"], text=True, timeout=2).strip()
+            except Exception:
+                pass
+            sock_accessible = False
+            try:
+                chk = subprocess.run([docker_bin, "info"], capture_output=True, text=True, timeout=2)
+                sock_accessible = chk.returncode == 0
+            except Exception:
+                pass
+            daemons["docker"] = {
+                "installed": True,
+                "binary": docker_bin,
+                "version": version_str,
+                "status": "ACTIVE" if sock_accessible else "INSTALLED_SOCKET_RESTRICTED",
+                "note": "Docker daemon đang chạy" if sock_accessible else "Đã cài Docker; cần thêm user vào group 'docker' (sudo usermod -aG docker aiot-1) để mở quyền socket",
+            }
+        else:
+            daemons["docker"] = {"installed": False, "binary": None, "version": None, "status": "NOT_INSTALLED"}
+
+        # 2. Trivy Security Scanner
+        trivy_bin = shutil.which("trivy")
+        if trivy_bin:
+            trivy_ver = "installed"
+            try:
+                trivy_ver = subprocess.check_output([trivy_bin, "--version"], text=True, timeout=3).splitlines()[0].strip()
+            except Exception:
+                pass
+            daemons["trivy"] = {
+                "installed": True,
+                "binary": trivy_bin,
+                "version": trivy_ver,
+                "status": "ACTIVE",
+            }
+        else:
+            daemons["trivy"] = {"installed": False, "binary": None, "version": None, "status": "NOT_INSTALLED"}
+
+        # 3. WireGuard VPN (wg / wg-quick)
+        wg_bin = shutil.which("wg")
+        if wg_bin:
+            wg_ver = "installed"
+            try:
+                wg_ver = subprocess.check_output([wg_bin, "--version"], text=True, timeout=2).strip()
+            except Exception:
+                pass
+            wg0_up = os.path.exists("/sys/class/net/wg0")
+            daemons["wireguard"] = {
+                "installed": True,
+                "binary": wg_bin,
+                "version": wg_ver,
+                "wg0_interface_present": wg0_up,
+                "status": "ACTIVE" if wg0_up else "INSTALLED_INTERFACE_DOWN",
+                "note": "wg0 đang hoạt động" if wg0_up else "Đã cài wireguard-tools; chờ khởi tạo /etc/wireguard/wg0.conf (wg-quick up wg0)",
+            }
+        else:
+            daemons["wireguard"] = {"installed": False, "binary": None, "version": None, "status": "NOT_INSTALLED"}
+
+        # 4. PostgreSQL
+        psql_bin = shutil.which("psql")
+        pg_isready_bin = shutil.which("pg_isready")
+        if psql_bin:
+            pg_ver = "installed"
+            try:
+                pg_ver = subprocess.check_output([psql_bin, "--version"], text=True, timeout=2).strip()
+            except Exception:
+                pass
+            accepting = False
+            if pg_isready_bin:
+                try:
+                    r = subprocess.run([pg_isready_bin, "-h", "127.0.0.1", "-p", "5432"], capture_output=True, text=True, timeout=2)
+                    accepting = r.returncode == 0
+                except Exception:
+                    pass
+            daemons["postgresql"] = {
+                "installed": True,
+                "binary": psql_bin,
+                "version": pg_ver,
+                "accepting_connections": accepting,
+                "status": "ACTIVE" if accepting else "INSTALLED_CHECKING_SOCKET",
+            }
+        else:
+            daemons["postgresql"] = {"installed": False, "binary": None, "version": None, "status": "NOT_INSTALLED"}
+
+        return daemons

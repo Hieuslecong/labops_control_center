@@ -80,6 +80,17 @@ class WorkspaceController:
             json.dump(state, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.state_path)
 
+    def remove_workspace(self, owner: str) -> bool:
+        with self._locked():
+            state = self._load()
+            workspaces = state.get("workspaces", [])
+            initial_count = len(workspaces)
+            state["workspaces"] = [w for w in workspaces if w.get("owner") != owner]
+            if len(state["workspaces"]) != initial_count:
+                self._save(state)
+                return True
+            return False
+
     def list_workspaces(self, owner: Optional[str] = None, legacy_endpoints: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         state = self._load()
         items = list(state.get("workspaces", []))
@@ -134,6 +145,8 @@ class WorkspaceController:
                 raise WorkspaceSecurityError("MOUNT_PATH_FORBIDDEN", f"Đường dẫn mount '{norm}' bị cấm bởi chính sách cách ly.", 403)
             if norm.startswith("/tank/workspaces/") and norm != f"/tank/workspaces/{owner}" and not norm.startswith(f"/tank/workspaces/{owner}/"):
                 raise WorkspaceSecurityError("CROSS_MEMBER_MOUNT_FORBIDDEN", "Cấm gắn thư mục lưu trữ của thành viên khác.", 403)
+            if norm.startswith("/media/LabOps-Data/users/") and norm != f"/media/LabOps-Data/users/{owner}" and not norm.startswith(f"/media/LabOps-Data/users/{owner}/"):
+                raise WorkspaceSecurityError("CROSS_MEMBER_MOUNT_FORBIDDEN", "Cấm gắn thư mục lưu trữ của thành viên khác trong /media/LabOps-Data/users.", 403)
         if not ssh_public_key or not SSH_PUBKEY_RE.match(ssh_public_key.strip()):
             raise WorkspaceSecurityError("SSH_PUBKEY_REQUIRED", "Bắt buộc cung cấp khóa công khai OpenSSH hợp lệ cho workspace.", 400)
         if not (1 <= int(cpu_cores) <= 48) or not (1024 <= int(ram_mb) <= 131072) or not (64 <= int(pids_limit) <= 32768):

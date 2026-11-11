@@ -35,6 +35,19 @@ class WireGuardAdapter:
             self.server_configs = server_configs if server_configs is not None else json.loads(raw_config or "{}")
         except json.JSONDecodeError as exc:
             raise WireGuardError("WIREGUARD_SERVERS_JSON is invalid") from exc
+
+        # Tự động nạp cấu hình Rack server chính thức nếu chưa có trong biến môi trường
+        rack_pub = os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY", "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=")
+        rack_endpoint = os.getenv("LABOPS_WG_ENDPOINT", "118.70.169.236:2204")
+        if "track" not in self.server_configs:
+            self.server_configs["track"] = {
+                "server_public_key": rack_pub,
+                "server_endpoint": rack_endpoint,
+                "vpn_subnet": "10.88.30.0/24",
+                "server_vpn_ip": "10.88.30.1",
+                "client_allowed_ips": ["10.88.30.1/32", "192.168.167.250/32"],
+                "interface": self.interface,
+            }
         self.peers_file = os.path.join(self.data_dir, "wireguard_peers.json")
         self.lock_file = os.path.join(self.data_dir, "wireguard_peers.lock")
         self.peers: Dict[str, Dict[str, Any]] = self._load_peers()
@@ -167,7 +180,8 @@ class WireGuardAdapter:
         live_addresses: Optional[List[str]] = None,
     ) -> str:
         cfg = self._server(server_id)
-        used = {str(ipaddress.ip_address(cfg["_server_ip"]))}
+        # Giữ nguyên IP 10.88.30.1 cho Rack Server và 10.88.30.2 cho Admin MacBook hiện có
+        used = {str(ipaddress.ip_address(cfg["_server_ip"])), "10.88.30.1", "10.88.30.2"}
         for peer in self.peers.values():
             if peer.get("server_id") == server_id and peer.get("client_ip"):
                 used.add(peer["client_ip"])
@@ -186,9 +200,12 @@ class WireGuardAdapter:
                 raise WireGuardError("A live WireGuard peer has an invalid AllowedIPs route")
             if network.version == cfg["_network"].version and network.overlaps(cfg["_network"]):
                 live_networks.append(network)
+        # Cấp phát IP động bắt đầu từ host thứ 3 trở đi (.3 -> .254)
         for address in cfg["_network"].hosts():
+            if str(address) in used:
+                continue
             host_route = ipaddress.ip_network(f"{address}/{cfg['_network'].max_prefixlen}")
-            if str(address) not in used and not any(network.overlaps(host_route) for network in live_networks):
+            if not any(network.overlaps(host_route) for network in live_networks):
                 return str(address)
         raise WireGuardError(f"No WireGuard IPs remain for '{server_id}'")
 

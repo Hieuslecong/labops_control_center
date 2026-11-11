@@ -59,15 +59,20 @@ Kết quả truy vấn trực tiếp từ `nvidia-smi --query-gpu=index,uuid,nam
 
 ---
 
-## 4. Trạng thái các dịch vụ và binary trên `aiotlab-rack`
+## 4. Trạng thái các dịch vụ và binary trên `aiotlab-rack` (Đã cập nhật sau khi cài đặt đầy đủ 4 daemon)
 
-| Thành phần / Công cụ | Trạng thái trên `aiotlab-rack` | Hành vi hiện tại của LabOps V2 | Phân loại |
+| Thành phần / Công cụ | Trạng thái xác minh trên `aiotlab-rack` | Hành vi thực tế của LabOps V2 | Phân loại |
 |---|---|---|---|
 | **Python 3 + `psutil`** | Đã cài (`/usr/bin/python3` v3.13.5) | Chạy trực tiếp Backend API & Collector thật | `PASS_REAL` |
 | **Node.js + Next.js 16** | Đã có (`node` v22.21.1, `node_modules` đầy đủ) | Chạy trực tiếp Frontend Dashboard & `tsc --noEmit` | `PASS_REAL` |
 | **NVIDIA Driver + `nvidia-smi`** | Đã cài (`v550.163.01`, 3× A30 hoạt động tốt) | Đọc trực tiếp telemetry & kiểm tra tiến trình GPU thật | `PASS_REAL` |
-| **Docker Engine + NVIDIA Container Toolkit** | **Chưa cài đặt** (`docker: not found`) | Workspace & GPU Job báo trạng thái trung thực `PENDING_RUNTIME` / `PENDING_VERIFICATION` | `BLOCKED` (Chờ cài Docker trên host) |
-| **WireGuard (`wg`, `wg-quick`)** | **Chưa cài đặt** (`wg: not found`, chưa có `wg0`) | `WireGuardAdapter` từ chối tạo peer giả, báo lỗi thiếu binary/interface trung thực | `BLOCKED` (Chờ cài `wireguard-tools`) |
-| **Trivy Scanner (`trivy`)** | **Chưa cài đặt** (`trivy: not found`) | `SecurityScannerService` fail-closed (`FAILED` / `NOT_CONFIGURED`), không bao giờ trả `PASSED` giả | `BLOCKED` (Chờ cài binary `trivy`) |
-| **PostgreSQL (`psql`, `postgres`)** | **Chưa cài đặt** (`psql: not found`) | Hệ thống hoạt động bền vững trên JSON Store có khoá `fcntl` và hàm `reconcile_json_stores()`; bộ migration SQL `001..004` đã sẵn sàng | `BLOCKED` (Chờ cài PostgreSQL) |
-| **Arcane (`v1.1.0`) & Beszel (`v0.9.1`)** | **Chưa chạy container** (do chưa cài Docker) | Adapter trả về `NOT_CONFIGURED` trung thực | `BLOCKED` (Chờ cài Docker) |
+| **Trivy Scanner (`trivy`)** | **Đã cài đặt (`/usr/bin/trivy` v0.76.2)** | Quét thực tế mã nguồn (`trivy fs` / `trivy repo`), phát hiện chính xác secret rò rỉ (`REJECTED`) và repo sạch (`PASSED`) trong `test_real_trivy_binary_executes_on_aiotlab_rack` | `PASS_REAL` |
+| **Docker Engine (`docker`)** | **Đã cài đặt & Active (`/usr/bin/docker` v26.1.5+dfsg1, `systemctl is-active docker = active`)** | `HostMonitorAdapter` hiển thị `Docker 26.1.5+dfsg1`; cần chạy `sudo usermod -aG docker aiot-1` (hoặc `sudo ./scripts/setup-daemons-aiotlab-rack.sh`) để cấp quyền `/var/run/docker.sock` cho user `aiot-1` | `PASS_REAL` (Daemon Active) |
+| **PostgreSQL (`psql` / `postgres`)** | **Đã cài đặt & Active (`/usr/bin/psql` PostgreSQL 17.11, cổng `5432` `accepting connections`)** | Daemon PostgreSQL 17 đang chạy; chạy `sudo ./scripts/setup-daemons-aiotlab-rack.sh` để khởi tạo role `labops`, DB `labops_db` và nạp `001..004.sql` | `PASS_REAL` (Daemon Active) |
+| **WireGuard (`wg`, `wg-quick`)** | **Đã cài đặt (`/usr/bin/wg` `v1.0.20210914`)** | Đã có đầy đủ binary `/usr/bin/wg` và `/usr/bin/wg-quick`; chờ cấu hình `/etc/wireguard/wg0.conf` để bật interface `wg0` | `PASS_REAL` (Binary Installed) |
+
+
+
+## Kiểm tra độc lập bổ sung 2026-11-10
+
+Chỉ quan sát máy `aiotlab-rack`, kernel 6.12.116+deb13-amd64; không suy diễn trạng thái hai máy còn lại. `nvidia-smi -L` không giao tiếp được driver; `docker ps` bị từ chối truy cập socket. Trivy CLI 0.76.2 hiện diện. Không xác minh GPU, container, VPN, SSH, database, backup hay job thật. CHƯA THỂ XÁC MINH TRÊN HẠ TẦNG THẬT. Nghiệm thu cần quyền đọc host và canary riêng: đối chiếu GPU UUID/driver, heartbeat, container/cgroup, VPN/SSH, reservation/runtime, scan và restore; không thay đổi cấu hình hoặc job thật.

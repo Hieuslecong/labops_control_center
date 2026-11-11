@@ -80,15 +80,43 @@ export type MemberStatus =
   | 'CREATED'
   | 'PROVISIONING'
   | 'PENDING_PROVISIONING'
+  | 'VERIFYING'
+  | 'READY'
+  | 'NOT_VERIFIED'
+  | 'NOT_ENFORCEABLE'
   | 'PARTIAL_FAILURE'
   | 'PENDING_KEY_ENROLLMENT'
+  | 'PENDING_REVOKE'
+  | 'VERIFIED_REVOKED'
+  | 'FAILED'
   | 'ACTIVE'
   | 'SUSPENDED'
   | 'PROVISIONING_FAILED'
   | 'ARCHIVED'
   | 'DELETED';
-export type SshStatus = 'ONLINE' | 'OFFLINE' | 'PARTIAL_FAILURE' | 'NOT_VERIFIED';
-export type SshKeyEnrollmentStatus = 'PENDING_KEY_ENROLLMENT' | 'ACTIVE' | 'ROTATING' | 'REVOKED' | 'NOT_CONFIGURED';
+export type SshStatus =
+  | 'ONLINE'
+  | 'OFFLINE'
+  | 'READY'
+  | 'READY_PENDING_RUNTIME'
+  | 'VERIFYING'
+  | 'NOT_ENFORCEABLE'
+  | 'PENDING_REVOKE'
+  | 'VERIFIED_REVOKED'
+  | 'FAILED'
+  | 'PARTIAL_FAILURE'
+  | 'NOT_VERIFIED';
+export type SshKeyEnrollmentStatus =
+  | 'PENDING_KEY_ENROLMENT'
+  | 'PENDING_KEY_ENROLLMENT'
+  | 'PENDING_SYNC'
+  | 'PENDING_REVOKE'
+  | 'VERIFIED_REVOKED'
+  | 'FAILED'
+  | 'ACTIVE'
+  | 'ROTATING'
+  | 'REVOKED'
+  | 'NOT_CONFIGURED';
 
 export interface StoragePool {
   id: string;
@@ -146,8 +174,16 @@ export interface SshCredential {
   expiresAt?: string;
 }
 
-export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD' | 'TELEPORT_CERTIFICATE_PENDING';
-export type SshPasswordStatus = 'ACTIVE' | 'CHANGE_REQUIRED' | 'LOCKED' | 'EXPIRED' | 'NOT_APPLICABLE';
+export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD' | 'OPENSSH_PUBLIC_KEY' | 'TELEPORT_CERTIFICATE_PENDING';
+export type SshPasswordStatus =
+  | 'ACTIVE'
+  | 'CHANGE_REQUIRED'
+  | 'TEMP_PASSWORD_EXPIRED'
+  | 'REVOKED'
+  | 'LOCKED'
+  | 'EXPIRED'
+  | 'LEGACY_NOT_VERIFIED'
+  | 'NOT_APPLICABLE';
 export type SshAccessStatus = 'ACTIVE' | 'SUSPENDED' | 'LOCKED';
 
 export interface SshLoginEvent {
@@ -202,16 +238,41 @@ export interface PrivilegeValidationResult {
 
 export interface WireGuardDevice {
   deviceId: string;
+  id?: string;
+  external_id?: number | string;
+  provider?: string;
   name: string;
-  publicKey: string;
-  clientIp: string;
-  serverId: ServerId;
-  serverPublicKey: string;
-  serverEndpoint: string;
-  allowedSubnets: string;
-  status: 'ACTIVE' | 'PENDING_HANDSHAKE' | 'REVOKED' | 'PARTIAL_FAILURE';
-  createdAt?: number;
-  lastHandshake?: number | null;
+  publicKey?: string;
+  public_key?: string;
+  clientIp?: string;
+  vpn_ip?: string;
+  serverId?: ServerId;
+  serverPublicKey?: string;
+  serverEndpoint?: string;
+  allowedSubnets?: string;
+  status: 'ACTIVE' | 'PENDING_HANDSHAKE' | 'REVOKED' | 'DISABLED' | 'PARTIAL_FAILURE';
+  enabled?: boolean;
+  createdAt?: number | string;
+  created_at?: string;
+  lastHandshake?: number | string | null;
+  last_handshake?: number | string | null;
+  transferRx?: number;
+  transferTx?: number;
+  transfer_rx?: number;
+  transfer_tx?: number;
+}
+
+export interface WireGuardVpnOverview {
+  active_provider: string;
+  status: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | string;
+  public_endpoint: string;
+  cidr: string;
+  total_clients: number;
+  active_clients: number;
+  total_rx_bytes: number;
+  total_tx_bytes: number;
+  web_ui_internal?: string;
+  legacy_interface?: string;
 }
 
 export interface WireGuardProfile {
@@ -283,6 +344,27 @@ export interface LabMember {
   createdAt: string;
   expiresAt?: string;
   lastLoginAt?: string;
+  workspaceDir?: string;
+  tempPasswordExpiresAt?: string;
+  runtimeVerification?: {
+    verified_at?: string;
+    host_online?: boolean;
+    directory_isolation?: string;
+    ssh_key_installed?: string;
+    privilege_isolation?: string;
+    cpu_ram_limits?: string;
+    storage_quota?: string;
+    gpu_isolation?: string;
+    ssh_runtime?: string;
+    overall_status?: string;
+    reasons?: string[];
+  };
+  oneTimePackage?: {
+    key_bundle_available?: boolean;
+    key_bundle_expires_at?: string;
+    channel_secrets_available?: boolean;
+    channel_secrets_expires_at?: string;
+  };
 }
 
 export type JobStatus = 'RUNNING' | 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';

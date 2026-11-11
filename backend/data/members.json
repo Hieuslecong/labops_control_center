@@ -1,40 +1,36 @@
 [
   {
-    "id": "mem-59d520",
-    "full_name": "Test Researcher",
-    "username": "test_wg_user",
-    "email": "test_wg@lab.ai",
+    "id": "mem-0226d821478c",
+    "full_name": "testacc",
+    "username": "testacc",
+    "email": "testacc@lab.ai.vn",
     "role": "RESEARCHER",
     "research_group": "AI Research Lab",
-    "assigned_server": "workstation",
-    "workspace_name": "ws-test_wg_user",
+    "assigned_server": "track",
+    "workspace_name": "ws-testacc",
     "status": "PENDING_PROVISIONING",
-    "wireguard": {
-      "public_key": "WquMg5z0FtGnH1HEFl2+fg+6RWY8nnUH7QN+3VMa1wg=",
-      "status": "NOT_VERIFIED",
-      "last_handshake": null,
-      "transfer_rx_bytes": 0,
-      "transfer_tx_bytes": 0
-    },
-    "storage_pool_id": "pool-workstation-ssd",
-    "storage_pool_label": "SSD Doanh nghiệp — Storage Pool A",
+    "provisioning_state": "NOT_ENFORCEABLE",
+    "workspace_status": "NOT_ENFORCEABLE",
+    "teleport_status": "NOT_CONFIGURED",
+    "storage_pool_id": "pool-root",
+    "storage_pool_label": "Ổ đĩa Hệ thống (EXT4 /dev/sda2)",
     "mount_path": "/workspace",
-    "storage_quota_gb": 250,
+    "storage_quota_gb": 1,
     "storage_used_gb": 0.0,
-    "backup_policy": "DAILY_SNAPSHOT",
+    "backup_policy": "NONE",
     "shared_datasets": [
       "/shared/datasets"
     ],
-    "ssh_status": "NOT_VERIFIED",
+    "ssh_status": "NOT_ENFORCEABLE",
     "ssh_sessions_count": 0,
-    "ssh_ip": "10.200.0.2",
-    "ssh_port": 22002,
-    "ssh_key_status": "NOT_CONFIGURED",
-    "ssh_fingerprint": "CHƯA_ĐĂNG_KÝ_KHÓA",
-    "ssh_public_key_preview": "(Đang chờ nạp khóa)",
-    "ssh_public_key": null,
-    "ssh_auth_mode": "PUBLIC_KEY_AND_PASSWORD",
-    "password_status": "LEGACY_NOT_VERIFIED",
+    "ssh_ip": "192.168.167.250",
+    "ssh_port": 22001,
+    "ssh_key_status": "ACTIVE",
+    "ssh_fingerprint": "SHA256:/FUjLcur5b+KyuMmQNqMK11h5vLnXBi9Mh9f5qam6ig",
+    "ssh_public_key_preview": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6G+w...",
+    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM6G+wSEuxyVJ6B0o2mq6cwZMXJlajUI5NiGdiERwLwe testacc@ws-testacc",
+    "ssh_auth_mode": "OPENSSH_PUBLIC_KEY",
+    "password_status": "CHANGE_REQUIRED",
     "failed_login_attempts": 0,
     "last_successful_login": null,
     "last_login_source_ip": null,
@@ -46,85 +42,75 @@
       "no_sudo_group_membership": true,
       "no_docker_socket_access": true,
       "no_incus_socket_access": true,
-      "verification_timestamp": "2026-11-04T19:25:34.565636Z",
-      "status": "NOT_VERIFIED"
+      "verification_timestamp": "2026-11-11T02:26:16.996277+00:00",
+      "status": "VERIFIED_SAFE"
     },
-    "cpu_limit_cores": 8,
-    "ram_limit_gb": 32,
-    "gpu_permissions": [],
+    "cpu_limit_cores": 4,
+    "ram_limit_gb": 16,
+    "gpu_permissions": [
+      "rack-gpu-01"
+    ],
     "vram_policy": "Quota 12GB (Shared)",
-    "vram_quota_gb": 12,
-    "gpu_allocation_mode": "SHARED",
+    "vram_quota_gb": 2,
+    "gpu_allocation_mode": "EXCLUSIVE",
     "max_runtime_hours": 48,
     "active_jobs_count": 0,
     "total_gpu_hours": 0.0,
-    "created_at": "2026-11-04",
-    "expires_at": null,
-    "legacy_access_status": "ACTIVE_UNVERIFIED",
-    "provisioning_state": "LEGACY_ACCESS_RETAINED_UNVERIFIED",
-    "workspace_status": "NOT_VERIFIED",
-    "teleport_status": "NOT_CONFIGURED"
-  },
-  {
-    "id": "mem-1",
-    "full_name": "Lê Cảnh Hiếu",
-    "username": "hieulc",
-    "email": "hieulc@lab.ai.vn",
-    "role": "SUPER_ADMIN",
-    "research_group": "NLP & Large Language Models",
-    "assigned_server": "track",
-    "workspace_name": "ws-hieulc",
-    "status": "PENDING_PROVISIONING",
-    "storage_pool_id": "pool-nvme-fast",
-    "storage_pool_label": "SSD NVMe Siêu tốc (Pool A)",
-    "mount_path": "/workspace",
-    "storage_quota_gb": 500,
-    "storage_used_gb": 182,
-    "backup_policy": "DAILY_SNAPSHOT",
-    "shared_datasets": [
-      "/shared/datasets",
-      "/data/models"
-    ],
-    "ssh_status": "READY_PENDING_RUNTIME",
-    "ssh_sessions_count": 0,
-    "ssh_ip": "10.200.0.1",
-    "ssh_port": 22001,
-    "ssh_key_status": "ACTIVE",
-    "ssh_fingerprint": "SHA256:36OeaovE3RPQwXzyJ7Rz8QwxTUw7yBLgms0fyhvYq8w",
-    "ssh_public_key_preview": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+H8...",
-    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+H8q9v8nZ+u8d/2X8s6mXvYq9s7t6r5e4w3q2a1s0 canary@aiotlab-rack",
-    "sudo_privilege": "DENIED",
-    "security_isolation_level": "NOT_VERIFIED",
-    "privilege_validation": {
-      "unprivileged_container": true,
-      "sudo_test_failed_as_expected": true,
-      "no_sudo_group_membership": true,
-      "no_docker_socket_access": true,
-      "no_incus_socket_access": true,
-      "verification_timestamp": "2024-01-15T08:00:00Z",
-      "status": "NOT_VERIFIED"
+    "created_at": "2026-11-11",
+    "expires_at": "2026-11-11",
+    "wireguard": {
+      "status": "NOT_CONFIGURED",
+      "devices": [
+        {
+          "device_id": "dev-133",
+          "external_id": 133,
+          "provider": "wg-easy",
+          "name": "Thiết bị chính",
+          "client_ip": "10.88.40.37",
+          "vpn_ip": "10.88.40.37",
+          "public_key": "11L68TGJ9E2WK4JFoHRe0BVN9Ue7OVJYkPhP6eVYsW8=",
+          "server_id": "track",
+          "server_public_key": "eFdcakifjJ4sfTxdk4BTT1QH3v9qmbIGC8OmfdQNhn0=",
+          "server_endpoint": "118.70.169.236:2204",
+          "allowed_subnets": "10.88.40.0/24",
+          "status": "ACTIVE",
+          "enabled": true,
+          "enrolled_at": "2026-11-11T02:26:18.240840+00:00",
+          "last_handshake": "2026-11-11T02:32:53.000Z",
+          "transfer_rx": 1005008,
+          "transfer_tx": 1252092
+        }
+      ],
+      "client_ip": "10.88.40.37",
+      "vpn_ip": "10.88.40.37",
+      "public_key": "11L68TGJ9E2WK4JFoHRe0BVN9Ue7OVJYkPhP6eVYsW8=",
+      "server_endpoint": "118.70.169.236:2204",
+      "allowed_subnets": "10.88.40.0/24, 192.168.167.250/32"
     },
-    "cpu_limit_cores": 16,
-    "ram_limit_gb": 64,
-    "gpu_permissions": [
-      "track-gpu-01",
-      "track-gpu-02",
-      "track-gpu-03"
-    ],
-    "vram_policy": "Full 24GB (Shared)",
-    "vram_quota_gb": 24,
-    "gpu_allocation_mode": "SHARED",
-    "max_runtime_hours": 72,
-    "active_jobs_count": 1,
-    "total_gpu_hours": 342.5,
-    "created_at": "2024-01-15",
-    "expires_at": "2027-01-15",
-    "legacy_access_status": "ACTIVE_UNVERIFIED",
-    "provisioning_state": "SSH_KEY_ENROLLED",
-    "workspace_status": "PENDING_VERIFICATION",
-    "teleport_status": "NOT_CONFIGURED",
-    "password_status": "LEGACY_NOT_VERIFIED",
-    "ssh_auth_mode": "OPENSSH_PUBLIC_KEY"
+    "temp_password_expires_at": "2026-11-12T02:34:05.789739+00:00",
+    "workspace_dir": "/home/aiot-1/admin_labops_control_center/backend/data/workspaces/track/testacc",
+    "runtime_verification": {
+      "verified_at": "2026-11-11T02:26:16.996277+00:00",
+      "host_online": true,
+      "directory_isolation": "VERIFIED",
+      "ssh_key_installed": "VERIFIED",
+      "privilege_isolation": "VERIFIED",
+      "cpu_ram_limits": "NOT_VERIFIED",
+      "storage_quota": "NOT_ENFORCEABLE",
+      "gpu_isolation": "VERIFIED",
+      "ssh_runtime": "VERIFIED",
+      "reasons": [
+        "Container 'ws-testacc' chưa chạy trên Docker runtime nên giới hạn 4 CPU / 16 GB RAM chỉ mới được cấu hình, chưa có hiệu lực kernel cgroup.",
+        "Filesystem thực tế là 'ext4' không bật project quota cho thư mục không đặc quyền; hạn mức 1 GB chỉ được giám sát, chưa cưỡng chế bởi filesystem."
+      ],
+      "overall_status": "NOT_ENFORCEABLE"
+    },
+    "one_time_package": {
+      "key_bundle_available": false,
+      "key_bundle_expires_at": null,
+      "channel_secrets_available": false,
+      "channel_secrets_expires_at": null
+    }
   },
   {
     "id": "mem-2",
@@ -180,7 +166,17 @@
     "provisioning_state": "LEGACY_ACCESS_RETAINED_UNVERIFIED",
     "workspace_status": "NOT_VERIFIED",
     "teleport_status": "NOT_CONFIGURED",
-    "password_status": "LEGACY_NOT_VERIFIED"
+    "password_status": "LEGACY_NOT_VERIFIED",
+    "one_time_package": {
+      "key_bundle_available": false,
+      "key_bundle_expires_at": null,
+      "channel_secrets_available": false,
+      "channel_secrets_expires_at": null
+    },
+    "wireguard": {
+      "devices": [],
+      "status": "NOT_CONFIGURED"
+    }
   },
   {
     "id": "mem-3",
@@ -236,7 +232,17 @@
     "provisioning_state": "LEGACY_ACCESS_RETAINED_UNVERIFIED",
     "workspace_status": "NOT_VERIFIED",
     "teleport_status": "NOT_CONFIGURED",
-    "password_status": "LEGACY_NOT_VERIFIED"
+    "password_status": "LEGACY_NOT_VERIFIED",
+    "one_time_package": {
+      "key_bundle_available": false,
+      "key_bundle_expires_at": null,
+      "channel_secrets_available": false,
+      "channel_secrets_expires_at": null
+    },
+    "wireguard": {
+      "devices": [],
+      "status": "NOT_CONFIGURED"
+    }
   },
   {
     "id": "mem-4",
@@ -292,6 +298,16 @@
     "provisioning_state": "LEGACY_ACCESS_RETAINED_UNVERIFIED",
     "workspace_status": "NOT_VERIFIED",
     "teleport_status": "NOT_CONFIGURED",
-    "password_status": "LEGACY_NOT_VERIFIED"
+    "password_status": "LEGACY_NOT_VERIFIED",
+    "one_time_package": {
+      "key_bundle_available": false,
+      "key_bundle_expires_at": null,
+      "channel_secrets_available": false,
+      "channel_secrets_expires_at": null
+    },
+    "wireguard": {
+      "devices": [],
+      "status": "NOT_CONFIGURED"
+    }
   }
 ]

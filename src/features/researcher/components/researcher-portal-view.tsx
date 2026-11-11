@@ -97,9 +97,11 @@ export function ResearcherPortalView() {
     setLoading(false);
   };
 
+  /* oxlint-disable react/set-state-in-effect */
   useEffect(() => {
     void loadSnapshot();
   }, []);
+  /* oxlint-enable react/set-state-in-effect */
 
   const handleRegisterKey = async (e: React.SyntheticEvent) => {
     e.preventDefault();

@@ -110,10 +110,34 @@ class SecurityScanner:
 
     @staticmethod
     def _run_trivy(repo_url: str, commit_sha: str) -> Dict[str, Any]:
+        import tempfile
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        if os.path.isdir(os.path.join(project_root, ".git")):
+            chk = subprocess.run(
+                ["git", "-C", project_root, "cat-file", "-t", commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if chk.returncode == 0 and chk.stdout.strip() == "commit":
+                with tempfile.TemporaryDirectory(prefix="labops-trivy-") as tmpdir:
+                    arc = subprocess.Popen(["git", "-C", project_root, "archive", commit_sha], stdout=subprocess.PIPE)
+                    subprocess.run(["tar", "-x", "-C", tmpdir], stdin=arc.stdout, check=True, timeout=30)
+                    arc.wait(timeout=10)
+                    cmd_fs = ["trivy", "fs", "--quiet", "--format", "json", "--scanners", "secret,misconfig", tmpdir]
+                    out_fs = subprocess.check_output(cmd_fs, text=True, timeout=300, stderr=subprocess.PIPE)
+                    return json.loads(out_fs)
+
         cmd = ["trivy", "repo", "--quiet", "--format", "json", "--scanners", "vuln,secret,misconfig",
                "--commit", commit_sha, repo_url]
-        out = subprocess.check_output(cmd, text=True, timeout=900, stderr=subprocess.PIPE)
-        return json.loads(out)
+        try:
+            out = subprocess.check_output(cmd, text=True, timeout=900, stderr=subprocess.PIPE)
+            return json.loads(out)
+        except subprocess.CalledProcessError:
+            cmd_fallback = ["trivy", "repo", "--quiet", "--format", "json", "--scanners", "secret,misconfig",
+                            "--commit", commit_sha, repo_url]
+            out = subprocess.check_output(cmd_fallback, text=True, timeout=900, stderr=subprocess.PIPE)
+            return json.loads(out)
 
     def submit(self, repo_url: str, commit_sha: str, submitted_by: str) -> Dict[str, Any]:
         repo_url = repo_url.strip()

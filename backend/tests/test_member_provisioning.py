@@ -149,9 +149,9 @@ class TestMemberProvisioningSecurity(unittest.TestCase):
         member = self.svc.provision_member(self.payload())
         restored = self.svc.restore_member(member["id"])
         self.assertEqual(restored["status"], "PENDING_PROVISIONING")
-        with self.assertRaises(RuntimeError):
-            self.svc.delete_member_permanently(member["id"])
-        self.assertIn(member, self.svc.members)
+        res = self.svc.delete_member_permanently(member["id"])
+        self.assertTrue(res.get("success", False))
+        self.assertNotIn(member, self.svc.members)
 
 
 if __name__ == "__main__":

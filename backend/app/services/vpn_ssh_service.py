@@ -127,7 +127,7 @@ class SshKeyRegistry:
             if not is_admin and rec["username"] != actor:
                 raise PermissionError("Bạn không sở hữu khóa SSH này")
             rec["desired_state"] = "REVOKED"
-            rec["observed_state"] = "REVOKED"
-            rec["revoked_at"] = _now()
+            rec["observed_state"] = "PENDING_REVOKE"
+            rec["revoke_requested_at"] = _now()
             rec["revoked_by"] = actor
             return dict(rec)

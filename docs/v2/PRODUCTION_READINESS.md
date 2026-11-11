@@ -64,3 +64,8 @@ Dưới đây là quy trình cài đặt và lệnh nghiệm thu cho quản tr�
 ### 2.5. Kết nối 2 máy Workstation từ xa (1× NVIDIA A30 còn lại)
 - **Hiện trạng:** Mới chỉ có máy `aiotlab-rack` (`track` — 3× NVIDIA A30) đang chạy cục bộ.
 - **Cách nghiệm thu:** Chạy `labops-node-agent` trên 2 máy Workstation gửi heartbeat kèm `X-Node-Agent-Token` về `http://192.168.167.250:8000/api/v1/v2/hosts/heartbeat`, sau đó kiểm tra `/api/v1/v2/hosts` chuyển sang `ONLINE` và tổng số GPU toàn phòng Lab đạt `4× NVIDIA A30`.
+
+
+## Đánh giá độc lập bổ sung 2026-11-10
+
+**Chưa đủ bằng chứng để bàn giao production.** Các trở ngại gồm phạm vi dữ liệu jobs theo researcher, audit actor từ header, reservation lưu JSON cục bộ thay vì PostgreSQL, thiếu kiểm thử API thực và không xác minh được driver GPU/Docker runtime. Cần kiểm tra thêm migration và phục hồi database, SSH/VPN, backup/restore, scan, tích hợp và cách ly trên canary được phép. Báo cáo cũ không thay thế bằng chứng chạy lại trên môi trường hiện tại.

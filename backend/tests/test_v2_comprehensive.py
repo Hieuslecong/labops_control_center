@@ -155,7 +155,7 @@ class TestV2ModulesAndSecurity(unittest.TestCase):
 
         # Alice tự thu hồi khóa của mình thành công
         revoked = reg.revoke_key(k["id"], actor="alice", is_admin=False)
-        self.assertEqual(revoked["observed_state"], "REVOKED")
+        self.assertEqual(revoked["observed_state"], "PENDING_REVOKE")
 
     # 6. Researcher Portal data isolation
     def test_researcher_portal_strictly_scopes_data_per_user(self):
@@ -174,6 +174,8 @@ class TestV2ModulesAndSecurity(unittest.TestCase):
     # 7. Real Host (aiotlab-rack) 3x NVIDIA A30 Inventory & Canary Reservation/Release
     def test_real_host_aiotlab_rack_gpu_inventory_and_canary_reservation(self):
         import shutil
+        if os.environ.get("LABOPS_TEST_REAL_HARDWARE") != "1":
+            self.skipTest("set LABOPS_TEST_REAL_HARDWARE=1 on an authorized GPU host")
         if not shutil.which("nvidia-smi"):
             self.skipTest("BLOCKED: nvidia-smi not available")
         svc = LabOpsDataService(demo_mode=False, data_dir=self.data_dir)

@@ -1,15 +1,5 @@
 [
   {
-    "id": "ep-1",
-    "member_id": "mem-1",
-    "server_id": "track",
-    "listen_address": "10.200.0.1",
-    "listen_port": 22001,
-    "container_port": 22,
-    "protocol": "tcp",
-    "status": "ACTIVE"
-  },
-  {
     "id": "ep-2",
     "member_id": "mem-2",
     "server_id": "track",
@@ -40,13 +30,43 @@
     "status": "ACTIVE"
   },
   {
-    "id": "ep-400d7d",
-    "member_id": "mem-59d520",
-    "server_id": "workstation",
-    "listen_address": "10.200.0.2",
-    "listen_port": 22002,
+    "id": "ep-ce640f86",
+    "member_id": "mem-e68b9cda1b86",
+    "server_id": "track",
+    "listen_address": "192.168.167.250",
+    "listen_port": 22004,
     "container_port": 22,
     "protocol": "tcp",
-    "status": "ACTIVE"
+    "status": "RESERVED"
+  },
+  {
+    "id": "ep-f56802d0",
+    "member_id": "mem-4564c90b89f4",
+    "server_id": "track",
+    "listen_address": "192.168.167.250",
+    "listen_port": 22005,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "RESERVED"
+  },
+  {
+    "id": "ep-70356551",
+    "member_id": "mem-2475db0b1115",
+    "server_id": "track",
+    "listen_address": "127.0.0.1",
+    "listen_port": 22006,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "RESERVED"
+  },
+  {
+    "id": "ep-91ba4829",
+    "member_id": "mem-0226d821478c",
+    "server_id": "track",
+    "listen_address": "192.168.167.250",
+    "listen_port": 22001,
+    "container_port": 22,
+    "protocol": "tcp",
+    "status": "RESERVED"
   }
 ]

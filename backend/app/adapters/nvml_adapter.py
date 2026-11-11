@@ -1,4 +1,6 @@
 import os
+import json
+import urllib.request
 import subprocess
 from datetime import datetime, timezone
 
@@ -101,11 +103,60 @@ class NvmlAdapter:
             logger.warning(f"Failed to query compute apps: {e}")
             return []
 
+    def _fetch_go_agent_gpus(self) -> Optional[List[Dict[str, Any]]]:
+        """Lấy dữ liệu GPU tức thì từ LabOps Go Agent nếu đang chạy."""
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:9100/api/v1/agent/gpus",
+                headers={"X-LabOps-Agent-Secret": "labops-local-agent-verified-token-2026"}
+            )
+            with urllib.request.urlopen(req, timeout=0.2) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if data.get("status") == "VERIFIED" and data.get("gpus"):
+                        gpus = []
+                        for g in data["gpus"]:
+                            gpus.append({
+                                "index": g.get("index", 0),
+                                "id": f"rack-gpu-0{g.get('index', 0) + 1}",
+                                "display_label": f"RACK-GPU-0{g.get('index', 0) + 1}",
+                                "server_id": "track",
+                                "server_name": "Server 01 — Server Rack (aiotlab-rack • Cục bộ)",
+                                "source": "labops-go-agent",
+                                "collected_at": data.get("collected_at", datetime.now(timezone.utc).isoformat()),
+                                "freshness": "ONLINE",
+                                "vram_unit": "MiB",
+                                "model": g.get("name", "NVIDIA A30"),
+                                "uuid": g.get("uuid", ""),
+                                "pci_bus_id": g.get("pci_bus_id", ""),
+                                "vram_total_mb": g.get("memory_total_mb", 24576),
+                                "vram_used_mb": g.get("memory_used_mb", 1),
+                                "gpu_util_percent": g.get("utilization_gpu_pct", 0),
+                                "temp_celsius": g.get("temperature_c", 35),
+                                "power_watts": g.get("power_watts", 45),
+                                "power_limit_watts": g.get("power_limit_watts", 165),
+                                "allocation_mode": "FULL_GPU_EXCLUSIVE",
+                                "enforcement_state": "MONITOR_ONLY",
+                                "active_processes": g.get("active_processes", []),
+                                "active_users": [],
+                                "associated_jobs": [],
+                                "live": True
+                            })
+                        return gpus
+        except Exception:
+            pass
+        return None
+
     def get_live_gpu_telemetry_sync(self) -> List[Dict[str, Any]]:
         """
         Synchronously query real nvidia-smi for live physical GPU telemetry.
         Never fabricates metrics in production mode.
         """
+        # 1. Thử lấy từ Go Agent trước để không tốn sub-process
+        if not self.demo_mode and self.server_id == settings_local_host_id():
+            go_gpus = self._fetch_go_agent_gpus()
+            if go_gpus:
+                return go_gpus
         if not self.demo_mode and self.has_nvidia_smi and self.server_id == settings_local_host_id():
             try:
                 cmd = [

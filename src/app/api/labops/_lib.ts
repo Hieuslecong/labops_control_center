@@ -93,9 +93,17 @@ export async function proxyLabOps(
       },
       ...(body ? { body } : {})
     });
+    const forwardHeaders: Record<string, string> = {
+      'Content-Type': response.headers.get('Content-Type') || 'application/json',
+      'Cache-Control': 'no-store, no-cache, must-revalidate'
+    };
+    const contentDisp = response.headers.get('Content-Disposition');
+    if (contentDisp) {
+      forwardHeaders['Content-Disposition'] = contentDisp;
+    }
     return new Response(response.body, {
       status: response.status,
-      headers: { 'Content-Type': response.headers.get('Content-Type') || 'application/json' }
+      headers: forwardHeaders
     });
   } catch {
     return NextResponse.json({ detail: 'Backend LabOps (cổng 8000) hiện không phản hồi' }, { status: 502 });

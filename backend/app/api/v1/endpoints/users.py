@@ -5,12 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.dependencies import require_labops_admin
 from app.schemas.labops import MemberCreateRequest, MemberResponse, WireGuardDeviceCreateRequest
 from app.services.labops_service import service
+from app.services.workspace_controller import WorkspaceSecurityError
 
 router = APIRouter(dependencies=[Depends(require_labops_admin)])
 
 
 @router.get("", response_model=List[MemberResponse])
 async def list_members():
+    for m in service.members:
+        m["one_time_package"] = service.ssh_access_manager.vault.get_availability(m.get("id", ""))
     return service.members
 
 
@@ -19,6 +22,7 @@ async def get_member(user_id: str):
     member = next((item for item in service.members if item["id"] == user_id), None)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+    member["one_time_package"] = service.ssh_access_manager.vault.get_availability(member.get("id", ""))
     return member
 
 
@@ -123,6 +127,8 @@ async def create_member(payload: MemberCreateRequest, actor: str = Depends(requi
         return service.provision_member(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except WorkspaceSecurityError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
 
 
 @router.put("/{user_id}/status")
@@ -139,5 +145,14 @@ async def update_member_status(user_id: str, payload: Dict[str, str], actor: str
 
 
 @router.delete("/{user_id}")
-async def disabled_permanent_delete(user_id: str):
-    raise HTTPException(status_code=410, detail="Permanent deletion is disabled; user data and workspace volumes are retained")
+async def delete_user(
+    user_id: str,
+    actor: str = Depends(require_labops_admin),
+):
+    try:
+        result = service.delete_member_permanently(user_id, actor=actor)
+        return {"success": True, "id": user_id, "result": result}
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi xóa tài khoản: {exc}") from exc

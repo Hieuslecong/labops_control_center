@@ -55,3 +55,24 @@
 | **5. Cấp phát GPU đang có tiến trình bên ngoài chiếm dụng** | Giả lập `nvidia-smi` có tiến trình unmanaged PID đang sử dụng VRAM trên GPU mục tiêu | Scheduler từ chối cấp phát và báo rõ GPU đang có tiến trình bên ngoài sử dụng | `PASS_AUTOMATED` |
 | **6. Mount đường dẫn nguy hiểm khi tạo Workspace** | Gửi request tạo workspace kèm `/var/run/docker.sock`, `/etc/shadow`, hoặc thư mục của thành viên khác | `WorkspaceController` ném `WorkspaceValidationError` (`400 Bad Request`) ngay lập tức | `PASS_REAL` |
 | **7. Gửi SSH Private Key thay vì Public Key** | Gửi chuỗi chứa `-----BEGIN OPENSSH PRIVATE KEY-----` vào `/api/v1/v2/ssh-keys` | `VPNSSHService` từ chối ngay lập tức với mã `400 Bad Request` | `PASS_REAL` |
+
+
+
+## Kiểm tra độc lập bổ sung 2026-11-10
+
+Commit `b423baa3fb29bb1e27b8972fea4cdaeb059fbbbc`, branch `feature/labops-control-center`; working tree có thay đổi từ trước. `python3 -m unittest discover -s backend/tests -v`: 55 test, 1 thất bại, 6 skipped. Test GPU thật giả định 3 GPU nhưng driver không phản hồi. Các test service sử dụng fixture hoặc telemetry giả không chứng minh runtime. Node/Bun và FastAPI/pytest không có trong PATH/môi trường Python, nên build, typecheck và FastAPI integration chưa chạy.
+
+| Nhóm | Kết quả | Bằng chứng / giới hạn |
+|---|---|---|
+| Auth/RBAC | PARTIAL | Test token và ownership cấp hàm pass; HTTP/FastAPI bị skip. |
+| Dashboard, hosts, GPU | BLOCKED | `nvidia-smi -L` lỗi driver; không xác minh GPU. |
+| Thành viên, workspace, SSH, WireGuard | NOT_VERIFIED | Có test service giả lập; chưa kiểm tra runtime/canary. |
+| Arcane, Beszel | NOT_VERIFIED | Test trạng thái chưa cấu hình dùng adapter giả lập. |
+| Scheduler, jobs, GPU-hours | PARTIAL | Test reservation giả lập pass; scheduler lưu JSON, chưa xác minh runtime hoặc PostgreSQL. |
+| Trivy | PARTIAL | CLI phiên bản 0.76.2 có sẵn; chưa chạy pipeline repo thực. |
+| Storage, backup, restore, alerts, audit, maintenance | NOT_VERIFIED | Chưa có nghiệm thu runtime/restore. |
+| Researcher portal | PARTIAL | Test service cô lập SSH key; chưa kiểm tra API đầu-cuối. |
+| Database/migrations | NOT_VERIFIED | Chưa kết nối hoặc kiểm thử migration. |
+| Tiếng Việt, accessibility, responsive | NOT_VERIFIED | Chưa chạy trình duyệt. |
+
+Các kết quả PASS_REAL trong báo cáo cũ chưa được xác nhận lại trong lần kiểm tra này.

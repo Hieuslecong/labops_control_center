@@ -112,3 +112,14 @@ Dưới đây là danh sách các lỗi thực tế được phát hiện trong 
 - **Test đã chạy lại:**
   - `python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_*.py' -v` -> `Ran 68 tests in 12.696s — OK`.
 - **Trạng thái:** `FIXED & VERIFIED`
+
+
+
+## Kiểm tra độc lập bổ sung 2026-11-10
+
+- P1: `/jobs` và `/jobs/active` lọc theo tham số client nhưng không theo principal; researcher có thể nhận danh sách job của người khác nếu service chứa dữ liệu đó. Bằng chứng: `backend/app/api/v1/endpoints/jobs.py`, router yêu cầu user trong `api.py`. Chưa test HTTP do thiếu FastAPI; chưa sửa.
+- P1: Scheduler dùng JSON và khóa file cục bộ (`gpu_scheduler.py`), không phải reservation PostgreSQL; không chứng minh độc quyền giữa các host/replica. Chưa sửa.
+- P2: Test `test_real_host_aiotlab_rack_gpu_inventory_and_canary_reservation` mặc định giả định 3 GPU khi chỉ kiểm tra có binary nvidia-smi; trên môi trường này thất bại vì driver không phản hồi. Chưa sửa.
+- P1: Audit legacy lấy actor từ header client với admin token (`api/dependencies.py`); actor không được xác thực độc lập. Chưa sửa.
+
+Không sửa code trong đợt kiểm tra chưa hoàn tất này; cần test hồi quy và phân tích tác động trước khi sửa.

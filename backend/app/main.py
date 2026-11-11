@@ -13,6 +13,7 @@ if backend_dir not in sys.path:
 from app.core.config import settings
 from app.core.security import AuthError, principal_from_authorization, require_node_agent, require_role
 from app.services.gpu_scheduler import GpuScheduler, SchedulerError
+from app.services.job_access import visible_jobs
 from app.services.workspace_controller import WorkspaceSecurityError
 from app.services.labops_service import service
 
@@ -168,6 +169,10 @@ def _format_member(m: Dict[str, Any]) -> Dict[str, Any]:
     res["totalGpuHours"] = m.get("total_gpu_hours", m.get("totalGpuHours", 0.0))
     res["createdAt"] = m.get("created_at", m.get("createdAt", ""))
     res["expiresAt"] = m.get("expires_at", m.get("expiresAt"))
+    res["workspaceDir"] = m.get("workspace_dir", m.get("workspaceDir"))
+    res["tempPasswordExpiresAt"] = m.get("temp_password_expires_at", m.get("tempPasswordExpiresAt"))
+    res["runtimeVerification"] = m.get("runtime_verification", m.get("runtimeVerification"))
+    res["oneTimePackage"] = service.ssh_access_manager.vault.get_availability(m.get("id", ""))
     return res
 
 class LabOpsRequestHandler(BaseHTTPRequestHandler):
@@ -362,7 +367,7 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             srv_id = query_params.get("server_id", [None])[0] or query_params.get("server", [None])[0]
             search_q = query_params.get("search", [None])[0]
 
-            filtered = service.jobs
+            filtered = visible_jobs(service.jobs, principal)
             if srv_id and srv_id != "all":
                 filtered = [j for j in filtered if j.get("serverId") == srv_id or j.get("server_id") == srv_id]
             if uname and uname != "all":
@@ -393,6 +398,79 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, service.events)
         elif path == "/api/v1/audit-logs":
             self._send_json(200, service.audit_logs)
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/status"):
+            member_id = path.split("/")[5]
+            try:
+                status = service.get_member_ssh_access_status(member_id)
+                if not principal.is_admin and status["username"] != principal.username:
+                    self._send_json(403, {"detail": "Bạn chỉ được xem thông tin truy cập SSH của chính mình"})
+                    return
+                self._send_json(200, status)
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/download-zip"):
+            member_id = path.split("/")[5]
+            try:
+                status = service.get_member_ssh_access_status(member_id)
+                if not principal.is_admin and status["username"] != principal.username:
+                    self._send_json(403, {"detail": "Chỉ admin hoặc chủ tài khoản mới được tải gói kết nối"})
+                    return
+                filename, zip_bytes = service.claim_member_access_zip(member_id, actor=principal.username)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Length", str(len(zip_bytes)))
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(zip_bytes)
+                return
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+            except Exception as e:
+                self._send_json(500, {"detail": f"Lỗi khi đóng gói file ZIP: {e}"})
+        elif path == "/api/v1/v2/vpn/overview":
+            self._send_json(200, service.get_vpn_system_overview())
+        elif path == "/api/v1/v2/vpn/devices":
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên mới được xem toàn bộ thiết bị VPN"})
+                return
+            self._send_json(200, service.list_all_vpn_devices())
+        elif path.startswith("/api/v1/v2/members/") and path.endswith("/devices"):
+            member_id = path.split("/")[5]
+            member = service._find_member(member_id)
+            if not member:
+                self._send_json(404, {"detail": "Không tìm thấy thành viên"})
+                return
+            if not principal.is_admin and member.get("username") != principal.username:
+                self._send_json(403, {"detail": "Bạn chỉ được xem thiết bị của chính mình"})
+                return
+            self._send_json(200, service.get_member_devices_synced(member["id"]))
+        elif path.startswith("/api/v1/v2/members/") and "/devices/" in path and path.endswith("/config"):
+            parts = path.split("/")
+            member_id = parts[5]
+            device_id = parts[7]
+            member = service._find_member(member_id)
+            if not member:
+                self._send_json(404, {"detail": "Không tìm thấy thành viên"})
+                return
+            if not principal.is_admin and member.get("username") != principal.username:
+                self._send_json(403, {"detail": "Chỉ admin hoặc chủ sở hữu mới có quyền lấy cấu hình"})
+                return
+            try:
+                conf_text = service.get_member_device_config(member["id"], device_id)
+                data_bytes = conf_text.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Disposition", f'attachment; filename="{member["username"]}-{device_id}.conf"')
+                self.send_header("Content-Length", str(len(data_bytes)))
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(data_bytes)
+                return
+            except Exception as e:
+                self._send_json(404, {"detail": str(e)})
         else:
             self._send_json(404, {"detail": f"Path '{path}' not found"})
 
@@ -561,8 +639,151 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, service.stop_job(job_id, actor=principal.username, is_admin=principal.is_admin))
             except SchedulerError as e:
                 self._send_json(e.http_status, {"detail": {"code": e.code, "message": e.message}})
+        elif path == "/api/v1/v2/ssh-access/provision":
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép tạo quyền truy cập SSH"})
+                return
+            try:
+                body["_actor_id"] = principal.username
+                created = service.provision_member_ssh_access(body)
+                self._send_json(200, _format_member(created))
+            except ValueError as e:
+                self._send_json(400, {"detail": str(e)})
+            except WorkspaceSecurityError as e:
+                self._send_json(e.http_status, {"detail": e.message})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/claim-key-bundle"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép tải gói khóa riêng"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                self._send_json(200, service.claim_member_key_bundle(member_id, actor=principal.username))
+            except LookupError as e:
+                self._send_json(410, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/claim-secrets"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép nhận passphrase và mật khẩu tạm"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                self._send_json(200, service.claim_member_secrets(member_id, actor=principal.username))
+            except LookupError as e:
+                self._send_json(410, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/rotate-key"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép cấp lại cặp khóa SSH"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                rotated = service.rotate_member_ssh_keypair(member_id, actor=principal.username)
+                self._send_json(200, _format_member(rotated))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/reissue-temp-password"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép cấp lại mật khẩu tạm"})
+                return
+            member_id = path.split("/")[5]
+            ttl = int(body.get("ttl_seconds", 86400))
+            try:
+                self._send_json(200, service.reissue_member_temp_password(member_id, actor=principal.username, ttl_seconds=ttl))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/revoke"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép thu hồi quyền SSH"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                self._send_json(200, service.revoke_member_ssh_access(member_id, actor=principal.username))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/terminate-sessions"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép đóng các phiên SSH đang mở"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                self._send_json(200, service.terminate_member_ssh_sessions(member_id, actor=principal.username, confirm=bool(body.get("confirm", False))))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+            except ValueError as e:
+                self._send_json(400, {"detail": str(e)})
+        elif path == "/api/v1/v2/ssh-access/first-login-change-password":
+            target_user = str(body.get("username") or principal.username).strip()
+            if not principal.is_admin and target_user != principal.username:
+                self._send_json(403, {"detail": "Bạn chỉ được đổi mật khẩu của chính mình"})
+                return
+            try:
+                self._send_json(200, service.change_member_first_login_password(
+                    username=target_user,
+                    temporary_password=str(body.get("temporary_password") or body.get("temporaryPassword") or ""),
+                    new_password=str(body.get("new_password") or body.get("newPassword") or ""),
+                ))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+            except ValueError as e:
+                self._send_json(400, {"detail": str(e)})
+            except PermissionError as e:
+                self._send_json(403, {"detail": str(e)})
+        elif path == "/api/v1/v2/ssh-access/verify-login":
+            target_user = str(body.get("username") or principal.username).strip()
+            if not principal.is_admin and target_user != principal.username:
+                self._send_json(403, {"detail": "Bạn chỉ được kiểm tra đăng nhập của chính mình"})
+                return
+            try:
+                self._send_json(200, service.verify_member_workspace_password(
+                    username=target_user,
+                    password=str(body.get("password") or ""),
+                ))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+            except PermissionError as e:
+                self._send_json(403, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/members/") and path.endswith("/devices"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên mới được đăng ký thiết bị"})
+                return
+            member_id = path.split("/")[5]
+            dev_name = str(body.get("name") or body.get("device_name") or "New Device").strip()
+            try:
+                self._send_json(200, service.add_member_device(member_id, dev_name, actor=principal.username))
+            except Exception as e:
+                self._send_json(400, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/members/") and "/devices/" in path and path.endswith("/toggle"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên mới được bật/tắt thiết bị"})
+                return
+            parts = path.split("/")
+            member_id = parts[5]
+            device_id = parts[7]
+            enable = bool(body.get("enable", True))
+            try:
+                self._send_json(200, service.toggle_member_device(member_id, device_id, enable=enable, actor=principal.username))
+            except Exception as e:
+                self._send_json(400, {"detail": str(e)})
         else:
             self._send_json(404, {"detail": f"POST path '{path}' not found"})
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        principal = self._authenticate(path)
+        if principal is None:
+            return
+        if path.startswith("/api/v1/v2/members/") and "/devices/" in path:
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên mới được thu hồi thiết bị"})
+                return
+            parts = path.split("/")
+            member_id = parts[5]
+            device_id = parts[7]
+            try:
+                self._send_json(200, service.revoke_member_device_v2(member_id, device_id, actor=principal.username))
+            except Exception as e:
+                self._send_json(400, {"detail": str(e)})
+            return
+        self._send_json(404, {"detail": f"DELETE path '{path}' not found"})
 
     def log_message(self, format, *args):
         # Clean logging
@@ -579,6 +800,8 @@ def run_server(host="0.0.0.0", port=8000):
         except ImportError:
             pass
 
+    if not settings.DEMO_MODE:
+        raise RuntimeError("FastAPI và Uvicorn là bắt buộc ngoài chế độ demo; HTTP fallback bị vô hiệu hóa")
     print(f"🚀 Khởi chạy LabOps Control Center API (Built-in Threading HTTP Engine) trên http://{host}:{port}")
     server = ThreadingHTTPServer((host, port), LabOpsRequestHandler)
     try:

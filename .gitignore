@@ -70,4 +70,11 @@ graphify-out/
 # LabOps runtime locks & cache
 backend/data/*.lock
 backend/data/*.tmp
+backend/data/workspaces/
 graphify-out/
+
+# Client VPN and binary packages
+*.conf
+*.zip
+bin/
+

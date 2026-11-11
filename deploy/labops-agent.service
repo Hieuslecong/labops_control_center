@@ -1,0 +1,25 @@
+[Unit]
+Description=LabOps Go Node Agent (High-Performance Real-Time System Telemetry)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=aiot-1
+Group=docker
+WorkingDirectory=/home/aiot-1/admin_labops_control_center
+ExecStart=/home/aiot-1/admin_labops_control_center/bin/labops-agent
+Restart=always
+RestartSec=3
+EnvironmentFile=-/home/aiot-1/admin_labops_control_center/deploy/labops-agent.env
+
+# Bảo mật Systemd Sandbox
+LimitNOFILE=65536
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+ReadWritePaths=/home/aiot-1/admin_labops_control_center
+
+[Install]
+WantedBy=multi-user.target
+

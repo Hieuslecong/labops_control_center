@@ -53,3 +53,9 @@ Theo đúng yêu cầu kiểm toán bảo mật:
   1. Workspace mount thư mục code ở chế độ chỉ đọc (`read-only`), và
   2. Container/Host chặn quyền ghi hoặc chặn kết nối mạng ra ngoài đối với thư mục thực thi.
 - Cảnh báo này được gắn trực tiếp trong trường `limitation_notice` của mọi bản ghi scan để Admin và Researcher nắm rõ, không gây hiểu lầm về khả năng bảo vệ tuyệt đối.
+
+
+
+## Kiểm tra độc lập bổ sung 2026-11-10
+
+`unittest` xác nhận ở cấp hàm: token sửa chữ ký/vai trò và token hết hạn bị từ chối; researcher không qua require_role ADMIN và ownership khác bị từ chối. Đây không phải kiểm thử FastAPI hay production. Các test HTTP bị skip do sandbox không mở listener; FastAPI không cài. `backend/app/api/v1/endpoints/jobs.py` trả danh sách `service.jobs` cho mọi principal được xác thực mà không lọc owner: nguy cơ lộ thông tin job giữa researcher; chưa xác minh qua HTTP. `require_labops_admin` chấp nhận `X-LabOps-Actor` do client gửi làm actor khi biết token admin tĩnh, do đó audit actor không phải danh tính đã xác minh. Cần kiểm thử và sửa cùng các đường gọi BFF trước khi triển khai.

@@ -1862,7 +1862,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   stopProcess: async (ref: string, reason = 'Admin yêu cầu dừng tiến trình', terminateTree = true) => {
     try {
-      const res = await fetch(`/api/v1/processes/${encodeURIComponent(ref)}/stop`, {
+      const res = await fetch(`/api/labops/processes/${encodeURIComponent(ref)}/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason, terminate_tree: terminateTree, timeout_seconds: 10 })
@@ -1881,7 +1881,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   killProcess: async (ref: string, reason = 'Admin yêu cầu buộc dừng tiến trình', killTree = true) => {
     try {
-      const res = await fetch(`/api/v1/processes/${encodeURIComponent(ref)}/kill`, {
+      const res = await fetch(`/api/labops/processes/${encodeURIComponent(ref)}/kill`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason, force_confirmed: true, kill_tree: killTree })

@@ -72,3 +72,4 @@
 1. **Không rò rỉ bất kỳ thông tin quản trị nào:** Menu Admin bị loại bỏ ngay từ phía Server Component, không render mã HTML và không dùng mẹo ẩn CSS.
 2. **Hỗ trợ Sub-routes & URL trực tiếp:** Nghiên cứu viên có thể bookmark hoặc truy cập thẳng các sub-route `/connect`, `/workspace`, `/jobs` mà không bị lỗi 404.
 3. **Phản ánh đúng danh tính:** Hiển thị chính xác tên người dùng, username và avatar từ Clerk session thay vì thông tin hardcode.
+

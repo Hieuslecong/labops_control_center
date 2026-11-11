@@ -70,3 +70,4 @@
   * **Allocated Hours:** Tính từ lúc đăng ký đến lúc giải phóng.
   * **Verified Runtime Hours:** Được Go Agent và NVIDIA NVML xác thực có tiến trình tính toán.
   * **Idle Hold Hours:** Chênh lệch thời gian để phát hiện lãng phí GPU.
+

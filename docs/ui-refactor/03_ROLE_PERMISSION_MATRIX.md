@@ -50,3 +50,4 @@
 | Tạm dừng / Buộc dừng tiến trình (Kill) | `POST /api/v1/v2/processes/terminate` | Cho phép | Chặn (403) | Bắt buộc kiểm tra quyền Admin, ghi Audit log |
 | Tạm dừng / Buộc dừng cây tiến trình | `POST /api/v1/v2/processes/terminate-tree` | Cho phép | Chặn (403) | Bắt buộc kiểm tra quyền Admin, ghi Audit log |
 | Xóa vĩnh viễn tài khoản thành viên | `DELETE /api/v1/v2/members/{id}` | Cho phép | Chặn (403) | Xóa container, VPN peers, thư mục |
+

@@ -66,3 +66,4 @@
    * Chặn truy cập trái phép vào API Admin (403 Forbidden).
    * CORS và xác thực JWT Bearer token.
 5. `backend/tests/test_v2_monitoring.py`, `test_v2_host_registry.py`, `test_wireguard_provisioning.py`: **PASSED**.
+

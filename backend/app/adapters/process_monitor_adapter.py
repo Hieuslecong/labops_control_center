@@ -420,10 +420,13 @@ class ProcessMonitorAdapter:
     def get_active_compute_jobs(self, members_db: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
         Produce a list of active compute jobs in the standard LabOps ComputeJob format,
-        sourced directly from verified research processes.
+        sourced directly from verified member and research processes.
         """
-        proc_result = self.get_real_processes(filter_type="research")
+        proc_result = self.get_real_processes(filter_type="member")
         observations = proc_result.get("actual_observations", [])
+        if not observations:
+            proc_result_res = self.get_real_processes(filter_type="research")
+            observations = proc_result_res.get("actual_observations", [])
 
         ssh_res = self.get_real_ssh_sessions()
         active_ssh_users = {s.get("username") for s in ssh_res.get("actual_observations", [])}
@@ -453,7 +456,7 @@ class ProcessMonitorAdapter:
                 "full_name": full_name,
                 "script": p["script_display"],
                 "cmdline": p["cmdline"],
-                "workspace": p["workspace"],
+                "workspace": p.get("workspace") or f"ws-{uname}",
                 "serverId": self.server_id,
                 "server_id": self.server_id,
                 "serverName": p["server_name"],

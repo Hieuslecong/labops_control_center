@@ -38,11 +38,11 @@ export function JobsMonitoringView() {
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Fetch full processes list from /api/v1/processes
+  // Fetch full processes list from /api/labops/processes
   const fetchProcessesList = useCallback(async () => {
     try {
       setLoadingProcesses(true);
-      const res = await fetch('/api/v1/processes?classification=all').catch(() => null);
+      const res = await fetch('/api/labops/processes?classification=all').catch(() => null);
       if (res && res.ok) {
         const data = await res.json();
         const items = data.items || [];

@@ -102,7 +102,7 @@ export function ProcessTreeDialog({ job, open, onOpenChange }: ProcessTreeDialog
     setLoading(true);
     setError(null);
 
-    fetch(`/api/v1/processes/${encodeURIComponent(processRef)}/tree`)
+    fetch(`/api/labops/processes/${encodeURIComponent(processRef)}/tree`)
       .then(async (res) => {
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));

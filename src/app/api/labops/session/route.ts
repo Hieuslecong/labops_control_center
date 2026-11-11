@@ -108,3 +108,4 @@ export async function GET(request: Request) {
     return NextResponse.json({ authenticated: false, role: null, error: errorMsg }, { status: 500 });
   }
 }
+

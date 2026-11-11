@@ -353,7 +353,7 @@ class JobResponse(BaseSchema):
     full_name: str = Field(alias="fullName")
     server_id: str = Field(alias="serverId")
     server_name: Optional[str] = Field(None, alias="serverName")
-    workspace: str
+    workspace: Optional[str] = Field("default", alias="workspace")
     pid: int
     ppid: Optional[int] = Field(None, alias="ppid")
     script: str

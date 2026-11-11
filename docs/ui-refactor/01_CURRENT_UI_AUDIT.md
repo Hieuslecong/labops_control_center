@@ -61,3 +61,4 @@ Cần tiến hành tái cấu trúc toàn diện theo kiến trúc phòng thủ 
 3. Tách biệt hoàn toàn `adminNavGroups` (7 nhóm quản trị) và `researcherNavGroups` (4 nhóm nghiên cứu).
 4. Sửa logic header để tính toán trạng thái máy chủ dựa trên dữ liệu thật thu thập từ Go Node Agent.
 5. Hợp nhất các màn hình trùng lặp và tổ chức chi tiết thành viên thành 5 tabs rõ ràng.
+

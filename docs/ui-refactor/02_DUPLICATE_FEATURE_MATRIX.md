@@ -57,3 +57,4 @@ Toàn bộ quy trình quản trị vòng đời tài khoản được hợp nh�
 * Thời điểm handshake VPN gần nhất.
 * Lịch sử cấp phát SSH, đổi mật khẩu lần đầu.
 * Vân tay khóa công khai (Fingerprint SHA256).
+

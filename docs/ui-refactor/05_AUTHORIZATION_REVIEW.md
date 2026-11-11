@@ -55,3 +55,4 @@ Nay toàn bộ danh tính được cấp phát và kiểm chứng độc quyền
   * Các dịch vụ lõi như `labops-agent`, `uvicorn`, `next-server`, `dockerd`, `sshd` (port 1911) nằm trong danh sách bất khả xâm phạm.
 * **Audit Logging Bắt buộc:**
   Mọi thao tác can thiệp tiến trình, cấp phát khóa SSH hay thay đổi VPN đều tự động ghi nhật ký vào `audit_logs.json` kèm actor, target ref, kết quả và lý do.
+

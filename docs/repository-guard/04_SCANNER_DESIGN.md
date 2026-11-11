@@ -46,3 +46,4 @@ Mọi bản ghi quét đều gắn liền với bảng kê phạm vi quét (Cove
 ```
 
 Nếu `vulnerability_scan` bị lỗi hoặc bỏ qua, `overall_coverage` lập tức chuyển thành `INCOMPLETE` và chặn cơ chế tự động duyệt.
+

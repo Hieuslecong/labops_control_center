@@ -63,3 +63,4 @@ fi
 echo "✅ Đã kích hoạt Network Egress Policy thành công cho ${PILOT_CONTAINER} (${CONTAINER_IP})."
 echo "Thử nghiệm: bên trong container, lệnh 'git clone https://github.com/...' sẽ bị chặn."
 echo "Chỉ có thể nạp mã qua: 'labops clone <repo_url>'."
+

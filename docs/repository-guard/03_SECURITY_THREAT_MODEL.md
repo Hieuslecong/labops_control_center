@@ -36,3 +36,4 @@
 
 - **Rủi ro còn lại**: Nếu container được cấp quyền truy cập internet không giới hạn đến các dịch vụ chia sẻ tệp bên thứ 3 (ví dụ Google Drive, pastebin), người dùng vẫn có thể copy mã nguồn qua kênh phụ ngoài GitHub.
 - **Biện pháp khuyến nghị**: Mở rộng egress whitelist sang toàn bộ outbound traffic ở các giai đoạn tiếp theo (Stage E) sau khi hoàn tất giai đoạn Pilot.
+

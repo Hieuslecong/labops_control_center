@@ -34,9 +34,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def evaluate_policy(report: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_policy(report: Dict[str, Any], coverage: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     secrets = misconfig_high = 0
+    coverage = coverage or report.get("coverage") or {
+        "vulnerability_scan": "COMPLETED",
+        "secret_scan": "COMPLETED",
+        "misconfiguration_scan": "COMPLETED",
+        "overall_coverage": "POLICY_COMPLETE"
+    }
+
     for res in report.get("Results", []) or []:
         for v in res.get("Vulnerabilities", []) or []:
             sev = v.get("Severity", "LOW")
@@ -44,14 +51,38 @@ def evaluate_policy(report: Dict[str, Any]) -> Dict[str, Any]:
         secrets += len(res.get("Secrets", []) or [])
         misconfig_high += sum(1 for m in (res.get("Misconfigurations", []) or [])
                               if m.get("Severity") in ("HIGH", "CRITICAL"))
+
+    policy_reasons = []
+    if secrets > 0:
+        policy_reasons.append(f"Phát hiện {secrets} secrets/khóa bảo mật rò rỉ")
+    if counts["CRITICAL"] > 0:
+        policy_reasons.append(f"Phát hiện {counts['CRITICAL']} lỗ hổng mức CRITICAL")
+    if counts["HIGH"] > 0:
+        policy_reasons.append(f"Phát hiện {counts['HIGH']} lỗ hổng mức HIGH")
+    if misconfig_high > 0:
+        policy_reasons.append(f"Phát hiện {misconfig_high} cấu hình sai mức HIGH/CRITICAL")
+
+    is_complete = coverage.get("overall_coverage") == "POLICY_COMPLETE"
+    if not is_complete:
+        policy_reasons.append("Phạm vi kiểm duyệt chưa hoàn tất (Scan coverage incomplete: " +
+                              coverage.get("vulnerability_scan", "UNKNOWN") + ")")
+
     if secrets > 0 or counts["CRITICAL"] > 0:
         verdict = "REJECTED"
-    elif counts["HIGH"] > 0 or misconfig_high > 0:
+    elif not is_complete or counts["HIGH"] > 0 or misconfig_high > 0:
+        # FAIL-CLOSED: Không bao giờ auto-approve nếu scan coverage không hoàn chỉnh
         verdict = "REVIEW_REQUIRED"
     else:
         verdict = "PASSED"
-    return {"verdict": verdict, "vulnerabilities": counts, "secrets": secrets,
-            "misconfigurations_high": misconfig_high}
+
+    return {
+        "verdict": verdict,
+        "vulnerabilities": counts,
+        "secrets": secrets,
+        "misconfigurations_high": misconfig_high,
+        "coverage": coverage,
+        "policy_reasons": policy_reasons
+    }
 
 
 class SecurityScanner:
@@ -62,6 +93,23 @@ class SecurityScanner:
         self.runner = runner or self._run_trivy
         self.async_mode = async_mode
         os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+        self._recover_stale_jobs()
+
+    def _recover_stale_jobs(self) -> None:
+        """Durable queue recovery: phát hiện các bản quét bị treo khi restart server"""
+        def fn(st):
+            recovered = 0
+            for s in st.get("scans", []):
+                if s.get("state") in ("SUBMITTED", "FETCHING", "SCANNING", "POLICY_EVALUATION"):
+                    s["state"] = "FAILED"
+                    s["error"] = "PROCESS_INTERRUPTED: Tiến trình quét bị gián đoạn do máy chủ khởi động lại."
+                    s["updated_at"] = _now()
+                    recovered += 1
+            return recovered
+        try:
+            self._mutate(fn)
+        except Exception:
+            pass
 
     # ----- storage -----
     def _mutate(self, fn):
@@ -132,12 +180,33 @@ class SecurityScanner:
                "--commit", commit_sha, repo_url]
         try:
             out = subprocess.check_output(cmd, text=True, timeout=900, stderr=subprocess.PIPE)
-            return json.loads(out)
-        except subprocess.CalledProcessError:
-            cmd_fallback = ["trivy", "repo", "--quiet", "--format", "json", "--scanners", "secret,misconfig",
-                            "--commit", commit_sha, repo_url]
-            out = subprocess.check_output(cmd_fallback, text=True, timeout=900, stderr=subprocess.PIPE)
-            return json.loads(out)
+            data = json.loads(out)
+            data["coverage"] = {
+                "vulnerability_scan": "COMPLETED",
+                "secret_scan": "COMPLETED",
+                "misconfiguration_scan": "COMPLETED",
+                "submodules": "NOT_PRESENT",
+                "lfs": "NOT_PRESENT",
+                "overall_coverage": "POLICY_COMPLETE"
+            }
+            return data
+        except subprocess.CalledProcessError as err:
+            try:
+                cmd_fallback = ["trivy", "repo", "--quiet", "--format", "json", "--scanners", "secret,misconfig",
+                                "--commit", commit_sha, repo_url]
+                out = subprocess.check_output(cmd_fallback, text=True, timeout=900, stderr=subprocess.PIPE)
+                data = json.loads(out)
+                data["coverage"] = {
+                    "vulnerability_scan": f"FAILED (exit {err.returncode})",
+                    "secret_scan": "COMPLETED",
+                    "misconfiguration_scan": "COMPLETED",
+                    "submodules": "NOT_PRESENT",
+                    "lfs": "NOT_PRESENT",
+                    "overall_coverage": "INCOMPLETE"
+                }
+                return data
+            except Exception as e:
+                raise RuntimeError(f"Trivy scan failed: {err}") from e
 
     def submit(self, repo_url: str, commit_sha: str, submitted_by: str) -> Dict[str, Any]:
         repo_url = repo_url.strip()

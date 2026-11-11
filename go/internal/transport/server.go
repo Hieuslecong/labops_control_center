@@ -14,6 +14,7 @@ import (
 	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/process"
+	"github.com/Hieuslecong/labops_control_center/go/internal/repositoryguard"
 )
 
 // Server quản lý HTTP API cục bộ của Node Agent
@@ -24,6 +25,7 @@ type Server struct {
 	procCol    *process.Collector
 	procCtrl   *process.Controller
 	dockerCtrl *docker.Controller
+	repoGuard  *repositoryguard.GuardService
 	httpSrv    *http.Server
 	logger     *slog.Logger
 }
@@ -37,6 +39,11 @@ func NewServer(
 	dockerCtrl *docker.Controller,
 	logger *slog.Logger,
 ) *Server {
+	repoGuardSvc, err := repositoryguard.NewGuardService(cfg.RepoGuardDataDir)
+	if err != nil {
+		logger.Error("Không thể khởi tạo RepositoryGuard service", "err", err)
+	}
+
 	s := &Server{
 		cfg:        cfg,
 		hostCol:    hostCol,
@@ -44,6 +51,7 @@ func NewServer(
 		procCol:    procCol,
 		procCtrl:   process.NewController(procCol),
 		dockerCtrl: dockerCtrl,
+		repoGuard:  repoGuardSvc,
 		logger:     logger,
 	}
 
@@ -57,6 +65,11 @@ func NewServer(
 	mux.HandleFunc("/api/v1/agent/processes/kill", s.handleProcessKill)
 	mux.HandleFunc("/api/v1/agent/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("/api/v1/agent/telemetry/full", s.handleFullTelemetry)
+
+	if repoGuardSvc != nil {
+		repoHandler := repositoryguard.NewHTTPHandler(repoGuardSvc)
+		repoHandler.RegisterRoutes(mux)
+	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port)
 	s.httpSrv = &http.Server{

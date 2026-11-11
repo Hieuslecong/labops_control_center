@@ -16,7 +16,8 @@ from app.api.v1.endpoints import (
     monitoring,
     workspaces,
     processes,
-    v2_platform
+    v2_platform,
+    repositories
 )
 
 api_router = APIRouter()
@@ -36,6 +37,7 @@ api_router.include_router(audit.router, dependencies=[Depends(require_admin)], p
 api_router.include_router(monitoring.router, dependencies=[Depends(require_user)], prefix="/monitoring", tags=["Monitoring"])
 api_router.include_router(workspaces.router, dependencies=[Depends(require_admin)], prefix="/workspaces", tags=["Workspaces"])
 api_router.include_router(processes.router, dependencies=[Depends(require_user)], prefix="/processes", tags=["Processes"])
+api_router.include_router(repositories.router, dependencies=[Depends(require_user)], prefix="/repositories", tags=["Repositories"])
 
 
 api_router.include_router(v2_platform.router, prefix="/v2", tags=["V2 Platform"])

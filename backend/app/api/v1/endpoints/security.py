@@ -15,52 +15,11 @@ async def list_security_reviews(p: Principal = Depends(require_admin)):
 
 @router.post("/reviews", response_model=SecurityReviewResponse)
 async def submit_security_review(payload: Dict[str, str], p: Principal = Depends(require_admin)):
-    """Submit a GitHub repo to the isolated security sandbox for AST static analysis"""
-    if not service.demo_mode:
-        raise HTTPException(status_code=503, detail="Security scanner is not configured")
-    repo_url = payload.get("repo_url") or payload.get("repoUrl")
-    if not repo_url:
-        raise HTTPException(status_code=400, detail="Thiếu URL kho lưu trữ GitHub")
-
-    repo_name = repo_url.split("/")[-1].replace(".git", "")
-    new_id = f"sec-{uuid.uuid4().hex[:6]}"
-    new_review = {
-        "id": new_id,
-        "repo_url": repo_url,
-        "repo_name": repo_name,
-        "commit_sha": uuid.uuid4().hex[:12],
-        "submitted_by": payload.get("submitted_by", "hieulc"),
-        "submitted_at": "Vừa xong",
-        "status": "APPROVED",
-        "risk_score": 5,
-        "findings": {
-            "high": 0,
-            "medium": 0,
-            "low": 1,
-            "crypto_mining": False,
-            "suspicious_networking": False,
-            "privilege_escalation": False,
-            "verified_clean": True
-        },
-        "summary": "Kho lưu trữ đã vượt qua toàn bộ 8 bước kiểm duyệt sandbox an toàn.",
-        "reviewed_by": "Admin (Hệ thống)"
-    }
-    service.security_reviews.insert(0, new_review)
-
-    # Audit log
-    service.audit_logs.insert(0, {
-        "id": f"aud-{uuid.uuid4().hex[:6]}",
-        "actor": "admin@labops.local",
-        "action": "SECURITY_SCAN_PASSED",
-        "target_type": "REPOSITORY",
-        "target_id": repo_name,
-        "timestamp": "Vừa xong",
-        "result": "SUCCESS",
-        "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-        "details": f"Quét an ninh thành công kho mã {repo_url} (Điểm rủi ro: 5/100)"
-    })
-
-    return new_review
+    """Legacy endpoint: Không tạo kết quả APPROVED giả lập. Chuyển hướng sang V2 Scanner."""
+    raise HTTPException(
+        status_code=400,
+        detail="API legacy /reviews đã bị vô hiệu hóa vì không tạo kết quả kiểm duyệt thực tế. Vui lòng sử dụng /api/v1/security/scans hoặc Repository Guard."
+    )
 
 @router.post("/reviews/{review_id}/decision")
 async def update_security_review_decision(review_id: str, payload: Dict[str, str], p: Principal = Depends(require_admin)):

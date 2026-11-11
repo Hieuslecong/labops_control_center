@@ -20,20 +20,22 @@ type AgentConfig struct {
 	GPUInterval              time.Duration `json:"gpu_interval"`
 	ProcessInterval          time.Duration `json:"process_interval"`
 	IsContainerized          bool          `json:"is_containerized"`
+	RepoGuardDataDir         string        `json:"repo_guard_data_dir"`
 }
 
 // LoadFromEnv nạp cấu hình từ biến môi trường và phát hiện môi trường host thực tế.
 func LoadFromEnv() *AgentConfig {
 	cfg := &AgentConfig{
-		ServerID:        getEnv("LABOPS_SERVER_ID", "track"),
-		ServerName:      getEnv("LABOPS_SERVER_NAME", "Server 01 — Server Rack (aiotlab-rack • Cục bộ)"),
-		BindAddr:        getEnv("LABOPS_AGENT_BIND_ADDR", "127.0.0.1"),
-		Port:            getEnvInt("LABOPS_AGENT_PORT", 9100),
-		SecretToken:     getEnv("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026"),
-		DockerSocket:    getEnv("DOCKER_HOST", "/var/run/docker.sock"),
-		HostInterval:    5 * time.Second,
-		GPUInterval:     5 * time.Second,
-		ProcessInterval: 10 * time.Second,
+		ServerID:         getEnv("LABOPS_SERVER_ID", "track"),
+		ServerName:       getEnv("LABOPS_SERVER_NAME", "Server 01 — Server Rack (aiotlab-rack • Cục bộ)"),
+		BindAddr:         getEnv("LABOPS_AGENT_BIND_ADDR", "127.0.0.1"),
+		Port:             getEnvInt("LABOPS_AGENT_PORT", 9100),
+		SecretToken:      getEnv("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026"),
+		DockerSocket:     getEnv("DOCKER_HOST", "/var/run/docker.sock"),
+		HostInterval:     5 * time.Second,
+		GPUInterval:      5 * time.Second,
+		ProcessInterval:  10 * time.Second,
+		RepoGuardDataDir: getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/tmp/labops-repositoryguard"),
 	}
 
 	// Phát hiện hostname thực tế

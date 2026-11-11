@@ -65,11 +65,13 @@ backend/data/process_history.json
 # LabOps runtime locks
 backend/data/*.lock
 backend/data/*.tmp
+backend/data/security_scans.json
 graphify-out/
 
 # LabOps runtime locks & cache
 backend/data/*.lock
 backend/data/*.tmp
+backend/data/security_scans.json
 backend/data/workspaces/
 graphify-out/
 

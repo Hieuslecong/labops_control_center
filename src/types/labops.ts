@@ -420,7 +420,76 @@ export type SecurityReviewStatus =
   | 'MANUAL_REVIEW'
   | 'APPROVED'
   | 'REJECTED'
-  | 'REVOKED';
+  | 'REVOKED'
+  | 'AUTO_APPROVED'
+  | 'REVIEW_REQUIRED'
+  | 'MANUALLY_APPROVED'
+  | 'FAILED'
+  | 'DELIVERED';
+
+export interface RepositoryGuardFinding {
+  id: string;
+  type: string;
+  severity: string;
+  title: string;
+  target_file: string;
+  masked_value?: string;
+}
+
+export interface RepositoryGuardReport {
+  verdict: string;
+  coverage: {
+    vulnerability_scan: string;
+    secret_scan: string;
+    misconfiguration_scan: string;
+    overall_coverage: string;
+  };
+  vulnerabilities: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  secrets_count: number;
+  misconfig_high_count: number;
+  scorecard?: {
+    score: number;
+    status: string;
+    reasons?: string[];
+  };
+  policy_reasons: string[];
+  findings?: RepositoryGuardFinding[];
+  scanner_version: string;
+  db_version?: string;
+  scan_duration_ms: number;
+}
+
+export interface RepositoryGuardRequest {
+  id: string;
+  repo_url: string;
+  canonical_repo: string;
+  owner: string;
+  repo_name: string;
+  requested_ref: string;
+  commit_sha: string;
+  submitted_by: string;
+  target_workspace?: string;
+  submitted_at: string;
+  updated_at: string;
+  state: SecurityReviewStatus;
+  cache_hit: boolean;
+  artifact_digest?: string;
+  artifact_size_bytes?: number;
+  report?: RepositoryGuardReport;
+  decision?: {
+    verdict: string;
+    reviewer: string;
+    reviewed_at: string;
+    reason: string;
+  };
+  error?: string;
+  policy_version: string;
+}
 
 export interface SecurityReview {
   id: string;

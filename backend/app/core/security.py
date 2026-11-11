@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from app.core.config import settings
+
 ROLES = {"ADMIN", "RESEARCHER"}
 
 
@@ -50,7 +52,9 @@ def _b64d(s: str) -> bytes:
 
 
 def _secret() -> str:
-    return os.getenv("LABOPS_SESSION_SECRET", "")
+    if "LABOPS_SESSION_SECRET" in os.environ:
+        return os.environ["LABOPS_SESSION_SECRET"]
+    return getattr(settings, "LABOPS_SESSION_SECRET", "")
 
 
 def issue_token(username: str, role: str, member_id: Optional[str] = None, ttl: int = 3600,

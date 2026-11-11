@@ -2,6 +2,16 @@ import os
 import sys
 from typing import List
 
+# Load backend/.env if not in a test session
+if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
+    try:
+        from dotenv import load_dotenv
+        _backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env"))
+        if os.path.exists(_backend_env):
+            load_dotenv(_backend_env)
+    except ImportError:
+        pass
+
 try:
     from pydantic_settings import BaseSettings
 except ImportError:
@@ -48,6 +58,7 @@ class Settings(BaseSettings):
 
     # Local Machine Identification (auto-detects aiotlab-rack -> "track")
     LOCAL_HOST_ID: str = _detect_local_host_id()
+    LABOPS_SESSION_SECRET: str = os.getenv("LABOPS_SESSION_SECRET", "")
     LABOPS_ADMIN_API_TOKEN: str = os.getenv("LABOPS_ADMIN_API_TOKEN", "")
     LABOPS_NODE_AGENT_TOKEN: str = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
 

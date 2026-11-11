@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,7 +34,18 @@ from app.services.vpn_manager import VPNManager
 
 
 class TestVpnWgEasyIntegration(unittest.TestCase):
+    def _clean_dirs(self) -> None:
+        for u in ("multidev_user", "api_dev_user", "delete_u"):
+            p = f"/media/LabOps-Data/users/{u}"
+            if os.path.exists(p):
+                shutil.rmtree(p, ignore_errors=True)
+                if os.path.exists(p) and shutil.which("docker"):
+                    subprocess.run(["docker", "run", "--rm", "-v", "/media/LabOps-Data/users:/u", "alpine", "rm", "-rf", f"/u/{u}"], capture_output=True, timeout=10)
+            if shutil.which("docker"):
+                subprocess.run(["docker", "rm", "-f", f"ws-{u}"], capture_output=True, timeout=5)
+
     def setUp(self) -> None:
+        self._clean_dirs()
         self.tmpdir = tempfile.TemporaryDirectory(prefix="labops-vpn-test-")
         self.svc = LabOpsDataService(demo_mode=False, data_dir=self.tmpdir.name)
         self.admin_token = issue_token("admin_vpn", "ADMIN")
@@ -41,10 +53,7 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
-        for u in ("multidev_user", "api_dev_user", "delete_u"):
-            p = f"/media/LabOps-Data/users/{u}"
-            if os.path.exists(p):
-                shutil.rmtree(p, ignore_errors=True)
+        self._clean_dirs()
 
     def test_01_vpn_manager_overview_and_provider_resolution(self) -> None:
         """Kiểm tra tổng quan hệ thống VPN và độ phân giải provider."""

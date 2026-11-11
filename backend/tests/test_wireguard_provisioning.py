@@ -1,10 +1,15 @@
 import base64
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
 from unittest.mock import patch
+
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
 
 from app.adapters.wireguard_adapter import WireGuardAdapter, WireGuardError
 from app.services.labops_service import LabOpsDataService

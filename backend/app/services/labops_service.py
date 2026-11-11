@@ -1131,6 +1131,91 @@ class LabOpsDataService:
         return {"success": r["state"] in {"RELEASED", "STOP_REQUESTED"}, "state": r["state"],
                 "verification": verification, "reservation": r}
 
+    def list_processes(
+        self,
+        server_id: Optional[str] = None,
+        classification: Optional[str] = None,
+        username: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        gpu_id: Optional[str] = None,
+        search: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách tiến trình chi tiết từ Go Node Agent kết hợp danh bạ thành viên."""
+        filter_type = "all"
+        if classification:
+            if classification == "RESEARCH_JOB":
+                filter_type = "research"
+            elif classification == "GPU_PROCESS":
+                filter_type = "gpu"
+            elif classification == "SYSTEM_PROCESS":
+                filter_type = "system"
+            elif classification == "MEMBER_PROCESS":
+                filter_type = "member"
+
+        res = self.process_monitor.get_real_processes(filter_type=filter_type)
+        obs = res.get("actual_observations", [])
+
+        member_lookup = {m.get("username", ""): m for m in self.members}
+
+        items = []
+        for p in obs:
+            u = p.get("username", "")
+            m = member_lookup.get(u, {})
+            p_copy = dict(p)
+            p_copy["member_id"] = m.get("id") or (f"user-{u}" if u else None)
+            p_copy["full_name"] = m.get("full_name") or (f"Người dùng @{u}" if u else "Hệ thống")
+            p_copy["avatar"] = m.get("avatar") or f"https://api.dicebear.com/7.x/avataaars/svg?seed={u}"
+            items.append(p_copy)
+
+        if server_id and server_id != "all":
+            items = [x for x in items if x.get("host_id") == server_id or x.get("server_id") == server_id]
+        if username and username != "all":
+            items = [x for x in items if x.get("username") == username]
+        if workspace_id and workspace_id != "all":
+            items = [x for x in items if x.get("workspace") == workspace_id or x.get("container_id") == workspace_id]
+        if gpu_id and gpu_id != "all":
+            items = [x for x in items if str(x.get("gpu_index")) == str(gpu_id) or x.get("gpu_id") == gpu_id]
+        if search:
+            q = search.lower()
+            items = [
+                x for x in items
+                if q in str(x.get("pid", "")).lower()
+                or q in str(x.get("name", "")).lower()
+                or q in str(x.get("cmdline", "")).lower()
+                or q in str(x.get("username", "")).lower()
+                or q in str(x.get("workspace", "")).lower()
+            ]
+
+        return items
+
+    def get_process_tree(self, ref: str) -> Dict[str, Any]:
+        """Lấy cây tiến trình đầy đủ."""
+        return self.process_monitor.get_process_tree(ref)
+
+    def terminate_process(self, ref: str, timeout_seconds: int = 10, terminate_tree: bool = True, actor: str = "admin", is_admin: bool = True) -> Dict[str, Any]:
+        """Dừng an toàn tiến trình (SIGTERM) với thời gian ân hạn."""
+        if not is_admin:
+            raise PermissionError("Chỉ quản trị viên (Admin) mới có quyền dừng tiến trình")
+        try:
+            res = self.process_monitor.terminate_process(ref, timeout_seconds=timeout_seconds, terminate_tree=terminate_tree)
+            self._audit(actor, "PROCESS_SIGTERM", "PROCESS", ref, res.get("status", "SUCCESS"), f"Dừng an toàn {ref} (PID {res.get('pid')})")
+            return res
+        except Exception as e:
+            self._audit(actor, "PROCESS_SIGTERM", "PROCESS", ref, "FAILED", str(e))
+            raise
+
+    def kill_process(self, ref: str, force: bool = True, kill_tree: bool = True, actor: str = "admin", is_admin: bool = True) -> Dict[str, Any]:
+        """Buộc dừng cưỡng chế tiến trình (SIGKILL) khi có xác nhận riêng."""
+        if not is_admin:
+            raise PermissionError("Chỉ quản trị viên (Admin) mới có quyền buộc dừng tiến trình")
+        try:
+            res = self.process_monitor.kill_process(ref, force=force, kill_tree=kill_tree)
+            self._audit(actor, "PROCESS_SIGKILL", "PROCESS", ref, res.get("status", "SUCCESS"), f"Buộc dừng cưỡng chế {ref} (PID {res.get('pid')})")
+            return res
+        except Exception as e:
+            self._audit(actor, "PROCESS_SIGKILL", "PROCESS", ref, "FAILED", str(e))
+            raise
+
     def get_next_available_ssh_port(self, server_id: str) -> int:
         """Find lowest free port in range 22000-29999 for given server, checking endpoints, members and live sockets"""
         import socket
@@ -1574,7 +1659,15 @@ class LabOpsDataService:
                 ws_dir = self.ssh_access_manager.member_workspace_dir(server_id, username)
                 if os.path.exists(ws_dir):
                     shutil.rmtree(ws_dir, ignore_errors=True)
-                    cleanup_summary["workspace_files_removed"] = True
+                    if os.path.exists(ws_dir) and shutil.which("docker"):
+                        parent_d = os.path.dirname(ws_dir)
+                        base_n = os.path.basename(ws_dir)
+                        subprocess.run(
+                            ["docker", "run", "--rm", "-v", f"{parent_d}:/parent", "alpine", "rm", "-rf", f"/parent/{base_n}"],
+                            capture_output=True,
+                            timeout=10,
+                        )
+                    cleanup_summary["workspace_files_removed"] = not os.path.exists(ws_dir)
             except Exception as e:
                 logger.warning(f"Lỗi xóa thư mục workspace {username}: {e}")
 
@@ -1936,10 +2029,11 @@ class LabOpsDataService:
                         'echo "$USERNAME:$TEMPPW" | chpasswd;'
                         'mkdir -p /workspace/.ssh;'
                         'echo "$PUBKEY" > /workspace/.ssh/authorized_keys;'
-                        'chmod 700 /workspace;'
+                        'chmod 770 /workspace;'
                         'chmod 700 /workspace/.ssh;'
                         'chmod 600 /workspace/.ssh/authorized_keys;'
                         'chown -R "$USERNAME:$USERNAME" /workspace;'
+                        'chmod 770 /workspace;'
                         'cat << "EOF" > /etc/pam.d/sshd\n'
                         'auth      required   pam_unix.so nullok\n'
                         'account   required   pam_unix.so\n'

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Hieuslecong/labops_control_center/go/internal/config"
@@ -28,7 +29,7 @@ func TestServer_Endpoints(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hostCol := host.NewCollector(cfg)
 	gpuCol := gpu.NewCollector()
-	procCol := process.NewCollector(cfg.ServerID)
+	procCol := process.NewCollector(cfg.ServerID, gpuCol)
 	dockerCtrl := docker.NewController("")
 
 	srv := NewServer(cfg, hostCol, gpuCol, procCol, dockerCtrl, logger)
@@ -76,5 +77,27 @@ func TestServer_Endpoints(t *testing.T) {
 
 	if wFull.Code != http.StatusOK {
 		t.Errorf("Kỳ vọng status 200 tại /api/v1/agent/telemetry/full, nhận được: %d", wFull.Code)
+	}
+
+	// 4. Test /api/v1/agent/processes
+	reqProc := httptest.NewRequest("GET", "/api/v1/agent/processes?filter=all", nil)
+	reqProc.Header.Set("X-LabOps-Agent-Secret", "test-token")
+	wProc := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(wProc, reqProc)
+
+	if wProc.Code != http.StatusOK {
+		t.Errorf("Kỳ vọng status 200 tại /api/v1/agent/processes, nhận được: %d", wProc.Code)
+	}
+
+	// 5. Test /api/v1/agent/processes/terminate rejection on protected process PID 1
+	termPayload := `{"ref":"track:host:1:100","timeout_seconds":5,"terminate_tree":false}`
+	reqTerm := httptest.NewRequest("POST", "/api/v1/agent/processes/terminate", strings.NewReader(termPayload))
+	reqTerm.Header.Set("Content-Type", "application/json")
+	wTerm := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(wTerm, reqTerm)
+
+	// Should reject because PID 1 is protected or ticks mismatch
+	if wTerm.Code == http.StatusOK {
+		t.Errorf("Kỳ vọng từ chối dừng PID 1, nhưng nhận được HTTP 200")
 	}
 }

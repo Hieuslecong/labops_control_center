@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import shutil
+import sys
 import tempfile
 import threading
 import unittest
@@ -14,6 +17,10 @@ from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "test-secret-vpn-wgeasy-32chars-ok!")
 
@@ -34,6 +41,10 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
+        for u in ("multidev_user", "api_dev_user", "delete_u"):
+            p = f"/media/LabOps-Data/users/{u}"
+            if os.path.exists(p):
+                shutil.rmtree(p, ignore_errors=True)
 
     def test_01_vpn_manager_overview_and_provider_resolution(self) -> None:
         """Kiểm tra tổng quan hệ thống VPN và độ phân giải provider."""

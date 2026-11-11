@@ -12,9 +12,9 @@
       "desired_state": "ACTIVE",
       "observed_state": "ONLINE",
       "telemetry_source": "labops_node_agent",
-      "last_heartbeat_at": "2026-11-11T03:54:45.463043+00:00",
+      "last_heartbeat_at": "2026-11-11T06:33:02.802474+00:00",
       "created_at": "2026-11-10T04:21:22.321393+00:00",
-      "updated_at": "2026-11-11T03:54:45.463070+00:00",
+      "updated_at": "2026-11-11T06:33:02.802494+00:00",
       "agent_version": "2.0.0"
     },
     {

@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any */
 import { create } from 'zustand';
 import {
   PhysicalServer,
@@ -53,6 +54,8 @@ interface LabOpsState {
   }) => void;
 
   stopJob: (jobId: string) => void;
+  stopProcess: (ref: string, reason?: string, terminateTree?: boolean) => Promise<{ success: boolean; message: string }>;
+  killProcess: (ref: string, reason?: string, killTree?: boolean) => Promise<{ success: boolean; message: string }>;
 
   updateSecurityReview: (id: string, status: SecurityReview['status'], reviewer: string) => void;
   addSecurityReview: (repoUrl: string, submitter: string) => void;
@@ -1460,7 +1463,8 @@ const PROD_SERVERS: PhysicalServer[] = [
 
 const PROD_JOBS: ComputeJob[] = [];
 
-function mapRawJob(j: Record<string, any>): ComputeJob {
+function mapRawJob(raw: Record<string, unknown>): ComputeJob {
+  const j = raw as Record<string, any>;
   const isGpu = Boolean(
     j.isGpu ??
     j.is_gpu_process ??
@@ -1471,6 +1475,7 @@ function mapRawJob(j: Record<string, any>): ComputeJob {
 
   return {
     id: String(j.id || `proc-${j.pid}`),
+    ref: j.ref ? String(j.ref) : undefined,
     username: String(j.username || 'unknown'),
     fullName: String(j.fullName || j.full_name || `@${j.username || 'unknown'}`),
     serverId: (j.serverId || j.server_id || 'workstation') as ServerId,
@@ -1499,11 +1504,14 @@ function mapRawJob(j: Record<string, any>): ComputeJob {
     containerState: String(
       j.containerState || j.container_state || (j.container_id ? 'Running' : 'Trực tiếp trên Host')
     ),
-    isGpu
+    isGpu,
+    classification: j.classification ? String(j.classification) : undefined,
+    isProtected: Boolean(j.isProtected ?? j.is_protected ?? false)
   };
 }
 
-function mapRawSshSession(s: Record<string, any>): RealSshSession {
+function mapRawSshSession(raw: Record<string, unknown>): RealSshSession {
+  const s = raw as Record<string, any>;
   return {
     id: String(s.id || `ssh-sess-${s.username}-${s.terminal || 'pts'}`),
     username: String(s.username || 'unknown'),
@@ -1518,7 +1526,8 @@ function mapRawSshSession(s: Record<string, any>): RealSshSession {
   };
 }
 
-function mapRawServer(s: Record<string, any>): PhysicalServer {
+function mapRawServer(raw: Record<string, unknown>): PhysicalServer {
+  const s = raw as Record<string, any>;
   return {
     id: s.id,
     name: s.name,
@@ -1550,7 +1559,8 @@ function mapRawServer(s: Record<string, any>): PhysicalServer {
   };
 }
 
-function mapRawGpu(g: Record<string, any>): PhysicalGpu {
+function mapRawGpu(raw: Record<string, unknown>): PhysicalGpu {
+  const g = raw as Record<string, any>;
   return {
     id: g.id,
     displayLabel: g.displayLabel ?? g.display_label ?? g.id,
@@ -1568,14 +1578,17 @@ function mapRawGpu(g: Record<string, any>): PhysicalGpu {
     allocationMode: g.allocationMode ?? g.allocation_mode ?? 'SHARED',
     enforcementState: g.enforcementState ?? g.enforcement_state ?? 'MONITOR_ONLY',
     activeProcesses: Array.isArray(g.activeProcesses ?? g.active_processes)
-      ? (g.activeProcesses ?? g.active_processes).map((p: Record<string, any>) => ({
-          pid: Number(p.pid),
-          name: String(p.name || ''),
-          username: String(p.username || ''),
-          workspace: String(p.workspace || ''),
-          vramMb: Number(p.vramMb ?? p.vram_mb ?? 0),
-          cpuPercent: Number(p.cpuPercent ?? p.cpu_percent ?? 0)
-        }))
+      ? (g.activeProcesses ?? g.active_processes).map((rawProc: unknown) => {
+          const p = rawProc as Record<string, any>;
+          return {
+            pid: Number(p.pid),
+            name: String(p.name || ''),
+            username: String(p.username || ''),
+            workspace: String(p.workspace || ''),
+            vramMb: Number(p.vramMb ?? p.vram_mb ?? 0),
+            cpuPercent: Number(p.cpuPercent ?? p.cpu_percent ?? 0)
+          };
+        })
       : [],
     activeUsers: g.activeUsers ?? g.active_users ?? [],
     associatedJobs: g.associatedJobs ?? g.associated_jobs ?? []
@@ -1640,8 +1653,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       } else {
         set({ syncError: 'Không thể tải danh sách tiến trình từ API' });
       }
-    } catch (err: any) {
-      set({ syncError: err?.message || 'Lỗi kết nối khi đồng bộ tiến trình' });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      set({ syncError: errorMsg || 'Lỗi kết nối khi đồng bộ tiến trình' });
     }
   },
 
@@ -1707,10 +1721,11 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       }
       if (failures.length) updates.syncError = `Không thể xác minh dữ liệu: ${failures.join(', ')}`;
       set(updates);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
       set({
         servers: PROD_SERVERS, gpus: [], jobs: [], activeSshSessions: [],
-        syncError: err?.message || 'Mất kết nối tới máy chủ giám sát'
+        syncError: errorMsg || 'Mất kết nối tới máy chủ giám sát'
       });
     }
   },
@@ -1790,50 +1805,97 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   },
 
   stopJob: (jobId) => {
-    if (!isDemoMode) return;
-    set((state) => {
-      const targetJob = state.jobs.find((j) => j.id === jobId);
-      if (!targetJob) return state;
+    if (isDemoMode) {
+      set((state) => {
+        const targetJob = state.jobs.find((j) => j.id === jobId);
+        if (!targetJob) return state;
 
-      const updatedJobs = state.jobs.map((j) =>
-        j.id === jobId
-          ? { ...j, status: 'COMPLETED' as const, elapsedTime: `${j.elapsedTime} (Dừng)` }
-          : j
-      );
+        const updatedJobs = state.jobs.map((j) =>
+          j.id === jobId
+            ? { ...j, status: 'COMPLETED' as const, elapsedTime: `${j.elapsedTime} (Dừng)` }
+            : j
+        );
 
-      // Free GPU process
-      const updatedGpus = state.gpus.map((g) => {
-        if (g.displayLabel !== targetJob.gpuId) return g;
-        const filteredProc = g.activeProcesses.filter((p) => p.pid !== targetJob.pid);
-        const newUsedMb = filteredProc.reduce((acc, p) => acc + p.vramMb, 0);
+        // Free GPU process
+        const updatedGpus = state.gpus.map((g) => {
+          if (g.displayLabel !== targetJob.gpuId) return g;
+          const filteredProc = g.activeProcesses.filter((p) => p.pid !== targetJob.pid);
+          const newUsedMb = filteredProc.reduce((acc, p) => acc + p.vramMb, 0);
+          return {
+            ...g,
+            vramUsedMb: newUsedMb,
+            gpuUtilPercent: filteredProc.length === 0 ? 0 : Math.max(10, g.gpuUtilPercent - 40),
+            activeProcesses: filteredProc,
+            activeUsers: Array.from(new Set(filteredProc.map((p) => p.username)))
+          };
+        });
+
         return {
-          ...g,
-          vramUsedMb: newUsedMb,
-          gpuUtilPercent: filteredProc.length === 0 ? 0 : Math.max(10, g.gpuUtilPercent - 40),
-          activeProcesses: filteredProc,
-          activeUsers: Array.from(new Set(filteredProc.map((p) => p.username)))
+          jobs: updatedJobs,
+          gpus: updatedGpus,
+          auditLogs: [
+            {
+              id: `log-${Date.now()}`,
+              actor: 'Quản trị viên (Demo)',
+              action: 'Dừng tiến trình GPU',
+              targetType: 'JOB',
+              targetId: jobId,
+              timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+              result: 'SUCCESS',
+              correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
+              details: `Dừng tác vụ ${jobId}`
+            },
+            ...state.auditLogs
+          ]
         };
       });
+      return;
+    }
 
-      return {
-        jobs: updatedJobs,
-        gpus: updatedGpus,
-        auditLogs: [
-          {
-            id: `log-${Date.now()}`,
-            actor: 'Quản trị viên (Demo)',
-            action: 'Dừng tiến trình GPU',
-            targetType: 'JOB',
-            targetId: jobId,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            result: 'SUCCESS',
-            correlationId: `tx-${Math.random().toString(36).substring(2, 9)}`,
-            details: `Dừng PID ${targetJob.pid} (${targetJob.script}) của ${targetJob.username}`
-          },
-          ...state.auditLogs
-        ]
-      };
-    });
+    // Production
+    fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' })
+      .then(() => {
+        get().fetchLiveJobs();
+      })
+      .catch(() => {});
+  },
+
+  stopProcess: async (ref: string, reason = 'Admin yêu cầu dừng tiến trình', terminateTree = true) => {
+    try {
+      const res = await fetch(`/api/v1/processes/${encodeURIComponent(ref)}/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, terminate_tree: terminateTree, timeout_seconds: 10 })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, message: data.detail || 'Không thể dừng tiến trình' };
+      }
+      get().fetchLiveJobs();
+      return { success: true, message: data.message || 'Đã gửi tín hiệu dừng tiến trình thành công' };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: errorMsg || 'Lỗi mạng khi kết nối tới máy chủ' };
+    }
+  },
+
+  killProcess: async (ref: string, reason = 'Admin yêu cầu buộc dừng tiến trình', killTree = true) => {
+    try {
+      const res = await fetch(`/api/v1/processes/${encodeURIComponent(ref)}/kill`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, force_confirmed: true, kill_tree: killTree })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, message: data.detail || 'Không thể buộc dừng tiến trình' };
+      }
+      get().fetchLiveJobs();
+      return { success: true, message: data.message || 'Đã buộc dừng tiến trình thành công' };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: errorMsg || 'Lỗi mạng khi kết nối tới máy chủ' };
+    }
   },
 
   updateSecurityReview: (id, status, reviewer) => {

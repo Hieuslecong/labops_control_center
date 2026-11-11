@@ -1,5 +1,12 @@
+import os
+import sys
 import importlib.util as _ilu
 import unittest as _ut
+
+backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 if _ilu.find_spec("fastapi") is None or _ilu.find_spec("pydantic") is None:
     raise _ut.SkipTest("BLOCKED_BY_INFRASTRUCTURE: fastapi/pydantic chưa cài trong môi trường test")
 import unittest

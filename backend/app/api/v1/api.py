@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     ssh_endpoints,
     monitoring,
     workspaces,
+    processes,
     v2_platform
 )
 
@@ -34,6 +35,7 @@ api_router.include_router(events.router, dependencies=[Depends(require_admin)], 
 api_router.include_router(audit.router, dependencies=[Depends(require_admin)], prefix="/audit-logs", tags=["Audit"])
 api_router.include_router(monitoring.router, dependencies=[Depends(require_user)], prefix="/monitoring", tags=["Monitoring"])
 api_router.include_router(workspaces.router, dependencies=[Depends(require_admin)], prefix="/workspaces", tags=["Workspaces"])
+api_router.include_router(processes.router, dependencies=[Depends(require_user)], prefix="/processes", tags=["Processes"])
 
 
 api_router.include_router(v2_platform.router, prefix="/v2", tags=["V2 Platform"])

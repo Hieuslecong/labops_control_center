@@ -22,6 +22,7 @@ type Server struct {
 	hostCol    *host.Collector
 	gpuCol     *gpu.Collector
 	procCol    *process.Collector
+	procCtrl   *process.Controller
 	dockerCtrl *docker.Controller
 	httpSrv    *http.Server
 	logger     *slog.Logger
@@ -41,6 +42,7 @@ func NewServer(
 		hostCol:    hostCol,
 		gpuCol:     gpuCol,
 		procCol:    procCol,
+		procCtrl:   process.NewController(procCol),
 		dockerCtrl: dockerCtrl,
 		logger:     logger,
 	}
@@ -50,6 +52,9 @@ func NewServer(
 	mux.HandleFunc("/api/v1/agent/host", s.handleHostTelemetry)
 	mux.HandleFunc("/api/v1/agent/gpus", s.handleGPUTelemetry)
 	mux.HandleFunc("/api/v1/agent/processes", s.handleProcessTelemetry)
+	mux.HandleFunc("/api/v1/agent/processes/tree", s.handleProcessTree)
+	mux.HandleFunc("/api/v1/agent/processes/terminate", s.handleProcessTerminate)
+	mux.HandleFunc("/api/v1/agent/processes/kill", s.handleProcessKill)
 	mux.HandleFunc("/api/v1/agent/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("/api/v1/agent/telemetry/full", s.handleFullTelemetry)
 
@@ -58,7 +63,7 @@ func NewServer(
 		Addr:         addr,
 		Handler:      s.authMiddleware(mux),
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
 
 	return s
@@ -67,16 +72,13 @@ func NewServer(
 // authMiddleware xác thực token nếu có cấu hình
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Health check luôn mở cho liveness probe
 		if r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Nếu gọi từ localhost, cho phép hoặc kiểm tra header
 		clientIP := r.RemoteAddr
 		if strings.HasPrefix(clientIP, "127.0.0.1") || strings.HasPrefix(clientIP, "[::1]") {
-			// Local trusted access
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -102,11 +104,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "HEALTHY",
-		"server_id":   s.cfg.ServerID,
-		"hostname":    s.cfg.Hostname,
-		"time":        time.Now().UTC().Format(time.RFC3339),
-		"agent":       "labops-go-agent-v1",
+		"status":    "HEALTHY",
+		"server_id": s.cfg.ServerID,
+		"hostname":  s.cfg.Hostname,
+		"time":      time.Now().UTC().Format(time.RFC3339),
+		"agent":     "labops-go-agent-v2",
 	})
 }
 
@@ -132,6 +134,126 @@ func (s *Server) handleProcessTelemetry(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(procs)
 }
 
+func (s *Server) handleProcessTree(w http.ResponseWriter, r *http.Request) {
+	ref := r.URL.Query().Get("ref")
+	if ref == "" {
+		http.Error(w, `{"error":"Thiếu tham số 'ref'"}`, http.StatusBadRequest)
+		return
+	}
+
+	tree, err := s.procCol.GetProcessTree(ref)
+	if err != nil {
+		s.logger.Warn("Lỗi tìm cây tiến trình", "ref", ref, "err", err)
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tree)
+}
+
+type terminateRequest struct {
+	Ref            string `json:"ref"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	TerminateTree  bool   `json:"terminate_tree"`
+}
+
+func (s *Server) handleProcessTerminate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req terminateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid JSON payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Ref == "" {
+		http.Error(w, `{"error":"Thiếu tham số 'ref'"}`, http.StatusBadRequest)
+		return
+	}
+
+	result, err := s.procCtrl.TerminateProcess(req.Ref, req.TimeoutSeconds, req.TerminateTree)
+	if err != nil {
+		s.logger.Warn("Từ chối hoặc thất bại khi dừng tiến trình", "ref", req.Ref, "err", err)
+		status := http.StatusInternalServerError
+		errStr := err.Error()
+		if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") {
+			status = http.StatusForbidden
+		} else if strings.Contains(errStr, "PID_RECYCLED") {
+			status = http.StatusConflict
+		} else if strings.Contains(errStr, "PROCESS_NOT_FOUND") {
+			status = http.StatusNotFound
+		} else if strings.Contains(errStr, "INVALID_PROCESS_REF") {
+			status = http.StatusBadRequest
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  errStr,
+			"status": "FAILED",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+type killRequest struct {
+	Ref      string `json:"ref"`
+	Force    bool   `json:"force"`
+	KillTree bool   `json:"kill_tree"`
+}
+
+func (s *Server) handleProcessKill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req killRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid JSON payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Ref == "" {
+		http.Error(w, `{"error":"Thiếu tham số 'ref'"}`, http.StatusBadRequest)
+		return
+	}
+
+	result, err := s.procCtrl.KillProcess(req.Ref, req.Force, req.KillTree)
+	if err != nil {
+		s.logger.Warn("Từ chối hoặc thất bại khi buộc dừng tiến trình", "ref", req.Ref, "err", err)
+		status := http.StatusInternalServerError
+		errStr := err.Error()
+		if strings.Contains(errStr, "FORCE_CONFIRMATION_REQUIRED") {
+			status = http.StatusBadRequest
+		} else if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") {
+			status = http.StatusForbidden
+		} else if strings.Contains(errStr, "PID_RECYCLED") {
+			status = http.StatusConflict
+		} else if strings.Contains(errStr, "PROCESS_NOT_FOUND") {
+			status = http.StatusNotFound
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  errStr,
+			"status": "FAILED",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	workspaces, err := s.dockerCtrl.ListWorkspaces(r.Context())
 	if err != nil {
@@ -154,24 +276,23 @@ func (s *Server) handleFullTelemetry(w http.ResponseWriter, r *http.Request) {
 	gpuTel := s.gpuCol.GetLatest()
 	workspaces, _ := s.dockerCtrl.ListWorkspaces(r.Context())
 
-	// Đếm số thành viên active
 	activeMembers := len(workspaces)
 	hostTel.ActiveMembers = activeMembers
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"source":          "labops-go-agent",
-		"collected_at":    time.Now().UTC().Format(time.RFC3339),
-		"server":          hostTel,
-		"gpus":            gpuTel,
-		"workspaces":      workspaces,
+		"source":           "labops-go-agent",
+		"collected_at":     time.Now().UTC().Format(time.RFC3339),
+		"server":           hostTel,
+		"gpus":             gpuTel,
+		"workspaces":       workspaces,
 		"workspaces_count": len(workspaces),
 	})
 }
 
 // Start khởi chạy HTTP server
 func (s *Server) Start() error {
-	s.logger.Info("Khởi động LabOps Go Agent HTTP Server", "addr", s.httpSrv.Addr)
+	s.logger.Info("Khởi động LabOps Go Agent HTTP Server V2", "addr", s.httpSrv.Addr)
 	return s.httpSrv.ListenAndServe()
 }
 
@@ -179,4 +300,3 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpSrv.Shutdown(ctx)
 }
-

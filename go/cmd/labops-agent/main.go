@@ -43,7 +43,7 @@ func main() {
 	// 3. Khởi tạo các bộ thu thập dữ liệu (Zero fork-exec host collector)
 	hostCollector := host.NewCollector(cfg)
 	gpuCollector := gpu.NewCollector()
-	procCollector := process.NewCollector(cfg.ServerID)
+	procCollector := process.NewCollector(cfg.ServerID, gpuCollector)
 	dockerCtrl := docker.NewController(cfg.DockerSocket)
 
 	// 4. Khởi chạy goroutine lấy mẫu định kỳ trong nền (Background sampling)

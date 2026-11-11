@@ -371,6 +371,7 @@ export type JobStatus = 'RUNNING' | 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCEL
 
 export interface ComputeJob {
   id: string;
+  ref?: string;
   username: string;
   fullName: string;
   serverId: ServerId;
@@ -390,6 +391,9 @@ export interface ComputeJob {
   sshStatus: string;
   containerState: string;
   isGpu?: boolean;
+  classification?: 'RESEARCH_JOB' | 'GPU_PROCESS' | 'MEMBER_PROCESS' | 'SYSTEM_PROCESS' | string;
+  isProtected?: boolean;
+  children?: ComputeJob[];
 }
 
 export interface RealSshSession {

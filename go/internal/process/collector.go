@@ -2,49 +2,46 @@ package process
 
 import (
 	"bufio"
+	"fmt"
 	"math"
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
 )
 
-// ProcessInfo lưu thông tin an toàn về một tiến trình đang chạy
-type ProcessInfo struct {
-	PID           int     `json:"pid"`
-	PPID          int     `json:"ppid"`
-	UID           int     `json:"uid"`
-	User          string  `json:"user"`
-	Name          string  `json:"name"`
-	CommandLine   string  `json:"command_line,omitempty"` // Rút gọn an toàn
-	CPUPercent    float64 `json:"cpu_percent"`
-	MemoryRSSMB   float64 `json:"memory_rss_mb"`
-	MemoryVMSMB   float64 `json:"memory_vms_mb"`
-	MemoryPercent float64 `json:"memory_percent"`
-	State         string  `json:"state"`
-	StartTime     string  `json:"start_time"`
-	ContainerID   string  `json:"container_id,omitempty"`
-	IsGPU         bool    `json:"is_gpu"`
-	IsSSH         bool    `json:"is_ssh"`
-	IsResearch    bool    `json:"is_research"`
+var sensitiveArgsPattern = regexp.MustCompile(`(?i)(--(?:password|token|secret|key|api_key|auth|credential)[=\s]+)([^\s]+)`)
+
+func sanitizeCmdline(cmd string) string {
+	if cmd == "" {
+		return ""
+	}
+	return sensitiveArgsPattern.ReplaceAllString(cmd, "${1}********")
 }
 
-// ProcessReport báo cáo tổng quan tiến trình
-type ProcessReport struct {
-	Source      string        `json:"source"`
-	CollectedAt string        `json:"collected_at"`
-	ServerID    string        `json:"server_id"`
-	TotalCount  int           `json:"total_count"`
-	Processes   []ProcessInfo `json:"processes"`
+func formatElapsedTime(seconds float64) string {
+	tot := int64(math.Max(0, seconds))
+	days := tot / 86400
+	hours := (tot % 86400) / 3600
+	mins := (tot % 3600) / 60
+	secs := tot % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %02dh %02dm", days, hours, mins)
+	}
+	return fmt.Sprintf("%02dh %02dm %02ds", hours, mins, secs)
 }
 
-// Collector quản lý quét /proc định kỳ
+// Collector quản lý quét /proc định kỳ và lưu cache hiệu năng cao
 type Collector struct {
 	serverID     string
+	gpuCol       *gpu.Collector
 	mu           sync.RWMutex
 	prevCPUTimes map[int]uint64
 	lastTotalCPU uint64
@@ -54,9 +51,10 @@ type Collector struct {
 }
 
 // NewCollector khởi tạo Process Collector
-func NewCollector(serverID string) *Collector {
+func NewCollector(serverID string, gpuCol *gpu.Collector) *Collector {
 	c := &Collector{
 		serverID:     serverID,
+		gpuCol:       gpuCol,
 		prevCPUTimes: make(map[int]uint64),
 		uidToUser:    make(map[int]string),
 	}
@@ -65,7 +63,6 @@ func NewCollector(serverID string) *Collector {
 }
 
 func (c *Collector) initUserCache() {
-	// Nạp trước các người dùng thông dụng
 	c.uidToUser[0] = "root"
 	c.uidToUser[1000] = "aiot-1"
 	c.uidToUser[1001] = "nhannv"
@@ -112,14 +109,79 @@ func readTotalCPUJiffies() uint64 {
 	return 0
 }
 
+// readSystemUptimeSeconds đọc thời gian uptime hệ thống từ /proc/uptime
+func readSystemUptimeSeconds() float64 {
+	data, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) > 0 {
+		v, _ := strconv.ParseFloat(fields[0], 64)
+		return v
+	}
+	return 0
+}
+
+// extractContainerInfo trích xuất container_id và workspace từ /proc/{pid}/cgroup
+func extractContainerInfo(pid int) (string, string) {
+	cgroupPath := filepath.Join("/proc", strconv.Itoa(pid), "cgroup")
+	data, err := os.ReadFile(cgroupPath)
+	if err != nil {
+		return "", ""
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Docker scope format: 0::/system.slice/docker-<64char_id>.scope
+		if strings.Contains(line, "docker-") && strings.Contains(line, ".scope") {
+			start := strings.Index(line, "docker-") + len("docker-")
+			end := strings.Index(line, ".scope")
+			if start < end {
+				fullID := line[start:end]
+				shortID := fullID
+				if len(shortID) > 12 {
+					shortID = shortID[:12]
+				}
+				return shortID, ""
+			}
+		} else if strings.Contains(line, "/docker/") {
+			parts := strings.Split(line, "/docker/")
+			if len(parts) > 1 {
+				fullID := strings.TrimSpace(parts[1])
+				shortID := fullID
+				if len(shortID) > 12 {
+					shortID = shortID[:12]
+				}
+				return shortID, ""
+			}
+		} else if strings.Contains(line, "lxc.payload.") {
+			parts := strings.Split(line, "lxc.payload.")
+			if len(parts) > 1 {
+				sub := strings.Split(parts[1], "/")[0]
+				return sub, sub
+			}
+		}
+	}
+	return "", ""
+}
+
 // Collect quét danh sách tiến trình từ /proc
 func (c *Collector) Collect(filterType string) *ProcessReport {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if time.Since(c.lastScan) < 2*time.Second && c.latest != nil && filterType == "all" {
+	// Cache 1.5 giây cho filter all
+	if time.Since(c.lastScan) < 1500*time.Millisecond && c.latest != nil && filterType == "all" {
 		return c.latest
 	}
+
+	uptimeSec := readSystemUptimeSeconds()
+	bootTime := time.Now().Add(-time.Duration(uptimeSec * float64(time.Second)))
 
 	totalJiffies := readTotalCPUJiffies()
 	totalJiffiesDiff := float64(totalJiffies - c.lastTotalCPU)
@@ -141,6 +203,32 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		}
 	}
 
+	// Đọc bảng GPU compute apps từ GPU collector
+	gpuProcessMap := make(map[int]struct {
+		gpuIndex int
+		gpuUUID  string
+		vramMB   uint64
+	})
+
+	if c.gpuCol != nil {
+		gpuReport := c.gpuCol.GetLatest()
+		if gpuReport != nil {
+			for _, g := range gpuReport.GPUs {
+				for _, p := range g.ActiveProcesses {
+					gpuProcessMap[p.PID] = struct {
+						gpuIndex int
+						gpuUUID  string
+						vramMB   uint64
+					}{
+						gpuIndex: g.Index,
+						gpuUUID:  g.UUID,
+						vramMB:   p.UsedMemoryMB,
+					}
+				}
+			}
+		}
+	}
+
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return &ProcessReport{
@@ -154,7 +242,6 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 
 	procs := make([]ProcessInfo, 0, 128)
 	newCPUTimes := make(map[int]uint64)
-
 	pageSize := uint64(syscall.Getpagesize())
 
 	for _, entry := range entries {
@@ -162,7 +249,7 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			continue
 		}
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
+		if err != nil || pid <= 0 {
 			continue
 		}
 
@@ -175,7 +262,6 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		}
 
 		statStr := string(statData)
-		// Tìm vị trí ngoặc bao tên tiến trình (comm)
 		firstParen := strings.IndexByte(statStr, '(')
 		lastParen := strings.LastIndexByte(statStr, ')')
 		if firstParen == -1 || lastParen == -1 || lastParen <= firstParen {
@@ -190,8 +276,10 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 
 		state := afterParen[0]
 		ppid, _ := strconv.Atoi(afterParen[1])
+		pgid, _ := strconv.Atoi(afterParen[2])
 		utime, _ := strconv.ParseUint(afterParen[11], 10, 64)
 		stime, _ := strconv.ParseUint(afterParen[12], 10, 64)
+		startTimeTicks, _ := strconv.ParseUint(afterParen[19], 10, 64)
 		vsize, _ := strconv.ParseUint(afterParen[20], 10, 64)
 		rssPages, _ := strconv.ParseUint(afterParen[21], 10, 64)
 
@@ -207,6 +295,14 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		memPct := math.Round((float64(rssBytes)/float64(totalRAMBytes))*1000) / 10
 		rssMB := math.Round((float64(rssBytes)/(1024*1024))*10) / 10
 		vmsMB := math.Round((float64(vsize)/(1024*1024))*10) / 10
+
+		// Tính toán start_time và elapsed_time chuẩn
+		// CLK_TCK = 100 on Linux x86_64
+		startSecAfterBoot := float64(startTimeTicks) / 100.0
+		procStartTime := bootTime.Add(time.Duration(startSecAfterBoot * float64(time.Second)))
+		elapsedSec := math.Max(0, uptimeSec-startSecAfterBoot)
+		elapsedStr := formatElapsedTime(elapsedSec)
+		startTimeStr := procStartTime.Format("2006-01-02 15:04:05")
 
 		// Đọc UID từ /proc/[pid]/status
 		uid := 0
@@ -226,45 +322,113 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 
 		userName := c.resolveUserLocked(uid)
 
-		// Đọc cmdline rút gọn an toàn (tối đa 120 ký tự, không lộ secrets)
+		// Đọc cmdline đầy đủ và sanitize
 		cmdline := procName
 		if cmdData, err := os.ReadFile(filepath.Join(pidPath, "cmdline")); err == nil && len(cmdData) > 0 {
 			cmdStr := strings.ReplaceAll(string(cmdData), "\x00", " ")
 			cmdStr = strings.TrimSpace(cmdStr)
-			if len(cmdStr) > 120 {
-				cmdStr = cmdStr[:117] + "..."
-			}
 			if cmdStr != "" {
-				cmdline = cmdStr
+				cmdline = sanitizeCmdline(cmdStr)
 			}
 		}
 
-		isSSH := strings.Contains(procName, "sshd") || strings.Contains(cmdline, "sshd:")
-		isResearch := strings.HasPrefix(userName, "test") || strings.HasPrefix(userName, "res_") ||
-			strings.Contains(cmdline, "python") || strings.Contains(cmdline, "torch") ||
-			strings.Contains(cmdline, "train") || strings.Contains(cmdline, "jupyter")
+		// Nhận diện Container / Workspace từ cgroup
+		containerID, workspace := extractContainerInfo(pid)
+		if containerID != "" && workspace == "" {
+			workspace = fmt.Sprintf("docker-%s", containerID)
+		}
+
+		// Ánh xạ GPU
+		gpuInfo, isGPU := gpuProcessMap[pid]
+		var gpuIdx *int
+		var gpuUUID string
+		var vramMB uint64
+		if isGPU {
+			gpuIdx = &gpuInfo.gpuIndex
+			gpuUUID = gpuInfo.gpuUUID
+			vramMB = gpuInfo.vramMB
+		}
+
+		// Định danh an toàn ProcessRef
+		ref := BuildRef(c.serverID, containerID, pid, startTimeTicks)
+
+		// PHÂN LOẠI TIẾN TRÌNH CHUẨN XÁC 4 NHÓM
+		var classification string
+		isProtected := false
+
+		// 1. Kiểm tra nếu là tiến trình hệ thống cốt lõi
+		if pid <= 1 || ppid == 2 || ProtectedProcessNames[strings.ToLower(procName)] {
+			classification = ClassSystemProcess
+			isProtected = true
+		} else if containerID == "" {
+			// Chạy trên host vật lý ngoài container
+			cmdLower := strings.ToLower(cmdline)
+			isHostService := false
+			for _, kw := range ProtectedCmdKeywords {
+				if strings.Contains(cmdLower, kw) {
+					isHostService = true
+					break
+				}
+			}
+			if isHostService || strings.Contains(procName, "sshd") || uid == 0 || uid < 1000 {
+				classification = ClassSystemProcess
+				isProtected = true
+			} else if isGPU {
+				classification = ClassGPUProcess
+			} else {
+				classification = ClassMemberProcess
+			}
+		} else {
+			// Chạy bên trong Container Workspace của thành viên
+			cmdLower := strings.ToLower(cmdline)
+			isAI := strings.Contains(cmdLower, "python") || strings.Contains(cmdLower, "torch") ||
+				strings.Contains(cmdLower, "train") || strings.Contains(cmdLower, "eval") ||
+				strings.Contains(cmdLower, "jupyter") || strings.Contains(cmdLower, "deepspeed") ||
+				strings.Contains(cmdLower, "vllm") || strings.Contains(cmdLower, "ollama") ||
+				strings.Contains(cmdLower, "accelerate")
+
+			if isGPU || isAI {
+				classification = ClassResearchJob
+			} else {
+				classification = ClassMemberProcess
+			}
+		}
 
 		pInfo := ProcessInfo{
-			PID:           pid,
-			PPID:          ppid,
-			UID:           uid,
-			User:          userName,
-			Name:          procName,
-			CommandLine:   cmdline,
-			CPUPercent:    cpuPct,
-			MemoryRSSMB:   rssMB,
-			MemoryVMSMB:   vmsMB,
-			MemoryPercent: memPct,
-			State:         state,
-			StartTime:     time.Now().Format("15:04:05"),
-			IsSSH:         isSSH,
-			IsResearch:    isResearch,
+			Ref:            ref,
+			PID:            pid,
+			PPID:           ppid,
+			PGID:           pgid,
+			UID:            uid,
+			User:           userName,
+			Name:           procName,
+			CommandLine:    cmdline,
+			Classification: classification,
+			ContainerID:    containerID,
+			Workspace:      workspace,
+			CPUPercent:     cpuPct,
+			MemoryRSSMB:    rssMB,
+			MemoryVMSMB:    vmsMB,
+			MemoryPercent:  memPct,
+			State:          state,
+			StartTime:      startTimeStr,
+			StartTimeTicks: startTimeTicks,
+			ElapsedTime:    elapsedStr,
+			IsGPU:          isGPU,
+			GPUIndex:       gpuIdx,
+			GPUUUID:        gpuUUID,
+			VRAMMB:         vramMB,
+			IsProtected:    isProtected,
 		}
 
 		// Áp dụng bộ lọc
-		if filterType == "research" && !isResearch {
+		if filterType == "research" && classification != ClassResearchJob {
 			continue
-		} else if filterType == "gpu" && !pInfo.IsGPU {
+		} else if filterType == "gpu" && !isGPU {
+			continue
+		} else if filterType == "system" && classification != ClassSystemProcess {
+			continue
+		} else if filterType == "member" && classification != ClassMemberProcess && classification != ClassResearchJob {
 			continue
 		}
 
@@ -286,4 +450,70 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		c.latest = report
 	}
 	return report
+}
+
+// GetProcessByPID tìm thông tin 1 tiến trình theo PID
+func (c *Collector) GetProcessByPID(pid int) (*ProcessInfo, error) {
+	report := c.Collect("all")
+	for _, p := range report.Processes {
+		if p.PID == pid {
+			return &p, nil
+		}
+	}
+	return nil, fmt.Errorf("không tìm thấy tiến trình PID %d trong bảng tiến trình hiện tại", pid)
+}
+
+// GetChildrenPIDs tìm tất cả PID con đệ quy của 1 PID
+func (c *Collector) GetChildrenPIDs(parentPID int) []int {
+	report := c.Collect("all")
+	children := make([]int, 0)
+	var findChildren func(p int)
+	findChildren = func(p int) {
+		for _, proc := range report.Processes {
+			if proc.PPID == p {
+				children = append(children, proc.PID)
+				findChildren(proc.PID)
+			}
+		}
+	}
+	findChildren(parentPID)
+	return children
+}
+
+// GetProcessTree xây dựng cây tiến trình đầy đủ cho 1 ref
+func (c *Collector) GetProcessTree(ref string) (*ProcessInfo, error) {
+	parsedRef, err := ParseRef(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	report := c.Collect("all")
+	var root *ProcessInfo
+	for _, p := range report.Processes {
+		if p.PID == parsedRef.PID && p.StartTimeTicks == parsedRef.StartTimeTicks {
+			copyP := p
+			root = &copyP
+			break
+		}
+	}
+
+	if root == nil {
+		return nil, fmt.Errorf("PROCESS_NOT_FOUND: Không tìm thấy tiến trình với ref '%s'", ref)
+	}
+
+	// Đệ quy ghép children
+	var buildTree func(p *ProcessInfo)
+	buildTree = func(p *ProcessInfo) {
+		p.Children = make([]ProcessInfo, 0)
+		for _, child := range report.Processes {
+			if child.PPID == p.PID {
+				childCopy := child
+				buildTree(&childCopy)
+				p.Children = append(p.Children, childCopy)
+			}
+		}
+	}
+
+	buildTree(root)
+	return root, nil
 }

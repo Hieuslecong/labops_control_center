@@ -91,3 +91,4 @@ OK
 | Bảo toàn WireGuard wg-easy | Container health check | `labops-wg-easy` healthy | **PASS** |
 | Quản lý vòng đời One-time Enrollment Token | Unit test & API test | Cấp phát thành công, chống replay 100% | **PASS** |
 | Thu hồi chứng chỉ (Revocation check) | TLS handshake test | Bị chặn và ngắt phiên ngay lập tức | **PASS** |
+

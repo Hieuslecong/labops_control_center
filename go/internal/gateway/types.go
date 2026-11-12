@@ -85,3 +85,4 @@ type DispatchResponse struct {
 	Result       any    `json:"result,omitempty"`
 	DurationMs   int64  `json:"duration_ms"`
 }
+

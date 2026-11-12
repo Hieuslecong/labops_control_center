@@ -23,3 +23,4 @@
    - Các thao tác can thiệp hệ thống nhạy cảm (Docker daemon, kill process) được kiểm soát bởi bộ bảo vệ (Safeguards) ngăn chặn triệt để việc tác động vào container và tiến trình hệ thống trọng yếu (`init`, `systemd`, `postgres`, `wg-easy`).
 3. **Phân quyền truy cập chứng chỉ**:
    - Khóa bí mật (`client.key`, `labops-ca.key`) luôn được thiết lập chế độ cấp quyền tệp tin `0600` (`-rw-------`) chỉ thuộc quyền sở hữu của tiến trình vận hành.
+

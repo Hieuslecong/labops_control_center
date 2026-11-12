@@ -43,3 +43,4 @@ echo "🎉 LabOps Agent Gateway đã sẵn sàng lắng nghe:"
 echo "   gRPC mTLS: 0.0.0.0:9443"
 echo "   HTTP API:  127.0.0.1:9444"
 echo "=========================================================="
+

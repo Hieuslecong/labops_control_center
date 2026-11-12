@@ -26,3 +26,4 @@ ReadWritePaths=/home/aiot-1/.labops /home/aiot-1/admin_labops_control_center
 
 [Install]
 WantedBy=multi-user.target
+

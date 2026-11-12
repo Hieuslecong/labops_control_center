@@ -63,3 +63,4 @@ Khi một compute node bị nghi ngờ xâm nhập hoặc loại biên:
 2. `RevocationManager` ghi nhận node vào danh sách đen và lập tức ngắt phiên stream gRPC hiện tại.
 3. Callback xác minh TLS `VerifyPeerCertificate` tại Gateway sẽ từ chối mọi nỗ lực bắt tay mTLS tiếp theo từ node này, trả về mã lỗi:
    `mTLS: Node ID 'workstation' đã bị từ chối hoặc thu hồi quyền truy cập`.
+

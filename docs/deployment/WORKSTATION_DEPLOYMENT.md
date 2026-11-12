@@ -79,3 +79,4 @@ Truy cập Dashboard tại `http://192.168.167.250:3000/dashboard/servers`:
 - Server Track hiển thị 3x NVIDIA A30.
 - Server Workstation hiển thị 1x NVIDIA A30.
 - Tổng cộng: **4x NVIDIA A30** được giám sát và vận hành tập trung trong một giao diện duy nhất.
+

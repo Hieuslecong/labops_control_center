@@ -103,3 +103,4 @@ echo "🎉 GHI DANH THÀNH CÔNG! Node '${NODE_ID}' đã sẵn sàng kết nối
 echo "Để khởi chạy agent, thực thi:"
 echo "   sudo ${SCRIPT_DIR}/install-agent.sh"
 echo "=========================================================="
+

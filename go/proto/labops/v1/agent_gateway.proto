@@ -264,3 +264,4 @@ message GatewayError {
   string correlation_id = 3;
   int64 timestamp_unix = 4;
 }
+

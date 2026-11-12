@@ -91,3 +91,4 @@ var AllowedActions = map[string]bool{
 ```
 
 Mọi yêu cầu ngoài danh sách trên sẽ bị Gateway từ chối ngay lập tức với mã lỗi `ACTION_NOT_ALLOWED` (HTTP 403 / REJECTED_UNAUTHORIZED) trước khi truyền sang node.
+

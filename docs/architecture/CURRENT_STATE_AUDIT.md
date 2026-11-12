@@ -85,3 +85,4 @@ Quá trình nâng cấp lên Multi-Node sẽ được thực hiện theo nguyên
 4. Nâng cấp Go Node Agent hỗ trợ chế độ Client gRPC mTLS kết nối về Gateway.
 5. Tạo giao tiếp nội bộ giữa FastAPI và Gateway để đồng bộ Host Registry & dispatch commands.
 6. Đóng gói binary và script triển khai cho WS1.
+

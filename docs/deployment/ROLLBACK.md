@@ -32,3 +32,4 @@ sudo systemctl disable labops-gateway
 Trong cấu hình backend (`backend/.env` hoặc biến môi trường):
 - Không cần cấu hình `LABOPS_GATEWAY_HTTP_URL`.
 - Backend tiếp tục phục vụ các yêu cầu trên giao diện web sử dụng collector nội bộ.
+

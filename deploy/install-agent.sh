@@ -12,12 +12,29 @@ echo "=========================================================="
 # 1. Thêm Go vào PATH nếu có
 export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
 
-# 2. Biên dịch binary
-echo "📦 [1/4] Đang biên dịch LabOps Go Agent..."
+# 2. Kiểm tra hoặc biên dịch binary
+echo "📦 [1/4] Chuẩn bị LabOps Go Agent binary..."
 mkdir -p "${ROOT_DIR}/bin"
-(cd "${ROOT_DIR}/go" && go build -o "${ROOT_DIR}/bin/labops-agent" ./cmd/labops-agent)
+
+if [ -f "${ROOT_DIR}/bin/labops-agent" ]; then
+    echo "✅ Sử dụng binary có sẵn tại: ${ROOT_DIR}/bin/labops-agent"
+elif command -v go &>/dev/null; then
+    echo "🔨 Đang biên dịch LabOps Go Agent bằng Go toolchain..."
+    (cd "${ROOT_DIR}/go" && go build -o "${ROOT_DIR}/bin/labops-agent" ./cmd/labops-agent)
+    echo "✅ Đã biên dịch binary thành công."
+else
+    echo "❌ Lỗi: Không tìm thấy binary '${ROOT_DIR}/bin/labops-agent' và máy chưa cài đặt Go compiler!"
+    echo "   Vui lòng copy tệp bin/labops-agent từ Server Rack sang."
+    exit 1
+fi
 chmod +x "${ROOT_DIR}/bin/labops-agent"
-echo "✅ Đã tạo binary tại: ${ROOT_DIR}/bin/labops-agent"
+
+# Tự động copy vào /usr/local/bin nếu có quyền sudo/root
+if [ -w /usr/local/bin ]; then
+    cp "${ROOT_DIR}/bin/labops-agent" /usr/local/bin/labops-agent
+    chmod +x /usr/local/bin/labops-agent
+    echo "✅ Đã cài đặt binary vào /usr/local/bin/labops-agent"
+fi
 
 # 3. Tạo file cấu hình env nếu chưa có
 if [ ! -f "${SCRIPT_DIR}/labops-agent.env" ]; then

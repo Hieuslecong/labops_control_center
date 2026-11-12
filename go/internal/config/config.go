@@ -43,11 +43,18 @@ func LoadFromEnv() *AgentConfig {
 		ProcessInterval:  10 * time.Second,
 		RepoGuardDataDir: getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/tmp/labops-repositoryguard"),
 		GatewayEnabled:   getEnvBool("LABOPS_GATEWAY_ENABLED", false),
-		GatewayURL:       getEnv("LABOPS_GATEWAY_URL", ""),
-		GatewayCertPath:  getEnv("LABOPS_GATEWAY_CERT_PATH", ""),
-		GatewayKeyPath:   getEnv("LABOPS_GATEWAY_KEY_PATH", ""),
-		GatewayCAPath:    getEnv("LABOPS_GATEWAY_CA_PATH", ""),
+		GatewayURL:       getEnv("LABOPS_GATEWAY_URL", "192.168.167.250:9443"),
+		GatewayCertPath:  getEnv("LABOPS_GATEWAY_CERT_PATH", "/etc/labops/certs/client.crt"),
+		GatewayKeyPath:   getEnv("LABOPS_GATEWAY_KEY_PATH", "/etc/labops/certs/client.key"),
+		GatewayCAPath:    getEnv("LABOPS_GATEWAY_CA_PATH", "/etc/labops/certs/ca.crt"),
 		GatewayServerName: getEnv("LABOPS_GATEWAY_SERVER_NAME", "gateway.control-plane.labops.local"),
+	}
+
+	// Tự động kích hoạt Gateway nếu tìm thấy đủ bộ chứng chỉ mTLS trên đĩa
+	if !cfg.GatewayEnabled {
+		if fileExists(cfg.GatewayCertPath) && fileExists(cfg.GatewayKeyPath) && fileExists(cfg.GatewayCAPath) {
+			cfg.GatewayEnabled = true
+		}
 	}
 
 	// Phát hiện hostname thực tế
@@ -89,5 +96,13 @@ func getEnvBool(key string, defaultVal bool) bool {
 		return v == "1" || v == "true" || v == "yes"
 	}
 	return defaultVal
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 

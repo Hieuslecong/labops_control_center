@@ -76,11 +76,11 @@ class PhysicalServerResponse(BaseSchema):
 
 class GpuProcessResponse(BaseSchema):
     pid: int
-    name: str
-    username: str
-    workspace: str
-    vram_mb: int = Field(alias="vramMb")
-    cpu_percent: float = Field(alias="cpuPercent")
+    name: str = "unknown"
+    username: str = "researcher"
+    workspace: str = "host"
+    vram_mb: int = Field(0, alias="vramMb")
+    cpu_percent: float = Field(0.0, alias="cpuPercent")
 
 class PhysicalGpuResponse(BaseSchema):
     id: str

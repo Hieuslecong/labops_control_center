@@ -60,7 +60,7 @@ func NewTunnelClient(
 
 // Start khởi chạy vòng lặp kết nối và duy trì tunnel tới Gateway
 func (c *TunnelClient) Start(ctx context.Context) {
-	if !c.cfg.GatewayEnabled && c.cfg.GatewayURL == "" {
+	if !c.cfg.GatewayEnabled {
 		c.logger.Info("Chế độ Gateway Tunnel đang tắt, Agent chạy ở chế độ standalone")
 		return
 	}

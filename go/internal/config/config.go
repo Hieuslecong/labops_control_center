@@ -50,9 +50,12 @@ func LoadFromEnv() *AgentConfig {
 		GatewayServerName: getEnv("LABOPS_GATEWAY_SERVER_NAME", "gateway.control-plane.labops.local"),
 	}
 
-	// Tự động kích hoạt Gateway nếu tìm thấy đủ bộ chứng chỉ mTLS trên đĩa
-	if !cfg.GatewayEnabled {
-		if fileExists(cfg.GatewayCertPath) && fileExists(cfg.GatewayKeyPath) && fileExists(cfg.GatewayCAPath) {
+	// Tự động kích hoạt Gateway nếu tìm thấy đủ bộ chứng chỉ mTLS có quyền đọc trên đĩa (trừ khi bị tắt rõ ràng)
+	gwEnv := os.Getenv("LABOPS_GATEWAY_ENABLED")
+	if gwEnv != "" {
+		cfg.GatewayEnabled = getEnvBool("LABOPS_GATEWAY_ENABLED", false)
+	} else {
+		if fileReadable(cfg.GatewayCertPath) && fileReadable(cfg.GatewayKeyPath) && fileReadable(cfg.GatewayCAPath) {
 			cfg.GatewayEnabled = true
 		}
 	}
@@ -104,5 +107,17 @@ func fileExists(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func fileReadable(path string) bool {
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 

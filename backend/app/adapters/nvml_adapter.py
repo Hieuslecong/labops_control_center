@@ -116,6 +116,37 @@ class NvmlAdapter:
                     if data.get("status") == "VERIFIED" and data.get("gpus"):
                         gpus = []
                         for g in data["gpus"]:
+                            raw_procs = g.get("active_processes") or []
+                            gpu_procs = []
+                            for p in raw_procs:
+                                pname = p.get("name", "")
+                                user = p.get("username", "")
+                                if not user:
+                                    if "/users/" in pname:
+                                        try:
+                                            user = pname.split("/users/")[1].split("/")[0]
+                                        except Exception:
+                                            user = "researcher"
+                                    elif "/home/" in pname:
+                                        try:
+                                            user = pname.split("/home/")[1].split("/")[0]
+                                        except Exception:
+                                            user = "researcher"
+                                    else:
+                                        user = "system"
+                                vram = p.get("vram_mb") or p.get("used_memory_mb") or p.get("vramMb") or 0
+                                gpu_procs.append({
+                                    "pid": p.get("pid", 0),
+                                    "name": pname or "python",
+                                    "username": user,
+                                    "workspace": p.get("workspace", "host"),
+                                    "vram_mb": vram,
+                                    "vramMb": vram,
+                                    "cpu_percent": p.get("cpu_percent", 0.0),
+                                    "cpuPercent": p.get("cpu_percent", 0.0),
+                                })
+
+                            active_users = list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username"))) or []
                             gpus.append({
                                 "index": g.get("index", 0),
                                 "id": f"rack-gpu-0{g.get('index', 0) + 1}",
@@ -137,9 +168,9 @@ class NvmlAdapter:
                                 "power_limit_watts": g.get("power_limit_watts", 165),
                                 "allocation_mode": "FULL_GPU_EXCLUSIVE",
                                 "enforcement_state": "MONITOR_ONLY",
-                                "active_processes": g.get("active_processes", []),
-                                "active_users": [],
-                                "associated_jobs": [],
+                                "active_processes": gpu_procs,
+                                "active_users": active_users,
+                                "associated_jobs": [f"proc-{p['pid']}" for p in gpu_procs],
                                 "live": True
                             })
                         return gpus

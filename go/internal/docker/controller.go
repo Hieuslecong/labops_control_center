@@ -277,6 +277,45 @@ func (c *Controller) InspectWorkspace(ctx context.Context, nameOrID string) (*Wo
 	}, nil
 }
 
+// StopContainer dừng một container qua Docker Unix Socket có kiểm tra safeguard
+func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
+	containerID = strings.TrimSpace(containerID)
+	if containerID == "" {
+		return fmt.Errorf("container_id không được để trống")
+	}
+
+	// 1. Inspect để kiểm tra tên có thuộc container hệ thống được bảo vệ hay không
+	ws, err := c.InspectWorkspace(context.Background(), containerID)
+	if err == nil && ws != nil {
+		cleanName := strings.TrimPrefix(ws.Name, "/")
+		if ProtectedSystemContainers[cleanName] {
+			return fmt.Errorf("từ chối can thiệp: container '%s' là dịch vụ hệ thống tối quan trọng", cleanName)
+		}
+	}
+
+	url := fmt.Sprintf("http://localhost/containers/%s/stop?t=%d", containerID, timeoutSec)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("lỗi gửi request dừng container tới Docker daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotModified || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("không tìm thấy container '%s'", containerID)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("Docker daemon trả về lỗi (code %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
 // VerifySSHReachability kiểm tra cổng SSH container có thực sự phản hồi hay không
 func VerifySSHReachability(host string, port int, timeout time.Duration) (bool, string) {
 	if port <= 0 {

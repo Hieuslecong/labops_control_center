@@ -4,12 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-echo "⏪ THỰC HIỆN ROLLBACK LABOPS GO AGENT..."
+echo "⏪ THỰC HIỆN ROLLBACK LABOPS ZERO-TRUST MULTI-NODE HẠ TẦNG..."
 
-# 1. Dừng systemd nếu đang chạy
-if command -v systemctl &>/dev/null && systemctl is-active --quiet labops-agent; then
-    echo "🛑 Đang tạm dừng dịch vụ systemd labops-agent..."
-    sudo systemctl stop labops-agent || true
+# 1. Dừng systemd agent và gateway nếu đang chạy
+if command -v systemctl &>/dev/null; then
+    if systemctl is-active --quiet labops-agent; then
+        echo "🛑 Đang dừng dịch vụ systemd labops-agent..."
+        sudo systemctl stop labops-agent || true
+    fi
+    if systemctl is-active --quiet labops-gateway; then
+        echo "🛑 Đang dừng dịch vụ systemd labops-gateway..."
+        sudo systemctl stop labops-gateway || true
+    fi
 fi
 
 # 2. Khôi phục binary backup nếu có

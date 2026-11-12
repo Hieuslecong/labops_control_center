@@ -21,6 +21,12 @@ type AgentConfig struct {
 	ProcessInterval          time.Duration `json:"process_interval"`
 	IsContainerized          bool          `json:"is_containerized"`
 	RepoGuardDataDir         string        `json:"repo_guard_data_dir"`
+	GatewayEnabled           bool          `json:"gateway_enabled"`
+	GatewayURL               string        `json:"gateway_url"`
+	GatewayCertPath          string        `json:"gateway_cert_path"`
+	GatewayKeyPath           string        `json:"gateway_key_path"`
+	GatewayCAPath            string        `json:"gateway_ca_path"`
+	GatewayServerName        string        `json:"gateway_server_name"`
 }
 
 // LoadFromEnv nạp cấu hình từ biến môi trường và phát hiện môi trường host thực tế.
@@ -36,6 +42,12 @@ func LoadFromEnv() *AgentConfig {
 		GPUInterval:      5 * time.Second,
 		ProcessInterval:  10 * time.Second,
 		RepoGuardDataDir: getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/tmp/labops-repositoryguard"),
+		GatewayEnabled:   getEnvBool("LABOPS_GATEWAY_ENABLED", false),
+		GatewayURL:       getEnv("LABOPS_GATEWAY_URL", ""),
+		GatewayCertPath:  getEnv("LABOPS_GATEWAY_CERT_PATH", ""),
+		GatewayKeyPath:   getEnv("LABOPS_GATEWAY_KEY_PATH", ""),
+		GatewayCAPath:    getEnv("LABOPS_GATEWAY_CA_PATH", ""),
+		GatewayServerName: getEnv("LABOPS_GATEWAY_SERVER_NAME", "gateway.control-plane.labops.local"),
 	}
 
 	// Phát hiện hostname thực tế
@@ -67,6 +79,14 @@ func getEnvInt(key string, defaultVal int) int {
 		if i, err := strconv.Atoi(val); err == nil {
 			return i
 		}
+	}
+	return defaultVal
+}
+
+func getEnvBool(key string, defaultVal bool) bool {
+	if val := os.Getenv(key); val != "" {
+		v := strings.ToLower(strings.TrimSpace(val))
+		return v == "1" || v == "true" || v == "yes"
 	}
 	return defaultVal
 }

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Hieuslecong/labops_control_center/go/internal/agent"
 	"github.com/Hieuslecong/labops_control_center/go/internal/config"
 	"github.com/Hieuslecong/labops_control_center/go/internal/docker"
 	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
@@ -86,7 +87,12 @@ func main() {
 		}
 	}()
 
-	// 6. Xử lý tín hiệu tắt an toàn (Graceful Shutdown)
+	// 6. Khởi chạy gRPC mTLS Tunnel Client tới Gateway (nếu được cấu hình)
+	procCtrl := process.NewController(procCollector)
+	tunnelClient := agent.NewTunnelClient(cfg, hostCollector, gpuCollector, procCollector, procCtrl, dockerCtrl, logger)
+	tunnelClient.Start(ctx)
+
+	// 7. Xử lý tín hiệu tắt an toàn (Graceful Shutdown)
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 

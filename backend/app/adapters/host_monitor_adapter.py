@@ -281,6 +281,84 @@ class HostMonitorAdapter:
             "is_real_host": False,
         }
 
+    def _query_gateway_node_telemetry(self, node_id: str) -> Optional[Dict[str, Any]]:
+        gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
+        try:
+            req = urllib.request.Request(
+                f"{gateway_http_url.rstrip('/')}/api/v1/gateway/nodes/{node_id}/telemetry",
+                headers={"Accept": "application/json"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("status") not in ("ONLINE", "DEGRADED"):
+                    return None
+                host_info = data.get("host") or {}
+                gpu_info = data.get("gpu") or {}
+                gpus_list = []
+                for g in gpu_info.get("gpus", []):
+                    gpus_list.append({
+                        "index": g.get("index", 0),
+                        "model": g.get("name", "NVIDIA A30"),
+                        "uuid": g.get("uuid", ""),
+                        "vram_total_mb": g.get("memory_total_mb", 24576),
+                        "vram_used_mb": g.get("memory_used_mb", 0),
+                        "gpu_util_percent": int(g.get("gpu_utilization_percent", 0)),
+                        "temp_celsius": g.get("temperature_celsius", 45),
+                        "power_watts": int(g.get("power_usage_watts", 0)),
+                    })
+
+                ram_total = round(host_info.get("ram_total_bytes", 0) / (1024**3), 1)
+                ram_used = round(host_info.get("ram_used_bytes", 0) / (1024**3), 1)
+                disk_total = round(host_info.get("disk_total_bytes", 0) / (1024**4), 2)
+                disk_used = round(host_info.get("disk_used_bytes", 0) / (1024**4), 2)
+                uptime_sec = host_info.get("uptime_seconds", 0)
+                days = uptime_sec // 86400
+                hours = (uptime_sec % 86400) // 3600
+
+                hostname = host_info.get("hostname", node_id)
+                disp_name = (
+                    f"Server 02 — Workstation ({hostname} • 1x NVIDIA A30)"
+                    if node_id == "workstation"
+                    else f"Server 01 — Server Rack ({hostname} • 3x NVIDIA A30)"
+                )
+
+                return {
+                    "id": node_id,
+                    "name": disp_name,
+                    "hostname": hostname,
+                    "location": "Phòng Lab (Workstation • LAN 192.168.167.251)" if node_id == "workstation" else "Phòng Máy chủ AIoT Lab (Rack)",
+                    "status": "online",
+                    "ip_address": host_info.get("management_ip", "192.168.167.251" if node_id == "workstation" else "192.168.167.250"),
+                    "vpn_ip": "",
+                    "uptime": f"{days} ngày {hours:02d} giờ" if days > 0 else f"{hours} giờ",
+                    "cpu_model": host_info.get("cpu_model", "Intel Core / Xeon"),
+                    "cpu_cores": host_info.get("cpu_cores", 8),
+                    "cpu_usage_percent": round(host_info.get("cpu_usage_percent", 0.0), 1),
+                    "ram_total_gb": ram_total,
+                    "ram_used_gb": ram_used,
+                    "ram_usage_percent": round(host_info.get("ram_usage_percent", 0.0), 1),
+                    "disk_total_tb": disk_total,
+                    "disk_used_tb": disk_used,
+                    "disk_usage_percent": round(host_info.get("disk_usage_percent", 0.0), 1),
+                    "disk_type": "NVMe SSD",
+                    "network_in_mbps": int(host_info.get("net_rx_bytes_sec", 0) / 125000),
+                    "network_out_mbps": int(host_info.get("net_tx_bytes_sec", 0) / 125000),
+                    "gpu_count": gpu_info.get("gpu_count", len(gpus_list)),
+                    "active_members": 0,
+                    "active_jobs": 0,
+                    "incus_version": "N/A",
+                    "driver_version": gpu_info.get("driver_version", "550.163.01"),
+                    "cuda_version": "12.4",
+                    "last_updated": f"Cập nhật trực tiếp qua LabOps Zero-Trust Gateway mTLS ({data.get('status')})",
+                    "is_real_host": True,
+                    "gpus": gpus_list,
+                }
+        except Exception:
+            return None
+
     def get_remote_track_telemetry(self) -> Dict[str, Any]:
         """Telemetry for Server 01 — Track / Server-Rack (aiotlab-rack)."""
         if self.local_host_id == "track":
@@ -289,6 +367,9 @@ class HostMonitorAdapter:
                 display_name="Server 01 — Server Rack (aiotlab-rack • Cục bộ)",
                 location="Phòng Máy chủ AIoT Lab (Rack)",
             )
+        gw = self._query_gateway_node_telemetry("track")
+        if gw:
+            return gw
         return self._build_unverified_remote("track", "Server 01 — Server Rack (Từ xa)")
 
     def get_local_workstation_telemetry(self) -> Dict[str, Any]:
@@ -299,6 +380,9 @@ class HostMonitorAdapter:
                 display_name="Server 02 — Workstation (Cục bộ)",
                 location="Phòng Lab (Workstation)",
             )
+        gw = self._query_gateway_node_telemetry("workstation")
+        if gw:
+            return gw
         return self._build_unverified_remote("workstation", "Server 02 — Workstation (Từ xa)")
 
     def get_external_daemons_telemetry(self) -> Dict[str, Dict[str, Any]]:

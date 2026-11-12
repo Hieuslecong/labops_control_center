@@ -1,0 +1,266 @@
+syntax = "proto3";
+
+package labops.v1;
+
+option go_package = "github.com/Hieuslecong/labops_control_center/go/proto/labops/v1;labopsv1";
+
+// NodeAgentGatewayService quản lý kênh streaming 2 chiều giữa Agent và Gateway
+service NodeAgentGatewayService {
+  rpc Tunnel(stream AgentMessage) returns (stream GatewayMessage);
+}
+
+// -------------------------------------------------------------
+// MESSAGES GỬI TỪ AGENT -> GATEWAY
+// -------------------------------------------------------------
+
+message AgentMessage {
+  string message_id = 1;
+  int64 timestamp_unix = 2;
+  string node_id = 3;
+
+  oneof payload {
+    NodeHello hello = 10;
+    NodeHeartbeat heartbeat = 11;
+    HostTelemetry host_telemetry = 12;
+    GPUTelemetry gpu_telemetry = 13;
+    ProcessTelemetry process_telemetry = 14;
+    WorkspaceTelemetry workspace_telemetry = 15;
+    CommandProgress command_progress = 16;
+    CommandResponse command_response = 17;
+    AgentError agent_error = 18;
+  }
+}
+
+// -------------------------------------------------------------
+// MESSAGES GỬI TỪ GATEWAY -> AGENT
+// -------------------------------------------------------------
+
+message GatewayMessage {
+  string message_id = 1;
+  int64 timestamp_unix = 2;
+
+  oneof payload {
+    NodeRegistration registration_ack = 10;
+    HeartbeatAck heartbeat_ack = 11;
+    CommandRequest command_request = 12;
+    GatewayError gateway_error = 13;
+  }
+}
+
+// -------------------------------------------------------------
+// HELLO & REGISTRATION
+// -------------------------------------------------------------
+
+message NodeHello {
+  string node_id = 1;
+  string hostname = 2;
+  string role = 3; // "COMPUTE_NODE", "HYBRID"
+  string agent_version = 4;
+  string os_info = 5;
+  string kernel_version = 6;
+  int64 start_time_unix = 7;
+  string management_ip = 8;
+  int32 gpu_count = 9;
+}
+
+message NodeRegistration {
+  bool approved = 1;
+  string node_id = 2;
+  string cluster_id = 3;
+  int64 heartbeat_interval_seconds = 4;
+  int64 telemetry_interval_seconds = 5;
+  string message = 6;
+  repeated string allowed_actions = 7;
+}
+
+// -------------------------------------------------------------
+// HEARTBEAT
+// -------------------------------------------------------------
+
+message NodeHeartbeat {
+  string node_id = 1;
+  int64 sequence_number = 2;
+  NodeHealthStatus health = 3;
+  int64 uptime_seconds = 4;
+}
+
+message HeartbeatAck {
+  int64 sequence_number = 1;
+  int64 server_time_unix = 2;
+  bool request_telemetry_resync = 3;
+}
+
+message NodeHealthStatus {
+  enum HealthState {
+    HEALTH_STATE_UNSPECIFIED = 0;
+    HEALTHY = 1;
+    DEGRADED = 2;
+    UNHEALTHY = 3;
+  }
+  HealthState state = 1;
+  repeated string degraded_reasons = 2;
+}
+
+// -------------------------------------------------------------
+// TELEMETRY MESSAGES
+// -------------------------------------------------------------
+
+message HostTelemetry {
+  string node_id = 1;
+  string hostname = 2;
+  double cpu_usage_percent = 3;
+  int32 cpu_cores = 4;
+  string cpu_model = 5;
+  uint64 ram_total_bytes = 6;
+  uint64 ram_used_bytes = 7;
+  double ram_usage_percent = 8;
+  uint64 disk_total_bytes = 9;
+  uint64 disk_used_bytes = 10;
+  double disk_usage_percent = 11;
+  repeated double load_average = 12;
+  int64 uptime_seconds = 13;
+  uint64 net_rx_bytes_sec = 14;
+  uint64 net_tx_bytes_sec = 15;
+}
+
+message GPUInfo {
+  int32 index = 1;
+  string name = 2;
+  string uuid = 3;
+  uint64 memory_total_mb = 4;
+  uint64 memory_used_mb = 5;
+  uint64 memory_free_mb = 6;
+  double gpu_utilization_percent = 7;
+  double memory_utilization_percent = 8;
+  int32 temperature_celsius = 9;
+  double power_usage_watts = 10;
+  double power_limit_watts = 11;
+  string driver_version = 12;
+  repeated GPUProcessInfo processes = 13;
+}
+
+message GPUProcessInfo {
+  int32 pid = 1;
+  string process_name = 2;
+  uint64 used_memory_mb = 3;
+  string username = 4;
+}
+
+message GPUTelemetry {
+  string node_id = 1;
+  string driver_version = 2;
+  int32 gpu_count = 3;
+  repeated GPUInfo gpus = 4;
+}
+
+message ProcessInfo {
+  string ref = 1;
+  int32 pid = 2;
+  int32 ppid = 3;
+  int32 pgid = 4;
+  uint32 uid = 5;
+  string user = 6;
+  string name = 7;
+  string command_line = 8;
+  string classification = 9; // RESEARCH_JOB, GPU_PROCESS, MEMBER_PROCESS, SYSTEM_PROCESS
+  string attribution = 10;
+  bool is_user_workload = 11;
+  bool is_root_workload = 12;
+  int32 children_count = 13;
+  double cpu_percent = 14;
+  double memory_rss_mb = 15;
+  string state = 16;
+  string start_time = 17;
+  string elapsed_time = 18;
+  bool is_gpu = 19;
+  bool is_protected = 20;
+}
+
+message ProcessTelemetry {
+  string node_id = 1;
+  int32 total_count = 2;
+  repeated ProcessInfo processes = 3;
+}
+
+message WorkspaceInfo {
+  string container_id = 1;
+  string name = 2;
+  string owner = 3;
+  string status = 4;
+  string image = 5;
+  int32 ssh_port = 6;
+  int32 cpu_cores_limit = 7;
+  int64 ram_mb_limit = 8;
+  int32 pids_limit = 9;
+  repeated string assigned_gpu_uuids = 10;
+  string created_at = 11;
+}
+
+message WorkspaceTelemetry {
+  string node_id = 1;
+  repeated WorkspaceInfo workspaces = 2;
+}
+
+// -------------------------------------------------------------
+// COMMAND DISPATCH & EXECUTION (TWO-WAY ON STREAM)
+// -------------------------------------------------------------
+
+message CommandRequest {
+  string command_id = 1;
+  string request_id = 2;
+  string node_id = 3;
+  string action = 4; // Bắt buộc thuộc allowlist
+  map<string, string> parameters = 5;
+  int64 issued_at_unix = 6;
+  int64 deadline_seconds = 7;
+  string idempotency_key = 8;
+  string actor_id = 9;
+  string authorization_context = 10;
+}
+
+message CommandProgress {
+  string command_id = 1;
+  string request_id = 2;
+  int32 percent = 3;
+  string message = 4;
+  int64 timestamp_unix = 5;
+}
+
+message CommandResponse {
+  string command_id = 1;
+  string request_id = 2;
+  string node_id = 3;
+  enum CommandStatus {
+    COMMAND_STATUS_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    FAILED = 2;
+    REJECTED_UNAUTHORIZED = 3;
+    REJECTED_DEADLINE_EXCEEDED = 4;
+    REJECTED_INVALID_PARAMS = 5;
+  }
+  CommandStatus status = 4;
+  string error_code = 5;
+  string error_message = 6;
+  bytes result_payload = 7; // JSON format
+  int64 executed_at_unix = 8;
+  int64 execution_duration_ms = 9;
+  bool idempotent_replay = 10;
+}
+
+// -------------------------------------------------------------
+// ERRORS
+// -------------------------------------------------------------
+
+message AgentError {
+  string code = 1;
+  string message = 2;
+  string correlation_id = 3;
+  int64 timestamp_unix = 4;
+}
+
+message GatewayError {
+  string code = 1;
+  string message = 2;
+  string correlation_id = 3;
+  int64 timestamp_unix = 4;
+}

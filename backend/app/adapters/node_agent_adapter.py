@@ -206,6 +206,43 @@ class NodeAgentClient:
                 action, params, request_id=request_id, idempotency_key=idempotency_key
             )
 
+        # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel)
+        gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
+        try:
+            gw_req = urllib.request.Request(
+                f"{gateway_http_url.rstrip('/')}/api/v1/gateway/dispatch",
+                data=json.dumps({
+                    "node_id": host.get("id"),
+                    "action": action,
+                    "parameters": {k: str(v) for k, v in (params or {}).items()},
+                    "timeout_seconds": 15,
+                    "idempotency_key": idempotency_key or "",
+                    "actor_id": "fastapi-controller",
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(gw_req, timeout=15) as resp:
+                gw_data = json.loads(resp.read().decode("utf-8"))
+                if gw_data.get("success"):
+                    return {
+                        "request_id": gw_data.get("command_id", request_id),
+                        "host_id": host.get("id"),
+                        "agent_version": AGENT_VERSION,
+                        "action": action,
+                        "executed_at": _now(),
+                        "result": gw_data.get("result", {}),
+                    }
+                if gw_data.get("error_code") == "ACTION_NOT_ALLOWED":
+                    raise NodeAgentError("ACTION_NOT_ALLOWLISTED", gw_data.get("error_message", ""), 403)
+                if gw_data.get("error_code") != "NODE_OFFLINE":
+                    raise NodeAgentError(gw_data.get("error_code", "GATEWAY_ERROR"), gw_data.get("error_message", "Lỗi điều khiển từ xa"), 500)
+        except NodeAgentError:
+            raise
+        except Exception:
+            # Fallback sang kết nối trực tiếp agent_url nếu Gateway chưa bật hoặc node offline
+            pass
+
         agent_url = host.get("agent_url")
         token = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
         if not agent_url or not token:

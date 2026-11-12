@@ -124,6 +124,10 @@ export function ServerDetailView() {
             <Badge variant='secondary' className='font-mono text-xs'>
               {server.hostname}
             </Badge>
+            <Badge variant='outline' className='bg-primary/5 text-primary border-primary/20 font-mono text-[11px] flex items-center gap-1'>
+              <Icons.shield className='size-3 text-emerald-500' />
+              Zero-Trust mTLS Mesh
+            </Badge>
           </div>
           <p className='text-xs text-muted-foreground mt-1'>
             {server.location} • IP:{' '}

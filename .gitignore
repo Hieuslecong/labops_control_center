@@ -38,6 +38,11 @@ __pycache__/
 .env
 .env*.local
 !.env.example
+*.env
+deploy/*.env
+deploy/labops-agent.env
+go/
+infrastructure/
 
 
 # vercel

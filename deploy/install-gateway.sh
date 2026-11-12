@@ -19,9 +19,12 @@ chmod +x "${ROOT_DIR}/bin/labops-gateway"
 echo "✅ Đã tạo binary tại: ${ROOT_DIR}/bin/labops-gateway"
 
 # 2. Khởi tạo thư mục PKI
-PKI_DIR="$HOME/.labops/pki"
+PKI_DIR="/home/aiot-1/.labops/pki"
 mkdir -p "${PKI_DIR}"
 chmod 700 "${PKI_DIR}"
+if [ "$(id -u)" -eq 0 ]; then
+    chown -R aiot-1:aiot-1 "/home/aiot-1/.labops"
+fi
 echo "📁 [2/3] Đã cấu hình thư mục Root CA PKI: ${PKI_DIR}"
 
 # 3. Cài đặt systemd nếu có quyền sudo

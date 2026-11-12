@@ -29,13 +29,21 @@ func main() {
 	grpcPort := getEnvInt("LABOPS_GATEWAY_GRPC_PORT", 9443)
 	httpPort := getEnvInt("LABOPS_GATEWAY_HTTP_PORT", 9444)
 	bindAddr := getEnvStr("LABOPS_GATEWAY_BIND_ADDR", "0.0.0.0")
-	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "127.0.0.1")
+	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "0.0.0.0")
 	pkiDir := getEnvStr("LABOPS_GATEWAY_PKI_DIR", "")
 	tokenSecret := getEnvStr("LABOPS_GATEWAY_TOKEN_SECRET", "labops-zero-trust-secret-salt-2026")
 
 	if pkiDir == "" {
 		home, _ := os.UserHomeDir()
-		pkiDir = filepath.Join(home, ".labops", "pki")
+		defaultDir := filepath.Join(home, ".labops", "pki")
+		if err := os.MkdirAll(defaultDir, 0700); err == nil {
+			pkiDir = defaultDir
+		} else {
+			// Fallback sang data/pki trong thư mục làm việc hiện tại
+			cwd, _ := os.Getwd()
+			pkiDir = filepath.Join(cwd, "data", "pki")
+			_ = os.MkdirAll(pkiDir, 0700)
+		}
 	}
 
 	logger.Info("Cấu hình Agent Gateway",

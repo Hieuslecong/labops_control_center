@@ -9,14 +9,27 @@ echo "=========================================================="
 echo "🛡️ CÀI ĐẶT LABOPS AGENT GATEWAY (PORT 9443 mTLS)"
 echo "=========================================================="
 
-export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
+export PATH="/home/aiot-1/.local/go/bin:/usr/local/go/bin:$HOME/.local/go/bin:$HOME/go/bin:$PATH"
 
-# 1. Biên dịch Gateway
-echo "📦 [1/3] Biên dịch labops-gateway binary..."
+# 1. Chuẩn bị Gateway binary
+echo "📦 [1/3] Chuẩn bị labops-gateway binary..."
 mkdir -p "${ROOT_DIR}/bin"
-(cd "${ROOT_DIR}/go" && go build -o "${ROOT_DIR}/bin/labops-gateway" ./cmd/labops-gateway)
+
+if [ -f "${ROOT_DIR}/bin/labops-gateway" ]; then
+    echo "✅ Sử dụng binary có sẵn tại: ${ROOT_DIR}/bin/labops-gateway"
+elif command -v go &>/dev/null; then
+    echo "🔨 Đang biên dịch labops-gateway bằng Go toolchain..."
+    (cd "${ROOT_DIR}/go" && go build -o "${ROOT_DIR}/bin/labops-gateway" ./cmd/labops-gateway)
+    echo "✅ Đã biên dịch binary thành công."
+elif [ -x /home/aiot-1/.local/go/bin/go ]; then
+    echo "🔨 Đang biên dịch labops-gateway bằng Go toolchain tại /home/aiot-1/.local/go/bin/go..."
+    (cd "${ROOT_DIR}/go" && /home/aiot-1/.local/go/bin/go build -o "${ROOT_DIR}/bin/labops-gateway" ./cmd/labops-gateway)
+    echo "✅ Đã biên dịch binary thành công."
+else
+    echo "❌ Lỗi: Không tìm thấy Go compiler và binary '${ROOT_DIR}/bin/labops-gateway' chưa tồn tại!"
+    exit 1
+fi
 chmod +x "${ROOT_DIR}/bin/labops-gateway"
-echo "✅ Đã tạo binary tại: ${ROOT_DIR}/bin/labops-gateway"
 
 # 2. Khởi tạo thư mục PKI
 PKI_DIR="/home/aiot-1/.labops/pki"

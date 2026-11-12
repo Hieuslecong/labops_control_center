@@ -40,6 +40,15 @@ fi
 if [ ! -f "${SCRIPT_DIR}/labops-agent.env" ]; then
     echo "⚙️ [2/4] Tạo cấu hình deploy/labops-agent.env từ mẫu..."
     cp "${SCRIPT_DIR}/labops-agent.env.example" "${SCRIPT_DIR}/labops-agent.env"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    chown aiot-1:docker "${SCRIPT_DIR}/labops-agent.env" 2>/dev/null || true
+    chmod 640 "${SCRIPT_DIR}/labops-agent.env"
+    if [ -f "/etc/labops/certs/client.key" ]; then
+        chown root:docker "/etc/labops/certs/client.key" 2>/dev/null || true
+        chmod 640 "/etc/labops/certs/client.key" 2>/dev/null || true
+    fi
+else
     chmod 600 "${SCRIPT_DIR}/labops-agent.env"
 fi
 
@@ -51,6 +60,7 @@ if command -v systemctl &>/dev/null && [ -w /etc/systemd/system ]; then
     systemctl enable labops-agent.service
     systemctl restart labops-agent.service
     echo "✅ Dịch vụ systemd 'labops-agent' đã được kích hoạt và khởi chạy."
+    sleep 1.5
 else
     echo "ℹ️ Không có quyền ghi vào /etc/systemd/system. Chạy lệnh sau bằng quyền root/sudo nếu cần cài systemd:"
     echo "   sudo cp ${SCRIPT_DIR}/labops-agent.service /etc/systemd/system/"

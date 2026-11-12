@@ -9,6 +9,7 @@ import { RunningJobsTable } from './running-jobs-table';
 import { GpuHoursChart } from './gpu-hours-chart';
 import { LabEventsPanel } from './lab-events-panel';
 import { SecuritySummaryPanel } from './security-summary-panel';
+import { MemberRepoHistoryPanel } from './member-repo-history-panel';
 import { GpuAllocationDialog } from './gpu-allocation-dialog';
 import { useLabOpsStore } from '@/features/labops/store';
 
@@ -56,6 +57,9 @@ export function OverviewContent() {
         <LabEventsPanel />
         <SecuritySummaryPanel />
       </div>
+
+      {/* SECTION G — Lịch sử Clone & Kiểm duyệt Kho mã theo Thành viên */}
+      <MemberRepoHistoryPanel />
 
       {/* Quick GPU Allocation Dialog */}
       <GpuAllocationDialog

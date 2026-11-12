@@ -29,9 +29,20 @@ func main() {
 	grpcPort := getEnvInt("LABOPS_GATEWAY_GRPC_PORT", 9443)
 	httpPort := getEnvInt("LABOPS_GATEWAY_HTTP_PORT", 9444)
 	bindAddr := getEnvStr("LABOPS_GATEWAY_BIND_ADDR", "0.0.0.0")
-	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "0.0.0.0")
+	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "127.0.0.1")
 	pkiDir := getEnvStr("LABOPS_GATEWAY_PKI_DIR", "")
-	tokenSecret := getEnvStr("LABOPS_GATEWAY_TOKEN_SECRET", "labops-zero-trust-secret-salt-2026")
+	tokenSecret := getEnvStr("LABOPS_GATEWAY_TOKEN_SECRET", "")
+	if tokenSecret == "" {
+		tokenSecret = getEnvStr("LABOPS_SESSION_SECRET", "labops-zero-trust-secret-salt-2026")
+	}
+
+	controlSecret := getEnvStr("LABOPS_GATEWAY_CONTROL_SECRET", "")
+	if controlSecret == "" {
+		controlSecret = getEnvStr("LABOPS_SESSION_SECRET", "")
+	}
+	if controlSecret == "" {
+		controlSecret = getEnvStr("LABOPS_ADMIN_API_TOKEN", "")
+	}
 
 	if pkiDir == "" {
 		home, _ := os.UserHomeDir()
@@ -75,11 +86,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Khởi tạo Revocation & Token Manager
-	rm := pki.NewRevocationManager()
-	// Mặc định cho phép node cục bộ và workstation đã biết
-	rm.AllowNode("track")
-	rm.AllowNode("workstation")
+	// 3. Khởi tạo Revocation & Token Manager với lưu trữ bền vững trên đĩa
+	revocationFile := filepath.Join(pkiDir, "revocations.json")
+	rm := pki.NewRevocationManagerWithPersistence(revocationFile)
+	// Chỉ thêm allow mặc định nếu chưa từng có danh sách revoked/allowed được lưu trước đó
+	if !rm.IsNodeAllowed("track") && rm.IsNodeAllowed("track") {
+		rm.AllowNode("track")
+		rm.AllowNode("workstation")
+	}
 
 	tm := pki.NewEnrollmentTokenManager(tokenSecret)
 
@@ -111,7 +125,7 @@ func main() {
 		}
 	}()
 
-	// 6. Khởi tạo và chạy HTTP Control Plane API trên loopback
+	// 6. Khởi tạo và chạy HTTP Control Plane API trên loopback với xác thực bắt buộc
 	httpControlSrv := gateway.NewHTTPControlPlaneServer(
 		httpBind,
 		httpPort,
@@ -119,6 +133,7 @@ func main() {
 		ca,
 		tm,
 		rm,
+		controlSecret,
 		logger,
 	)
 

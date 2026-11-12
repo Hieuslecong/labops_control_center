@@ -41,35 +41,34 @@ if ! "$BACKEND_PYTHON" -c 'import fastapi, uvicorn, pydantic_settings, psutil' 2
     exit 1
 fi
 
-# 3. Khởi động LabOps Go Node Agent (Port 9100) nếu có
+# 3. Kiểm tra hoặc khởi động LabOps Go Node Agent (Port 9100)
 AGENT_PID=""
-OLD_PORT_9100_PID=$(ss -tulpn 2>/dev/null | grep :9100 | grep -o 'pid=[0-9]*' | cut -d= -f2 | tr '\n' ' ' || true)
-if [ -n "$OLD_PORT_9100_PID" ]; then
-    kill $OLD_PORT_9100_PID 2>/dev/null || true
-fi
-if [ -x ./bin/labops-agent ]; then
+if curl -s http://127.0.0.1:9100/health >/dev/null 2>&1; then
+    echo "✅ [1/3] LabOps Go Node Agent đang hoạt động (http://127.0.0.1:9100)"
+elif [ -x ./bin/labops-agent ]; then
     echo "⚡ [1/3] Khởi động LabOps Go Node Agent (http://127.0.0.1:9100)..."
     ./bin/labops-agent &
     AGENT_PID=$!
-    sleep 0.2
+    sleep 0.5
 fi
 
-# 4. Khởi động Backend API (Port 8000)
-OLD_PORT_8000_PID=$(ss -tulpn 2>/dev/null | grep :8000 | grep -o 'pid=[0-9]*' | cut -d= -f2 | tr '\n' ' ' || true)
-if [ -n "$OLD_PORT_8000_PID" ]; then
-    echo "⚠️ Phát hiện tiến trình cũ đang chiếm cổng 8000 (PID: $OLD_PORT_8000_PID), đang dọn dẹp..."
-    kill $OLD_PORT_8000_PID 2>/dev/null || true
-    sleep 1
-fi
-
-echo "📡 [2/3] Đang khởi động LabOps Backend API V2 (http://127.0.0.1:8000)..."
-"$BACKEND_PYTHON" backend/app/main.py &
-BACKEND_PID=$!
+# 4. Chỉ sử dụng lại backend nếu health endpoint xác nhận đúng dịch vụ LabOps.
+BACKEND_PID=""
+backend_healthy() {
+    "$BACKEND_PYTHON" -c 'import json, sys, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2) as response:
+        data = json.load(response)
+    sys.exit(0 if data.get("status") == "ok" and data.get("app") == "LabOps Control Center API" else 1)
+except Exception:
+    sys.exit(1)' 2>/dev/null
+}
 
 cleanup() {
     local status=$?
+    trap - EXIT INT TERM
     echo ""
-    echo "🛑 Đang tắt hệ thống LabOps Control Center..."
+    echo "🛑 Đang tắt các tiến trình LabOps do script này khởi động..."
     if [ -n "$AGENT_PID" ]; then
         kill "$AGENT_PID" 2>/dev/null || true
     fi
@@ -78,12 +77,45 @@ cleanup() {
     fi
     return "$status"
 }
-trap cleanup SIGINT SIGTERM EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-sleep 1.5
-if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo "❌ Backend đã dừng; không khởi động dashboard. Kiểm tra lỗi bên trên."
-    exit 1
+if backend_healthy; then
+    echo "✅ [2/3] Backend LabOps đang hoạt động (http://127.0.0.1:8000)"
+else
+    # Không tự kill tiến trình đang chạy: có thể là dịch vụ khác hoặc backend đang khởi động.
+    if ! "$BACKEND_PYTHON" -c 'import socket, sys
+s = socket.socket()
+s.settimeout(1)
+try:
+    sys.exit(0 if s.connect_ex(("127.0.0.1", 8000)) == 0 else 1)
+finally:
+    s.close()'; then
+        echo "📡 [2/3] Đang khởi động LabOps Backend API V2 (http://127.0.0.1:8000)..."
+        "$BACKEND_PYTHON" backend/app/main.py &
+        BACKEND_PID=$!
+        ready=false
+        for attempt in {1..30}; do
+            if backend_healthy; then
+                ready=true
+                break
+            fi
+            if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if [ "$ready" != true ]; then
+            echo "❌ Backend chưa sẵn sàng; kiểm tra lỗi bên trên và tiến trình đang dùng cổng 8000."
+            exit 1
+        fi
+    else
+        echo "❌ Cổng 8000 đang được sử dụng nhưng không xác nhận được backend LabOps."
+        echo "   Kiểm tra bằng: ss -ltnp 'sport = :8000'"
+        echo "   Script không tự dừng tiến trình đang chạy."
+        exit 1
+    fi
 fi
 
 # 5. Khởi động Frontend Next.js (Port 3000)

@@ -52,7 +52,10 @@ export function UserNav() {
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
-          <DropdownMenuItem onClick={() => router.push('/auth/sign-in')}>
+          <DropdownMenuItem onClick={async () => {
+            await fetch('/api/labops/logout', { method: 'POST' });
+            window.location.assign('/auth/sign-in');
+          }}>
             <Icons.logout className='mr-2 h-4 w-4 text-destructive' /> Đăng xuất
           </DropdownMenuItem>
         </DropdownMenuGroup>

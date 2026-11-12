@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ type HTTPControlPlaneServer struct {
 	pkiCA          *pki.CACertificate
 	tokenManager   *pki.EnrollmentTokenManager
 	revocationMgr  *pki.RevocationManager
+	controlSecret  string
 	server         *http.Server
 	logger         *slog.Logger
 	port           int
@@ -31,6 +33,7 @@ func NewHTTPControlPlaneServer(
 	ca *pki.CACertificate,
 	tm *pki.EnrollmentTokenManager,
 	rm *pki.RevocationManager,
+	controlSecret string,
 	logger *slog.Logger,
 ) *HTTPControlPlaneServer {
 	if logger == nil {
@@ -42,6 +45,7 @@ func NewHTTPControlPlaneServer(
 		pkiCA:          ca,
 		tokenManager:   tm,
 		revocationMgr:  rm,
+		controlSecret:  controlSecret,
 		logger:         logger,
 		port:           port,
 		bindAddr:       bindAddr,
@@ -67,6 +71,26 @@ func NewHTTPControlPlaneServer(
 	return h
 }
 
+// verifyControlAuth kiểm tra token xác thực của Control Plane API
+func (h *HTTPControlPlaneServer) verifyControlAuth(r *http.Request) bool {
+	if h.controlSecret == "" {
+		// Nếu chưa cấu hình secret xác thực, từ chối mọi yêu cầu đặc quyền (fail-closed)
+		return false
+	}
+	authHdr := r.Header.Get("Authorization")
+	token := ""
+	if strings.HasPrefix(strings.ToLower(authHdr), "bearer ") {
+		token = strings.TrimSpace(authHdr[7:])
+	}
+	if token == "" {
+		token = r.Header.Get("X-Gateway-Control-Secret")
+	}
+	if token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(h.controlSecret)) == 1
+}
+
 func (h *HTTPControlPlaneServer) Start() error {
 	h.logger.Info("🌐 LabOps Gateway Control Plane HTTP API đang lắng nghe", "address", h.server.Addr)
 	return h.server.ListenAndServe()
@@ -85,6 +109,10 @@ func (h *HTTPControlPlaneServer) handleHealth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *HTTPControlPlaneServer) handleNodes(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Chỉ hỗ trợ GET", http.StatusMethodNotAllowed)
 		return
@@ -97,6 +125,10 @@ func (h *HTTPControlPlaneServer) handleNodes(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *HTTPControlPlaneServer) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/gateway/nodes/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -139,6 +171,10 @@ func (h *HTTPControlPlaneServer) handleNodeDetail(w http.ResponseWriter, r *http
 }
 
 func (h *HTTPControlPlaneServer) handleDispatch(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Chỉ hỗ trợ POST", http.StatusMethodNotAllowed)
 		return
@@ -169,6 +205,10 @@ type EnrollRequest struct {
 }
 
 func (h *HTTPControlPlaneServer) handleEnrollToken(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Chỉ hỗ trợ POST", http.StatusMethodNotAllowed)
 		return
@@ -201,6 +241,10 @@ type RevokeRequest struct {
 }
 
 func (h *HTTPControlPlaneServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Chỉ hỗ trợ POST", http.StatusMethodNotAllowed)
 		return
@@ -247,8 +291,16 @@ func (h *HTTPControlPlaneServer) handleIssueCert(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if !h.tokenManager.ConsumeToken(req.EnrollmentToken) {
-		http.Error(w, "Token ghi danh (enrollment token) không hợp lệ hoặc đã hết hạn", http.StatusUnauthorized)
+	if req.NodeID == "" || req.EnrollmentToken == "" {
+		http.Error(w, "Thiếu node_id hoặc enrollment_token", http.StatusBadRequest)
+		return
+	}
+
+	// Xác minh token gắn chặt với đúng NodeID và chỉ sử dụng một lần duy nhất
+	if !h.tokenManager.ConsumeTokenForNode(req.EnrollmentToken, req.NodeID) {
+		h.logger.Warn("Từ chối cấp chứng chỉ: Token không hợp lệ, hết hạn hoặc sai node_id",
+			"claimed_node", req.NodeID)
+		http.Error(w, "Token ghi danh (enrollment token) không hợp lệ, đã hết hạn hoặc không khớp với node_id", http.StatusUnauthorized)
 		return
 	}
 

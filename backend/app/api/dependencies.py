@@ -19,14 +19,14 @@ def require_labops_admin(
             raise HTTPException(status_code=503, detail="Access management authentication is not configured")
         raise HTTPException(status_code=401, detail="Unauthorized")
     raw_token = credentials.credentials
-    actor_str = actor if isinstance(actor, str) and actor.strip() else None
     # 1. Accept V2 HMAC ADMIN session token issued by Next.js BFF
     v2_secret = os.environ.get("LABOPS_SESSION_SECRET", "").strip()
     if v2_secret:
         try:
             p = principal_from_authorization(f"Bearer {raw_token}")
             require_role(p, "ADMIN")
-            return actor_str or p.username
+            # Danh tính bắt buộc lấy từ token đã ký số, không tin header X-LabOps-Actor do client gửi
+            return p.username
         except AuthError as v2_err:
             if not settings.LABOPS_ADMIN_API_TOKEN:
                 raise HTTPException(status_code=v2_err.status, detail=v2_err.detail) from v2_err
@@ -36,7 +36,7 @@ def require_labops_admin(
         raise HTTPException(status_code=503, detail="Access management authentication is not configured")
     if not secrets.compare_digest(raw_token, configured):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return actor_str or "admin-service"
+    return (actor or "").strip() or "admin-service"
 
 
 # ---------------- V2 principal-based auth ----------------

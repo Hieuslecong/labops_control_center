@@ -208,6 +208,14 @@ class NodeAgentClient:
 
         # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel)
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
+        control_secret = (
+            os.getenv("LABOPS_GATEWAY_CONTROL_SECRET")
+            or os.getenv("LABOPS_SESSION_SECRET")
+            or os.getenv("LABOPS_ADMIN_API_TOKEN", "")
+        )
+        gw_headers = {"Content-Type": "application/json"}
+        if control_secret:
+            gw_headers["Authorization"] = f"Bearer {control_secret}"
         try:
             gw_req = urllib.request.Request(
                 f"{gateway_http_url.rstrip('/')}/api/v1/gateway/dispatch",
@@ -219,7 +227,7 @@ class NodeAgentClient:
                     "idempotency_key": idempotency_key or "",
                     "actor_id": "fastapi-controller",
                 }).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers=gw_headers,
                 method="POST",
             )
             with urllib.request.urlopen(gw_req, timeout=15) as resp:

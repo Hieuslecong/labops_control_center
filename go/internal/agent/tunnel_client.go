@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Hieuslecong/labops_control_center/go/internal/config"
@@ -103,6 +105,28 @@ func (c *TunnelClient) runLoop(ctx context.Context) {
 			backoff = maxBackoff
 		}
 	}
+}
+
+// safeStreamSender đảm bảo an toàn đồng thời (thread-safe) khi gửi tin trên cùng gRPC stream
+type safeStreamSender struct {
+	mu     sync.Mutex
+	stream pb.NodeAgentGatewayService_TunnelClient
+	closed bool
+}
+
+func (s *safeStreamSender) Send(msg *pb.AgentMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("safeStreamSender: stream đã đóng")
+	}
+	return s.stream.Send(msg)
+}
+
+func (s *safeStreamSender) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
 }
 
 func (c *TunnelClient) connectAndStream(ctx context.Context) error {
@@ -200,11 +224,17 @@ func (c *TunnelClient) connectAndStream(ctx context.Context) error {
 		"allowed_actions", regAck.AllowedActions,
 	)
 
-	// 3. Goroutine định kỳ gửi Heartbeat và Telemetry
-	streamCtx, streamCancel := context.WithCancel(ctx)
-	defer streamCancel()
+	// 3. Khởi tạo thread-safe stream sender để chống race condition khi gửi song song
+	sender := &safeStreamSender{stream: stream}
 
-	go c.telemetrySenderRoutine(streamCtx, stream)
+	// Goroutine định kỳ gửi Heartbeat và Telemetry
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer func() {
+		sender.Close()
+		streamCancel()
+	}()
+
+	go c.telemetrySenderRoutine(streamCtx, sender)
 
 	// 4. Vòng lặp chính đọc các yêu cầu lệnh từ Gateway
 	for {
@@ -221,12 +251,12 @@ func (c *TunnelClient) connectAndStream(ctx context.Context) error {
 		}
 
 		if req := gwMsg.GetCommandRequest(); req != nil {
-			go c.handleCommandRequest(stream, req)
+			go c.handleCommandRequest(sender, req)
 		}
 	}
 }
 
-func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.NodeAgentGatewayService_TunnelClient) {
+func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, sender *safeStreamSender) {
 	hbTicker := time.NewTicker(c.cfg.HostInterval)
 	defer hbTicker.Stop()
 
@@ -261,13 +291,13 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.Nod
 					},
 				},
 			}
-			_ = stream.Send(hbMsg)
+			_ = sender.Send(hbMsg)
 
 			// 2. Gửi Host Telemetry
 			hostReport := c.hostCol.GetLatest()
 			if hostReport != nil {
 				hostProto := toProtoHost(c.cfg.ServerID, hostReport)
-				_ = stream.Send(&pb.AgentMessage{
+				_ = sender.Send(&pb.AgentMessage{
 					MessageId:     newUUID(),
 					TimestampUnix: time.Now().Unix(),
 					NodeId:        c.cfg.ServerID,
@@ -281,7 +311,7 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.Nod
 			gpuReport := c.gpuCol.GetLatest()
 			if gpuReport != nil {
 				gpuProto := toProtoGPU(c.cfg.ServerID, gpuReport)
-				_ = stream.Send(&pb.AgentMessage{
+				_ = sender.Send(&pb.AgentMessage{
 					MessageId:     newUUID(),
 					TimestampUnix: time.Now().Unix(),
 					NodeId:        c.cfg.ServerID,
@@ -296,7 +326,7 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.Nod
 			procReport := c.procCol.Collect("all")
 			if procReport != nil {
 				procProto := toProtoProcess(c.cfg.ServerID, procReport)
-				_ = stream.Send(&pb.AgentMessage{
+				_ = sender.Send(&pb.AgentMessage{
 					MessageId:     newUUID(),
 					TimestampUnix: time.Now().Unix(),
 					NodeId:        c.cfg.ServerID,
@@ -310,7 +340,7 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.Nod
 			workspaces, err := c.dockerCtrl.ListWorkspaces(ctx)
 			if err == nil {
 				wsProto := toProtoWorkspace(c.cfg.ServerID, workspaces)
-				_ = stream.Send(&pb.AgentMessage{
+				_ = sender.Send(&pb.AgentMessage{
 					MessageId:     newUUID(),
 					TimestampUnix: time.Now().Unix(),
 					NodeId:        c.cfg.ServerID,
@@ -323,7 +353,7 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, stream pb.Nod
 	}
 }
 
-func (c *TunnelClient) handleCommandRequest(stream pb.NodeAgentGatewayService_TunnelClient, req *pb.CommandRequest) {
+func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.CommandRequest) {
 	c.logger.Info("Nhận yêu cầu lệnh từ Gateway",
 		"command_id", req.CommandId,
 		"action", req.Action,
@@ -428,7 +458,7 @@ func (c *TunnelClient) handleCommandRequest(stream pb.NodeAgentGatewayService_Tu
 		},
 	}
 
-	_ = stream.Send(resMsg)
+	_ = sender.Send(resMsg)
 }
 
 // -------------------------------------------------------------

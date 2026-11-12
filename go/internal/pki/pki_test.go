@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -159,5 +160,44 @@ func TestEnrollmentTokenManager(t *testing.T) {
 	expToken := etm.GenerateToken("ws-compute-2", -1*time.Second)
 	if etm.ConsumeToken(expToken) {
 		t.Fatal("Kỳ vọng ConsumeToken thất bại do token đã hết hạn")
+	}
+
+	// Token ràng buộc NodeID (AT-04)
+	boundToken := etm.GenerateToken("ws-target", 5*time.Minute)
+	if etm.ConsumeTokenForNode(boundToken, "ws-attacker") {
+		t.Fatal("Kỳ vọng ConsumeTokenForNode thất bại khi node ID không khớp (AT-04)")
+	}
+	if !etm.ConsumeTokenForNode(boundToken, "ws-target") {
+		t.Fatal("Kỳ vọng ConsumeTokenForNode thành công với đúng node ID")
+	}
+}
+
+func TestRevocationPersistenceAcrossRestart(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "labops-revocation-test-*")
+	if err != nil {
+		t.Fatalf("Lỗi tạo tempdir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	revFile := filepath.Join(tempDir, "revocations.json")
+
+	// 1. Khởi tạo RevocationManager với file bền vững và thu hồi node "ws-bad-actor"
+	rm1 := NewRevocationManagerWithPersistence(revFile)
+	rm1.AllowNode("ws-good-actor")
+	rm1.RevokeNode("ws-bad-actor", "Compromised credential")
+
+	if rm1.IsNodeAllowed("ws-bad-actor") {
+		t.Fatal("ws-bad-actor phải bị từ chối")
+	}
+
+	// 2. Mô phỏng Gateway restart hoàn toàn bằng cách tạo instance mới từ cùng file
+	rm2 := NewRevocationManagerWithPersistence(revFile)
+
+	// AT-05: Node đã revoke phải tiếp tục bị từ chối sau restart
+	if rm2.IsNodeAllowed("ws-bad-actor") {
+		t.Fatal("AT-05 Vi phạm: ws-bad-actor vẫn được phép sau khi Gateway restart!")
+	}
+	if !rm2.IsNodeAllowed("ws-good-actor") {
+		t.Fatal("ws-good-actor phải tiếp tục được phép sau khi Gateway restart")
 	}
 }

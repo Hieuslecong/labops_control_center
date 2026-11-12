@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -82,7 +83,7 @@ func NewServer(
 	return s
 }
 
-// authMiddleware xác thực token nếu có cấu hình
+// authMiddleware xác thực token bảo mật nghiêm ngặt (AT-06)
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -90,23 +91,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		clientIP := r.RemoteAddr
-		if strings.HasPrefix(clientIP, "127.0.0.1") || strings.HasPrefix(clientIP, "[::1]") {
-			next.ServeHTTP(w, r)
-			return
-		}
-
+		// AT-06: Loại bỏ hoàn toàn cơ chế miễn trừ xác thực theo localhost
 		token := r.Header.Get("X-LabOps-Agent-Secret")
 		if token == "" {
 			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				token = strings.TrimPrefix(authHeader, "Bearer ")
+			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				token = strings.TrimSpace(authHeader[7:])
 			}
 		}
 
-		if token != s.cfg.SecretToken {
-			http.Error(w, `{"error":"Unauthorized: invalid or missing agent token"}`, http.StatusUnauthorized)
-			return
+		isMutation := r.Method != http.MethodGet && r.Method != http.MethodHead
+		expectedSecret := s.cfg.SecretToken
+
+		// Mutation endpoints bắt buộc phải có secret cấu hình và token khớp (constant-time compare)
+		if isMutation || expectedSecret != "" {
+			if expectedSecret == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedSecret)) != 1 {
+				http.Error(w, `{"error":"Unauthorized: invalid or missing agent token"}`, http.StatusUnauthorized)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)

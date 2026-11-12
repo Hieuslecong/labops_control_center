@@ -1,6 +1,6 @@
 import { auth, currentUser } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
-import { isDemoModeAllowed, hasRealClerkKeys } from '@/lib/auth-guard';
+import { isDemoModeAllowed, hasRealClerkKeys, getLocalSession } from '@/lib/auth-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,6 +18,15 @@ export interface UserSessionData {
 
 export async function GET(request: Request) {
   try {
+    const localSession = await getLocalSession();
+    if (localSession) {
+      return NextResponse.json<UserSessionData>({
+        authenticated: true, userId: localSession.username, username: localSession.username,
+        fullName: 'Quản trị viên LabOps', email: '', imageUrl: '', role: localSession.role,
+        permissions: localSession.role === 'ADMIN' ? ['all'] : ['researcher:read', 'researcher:write'],
+        isDemo: false
+      });
+    }
     const isDemo = isDemoModeAllowed();
 
     // In demo mode without real Clerk keys
@@ -64,11 +73,12 @@ export async function GET(request: Request) {
         ''
     ).toUpperCase();
 
-    let role: 'ADMIN' | 'RESEARCHER' = 'ADMIN';
-    if (metadataRole === 'RESEARCHER') {
-      role = 'RESEARCHER';
-    } else if (orgId && typeof has === 'function' && !has({ role: 'org:admin' }) && metadataRole !== 'ADMIN') {
-      role = 'RESEARCHER';
+    // Default-deny: Mặc định RESEARCHER, chỉ nâng quyền ADMIN khi có xác thực org:admin hoặc metadata ADMIN
+    let role: 'ADMIN' | 'RESEARCHER' = 'RESEARCHER';
+    if (metadataRole === 'ADMIN') {
+      role = 'ADMIN';
+    } else if (orgId && typeof has === 'function' && has({ role: 'org:admin' })) {
+      role = 'ADMIN';
     }
 
     let fullName = '';

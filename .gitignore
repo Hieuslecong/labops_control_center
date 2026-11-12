@@ -41,8 +41,7 @@ __pycache__/
 *.env
 deploy/*.env
 deploy/labops-agent.env
-go/
-infrastructure/
+bin/node
 
 
 # vercel

@@ -100,4 +100,14 @@ func TestServer_Endpoints(t *testing.T) {
 	if wTerm.Code == http.StatusOK {
 		t.Errorf("Kỳ vọng từ chối dừng PID 1, nhưng nhận được HTTP 200")
 	}
+
+	// 6. Test AT-06: Localhost request không có token tới mutation endpoint BẮT BUỘC bị từ chối 401
+	reqLocalhostMut := httptest.NewRequest("POST", "/api/v1/agent/processes/terminate", strings.NewReader(termPayload))
+	reqLocalhostMut.RemoteAddr = "127.0.0.1:45678"
+	reqLocalhostMut.Header.Set("Content-Type", "application/json")
+	wLocalhostMut := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(wLocalhostMut, reqLocalhostMut)
+	if wLocalhostMut.Code != http.StatusUnauthorized {
+		t.Errorf("AT-06 Vi phạm: Localhost request không có token phải bị từ chối 401, nhận: %d", wLocalhostMut.Code)
+	}
 }

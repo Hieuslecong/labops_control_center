@@ -83,10 +83,17 @@ def verify_token(token: str, secret: Optional[str] = None) -> Principal:
         data = json.loads(payload)
     except Exception:
         raise AuthError(401, "Token không hợp lệ")
-    if int(data.get("exp", 0)) < time.time():
-        raise AuthError(401, "Phiên đăng nhập đã hết hạn")
-    if data.get("role") not in ROLES or not data.get("sub"):
+    if not isinstance(data, dict):
         raise AuthError(401, "Token không hợp lệ")
+    exp = data.get("exp")
+    role = data.get("role")
+    subject = data.get("sub")
+    if type(exp) is not int or not isinstance(role, str) or role not in ROLES:
+        raise AuthError(401, "Token không hợp lệ")
+    if not isinstance(subject, str) or not subject.strip():
+        raise AuthError(401, "Token không hợp lệ")
+    if exp <= time.time():
+        raise AuthError(401, "Phiên đăng nhập đã hết hạn")
     return Principal(username=str(data["sub"]), role=data["role"], member_id=data.get("member_id"))
 
 

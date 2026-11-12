@@ -283,10 +283,18 @@ class HostMonitorAdapter:
 
     def _query_gateway_node_telemetry(self, node_id: str) -> Optional[Dict[str, Any]]:
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
+        control_secret = (
+            os.getenv("LABOPS_GATEWAY_CONTROL_SECRET")
+            or os.getenv("LABOPS_SESSION_SECRET")
+            or os.getenv("LABOPS_ADMIN_API_TOKEN", "")
+        )
+        headers = {"Accept": "application/json"}
+        if control_secret:
+            headers["Authorization"] = f"Bearer {control_secret}"
         try:
             req = urllib.request.Request(
                 f"{gateway_http_url.rstrip('/')}/api/v1/gateway/nodes/{node_id}/telemetry",
-                headers={"Accept": "application/json"},
+                headers=headers,
                 method="GET",
             )
             with urllib.request.urlopen(req, timeout=2) as resp:

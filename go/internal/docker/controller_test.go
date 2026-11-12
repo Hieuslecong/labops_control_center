@@ -22,6 +22,17 @@ func TestDockerController_ProtectionRules(t *testing.T) {
 	if err == nil {
 		t.Error("InspectWorkspace phải chặn can thiệp container 'postgres'")
 	}
+
+	// AT-07: StopContainer phải từ chối ngay khi inspect thất bại hoặc container không được quản lý
+	err = ctrl.StopContainer("postgres", 5)
+	if err == nil {
+		t.Error("StopContainer phải từ chối can thiệp container postgres (AT-07)")
+	}
+
+	err = ctrl.StopContainer("unmanaged_random_container", 5)
+	if err == nil {
+		t.Error("StopContainer phải từ chối khi không inspect được hoặc container không thuộc quản lý của LabOps (AT-07)")
+	}
 }
 
 func TestDockerController_ListRealWorkspaces(t *testing.T) {

@@ -22,6 +22,17 @@ const handler: MiddlewareHandler | null = hasRealClerkKeys
 const PROTECTED = /^\/(dashboard|api)(\/|$)/;
 
 export default function middleware(request: NextRequest, event: NextFetchEvent) {
+  // Cho phép gọi các endpoint đăng nhập/đăng xuất cục bộ
+  if (request.nextUrl.pathname.startsWith('/api/auth/')) {
+    return NextResponse.next();
+  }
+
+  // Nếu người dùng đã đăng nhập bằng phiên LabOps (cookie labops_session), cho phép đi tiếp
+  const hasLocalSession = Boolean(request.cookies.get('labops_session')?.value);
+  if (hasLocalSession) {
+    return NextResponse.next();
+  }
+
   if (handler) return handler(request, event);
   if (isDemoMode) return NextResponse.next();
   // Fail-closed: không có xác thực thì chặn các vùng nhạy cảm.

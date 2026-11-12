@@ -1,6 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
 import { createHmac } from 'node:crypto';
 import { NextResponse } from 'next/server';
+import { getLocalSession } from '@/lib/auth-guard';
 
 /**
  * BFF LabOps V2: mọi lời gọi từ trình duyệt tới backend đi qua đây.
@@ -35,14 +36,29 @@ export async function proxyLabOps(
     return NextResponse.json({ detail: 'Backend LabOps chưa cấu hình LABOPS_SESSION_SECRET' }, { status: 503 });
   }
 
-  let session: Awaited<ReturnType<typeof auth>>;
-  try {
-    session = await auth();
-  } catch {
-    return NextResponse.json({ detail: 'Xác thực Clerk chưa được cấu hình' }, { status: 503 });
+  const localSession = await getLocalSession();
+  let username: string;
+  let role: 'ADMIN' | 'RESEARCHER';
+  if (localSession) {
+    ({ username, role } = localSession);
+  } else {
+    let session: Awaited<ReturnType<typeof auth>>;
+    try {
+      session = await auth();
+    } catch {
+      return NextResponse.json({ detail: 'Xác thực Clerk chưa được cấu hình' }, { status: 503 });
+    }
+    const { userId, orgId, has, sessionClaims } = session;
+    if (!userId) return NextResponse.json({ detail: 'Yêu cầu đăng nhập' }, { status: 401 });
+    const metadataRole = String(
+      (sessionClaims?.metadata as { role?: string } | undefined)?.role ||
+      (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role || ''
+    ).toUpperCase();
+    role = metadataRole === 'ADMIN' || (orgId && typeof has === 'function' && has({ role: 'org:admin' }))
+      ? 'ADMIN' : 'RESEARCHER';
+    username = (sessionClaims?.username as string | undefined) ||
+      (sessionClaims?.email as string | undefined)?.split('@')[0] || userId;
   }
-  const { userId, orgId, has, sessionClaims } = session;
-  if (!userId) return NextResponse.json({ detail: 'Yêu cầu đăng nhập' }, { status: 401 });
 
   const method = request.method;
   const originHeader = request.headers.get('origin');
@@ -55,27 +71,10 @@ export async function proxyLabOps(
     return NextResponse.json({ detail: 'Đường dẫn API không hợp lệ' }, { status: 400 });
   }
 
-  const metadataRole = String(
-    (sessionClaims?.metadata as { role?: string } | undefined)?.role ||
-      (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role ||
-      ''
-  ).toUpperCase();
-
-  let role: 'ADMIN' | 'RESEARCHER' = 'ADMIN';
-  if (metadataRole === 'RESEARCHER') {
-    role = 'RESEARCHER';
-  } else if (orgId && typeof has === 'function' && !has({ role: 'org:admin' }) && metadataRole !== 'ADMIN') {
-    role = 'RESEARCHER';
-  }
-
   if (options.requireAdmin && role !== 'ADMIN') {
     return NextResponse.json({ detail: 'Chỉ quản trị viên LabOps được phép thực hiện thao tác này' }, { status: 403 });
   }
 
-  const username =
-    (sessionClaims?.username as string | undefined) ||
-    (sessionClaims?.email as string | undefined)?.split('@')[0] ||
-    userId;
   const token = issueLabOpsToken(username, role, secret);
 
   const search = new URL(request.url).search;

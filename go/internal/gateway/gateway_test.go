@@ -91,9 +91,10 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 	tm := pki.NewEnrollmentTokenManager("test-salt")
 	rm := pki.NewRevocationManager()
 
-	httpSrv := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, ca, tm, rm, nil)
+	controlSecret := "test-secret-salt-2026"
+	httpSrv := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, ca, tm, rm, controlSecret, nil)
 
-	// 1. Test /health
+	// 1. Test /health (Public, no auth needed)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 	httpSrv.handleHealth(w, req)
@@ -101,8 +102,17 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 		t.Fatalf("Health check lỗi: %d", w.Code)
 	}
 
-	// 2. Test /api/v1/gateway/nodes
+	// 2. Test /api/v1/gateway/nodes không có token xác thực -> Phải bị từ chối 401 Unauthorized
+	reqUnauth := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/nodes", nil)
+	wUnauth := httptest.NewRecorder()
+	httpSrv.handleNodes(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("Kỳ vọng 401 khi chưa xác thực nhưng nhận được: %d", wUnauth.Code)
+	}
+
+	// 2b. Test /api/v1/gateway/nodes có Bearer token hợp lệ -> 200 OK
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/gateway/nodes", nil)
+	req.Header.Set("Authorization", "Bearer "+controlSecret)
 	w = httptest.NewRecorder()
 	httpSrv.handleNodes(w, req)
 	if w.Code != http.StatusOK {
@@ -114,12 +124,13 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 		t.Fatalf("Total count không chính xác: %v", res)
 	}
 
-	// 3. Test /api/v1/gateway/enroll
+	// 3. Test /api/v1/gateway/enroll có xác thực
 	enrollBody, _ := json.Marshal(map[string]any{
 		"node_id":     "ws-node-new",
 		"ttl_minutes": 10,
 	})
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/gateway/enroll", bytes.NewReader(enrollBody))
+	req.Header.Set("Authorization", "Bearer "+controlSecret)
 	w = httptest.NewRecorder()
 	httpSrv.handleEnrollToken(w, req)
 	if w.Code != http.StatusOK {
@@ -132,7 +143,19 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 		t.Fatal("Token rỗng")
 	}
 
-	// 4. Test /api/v1/gateway/issue-cert với token vừa tạo
+	// 3b. Test AT-04: Thử dùng token của ws-node-new để cấp cert cho node khác (attacker-node) -> Phải bị từ chối 401
+	issueAttackBody, _ := json.Marshal(map[string]any{
+		"node_id":          "attacker-node",
+		"enrollment_token": token,
+	})
+	reqAttack := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/issue-cert", bytes.NewReader(issueAttackBody))
+	wAttack := httptest.NewRecorder()
+	httpSrv.handleIssueCert(wAttack, reqAttack)
+	if wAttack.Code != http.StatusUnauthorized {
+		t.Fatalf("AT-04 Vi phạm: Dùng token node này cấp cho node khác phải bị từ chối 401, nhận: %d", wAttack.Code)
+	}
+
+	// 4. Test /api/v1/gateway/issue-cert với token đúng node_id
 	issueBody, _ := json.Marshal(map[string]any{
 		"node_id":          "ws-node-new",
 		"enrollment_token": token,

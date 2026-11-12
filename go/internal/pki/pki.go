@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -44,35 +45,98 @@ type CACertificate struct {
 	CAKeyPath  string
 }
 
-// RevocationManager quản lý danh sách thu hồi node certificate
+// RevocationData cấu trúc lưu trữ danh sách thu hồi trên đĩa
+type RevocationData struct {
+	RevokedNodes map[string]string `json:"revoked_nodes"`
+	AllowedNodes map[string]bool   `json:"allowed_nodes"`
+	UpdatedAt    string            `json:"updated_at"`
+}
+
+// RevocationManager quản lý danh sách thu hồi node certificate có hỗ trợ lưu trữ bền vững
 type RevocationManager struct {
 	mu           sync.RWMutex
+	filePath     string
 	revokedNodes map[string]string // node_id -> reason
 	allowedNodes map[string]bool   // node_id -> allowed
 }
 
 func NewRevocationManager() *RevocationManager {
-	return &RevocationManager{
+	return NewRevocationManagerWithPersistence("")
+}
+
+func NewRevocationManagerWithPersistence(filePath string) *RevocationManager {
+	rm := &RevocationManager{
+		filePath:     filePath,
 		revokedNodes: make(map[string]string),
 		allowedNodes: make(map[string]bool),
 	}
+	if filePath != "" {
+		rm.loadFromDisk()
+	}
+	return rm
+}
+
+func (rm *RevocationManager) loadFromDisk() {
+	if rm.filePath == "" || !fileExists(rm.filePath) {
+		return
+	}
+	data, err := os.ReadFile(rm.filePath)
+	if err != nil {
+		return
+	}
+	var rd RevocationData
+	if err := json.Unmarshal(data, &rd); err == nil {
+		if rd.RevokedNodes != nil {
+			rm.revokedNodes = rd.RevokedNodes
+		}
+		if rd.AllowedNodes != nil {
+			rm.allowedNodes = rd.AllowedNodes
+		}
+	}
+}
+
+func (rm *RevocationManager) saveToDiskLocked() {
+	if rm.filePath == "" {
+		return
+	}
+	rd := RevocationData{
+		RevokedNodes: rm.revokedNodes,
+		AllowedNodes: rm.allowedNodes,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(rd, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(rm.filePath, data, 0600)
 }
 
 func (rm *RevocationManager) AllowNode(nodeID string) {
+	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	if nodeID == "" {
+		return
+	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.allowedNodes[nodeID] = true
 	delete(rm.revokedNodes, nodeID)
+	rm.saveToDiskLocked()
 }
 
 func (rm *RevocationManager) RevokeNode(nodeID string, reason string) {
+	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	if nodeID == "" {
+		return
+	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	delete(rm.allowedNodes, nodeID)
 	rm.revokedNodes[nodeID] = reason
+	rm.saveToDiskLocked()
 }
 
 func (rm *RevocationManager) IsNodeAllowed(nodeID string) bool {
+	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	if _, revoked := rm.revokedNodes[nodeID]; revoked {
@@ -382,11 +446,17 @@ func BuildClientTLSConfig(caPEM, clientCertPEM, clientKeyPEM []byte, serverName 
 	return tlsCfg, nil
 }
 
-// One-Time Enrollment Token
+type tokenRecord struct {
+	NodeID    string
+	ExpiresAt int64
+	Used      bool
+}
+
+// One-Time Enrollment Token gắn chặt với Node ID cụ thể
 type EnrollmentTokenManager struct {
 	mu     sync.Mutex
 	secret []byte
-	tokens map[string]int64 // token -> expires_at_unix
+	tokens map[string]*tokenRecord // token -> record
 }
 
 func NewEnrollmentTokenManager(secret string) *EnrollmentTokenManager {
@@ -395,11 +465,12 @@ func NewEnrollmentTokenManager(secret string) *EnrollmentTokenManager {
 	}
 	return &EnrollmentTokenManager{
 		secret: []byte(secret),
-		tokens: make(map[string]int64),
+		tokens: make(map[string]*tokenRecord),
 	}
 }
 
 func (etm *EnrollmentTokenManager) GenerateToken(nodeID string, ttl time.Duration) string {
+	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
 	etm.mu.Lock()
 	defer etm.mu.Unlock()
 
@@ -412,20 +483,53 @@ func (etm *EnrollmentTokenManager) GenerateToken(nodeID string, ttl time.Duratio
 	token := hex.EncodeToString(h.Sum(nil))
 
 	expiresAt := time.Now().Add(ttl).Unix()
-	etm.tokens[token] = expiresAt
+	etm.tokens[token] = &tokenRecord{
+		NodeID:    nodeID,
+		ExpiresAt: expiresAt,
+		Used:      false,
+	}
 	return token
+}
+
+// ConsumeTokenForNode xác minh token thuộc về đúng nodeID và chỉ được sử dụng một lần duy nhất
+func (etm *EnrollmentTokenManager) ConsumeTokenForNode(token string, nodeID string) bool {
+	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	etm.mu.Lock()
+	defer etm.mu.Unlock()
+
+	rec, exists := etm.tokens[token]
+	if !exists || rec == nil || rec.Used {
+		return false
+	}
+	if rec.NodeID != nodeID {
+		// Phát hiện gian lận: token được cấp cho Node A nhưng mang sang ghi danh cho Node B
+		return false
+	}
+	if time.Now().Unix() > rec.ExpiresAt {
+		delete(etm.tokens, token)
+		return false
+	}
+	// Đánh dấu đã dùng và xóa token (chỉ sử dụng một lần)
+	rec.Used = true
+	delete(etm.tokens, token)
+	return true
 }
 
 func (etm *EnrollmentTokenManager) ConsumeToken(token string) bool {
 	etm.mu.Lock()
 	defer etm.mu.Unlock()
 
-	exp, exists := etm.tokens[token]
-	if !exists {
+	rec, exists := etm.tokens[token]
+	if !exists || rec == nil || rec.Used {
 		return false
 	}
+	if time.Now().Unix() > rec.ExpiresAt {
+		delete(etm.tokens, token)
+		return false
+	}
+	rec.Used = true
 	delete(etm.tokens, token)
-	return time.Now().Unix() <= exp
+	return true
 }
 
 func fileExists(path string) bool {

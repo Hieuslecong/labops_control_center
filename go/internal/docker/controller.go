@@ -13,10 +13,14 @@ import (
 
 // ProtectedSystemContainers danh sách container hệ thống tuyệt đối không được xóa hoặc can thiệp
 var ProtectedSystemContainers = map[string]bool{
-	"labops-wg-easy": true,
-	"postgres":       true,
-	"postgresql":     true,
-	"wg-easy":        true,
+	"labops-wg-easy":              true,
+	"postgres":                    true,
+	"postgresql":                  true,
+	"wg-easy":                     true,
+	"labops-gateway":              true,
+	"labops-agent":                true,
+	"labops-control-center":       true,
+	"admin_labops_control_center": true,
 }
 
 // DockerPortMapping lưu ánh xạ cổng
@@ -277,20 +281,31 @@ func (c *Controller) InspectWorkspace(ctx context.Context, nameOrID string) (*Wo
 	}, nil
 }
 
-// StopContainer dừng một container qua Docker Unix Socket có kiểm tra safeguard
+// StopContainer dừng một container qua Docker Unix Socket có kiểm tra safeguard nghiêm ngặt (AT-07)
 func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
 	containerID = strings.TrimSpace(containerID)
 	if containerID == "" {
 		return fmt.Errorf("container_id không được để trống")
 	}
 
-	// 1. Inspect để kiểm tra tên có thuộc container hệ thống được bảo vệ hay không
+	// 1. Inspect bắt buộc để kiểm tra metadata trước khi dừng (fail-closed)
 	ws, err := c.InspectWorkspace(context.Background(), containerID)
-	if err == nil && ws != nil {
-		cleanName := strings.TrimPrefix(ws.Name, "/")
-		if ProtectedSystemContainers[cleanName] {
-			return fmt.Errorf("từ chối can thiệp: container '%s' là dịch vụ hệ thống tối quan trọng", cleanName)
-		}
+	if err != nil {
+		return fmt.Errorf("từ chối dừng: không thể xác minh metadata container '%s' (%w)", containerID, err)
+	}
+	if ws == nil {
+		return fmt.Errorf("từ chối dừng: container '%s' không tồn tại", containerID)
+	}
+
+	cleanName := strings.TrimPrefix(ws.Name, "/")
+	// Chặn mọi container hệ thống quan trọng
+	if ProtectedSystemContainers[cleanName] {
+		return fmt.Errorf("từ chối can thiệp: container '%s' là dịch vụ hệ thống tối quan trọng", cleanName)
+	}
+
+	// Chặn các container không phải là workspace do LabOps quản lý
+	if !ws.IsManaged || (!strings.HasPrefix(cleanName, "ws-") && ws.MemberUsername == "") {
+		return fmt.Errorf("từ chối can thiệp: container '%s' không thuộc danh mục workspace do LabOps quản lý", cleanName)
 	}
 
 	url := fmt.Sprintf("http://localhost/containers/%s/stop?t=%d", containerID, timeoutSec)
@@ -305,15 +320,23 @@ func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotModified || resp.StatusCode == http.StatusNoContent {
-		return nil
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("không tìm thấy container '%s'", containerID)
+	if resp.StatusCode != http.StatusNotModified && resp.StatusCode != http.StatusNoContent {
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("không tìm thấy container '%s'", containerID)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Docker daemon trả về lỗi (code %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("Docker daemon trả về lỗi (code %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	// 2. Xác minh trạng thái thực tế sau khi stop (runtime verification)
+	afterWs, afterErr := c.InspectWorkspace(context.Background(), containerID)
+	if afterErr == nil && afterWs != nil {
+		if afterWs.State == "running" {
+			return fmt.Errorf("xác minh thất bại: container '%s' vẫn đang ở trạng thái running sau lệnh dừng", containerID)
+		}
+	}
+
+	return nil
 }
 
 // VerifySSHReachability kiểm tra cổng SSH container có thực sự phản hồi hay không

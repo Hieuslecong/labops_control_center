@@ -29,23 +29,36 @@ for tool in curl jq; do
     fi
 done
 
-# 2. Yêu cầu cấp Enrollment Token từ Gateway Control Plane
-echo "🔑 [1/4] Yêu cầu One-Time Enrollment Token từ Gateway..."
-ENROLL_RESP=$(curl -s -f -X POST "http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/enroll" \
-    -H "Content-Type: application/json" \
-    -d "{\"node_id\": \"${NODE_ID}\", \"ttl_minutes\": 15}" || true)
-
-if [ -z "${ENROLL_RESP}" ]; then
-    echo "❌ Không thể kết nối tới Gateway Control Plane tại http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
-    exit 1
+CONTROL_SECRET="${6:-${LABOPS_GATEWAY_CONTROL_SECRET:-${LABOPS_SESSION_SECRET:-${LABOPS_ADMIN_API_TOKEN:-}}}}"
+AUTH_HEADER=""
+if [ -n "${CONTROL_SECRET}" ]; then
+    AUTH_HEADER="-H Authorization: Bearer ${CONTROL_SECRET}"
 fi
 
-TOKEN=$(echo "${ENROLL_RESP}" | jq -r '.token // empty')
+TOKEN="${ENROLLMENT_TOKEN:-}"
+
+# 2. Yêu cầu cấp Enrollment Token từ Gateway Control Plane (nếu chưa được cấp sẵn)
 if [ -z "${TOKEN}" ]; then
-    echo "❌ Không nhận được token từ Gateway: ${ENROLL_RESP}"
-    exit 1
+    echo "🔑 [1/4] Yêu cầu One-Time Enrollment Token từ Gateway Control Plane..."
+    ENROLL_RESP=$(curl -s -f -X POST "http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/enroll" \
+        -H "Content-Type: application/json" \
+        ${AUTH_HEADER} \
+        -d "{\"node_id\": \"${NODE_ID}\", \"ttl_minutes\": 15}" || true)
+
+    if [ -z "${ENROLL_RESP}" ]; then
+        echo "❌ Không thể kết nối tới Gateway Control Plane hoặc chưa xác thực tại http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
+        exit 1
+    fi
+
+    TOKEN=$(echo "${ENROLL_RESP}" | jq -r '.token // empty')
+    if [ -z "${TOKEN}" ]; then
+        echo "❌ Không nhận được token từ Gateway: ${ENROLL_RESP}"
+        exit 1
+    fi
+    echo "✅ Đã nhận Enrollment Token (có hiệu lực trong 15 phút)"
+else
+    echo "🔑 [1/4] Sử dụng Enrollment Token được chỉ định trước: ${TOKEN:0:8}..."
 fi
-echo "✅ Đã nhận Enrollment Token (có hiệu lực trong 15 phút)"
 
 # 3. Sử dụng token để nhận cặp chứng chỉ và private key từ Gateway CA
 echo "📜 [2/4] Trao đổi Token lấy Chứng chỉ mTLS Client TLS 1.3..."

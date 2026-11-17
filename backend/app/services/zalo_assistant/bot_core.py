@@ -320,10 +320,14 @@ class ZaloBotEngine:
 
         # Cung cấp ngữ cảnh thực tế của hệ thống để AI trả lời chính xác mà không cần gọi tool
         live_telemetry = self._cmd_status()
+        live_jobs = self._cmd_jobs()
         context_msg = (
-            f"Thông tin tài nguyên thực tế hiện tại của Workstation aiot-ws1:\n"
-            f"{live_telemetry}\n"
-            f"Hãy dùng dữ liệu trên để trả lời ngắn gọn, trực tiếp, bằng tiếng Việt."
+            f"DỮ LIỆU THỜI GIAN THỰC TỪ MÁY CHỦ WORKSTATION AIOT-WS1:\n\n"
+            f"{live_telemetry}\n\n"
+            f"{live_jobs}\n\n"
+            f"QUY TẮC PHẢN HỒI:\n"
+            f"1. Trả lời trực tiếp, tự nhiên bằng tiếng Việt dựa trên dữ liệu thực tế ở trên.\n"
+            f"2. Tuyệt đối không sinh tool_calls hoặc lệnh shell vì dữ liệu phần cứng và tác vụ đã có đủ."
         )
 
         ai_reply = self.ai_client.generate_chat_response(
@@ -331,7 +335,7 @@ class ZaloBotEngine:
                 {"role": "system", "content": context_msg},
                 {"role": "user", "content": question},
             ],
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=600,
         )
         return f"🤖 Trợ lý AI:\n{ai_reply}"

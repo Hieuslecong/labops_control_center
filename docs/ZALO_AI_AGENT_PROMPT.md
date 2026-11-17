@@ -47,10 +47,18 @@ Hệ thống LabOps Control Center hiện đang vận hành trong trạng thái 
 Khi người dùng yêu cầu thực hiện lệnh qua Zalo Bot:
 
 ### A. Các lệnh ĐỌC (Read-Only) — Cho phép thực thi tức thì:
-- Kiểm tra tài nguyên CPU, RAM, GPU, Disk (`/status`, `/gpu`).
-- Kiểm tra danh sách tiến trình đang huấn luyện (`/jobs`).
-- Tạo và đọc báo cáo tuần (`/report`).
-- Kiểm tra số lượng tin nhắn còn lại trong tháng (`/quota`).
+- **Kiểm tra tài nguyên CPU, RAM, GPU, Disk (`/status`, `/gpu`):**
+  + Trả về số liệu đo lường thời gian thực từ máy trạm `aiot-ws1` (GPU NVIDIA A30).
+  + Đảm bảo gán đúng GPU cho máy trạm Workstation (`WS-GPU-01`), không gán nhầm sang Rack server.
+  + Cảnh báo động theo thời gian thực (chỉ cảnh báo VRAM cao khi VRAM >90%, cảnh báo nhiệt độ khi >85°C; khi bình thường ghi rõ tài nguyên an toàn).
+- **Kiểm tra tác vụ nghiên cứu đang chạy (`/jobs`):**
+  + CHỈ hiển thị các tác vụ tính toán thực sự của thành viên Lab (người dùng có `uid >= 1000` như `vinh_test`, `nhannv`, `hieulc`).
+  + TỰ ĐỘNG LỌC BỎ toàn bộ các tiến trình hệ thống, daemon quản trị (`root`, `aiot-ws1`, `dockerd`, `systemd`).
+  + TỰ ĐỘNG LỌC BỎ các lệnh shell/giám sát tĩnh (`watch`, `top`, `htop`, `tmux`, `sleep`, `bash` chờ).
+  + GOM NHÓM các tiến trình worker con của PyTorch/DataLoader thành một đầu việc duy nhất để danh sách ngắn gọn, dễ nắm bắt (Ví dụ: `vinh_test • 11_train_rgb.py (25 tiến trình) [12.3 GB VRAM]`).
+  + Phân loại rõ ràng giữa tác vụ chạy trên GPU và tác vụ tính toán chuyên sâu trên CPU.
+- **Tạo và đọc báo cáo tuần (`/report`, `/report gen`):** Đọc các job hợp lệ và commits trong tuần.
+- **Kiểm tra số lượng tin nhắn còn lại (`/quota`).**
 
 ### B. Các thao tác GHI hoặc THAY ĐỔI CẤU HÌNH (Write / Modifying Commands):
 - **TUYỆT ĐỐI KHÔNG** tự ý thực thi các lệnh nguy hiểm từ xa qua Bot: `kill`, `pkill`, `reboot`, `shutdown`, `rm`, `dd`, `mkfs`, sửa iptables, đổi IP mạng, sửa VPN WireGuard, `docker system prune -a`.

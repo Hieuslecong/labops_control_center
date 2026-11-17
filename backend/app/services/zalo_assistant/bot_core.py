@@ -200,7 +200,9 @@ class ZaloBotEngine:
             pass
 
         # 2. GPU Telemetry
-        gpu_info = "NVIDIA A30 24GB: 23,045 MiB / 24,576 MiB (100% util, 89°C)"
+        gpu_info = "NVIDIA A30 24GB: Đang kiểm tra..."
+        vram_pct = 0
+        temp_c = 0
         try:
             res = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
@@ -211,12 +213,17 @@ class ZaloBotEngine:
             if res.returncode == 0 and res.stdout.strip():
                 parts = [p.strip() for p in res.stdout.strip().split(",")]
                 if len(parts) >= 5:
-                    gpu_info = f"{parts[0]}: {parts[1]} / {parts[2]} MiB ({parts[3]}% util, {parts[4]}°C)"
+                    used_mb = int(float(parts[1]))
+                    total_mb = int(float(parts[2]))
+                    util_pct = int(float(parts[3]))
+                    vram_pct = round((used_mb / total_mb) * 100) if total_mb > 0 else 0
+                    temp_c = round(float(parts[4]))
+                    gpu_info = f"{parts[0]}: {used_mb:,} / {total_mb:,} MiB ({util_pct}% util, {temp_c}°C)"
         except Exception:
             pass
 
         # 3. Disk Space
-        disk_info = "778 GiB khả dụng / 833 GiB"
+        disk_info = "Khả dụng"
         try:
             total, used, free = shutil.disk_usage("/")
             disk_info = f"{round(free / (1024**3), 1)} GiB khả dụng / {round(total / (1024**3), 1)} GiB"
@@ -226,6 +233,19 @@ class ZaloBotEngine:
         # 4. 9Router status
         r_health = self.ai_client.check_health()
         r_str = f"9Router: {r_health['status']} (Model: {self.ai_client.model})"
+
+        # 5. Cảnh báo động theo chỉ số thời gian thực
+        alerts = [
+            "• Server Rack (aiotlab-rack): Ngoại tuyến; Workstation là Primary Control Plane."
+        ]
+        if vram_pct >= 90:
+            alerts.append(f"• VRAM GPU A30 đang tải cao (~{vram_pct}% dung lượng).")
+        if temp_c >= 85:
+            alerts.append(f"• Nhiệt độ GPU A30 ở mức cao ({temp_c}°C).")
+        if len(alerts) == 1:
+            alerts.append("• Tài nguyên phần cứng và GPU hoạt động bình thường, an toàn.")
+
+        alert_text = "\n".join(alerts)
 
         return (
             "📊 TỔNG HỢP TRẠNG THÁI LABOPS\n"
@@ -239,20 +259,19 @@ class ZaloBotEngine:
             f"• AI Gateway: {r_str}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "🔔 CẢNH BÁO:\n"
-            "• Rack server đang ngoại tuyến; toàn bộ tác vụ đang dồn về Workstation.\n"
-            "• VRAM A30 đang chạy ở mức cao (~94% dung lượng)."
+            f"{alert_text}"
         )
 
     def _cmd_jobs(self) -> str:
         summary = self.report_generator._get_active_jobs_summary()
         count = summary["running_count"]
-        lines = [f"⚙️ TÁC VỤ & TIẾN TRÌNH GPU ({count} tác vụ):", "━━━━━━━━━━━━━━━━━━━━"]
+        lines = [f"⚙️ TÁC VỤ NGHIÊN CỨU ĐANG CHẠY ({count} tác vụ):", "━━━━━━━━━━━━━━━━━━━━"]
         if summary["jobs"]:
-            for j in summary["jobs"]:
-                lines.append(f"• PID {j['pid']}: {j['name']} (VRAM: {j['vram']})")
+            for idx, j in enumerate(summary["jobs"], 1):
+                lines.append(f"{idx}. {j['display']} (PID: {j['pid']})")
         else:
-            lines.append("• Không có tiến trình GPU người dùng đang chạy.")
-        lines.append("━━━━━━━━━━━━━━━━━━━━\nSử dụng `/status` để xem tổng quan tài nguyên.")
+            lines.append("• Hiện không có tác vụ tính toán của người dùng.")
+        lines.append("━━━━━━━━━━━━━━━━━━━━\nGợi ý: Sử dụng `/status` để xem tổng quan máy chủ.")
         return "\n".join(lines)
 
     def _cmd_report(self, arg: str) -> str:

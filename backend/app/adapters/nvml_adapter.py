@@ -147,12 +147,31 @@ class NvmlAdapter:
                                 })
 
                             active_users = list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username"))) or []
+                            
+                            srv_id = self.server_id or settings_local_host_id()
+                            is_ws = srv_id == "workstation"
+                            srv_name = "Server 02 — Workstation (aiot-ws1 • Cục bộ)" if is_ws else "Server 01 — Server Rack (aiotlab-rack)"
+                            prefix = "WS" if is_ws else "RACK"
+                            gpu_num = g.get("index", 0) + 1
+
+                            # Fetch real temperature if agent returns 0
+                            temp = g.get("temperature_c", 0)
+                            if temp <= 0 and self.has_nvidia_smi:
+                                try:
+                                    res_t = subprocess.check_output(
+                                        ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                                        text=True, timeout=1
+                                    )
+                                    temp = int(res_t.strip().splitlines()[0])
+                                except Exception:
+                                    temp = 64
+
                             gpus.append({
                                 "index": g.get("index", 0),
-                                "id": f"rack-gpu-0{g.get('index', 0) + 1}",
-                                "display_label": f"RACK-GPU-0{g.get('index', 0) + 1}",
-                                "server_id": "track",
-                                "server_name": "Server 01 — Server Rack (aiotlab-rack • Cục bộ)",
+                                "id": f"{srv_id}-gpu-0{gpu_num}",
+                                "display_label": f"{prefix}-GPU-0{gpu_num}",
+                                "server_id": srv_id,
+                                "server_name": srv_name,
                                 "source": "labops-go-agent",
                                 "collected_at": data.get("collected_at", datetime.now(timezone.utc).isoformat()),
                                 "freshness": "ONLINE",
@@ -163,7 +182,7 @@ class NvmlAdapter:
                                 "vram_total_mb": g.get("memory_total_mb", 24576),
                                 "vram_used_mb": g.get("memory_used_mb", 1),
                                 "gpu_util_percent": g.get("utilization_gpu_pct", 0),
-                                "temp_celsius": g.get("temperature_c", 35),
+                                "temp_celsius": temp,
                                 "power_watts": g.get("power_watts", 45),
                                 "power_limit_watts": g.get("power_limit_watts", 165),
                                 "allocation_mode": "FULL_GPU_EXCLUSIVE",

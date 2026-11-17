@@ -93,27 +93,108 @@ class ReportGenerator:
         return commits
 
     def _get_active_jobs_summary(self) -> Dict[str, Any]:
-        jobs = []
-        # Quét tiến trình người dùng đang dùng GPU trên máy
+        """
+        Lấy danh sách các tác vụ tính toán thực tế của người dùng (User Workloads).
+        Tự động lọc bỏ các tiến trình hệ thống, daemon nền, watch/shell loops
+        và gom nhóm các worker PyTorch/DataLoader để dễ theo dõi.
+        """
+        gpu_pids: Dict[int, int] = {}
         try:
             res = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"],
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=2,
             )
             if res.returncode == 0 and res.stdout.strip():
                 for line in res.stdout.strip().splitlines():
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 3:
-                        jobs.append({
-                            "pid": parts[0],
-                            "name": os.path.basename(parts[1]),
-                            "vram": parts[2],
-                            "status": "RUNNING",
-                        })
+                    p = [x.strip() for x in line.split(",")]
+                    if len(p) >= 2 and p[0].isdigit():
+                        gpu_pids[int(p[0])] = int(p[1])
         except Exception:
             pass
+
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+
+        if not psutil:
+            return {"running_count": len(gpu_pids), "jobs": []}
+
+        SYSTEM_USERS = {"root", "daemon", "systemd", "aiot-ws1"}
+        IGNORED_CMDS = {"watch", "top", "htop", "nvtop", "pgrep", "sleep", "tmux", "tail", "less", "sshd", "node"}
+
+        raw_jobs: Dict[tuple, Dict[str, Any]] = {}
+        for p in psutil.process_iter(["pid", "name", "cmdline", "username", "uids", "cpu_percent"]):
+            try:
+                info = p.info
+                pid = info["pid"]
+                user = info["username"] or "unknown"
+                uid = info["uids"].real if info.get("uids") else 0
+
+                if uid < 1000 or user in SYSTEM_USERS:
+                    continue
+
+                cmdline = info["cmdline"] or []
+                if not cmdline:
+                    continue
+                name = info["name"] or ""
+                if name in IGNORED_CMDS:
+                    continue
+
+                is_gpu = pid in gpu_pids
+                is_python = "python" in name.lower() or any(k.endswith(".py") for k in cmdline)
+                if not (is_gpu or is_python):
+                    continue
+
+                # Tìm tên file script thực tế
+                script_name = ""
+                for arg in cmdline:
+                    if arg.endswith(".py") and not arg.startswith("-"):
+                        script_name = os.path.basename(arg)
+                        break
+                if not script_name:
+                    script_name = name
+
+                group_key = (user, script_name)
+                vram = gpu_pids.get(pid, 0)
+
+                if group_key not in raw_jobs:
+                    raw_jobs[group_key] = {
+                        "user": user,
+                        "script": script_name,
+                        "root_pid": pid,
+                        "vram_mb": vram,
+                        "is_gpu": is_gpu,
+                        "count": 1,
+                    }
+                else:
+                    raw_jobs[group_key]["count"] += 1
+                    raw_jobs[group_key]["vram_mb"] = max(raw_jobs[group_key]["vram_mb"], vram)
+                    if is_gpu:
+                        raw_jobs[group_key]["is_gpu"] = True
+                        raw_jobs[group_key]["root_pid"] = pid
+            except Exception:
+                continue
+
+        jobs = []
+        for (user, script), item in raw_jobs.items():
+            vram_str = f"{item['vram_mb']:,} MiB VRAM (GPU A30)" if item["is_gpu"] else "CPU Compute"
+            count_str = f" ({item['count']} tiến trình)" if item["count"] > 1 else ""
+            jobs.append({
+                "pid": item["root_pid"],
+                "user": user,
+                "script": script,
+                "vram": vram_str,
+                "is_gpu": item["is_gpu"],
+                "count": item["count"],
+                "display": f"{user} • {script}{count_str} [{vram_str}]",
+            })
+
+        # Sắp xếp ưu tiên GPU lên đầu
+        jobs.sort(key=lambda x: (not x["is_gpu"], x["user"]))
+
         return {
             "running_count": len(jobs),
             "jobs": jobs,

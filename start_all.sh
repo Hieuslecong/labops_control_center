@@ -52,12 +52,17 @@ set +a
 STARTED_ROUTER_PID=""
 STARTED_AGENT_PID=""
 STARTED_BACKEND_PID=""
+STARTED_ZALO_PID=""
 
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
     echo ""
     echo -e "${YELLOW}🛑 Đang dừng an toàn các tiến trình do script này khởi động...${NC}"
+    if [ -n "$STARTED_ZALO_PID" ]; then
+        echo -e "   • Dừng Zalo Assistant Worker (PID: $STARTED_ZALO_PID)"
+        kill "$STARTED_ZALO_PID" 2>/dev/null || true
+    fi
     if [ -n "$STARTED_BACKEND_PID" ]; then
         echo -e "   • Dừng FastAPI Backend (PID: $STARTED_BACKEND_PID)"
         kill "$STARTED_BACKEND_PID" 2>/dev/null || true
@@ -165,6 +170,16 @@ else
         echo -e "${RED}❌ Không thể khởi động Backend API cổng 8000. Vui lòng kiểm tra log.${NC}"
         exit 1
     fi
+fi
+
+# ------------------------------------------------------------------------------
+# DỊCH VỤ 3B: ZALO AI ASSISTANT POLLING WORKER
+# ------------------------------------------------------------------------------
+if [ -n "$ZALO_BOT_TOKEN" ]; then
+    echo -e "\n${BLUE}[3b] Kích hoạt Trợ lý Zalo AI Assistant Polling Worker...${NC}"
+    "$PYTHON_BIN" "$PROJECT_DIR/backend/app/services/zalo_assistant/worker.py" >/dev/null 2>&1 &
+    STARTED_ZALO_PID=$!
+    echo -e "${GREEN}✅ Zalo Assistant Worker đang chạy ngầm (PID: $STARTED_ZALO_PID).${NC}"
 fi
 
 # ------------------------------------------------------------------------------

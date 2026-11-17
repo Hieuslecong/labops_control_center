@@ -65,6 +65,14 @@ export const adminNavGroups: NavGroup[] = [
         items: []
       },
       {
+        title: 'Trợ lý AI & Zalo',
+        url: '/dashboard/ai-assistant',
+        icon: 'sparkles',
+        shortcut: ['a', 'i'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
         title: 'Quản trị hệ thống',
         url: '/dashboard/audit-logs',
         icon: 'settings',

@@ -17,12 +17,14 @@ from app.api.v1.endpoints import (
     workspaces,
     processes,
     v2_platform,
-    repositories
+    repositories,
+    ai_assistant
 )
 
 api_router = APIRouter()
 
 api_router.include_router(dashboard.router, dependencies=[Depends(require_user)], prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(ai_assistant.router, prefix="/ai-assistant", tags=["AI Assistant"])
 api_router.include_router(servers.router, dependencies=[Depends(require_user)], prefix="/servers", tags=["Servers"])
 api_router.include_router(gpus.router, prefix="/gpus", tags=["GPUs"])
 api_router.include_router(users.router, dependencies=[Depends(require_admin)], prefix="/users", tags=["Users"])

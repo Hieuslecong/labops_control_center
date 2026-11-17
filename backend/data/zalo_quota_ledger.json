@@ -1,0 +1,19 @@
+{
+  "current_month": "2026-11",
+  "limits": {
+    "total": 3000,
+    "standard": 2800,
+    "critical_reserve": 200
+  },
+  "usage": {
+    "standard_sent": 0,
+    "critical_sent": 0,
+    "total_sent": 0,
+    "ai_requests": 0
+  },
+  "daily_usage": {},
+  "outbox": [],
+  "idempotency_keys": {},
+  "history_months": {},
+  "last_updated": "2026-11-17T08:31:28.192739+00:00"
+}

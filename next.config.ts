@@ -3,6 +3,9 @@ import { withSentryConfig } from '@sentry/nextjs/config';
 
 // Define the base Next.js configuration
 const baseConfig: NextConfig = {
+  experimental: {
+    agentUpgrade: 'security'
+  } as any,
   output: process.env.BUILD_STANDALONE === 'true' ? 'standalone' : undefined,
   images: {
     remotePatterns: [

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useUser } from '@clerk/nextjs';
+import { useClerkSafe } from '@/components/layout/clerk-auth-context';
 import type { UserSessionData } from '@/app/api/labops/session/route';
 
 let globalCachedSession: UserSessionData | null = null;
@@ -13,10 +13,12 @@ function notifyListeners() {
 }
 
 export function useAuthSession() {
-  const { user, isLoaded: clerkLoaded, isSignedIn } = useUser();
+  const { user, isLoaded: clerkLoaded, isSignedIn } = useClerkSafe();
   const [session, setSession] = useState<UserSessionData | null>(globalCachedSession);
   const [loading, setLoading] = useState<boolean>(!globalCachedSession);
-  const [previewRole, setLocalPreviewRole] = useState<'ADMIN' | 'RESEARCHER' | null>(globalPreviewRole);
+  const [previewRole, setLocalPreviewRole] = useState<'ADMIN' | 'RESEARCHER' | null>(
+    globalPreviewRole
+  );
 
   const fetchSession = useCallback(async () => {
     try {
@@ -84,15 +86,22 @@ export function useAuthSession() {
       return {
         fullName: session.fullName || user?.fullName || 'Người dùng LabOps',
         imageUrl: session.imageUrl || user?.imageUrl || '',
-        emailAddresses: session.email ? [{ emailAddress: session.email }] : user?.emailAddresses || [{ emailAddress: '' }],
+        emailAddresses: session.email
+          ? [{ emailAddress: session.email }]
+          : user?.emailAddresses || [{ emailAddress: '' }],
         username: session.username || user?.username || ''
       };
     }
     if (user && isSignedIn) {
       return {
-        fullName: user.fullName || `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Thành viên LabOps',
+        fullName:
+          user.fullName ||
+          `${user.firstName || ''} ${user.lastName || ''}`.trim() ||
+          'Thành viên LabOps',
         imageUrl: user.imageUrl || '',
-        emailAddresses: user.primaryEmailAddress ? [{ emailAddress: user.primaryEmailAddress.emailAddress }] : [{ emailAddress: '' }],
+        emailAddresses: user.primaryEmailAddress
+          ? [{ emailAddress: user.primaryEmailAddress.emailAddress }]
+          : [{ emailAddress: '' }],
         username: user.username || ''
       };
     }

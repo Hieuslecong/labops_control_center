@@ -5,9 +5,9 @@ const isDemoMode =
   process.env.NEXT_PUBLIC_DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 const hasRealClerkKeys = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
-    process.env.CLERK_SECRET_KEY &&
-    !process.env.CLERK_SECRET_KEY.includes('mock')
+  !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes('mock') &&
+  process.env.CLERK_SECRET_KEY &&
+  !process.env.CLERK_SECRET_KEY.includes('mock')
 );
 
 type MiddlewareHandler = (
@@ -35,11 +35,15 @@ export default function middleware(request: NextRequest, event: NextFetchEvent) 
 
   if (handler) return handler(request, event);
   if (isDemoMode) return NextResponse.next();
-  // Fail-closed: không có xác thực thì chặn các vùng nhạy cảm.
+  // Fail-closed: chưa có phiên đăng nhập thì chuyển hướng hoặc chặn API
   if (PROTECTED.test(request.nextUrl.pathname)) {
+    if (request.nextUrl.pathname.startsWith('/dashboard')) {
+      const signInUrl = new URL('/auth/sign-in', request.url);
+      return NextResponse.redirect(signInUrl);
+    }
     return NextResponse.json(
-      { detail: 'Xác thực chưa được cấu hình. Truy cập bị từ chối.' },
-      { status: 503 }
+      { error: 'Unauthorized', detail: 'Chưa đăng nhập hoặc phiên làm việc đã hết hạn' },
+      { status: 401 }
     );
   }
   return NextResponse.next();

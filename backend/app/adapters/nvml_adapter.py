@@ -127,13 +127,29 @@ class NvmlAdapter:
                                             user = pname.split("/users/")[1].split("/")[0]
                                         except Exception:
                                             user = "researcher"
-                                    elif "/home/" in pname:
+                                pid_val = p.get("pid", 0)
+                                user = ""
+                                try:
+                                    import psutil
+                                    if psutil and psutil.pid_exists(pid_val):
+                                        user = psutil.Process(pid_val).username()
+                                except Exception:
+                                    pass
+
+                                if not user or user in ("unknown", "system"):
+                                    if "/home/" in pname:
                                         try:
                                             user = pname.split("/home/")[1].split("/")[0]
                                         except Exception:
                                             user = "researcher"
+                                    elif "/mnt/" in pname:
+                                        try:
+                                            parts = pname.split("/mnt/")[1].split("/")
+                                            user = parts[1] if len(parts) >= 2 else "researcher"
+                                        except Exception:
+                                            user = "researcher"
                                     else:
-                                        user = "system"
+                                        user = "researcher"
                                 vram = p.get("vram_mb") or p.get("used_memory_mb") or p.get("vramMb") or 0
                                 gpu_procs.append({
                                     "pid": p.get("pid", 0),

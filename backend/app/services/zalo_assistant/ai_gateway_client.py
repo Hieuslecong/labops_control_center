@@ -152,8 +152,21 @@ class AIGatewayClient:
                 result = json.loads(resp.read().decode("utf-8"))
                 choices = result.get("choices", [])
                 if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-                    return content.strip()
+                    msg = choices[0].get("message", {}) or {}
+                    raw_content = msg.get("content")
+                    if raw_content and isinstance(raw_content, str):
+                        return raw_content.strip()
+
+                    # Fallback to reasoning_content if content is None
+                    reasoning = msg.get("reasoning_content")
+                    if reasoning and isinstance(reasoning, str) and reasoning.strip():
+                        return reasoning.strip()
+
+                    # Fallback if tool_calls was emitted by agentic model
+                    tool_calls = msg.get("tool_calls")
+                    if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                        return "Hệ thống đã nhận diện yêu cầu tra cứu tài nguyên. Bạn có thể sử dụng trực tiếp lệnh `/status` để xem toàn bộ thông số máy chủ và GPU A30."
+
                 return "Trợ lý không nhận được phản hồi nội dung từ mô hình AI."
         except urllib.error.HTTPError as http_err:
             body = http_err.read().decode("utf-8", errors="ignore")

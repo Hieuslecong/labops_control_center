@@ -37,6 +37,22 @@ QUY TẮC BẮT BUỘC:
 4. Trả lời trực tiếp, không sử dụng markdown phức tạp khó đọc trên màn hình điện thoại."""
 
 
+def _get_active_system_prompt() -> str:
+    """Dynamically load system prompt from docs/ZALO_AI_AGENT_PROMPT.md if available."""
+    prompt_file = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "docs", "ZALO_AI_AGENT_PROMPT.md")
+    )
+    if os.path.exists(prompt_file):
+        try:
+            with open(prompt_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    return content
+        except Exception:
+            pass
+    return LABOPS_SYSTEM_PROMPT
+
+
 class AIGatewayClient:
     def __init__(
         self,
@@ -106,7 +122,8 @@ class AIGatewayClient:
     ) -> str:
         api_key = self._resolve_api_key()
         full_messages = []
-        full_messages.append({"role": "system", "content": system_prompt or LABOPS_SYSTEM_PROMPT})
+        active_prompt = system_prompt or _get_active_system_prompt()
+        full_messages.append({"role": "system", "content": active_prompt})
         full_messages.extend(messages)
 
         payload = {

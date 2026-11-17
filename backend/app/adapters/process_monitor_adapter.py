@@ -76,6 +76,12 @@ class ProcessMonitorAdapter:
         os.makedirs(self.data_dir, exist_ok=True)
         self.history_file = os.path.join(self.data_dir, "process_history.json")
 
+    @property
+    def server_name(self) -> str:
+        if self.server_id == "workstation":
+            return "Server 02 — Workstation (aiot-ws1 • Cục bộ)"
+        return "Server 01 — Server Rack (aiotlab-rack)"
+
     def _query_go_agent(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
         """Gọi nội bộ sang Go Agent trên port 9150 hoặc 9100."""
         configured_ports = [int(os.environ.get("LABOPS_AGENT_PORT", 9150)), 9150, 9100]
@@ -187,9 +193,10 @@ class ProcessMonitorAdapter:
         if agent_res and "processes" in agent_res:
             procs = []
             for p in agent_res.get("processes", []):
+                gpu_idx = p.get('gpu_index')
                 procs.append({
                     "host_id": self.server_id,
-                    "server_name": "Server 01 — Server Rack (Debian 12)",
+                    "server_name": self.server_name,
                     "ref": p.get("ref", f"{self.server_id}:{p.get('container_id') or 'host'}:{p.get('pid')}:{p.get('start_time_ticks', 0)}"),
                     "pid": p.get("pid"),
                     "ppid": p.get("ppid"),
@@ -208,7 +215,7 @@ class ProcessMonitorAdapter:
                     "status": p.get("state", "RUNNING"),
                     "classification": p.get("classification"),
                     "is_gpu_process": p.get("is_gpu", False),
-                    "gpu_id": f"rack-gpu-0{p.get('gpu_index')}" if p.get("gpu_index") is not None else None,
+                    "gpu_id": f"{self.server_id}-gpu-0{int(gpu_idx) + 1}" if gpu_idx is not None else None,
                     "gpu_index": p.get("gpu_index"),
                     "vram_mb": p.get("vram_mb", 0),
                     "container_id": p.get("container_id"),
@@ -319,7 +326,7 @@ class ProcessMonitorAdapter:
 
                 processes.append({
                     "host_id": self.server_id,
-                    "server_name": "Server 01 — Server Rack (Debian 12)",
+                    "server_name": self.server_name,
                     "ref": ref,
                     "pid": pid,
                     "ppid": ppid,
@@ -339,7 +346,7 @@ class ProcessMonitorAdapter:
                     "status": (info.get('status') or "running").upper(),
                     "classification": classification,
                     "is_gpu_process": is_gpu,
-                    "gpu_id": "rack-gpu-00" if is_gpu else None,
+                    "gpu_id": f"{self.server_id}-gpu-01" if is_gpu else None,
                     "vram_mb": vram_mb,
                     "container_id": container,
                     "workspace": workspace,
@@ -385,7 +392,7 @@ class ProcessMonitorAdapter:
                     "started_at": started_dt,
                     "session_duration": duration,
                     "server_id": self.server_id,
-                    "server_name": "Server 01 — Server Rack (Debian 12)",
+                    "server_name": self.server_name,
                     "workspace": f"ws-{u.name}",
                     "status": "ACTIVE"
                 })

@@ -239,22 +239,24 @@ class NvmlAdapter:
                         continue
                     parts = [p.strip() for p in line.split(",")]
                     if len(parts) >= 10:
-                        idx = int(parts[0])
-                        total_vram = int(parts[4])
-                        used_vram = int(parts[5])
-                        util_pct = int(parts[6])
-                        temp_c = int(parts[7])
+                        idx = int(float(parts[0]))
+                        total_vram = int(float(parts[4]))
+                        used_vram = int(float(parts[5]))
+                        util_pct = int(float(parts[6]))
+                        temp_c = round(float(parts[7]))
                         power_w = int(float(parts[8]))
                         power_limit_w = int(float(parts[9]))
                         
                         gpu_uuid = parts[2]
                         gpu_procs = [p for p in live_processes if p.get("gpu_uuid") == gpu_uuid]
+                        srv_prefix = "WS" if self.server_id == "workstation" else "RACK"
+                        srv_full_name = "Server 02 — Workstation (aiot-ws1 • Cục bộ)" if self.server_id == "workstation" else "Server 01 — Server Rack (aiotlab-rack)"
                         gpus.append({
                             "index": idx,
-                            "id": f"{self.server_id}-gpu-{idx:02d}",
-                            "display_label": f"{self.server_id.upper()}-GPU-{idx:02d}",
+                            "id": f"{self.server_id}-gpu-0{idx + 1}",
+                            "display_label": f"{srv_prefix}-GPU-0{idx + 1}",
                             "server_id": self.server_id,
-                            "server_name": "Server 01 — Server Rack (aiotlab-rack)" if self.server_id == "track" else "Server 02 — Workstation",
+                            "server_name": srv_full_name,
                             "source": "nvidia-smi",
                             "collected_at": datetime.now(timezone.utc).isoformat(),
                             "freshness": "ONLINE",

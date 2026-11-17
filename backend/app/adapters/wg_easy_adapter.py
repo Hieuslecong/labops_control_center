@@ -157,7 +157,7 @@ class WgEasyAdapter(VPNProvider):
         self.ensure_subnet_configured()
         payload = {"name": name, "expiresAt": expires_at}
         res = self._request("api/client", method="POST", data=payload)
-        client_id = res.get("clientId")
+        client_id = res.get("clientId") or res.get("id")
         if not client_id:
             raise VPNProviderError(f"wg-easy không trả về clientId hợp lệ: {res}")
         # Lấy thông tin chi tiết client vừa tạo
@@ -169,7 +169,7 @@ class WgEasyAdapter(VPNProvider):
                 "external_id": client_id,
                 "name": name,
                 "status": "ACTIVE",
-                "enabled": true,
+                "enabled": True,
             }
         return device
 

@@ -182,14 +182,16 @@ class ReportGenerator:
         for (user, script), item in raw_jobs.items():
             vram_str = f"{item['vram_mb']:,} MiB VRAM (GPU A30)" if item["is_gpu"] else "CPU Compute"
             count_str = f" ({item['count']} tiến trình)" if item["count"] > 1 else ""
+            display_title = f"{user} • {script}{count_str}"
             jobs.append({
                 "pid": item["root_pid"],
+                "name": display_title,
                 "user": user,
                 "script": script,
                 "vram": vram_str,
                 "is_gpu": item["is_gpu"],
                 "count": item["count"],
-                "display": f"{user} • {script}{count_str} [{vram_str}]",
+                "display": f"{display_title} [{vram_str}]",
             })
 
         # Sắp xếp ưu tiên GPU lên đầu
@@ -228,7 +230,8 @@ class ReportGenerator:
 
         if jobs_summary["jobs"]:
             for j in jobs_summary["jobs"]:
-                md_lines.append(f"  • PID `{j['pid']}` — {j['name']} (Chiếm dụng: {j['vram']})")
+                name_str = j.get("display") or j.get("name") or j.get("script") or "python"
+                md_lines.append(f"  • PID `{j['pid']}` — {name_str}")
         else:
             md_lines.append("  • Không có tác vụ độc lập chiếm dụng GPU lớn.")
 

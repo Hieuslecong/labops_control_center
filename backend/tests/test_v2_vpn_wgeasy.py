@@ -33,7 +33,79 @@ from app.services.labops_service import LabOpsDataService
 from app.services.vpn_manager import VPNManager
 
 
+class _MockWgEasyBackend:
+    def __init__(self) -> None:
+        self.clients: Dict[str, Any] = {}
+        self.counter = 1
+
+    def request(
+        self,
+        path: str,
+        method: str = "GET",
+        data: Optional[Dict[str, Any]] = None,
+        is_text_response: bool = False,
+    ) -> Any:
+        p = path.lstrip("/")
+        if p == "api/admin/interface":
+            return {"ipv4Cidr": "10.88.40.0/24"}
+        if p == "api/admin/interface/cidr":
+            return {"success": True}
+        if p == "api/client" and method == "GET":
+            return list(self.clients.values())
+        if p == "api/client" and method == "POST":
+            cid = f"wgc-mock-{self.counter}"
+            self.counter += 1
+            client = {
+                "id": cid,
+                "name": (data or {}).get("name", "client"),
+                "enabled": True,
+                "address": f"10.88.40.{self.counter}/32",
+                "publicKey": f"mockpubkey{self.counter}=",
+                "createdAt": "2026-03-30T10:00:00Z",
+                "updatedAt": "2026-03-30T10:00:00Z",
+                "transferRx": 1024,
+                "transferTx": 2048,
+                "latestHandshakeAt": "2026-03-30T10:05:00Z",
+            }
+            self.clients[cid] = client
+            return client
+        if p.startswith("api/client/") and p.endswith("/configuration"):
+            cid = p.split("/")[2]
+            c = self.clients.get(cid, {})
+            addr = c.get("address", "10.88.40.10/32")
+            return (
+                f"[Interface]\nPrivateKey = mockprivkey==\nAddress = {addr}\nDNS = 1.1.1.1\n\n"
+                f"[Peer]\nPublicKey = mockserverpub==\nEndpoint = 118.70.169.236:2204\nAllowedIPs = 10.88.40.0/24\n"
+            )
+        if p.startswith("api/client/") and p.endswith("/disable"):
+            cid = p.split("/")[2]
+            if cid in self.clients:
+                self.clients[cid]["enabled"] = False
+            return self.clients.get(cid, {})
+        if p.startswith("api/client/") and p.endswith("/enable"):
+            cid = p.split("/")[2]
+            if cid in self.clients:
+                self.clients[cid]["enabled"] = True
+            return self.clients.get(cid, {})
+        if p.startswith("api/client/") and method == "DELETE":
+            cid = p.split("/")[2]
+            self.clients.pop(cid, None)
+            return {"success": True}
+        return {}
+
+
 class TestVpnWgEasyIntegration(unittest.TestCase):
+    has_wgeasy: bool = False
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import urllib.request
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:51821/api/wireguard/client", timeout=1):
+                cls.has_wgeasy = True
+        except Exception:
+            cls.has_wgeasy = False
+
     def _clean_dirs(self) -> None:
         for u in ("multidev_user", "api_dev_user", "delete_u"):
             p = f"/media/LabOps-Data/users/{u}"
@@ -48,6 +120,9 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
         self._clean_dirs()
         self.tmpdir = tempfile.TemporaryDirectory(prefix="labops-vpn-test-")
         self.svc = LabOpsDataService(demo_mode=False, data_dir=self.tmpdir.name)
+        if not self.has_wgeasy:
+            mock_backend = _MockWgEasyBackend()
+            self.svc.vpn_manager.wg_easy._request = mock_backend.request
         self.admin_token = issue_token("admin_vpn", "ADMIN")
         self.researcher_token = issue_token("res_vpn", "RESEARCHER")
 

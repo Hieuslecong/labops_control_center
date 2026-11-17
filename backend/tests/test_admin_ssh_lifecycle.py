@@ -24,9 +24,13 @@ if backend_dir not in sys.path:
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "test-secret-admin-ssh-lifecycle-32chars!")
 
+from app.core.config import settings
 from app.core.security import issue_token
 from app.main import LabOpsRequestHandler
 from app.services.labops_service import LabOpsDataService
+
+LOCAL_HOST = getattr(settings, "LOCAL_HOST_ID", "workstation")
+OFFLINE_HOST = "track" if LOCAL_HOST == "workstation" else "workstation"
 
 
 class TestAdminSshLifecycle(unittest.TestCase):
@@ -121,11 +125,11 @@ class TestAdminSshLifecycle(unittest.TestCase):
 
     def test_02_provision_on_offline_host_or_without_container_never_reports_ready(self) -> None:
         """[PASS_AUTOMATED] Tạo quyền khi host offline hoặc chưa có container/quota thực tế KHÔNG bao giờ trả READY."""
-        # 1. Host workstation đang offline/unknown
+        # 1. Host offline/unknown
         m_offline = self.svc.provision_member_ssh_access({
             "full_name": "Offline Host User",
             "username": "user_offline",
-            "assigned_server": "workstation",
+            "assigned_server": OFFLINE_HOST,
             "cpu_limit_cores": 4,
             "ram_limit_gb": 8,
             "storage_quota_gb": 50,
@@ -135,11 +139,11 @@ class TestAdminSshLifecycle(unittest.TestCase):
         self.assertEqual(m_offline["provisioning_state"], "NOT_VERIFIED")
         self.assertFalse(m_offline["runtime_verification"]["host_online"])
 
-        # 2. Host track đang online nhưng chưa bật container/canary runtime và ext4 không hỗ trợ quota thư mục
+        # 2. Host local đang online nhưng chưa bật container/canary runtime và ext4 không hỗ trợ quota thư mục
         m_unverified_quota = self.svc.provision_member_ssh_access({
-            "full_name": "Track Pending Container",
+            "full_name": "Local Pending Container",
             "username": "user_no_container",
-            "assigned_server": "track",
+            "assigned_server": LOCAL_HOST,
             "cpu_limit_cores": 4,
             "ram_limit_gb": 8,
             "storage_quota_gb": 50,
@@ -296,7 +300,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
         member = self.svc.provision_member_ssh_access({
             "full_name": "Offline Revoke User",
             "username": "rev_offline",
-            "assigned_server": "workstation",
+            "assigned_server": OFFLINE_HOST,
             "_actor_id": "admin_root",
         })
         res = self.svc.revoke_member_ssh_access(member["id"], actor="admin_root")
@@ -305,11 +309,11 @@ class TestAdminSshLifecycle(unittest.TestCase):
         self.assertEqual(member["ssh_key_status"], "PENDING_REVOKE")
 
     def test_07_real_canary_sshd_passphrase_key_connect_and_revoke_blocks_new_connections(self) -> None:
-        """[PASS_REAL] Canary sshd thật trên aiotlab-rack: kết nối bằng private key có passphrase -> READY -> thu hồi -> chặn kết nối mới (VERIFIED_REVOKED)."""
+        """[PASS_REAL] Canary sshd thật trên host cục bộ: kết nối bằng private key có passphrase -> READY -> thu hồi -> chặn kết nối mới (VERIFIED_REVOKED)."""
         member = self.svc.provision_member_ssh_access({
             "full_name": "Canary Real SSH User",
             "username": "canary_real",
-            "assigned_server": "track",
+            "assigned_server": LOCAL_HOST,
             "cpu_limit_cores": 4,
             "ram_limit_gb": 8,
             "storage_quota_gb": 20,

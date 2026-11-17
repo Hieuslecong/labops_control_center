@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 
 from app.core.config import settings
+from app.adapters.telemetry_contract import is_fresh_timestamp
 def settings_local_host_id() -> str:
     return settings.LOCAL_HOST_ID
 
@@ -105,75 +106,104 @@ class NvmlAdapter:
 
     def _fetch_go_agent_gpus(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy dữ liệu GPU tức thì từ LabOps Go Agent nếu đang chạy."""
+        token = os.getenv("LABOPS_NODE_AGENT_TOKEN", "").strip()
+        if not token:
+            return None
         try:
             req = urllib.request.Request(
                 "http://127.0.0.1:9100/api/v1/agent/gpus",
-                headers={"X-LabOps-Agent-Secret": "labops-local-agent-verified-token-2026"}
+                headers={"X-LabOps-Agent-Secret": token}
             )
             with urllib.request.urlopen(req, timeout=0.2) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    if data.get("status") == "VERIFIED" and data.get("gpus"):
-                        gpus = []
-                        for g in data["gpus"]:
-                            raw_procs = g.get("active_processes") or []
-                            gpu_procs = []
-                            for p in raw_procs:
-                                pname = p.get("name", "")
-                                user = p.get("username", "")
-                                if not user:
-                                    if "/users/" in pname:
-                                        try:
-                                            user = pname.split("/users/")[1].split("/")[0]
-                                        except Exception:
-                                            user = "researcher"
-                                    elif "/home/" in pname:
-                                        try:
-                                            user = pname.split("/home/")[1].split("/")[0]
-                                        except Exception:
-                                            user = "researcher"
-                                    else:
-                                        user = "system"
-                                vram = p.get("vram_mb") or p.get("used_memory_mb") or p.get("vramMb") or 0
-                                gpu_procs.append({
-                                    "pid": p.get("pid", 0),
-                                    "name": pname or "python",
-                                    "username": user,
-                                    "workspace": p.get("workspace", "host"),
-                                    "vram_mb": vram,
-                                    "vramMb": vram,
-                                    "cpu_percent": p.get("cpu_percent", 0.0),
-                                    "cpuPercent": p.get("cpu_percent", 0.0),
-                                })
+                    if (
+                        not isinstance(data, dict)
+                        or data.get("status") != "VERIFIED"
+                        or not is_fresh_timestamp(data.get("collected_at"))
+                        or not isinstance(data.get("gpus"), list)
+                    ):
+                        return None
+                    gpus = []
+                    seen_uuids = set()
+                    seen_indexes = set()
+                    for g in data["gpus"]:
+                        required = ("index", "name", "uuid", "pci_bus_id", "memory_total_mb", "memory_used_mb",
+                                    "utilization_gpu_pct", "temperature_c", "power_watts", "power_limit_watts",
+                                    "active_processes")
+                        if not isinstance(g, dict) or any(key not in g for key in required):
+                            return None
+                        index, gpu_uuid = g["index"], g["uuid"]
+                        if (
+                            type(index) is not int
+                            or index < 0
+                            or index in seen_indexes
+                            or not isinstance(gpu_uuid, str)
+                            or not gpu_uuid
+                            or gpu_uuid in seen_uuids
+                        ):
+                            return None
+                        if not isinstance(g["name"], str) or not g["name"] or not isinstance(g["active_processes"], list):
+                            return None
+                        numeric = ("memory_total_mb", "memory_used_mb", "utilization_gpu_pct", "temperature_c", "power_watts", "power_limit_watts")
+                        if any(type(g[key]) not in (int, float) or g[key] < 0 for key in numeric):
+                            return None
+                        if g["memory_total_mb"] <= 0 or g["memory_used_mb"] > g["memory_total_mb"] or g["utilization_gpu_pct"] > 100:
+                            return None
+                        seen_uuids.add(gpu_uuid)
+                        seen_indexes.add(index)
 
-                            active_users = list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username"))) or []
-                            gpus.append({
-                                "index": g.get("index", 0),
-                                "id": f"rack-gpu-0{g.get('index', 0) + 1}",
-                                "display_label": f"RACK-GPU-0{g.get('index', 0) + 1}",
-                                "server_id": "track",
-                                "server_name": "Server 01 — Server Rack (aiotlab-rack • Cục bộ)",
-                                "source": "labops-go-agent",
-                                "collected_at": data.get("collected_at", datetime.now(timezone.utc).isoformat()),
-                                "freshness": "ONLINE",
-                                "vram_unit": "MiB",
-                                "model": g.get("name", "NVIDIA A30"),
-                                "uuid": g.get("uuid", ""),
-                                "pci_bus_id": g.get("pci_bus_id", ""),
-                                "vram_total_mb": g.get("memory_total_mb", 24576),
-                                "vram_used_mb": g.get("memory_used_mb", 1),
-                                "gpu_util_percent": g.get("utilization_gpu_pct", 0),
-                                "temp_celsius": g.get("temperature_c", 35),
-                                "power_watts": g.get("power_watts", 45),
-                                "power_limit_watts": g.get("power_limit_watts", 165),
-                                "allocation_mode": "FULL_GPU_EXCLUSIVE",
-                                "enforcement_state": "MONITOR_ONLY",
-                                "active_processes": gpu_procs,
-                                "active_users": active_users,
-                                "associated_jobs": [f"proc-{p['pid']}" for p in gpu_procs],
-                                "live": True
+                        gpu_procs = []
+                        for p in g["active_processes"]:
+                            if not isinstance(p, dict) or type(p.get("pid")) is not int or p["pid"] <= 0:
+                                return None
+                            process_name = p.get("name")
+                            if not isinstance(process_name, str) or not process_name:
+                                return None
+                            used_memory = p.get("used_memory_mb")
+                            if type(used_memory) not in (int, float) or used_memory < 0:
+                                return None
+                            username = p.get("username")
+                            gpu_procs.append({
+                                "pid": p["pid"],
+                                "name": process_name,
+                                "username": username if isinstance(username, str) and username else "UNATTRIBUTED_EXTERNAL",
+                                "workspace": p.get("container_name") or "UNVERIFIED",
+                                "vram_mb": used_memory,
                             })
-                        return gpus
+
+                        active_users = list(dict.fromkeys(
+                            p["username"] for p in gpu_procs if p["username"] != "UNATTRIBUTED_EXTERNAL"
+                        ))
+                        gpus.append({
+                            "index": index,
+                            "id": f"{self.server_id}-gpu-{index:02d}",
+                            "display_label": f"{self.server_id.upper()}-GPU-{index:02d}",
+                            "server_id": self.server_id,
+                            "server_name": self.server_id,
+                            "source": "labops-go-agent",
+                            "collected_at": data["collected_at"],
+                            "freshness": "ONLINE",
+                            "vram_unit": "MiB",
+                            "model": g["name"],
+                            "uuid": gpu_uuid,
+                            "pci_bus_id": g["pci_bus_id"],
+                            "vram_total_mb": g["memory_total_mb"],
+                            "vram_used_mb": g["memory_used_mb"],
+                            "gpu_util_percent": g["utilization_gpu_pct"],
+                            "temp_celsius": g["temperature_c"],
+                            "power_watts": g["power_watts"],
+                            "power_limit_watts": g["power_limit_watts"],
+                            "allocation_mode": "OBSERVED_ONLY",
+                            "enforcement_state": g.get("enforcement_state") or "MONITOR_ONLY",
+                            "active_processes": gpu_procs,
+                            "active_users": active_users,
+                            "associated_jobs": [f"proc-{p['pid']}" for p in gpu_procs],
+                            "live": True,
+                        })
+                    if len(gpus) != data.get("count"):
+                        return None
+                    return gpus
         except Exception:
             pass
         return None
@@ -233,7 +263,7 @@ class NvmlAdapter:
                             "temp_celsius": temp_c,
                             "power_watts": power_w,
                             "power_limit_watts": power_limit_w,
-                            "allocation_mode": "FULL_GPU_EXCLUSIVE",
+                            "allocation_mode": "OBSERVED_ONLY",
                             "enforcement_state": "MONITOR_ONLY",
                             "active_processes": gpu_procs,
                             "active_users": list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username") and p["username"] != "Chưa xác định")) or (["Chưa xác định (Workload ngoại vi)"] if gpu_procs else []),

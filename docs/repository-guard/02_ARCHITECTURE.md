@@ -1,13 +1,15 @@
 # LABOPS REPOSITORY GUARD — ARCHITECTURE DESIGN (PHASE 2)
 **Version:** 2.0.0  
-**Status:** IMPLEMENTED / ACTIVE  
+**Status:** PARTIAL SOURCE IMPLEMENTATION / RUNTIME NOT VERIFIED
 **Authors:** Principal DevSecOps & Security Architect  
+
+> This is a target architecture diagram, not a statement of current deployment. AIOTGIT, scoped request authorization and Git bundle handling have source/unit-test evidence. No production service, scanner worker, terminal broker, durable production store, workspace delivery or egress boundary was exercised.
 
 ---
 
 ## 1. TỔNG QUAN KIẾN TRÚC HỆ THỐNG
 
-LabOps Automated Repository Security Gateway được thiết kế theo mô hình Zero-Trust đối với các nguồn mã bên ngoài. Quy trình xử lý đảm bảo không bao giờ phân phối mã chưa qua kiểm duyệt vào các Docker Workspaces.
+LabOps Automated Repository Security Gateway hướng tới kiểm soát nguồn mã bên ngoài. Source code có các kiểm tra approval/digest; hiện chưa có bằng chứng runtime đủ để khẳng định mọi workspace chỉ nhận mã đã kiểm duyệt.
 
 ```text
                       LABOPS DASHBOARD (Next.js 16)
@@ -78,7 +80,7 @@ Module Go tích hợp trực tiếp vào Node Agent / Control Plane:
   - `REJECTED`: Có secrets rò rỉ hoặc lỗ hổng Critical bị cấm.
   - `FAILED`: Lỗi mạng, commit không tồn tại, hoặc công cụ quét không khả dụng (Fail-Closed).
 - **`cache.go`**: Bộ nhớ đệm các commit đã được phê duyệt dựa trên content digest và policy version.
-- **`delivery.go`**: Phân phối gói mã nguồn đã được xác thực (verified digest) vào thư mục làm việc của Docker Workspace.
+- **`delivery.go`**: Chứa helper xử lý artifact; direct arbitrary-path delivery bị vô hiệu hóa. AIOTGIT approved-bundle route tồn tại trong source nhưng chưa được kiểm thử end-to-end tới workspace.
 - **`audit.go`**: Ghi nhận toàn bộ sự kiện kiểm duyệt, tải về, phê duyệt ngoại lệ và phân phối mã vào hệ thống Audit Log bất biến.
 
 ---
@@ -118,12 +120,13 @@ Module Go tích hợp trực tiếp vào Node Agent / Control Plane:
 
 ---
 
-## 4. CHIẾN LƯỢC NETWORK EGRESS ENFORCEMENT (PILOT)
+## 4. WORKSPACE EGRESS BOUNDARY — CHƯA ĐƯỢC KIỂM CHỨNG
 
-- **Phạm vi**: Chỉ áp dụng trên 1 container Docker Workspace thử nghiệm của Researcher (ví dụ: `ws-pilot-researcher`).
-- **Nguyên tắc an toàn**: Không sửa đổi iptables toàn cục của host, không ảnh hưởng WireGuard `wg-easy`, không ảnh hưởng daemon Docker host hoặc các GPU training jobs của thành viên khác.
-- **Cơ chế**: Sử dụng container-specific iptables rule hoặc internal docker network route để chặn cổng 443 và 22 đến các dải IP của `github.com` từ bên trong container thí điểm.
-- **Đường dẫn hợp lệ duy nhất**: Thành viên sử dụng lệnh `labops clone <repo_url>` để yêu cầu gateway quét và phân phối mã đã xác thực vào workspace.
+- AIOTGIT approval alone cannot prevent direct downloads from a workspace with outbound network access or from a host SSH shell.
+- Source attestation accepts REPOSITORY_ENFORCED only for an observed Docker network mode of none, but this does not provision a workspace or create a terminal access channel.
+- No pilot container, terminal broker or direct-download bypass test was run. Host firewall/Docker egress scripts are no-op guards.
+- Dùng `aiotgit clone` để yêu cầu kiểm duyệt và `aiotgit status` để theo dõi; dùng binary `git` cho các thao tác local. Legacy `labops clone` và `labops repo` commands đã bị disable trong source.
+- Trạng thái hiện tại: HOST_ENFORCEMENT_NOT_VERIFIED; host-shell bypass remains possible until the execution boundary is proven.
 
 ---
 

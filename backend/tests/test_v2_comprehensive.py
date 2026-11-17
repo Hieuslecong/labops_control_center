@@ -20,6 +20,10 @@ from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from _safety_gate import require_live_test_opt_in
+
+require_live_test_opt_in("test_v2_comprehensive.py")
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "v2-comprehensive-test-secret-32bytes")

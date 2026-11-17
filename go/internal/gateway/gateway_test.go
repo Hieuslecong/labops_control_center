@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,9 +52,9 @@ func TestSessionManagerLifecycleAndDispatch(t *testing.T) {
 		},
 	}
 	sm.UpdateHeartbeat("track", hb)
-	sess, _ = sm.GetSession("track")
-	if sess.Status != "DEGRADED" || len(sess.DegradedReasons) == 0 {
-		t.Fatalf("Heartbeat không cập nhật trạng thái DEGRADED: %v", sess)
+	snapshot, _ := sm.GetSession("track")
+	if snapshot.Status != "DEGRADED" || len(snapshot.DegradedReasons) == 0 {
+		t.Fatalf("Heartbeat không cập nhật trạng thái DEGRADED: %v", snapshot)
 	}
 
 	// 3. Thử nghiệm DispatchCommand khi hành động không thuộc allowlist
@@ -66,6 +67,29 @@ func TestSessionManagerLifecycleAndDispatch(t *testing.T) {
 	}
 	if resp.Success || resp.Status != "REJECTED_UNAUTHORIZED" {
 		t.Fatalf("Kỳ vọng từ chối lệnh cấm nhưng lại trả về: %v", resp)
+	}
+}
+
+func TestTelemetrySnapshotReportsPerStreamGatewayReceiptTimes(t *testing.T) {
+	sm := NewSessionManager()
+	sess := sm.RegisterSession(&pb.NodeHello{NodeId: "track"}, nil)
+	started := time.Now().UTC().Add(-time.Second)
+	sm.UpdateHostTelemetryForSession(sess, &pb.HostTelemetry{NodeId: "track", Status: "online"})
+	sm.UpdateGPUTelemetryForSession(sess, &pb.GPUTelemetry{NodeId: "track", Status: "VERIFIED"})
+
+	snapshot, err := sm.GetTelemetrySnapshot("track")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"host_received_at", "gpu_received_at"} {
+		raw, ok := snapshot[key].(string)
+		if !ok || raw == "" {
+			t.Fatalf("snapshot has no gateway receipt time for %s: %#v", key, snapshot[key])
+		}
+		observed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || observed.Before(started) || observed.After(time.Now().UTC().Add(time.Second)) {
+			t.Fatalf("invalid gateway receipt time for %s: %q (%v)", key, raw, err)
+		}
 	}
 }
 
@@ -88,10 +112,10 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 		GpuCount: 1,
 	}, nil)
 
-	tm := pki.NewEnrollmentTokenManager("test-salt")
+	tm := pki.NewEnrollmentTokenManager("0123456789abcdef0123456789abcdef")
 	rm := pki.NewRevocationManager()
 
-	controlSecret := "test-secret-salt-2026"
+	controlSecret := "0123456789abcdef0123456789abcdef"
 	httpSrv := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, ca, tm, rm, controlSecret, nil)
 
 	// 1. Test /health (Public, no auth needed)
@@ -182,6 +206,9 @@ func TestHTTPControlPlaneAPI(t *testing.T) {
 }
 
 func TestGRPCGatewayMTLSTunnel(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("loopback gRPC integration test requires an isolated live-test opt-in")
+	}
 	tempDir, err := os.MkdirTemp("", "labops-gw-grpc-test-*")
 	if err != nil {
 		t.Fatalf("Lỗi tạo tempdir: %v", err)
@@ -317,5 +344,112 @@ func TestGRPCGatewayMTLSTunnel(t *testing.T) {
 	sess, ok := srv.SessionManager().GetSession(nodeID)
 	if !ok || sess.Status != "ONLINE" {
 		t.Fatalf("Session chưa được cập nhật ONLINE: %v", sess)
+	}
+}
+
+func TestDuplicateSessionOldDisconnectDoesNotRemoveNewSession(t *testing.T) {
+	sm := NewSessionManager()
+	hello := &pb.NodeHello{NodeId: "track"}
+	old := sm.RegisterSession(hello, nil)
+	pending := make(chan *pb.CommandResponse, 1)
+	old.pendingCommands["old-command"] = pending
+	current := sm.RegisterSession(hello, nil)
+	if old.Status != "OFFLINE" {
+		t.Fatalf("old session status = %s", old.Status)
+	}
+	if sm.IsCurrent("track", old) {
+		t.Fatal("old session still current")
+	}
+	if !sm.IsCurrent("track", current) {
+		t.Fatal("new session not current")
+	}
+	sm.RemoveSessionIfCurrent("track", old)
+	if !sm.IsCurrent("track", current) {
+		t.Fatal("old disconnect marked the replacement offline")
+	}
+	if _, ok := <-pending; ok {
+		t.Fatal("pending command was not closed on takeover")
+	}
+}
+
+func TestDispatchFailsClosedAndDoesNotTrustActor(t *testing.T) {
+	sm := NewSessionManager()
+	sm.RegisterSession(&pb.NodeHello{NodeId: "track"}, nil)
+	h := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, nil,
+		pki.NewEnrollmentTokenManager("0123456789abcdef0123456789abcdef"),
+		pki.NewRevocationManager(), "control-secret-0123456789abcdef0", nil)
+
+	body := bytes.NewBufferString(`{"node_id":"track","action":"NOT_ALLOWED","actor_id":"admin"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/dispatch", body)
+	r.Header.Set("Authorization", "Bearer control-secret-0123456789abcdef0")
+	w := httptest.NewRecorder()
+	h.handleDispatch(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unknown action status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	body = bytes.NewBufferString(`{"node_id":"offline","action":"INSPECT_HOST","actor_id":"admin"}`)
+	r = httptest.NewRequest(http.MethodPost, "/api/v1/gateway/dispatch", body)
+	r.Header.Set("Authorization", "Bearer control-secret-0123456789abcdef0")
+	w = httptest.NewRecorder()
+	h.handleDispatch(w, r)
+	if w.Code == http.StatusOK {
+		t.Fatalf("offline command was reported successful: %s", w.Body.String())
+	}
+
+	r = httptest.NewRequest(http.MethodPost, "/api/v1/gateway/dispatch", bytes.NewBufferString(`{"node_id":"track","action":"INSPECT_HOST"}`))
+	w = httptest.NewRecorder()
+	h.handleDispatch(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated dispatch status=%d", w.Code)
+	}
+}
+
+func TestGatewayDoesNotDispatchDestructiveActionsWithoutDelegatedUserAuthorization(t *testing.T) {
+	if AllowedActions["TERMINATE_PROCESS"] {
+		t.Fatal("machine control secret alone must not authorize process termination")
+	}
+}
+
+func TestGatewayControlHTTPBindMustBeLoopback(t *testing.T) {
+	for _, address := range []string{"127.0.0.1", "::1"} {
+		if !IsLoopbackControlBind(address) {
+			t.Fatalf("loopback address %q rejected", address)
+		}
+	}
+	for _, address := range []string{"0.0.0.0", "::", "192.0.2.10", "localhost", ""} {
+		if IsLoopbackControlBind(address) {
+			t.Fatalf("non-literal or public address %q accepted", address)
+		}
+	}
+
+	h := NewHTTPControlPlaneServer("0.0.0.0", 0, NewSessionManager(), nil,
+		pki.NewEnrollmentTokenManager("0123456789abcdef0123456789abcdef"),
+		pki.NewRevocationManager(), "control-secret-0123456789abcdef0", nil)
+	if err := h.Start(); err == nil {
+		t.Fatal("public control-plane bind reached ListenAndServe")
+	}
+}
+
+func TestFailedRevokePersistenceStopsSessionAndReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "revocations.json")
+	rm := pki.NewRevocationManagerWithPersistence(path)
+	sm := NewSessionManager()
+	session := sm.RegisterSession(&pb.NodeHello{NodeId: "track"}, nil)
+	h := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, nil,
+		pki.NewEnrollmentTokenManager("0123456789abcdef0123456789abcdef"), rm,
+		"control-secret-0123456789abcdef0", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/revoke", bytes.NewBufferString(`{"node_id":"track","reason":"test"}`))
+	r.Header.Set("Authorization", "Bearer control-secret-0123456789abcdef0")
+	w := httptest.NewRecorder()
+	h.handleRevoke(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("revoke status=%d body=%s", w.Code, w.Body.String())
+	}
+	if rm.IsNodeAllowed("track") {
+		t.Fatal("failed revoke left node authorized in memory")
+	}
+	if sm.IsCurrent("track", session) {
+		t.Fatal("failed revoke kept the session active")
 	}
 }

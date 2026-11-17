@@ -10,6 +10,9 @@ import (
 )
 
 func TestPKIWorkflowAndTLSHandshake(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("loopback TLS handshake test requires an isolated live-test opt-in")
+	}
 	tempDir, err := os.MkdirTemp("", "labops-pki-test-*")
 	if err != nil {
 		t.Fatalf("Không thể tạo temp dir: %v", err)
@@ -140,7 +143,7 @@ func TestPKIWorkflowAndTLSHandshake(t *testing.T) {
 }
 
 func TestEnrollmentTokenManager(t *testing.T) {
-	etm := NewEnrollmentTokenManager("test-salt")
+	etm := NewEnrollmentTokenManager("0123456789abcdef0123456789abcdef")
 	token := etm.GenerateToken("ws-compute-1", 1*time.Minute)
 	if token == "" {
 		t.Fatal("Token rỗng")

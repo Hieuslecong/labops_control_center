@@ -6,12 +6,15 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
+from copy import deepcopy
+from functools import wraps
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
 from app.core.config import settings
 from app.adapters.host_monitor_adapter import HostMonitorAdapter, get_real_root_mount_info
 from app.adapters.nvml_adapter import NvmlAdapter
-from app.services.gpu_scheduler import GpuScheduler, SchedulerError
+from app.services.gpu_scheduler import GpuScheduler, SchedulerError, observed_scheduler_state
 from app.services.security_scanner import SecurityScanner
 from app.services.host_registry import HostRegistry
 from app.adapters.node_agent_adapter import NodeAgentClient
@@ -24,10 +27,14 @@ from app.adapters.process_monitor_adapter import ProcessMonitorAdapter
 from app.adapters.wireguard_adapter import WireGuardAdapter
 from app.adapters.teleport_adapter import TeleportAdapter
 from app.services.vpn_manager import VPNManager
+from app.services.vpn_ownership import find_owned_member_device
+from app.services.vpn_config import parse_provider_vpn_config
+from app.services.atomic_json import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
 SAFE_USERNAME_REGEX = re.compile(r'^[a-z_][a-z0-9_-]{2,31}$')
+CLERK_USER_ID_REGEX = re.compile(r'^user_[A-Za-z0-9_-]{6,96}$')
 RESERVED_USERNAMES = {
     "root", "bin", "daemon", "sys", "adm", "sync", "games", "man", "lp", "mail",
     "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
@@ -35,6 +42,17 @@ RESERVED_USERNAMES = {
     "sudo", "wheel", "admin", "operator"
 }
 APPROVED_MOUNT_PATHS = {"/workspace", "/home", "/data"}
+
+
+def _serialized_state_change(method):
+    """Serialize state mutations with their durable JSON snapshot writes."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._state_lock:
+            if self._persistence_failed:
+                raise RuntimeError("LabOps state persistence is fail-closed after a storage error")
+            return method(self, *args, **kwargs)
+    return wrapped
 
 def validate_linux_username(username: str) -> None:
     if not SAFE_USERNAME_REGEX.match(username):
@@ -58,10 +76,15 @@ class LabOpsDataService:
     """
     def __init__(self, demo_mode: Optional[bool] = None, data_dir: Optional[str] = None):
         self.demo_mode = settings.DEMO_MODE if demo_mode is None else demo_mode
+        self._state_lock = threading.RLock()
+        self._persistence_failed = False
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
         self.process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
-        self.data_dir = os.path.abspath(data_dir or os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        default_data_dir = os.getenv("LABOPS_STATE_DIR", "").strip() or os.path.join(
+            os.path.dirname(__file__), "..", "..", "data"
+        )
+        self.data_dir = os.path.abspath(data_dir or default_data_dir)
         os.makedirs(self.data_dir, exist_ok=True)
         self.wireguard_adapter = WireGuardAdapter(interface="wg0", data_dir=self.data_dir)
         self.vpn_manager = VPNManager()
@@ -103,20 +126,23 @@ class LabOpsDataService:
                     member["privilege_validation"]["status"] = "NOT_VERIFIED"
 
     def _save_persistent_data(self):
-        try:
-            with open(os.path.join(self.data_dir, "members.json"), "w", encoding="utf-8") as f:
-                json.dump(self.members, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "ssh_policies.json"), "w", encoding="utf-8") as f:
-                json.dump(self.ssh_policies, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "audit_logs.json"), "w", encoding="utf-8") as f:
-                json.dump(self.audit_logs, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "storage_allocations.json"), "w", encoding="utf-8") as f:
-                json.dump(self.storage_allocations, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "ssh_endpoints.json"), "w", encoding="utf-8") as f:
-                json.dump(self.ssh_endpoints, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.exception("Failed to persist LabOps data")
-            raise RuntimeError("Could not persist LabOps data") from e
+        with self._state_lock:
+            if self._persistence_failed:
+                raise RuntimeError("LabOps state persistence is fail-closed after a storage error")
+            snapshots = {
+                "members.json": deepcopy(self.members),
+                "ssh_policies.json": deepcopy(self.ssh_policies),
+                "audit_logs.json": deepcopy(self.audit_logs),
+                "storage_allocations.json": deepcopy(self.storage_allocations),
+                "ssh_endpoints.json": deepcopy(self.ssh_endpoints),
+            }
+            try:
+                for filename, value in snapshots.items():
+                    atomic_write_json(os.path.join(self.data_dir, filename), value)
+            except Exception as e:
+                self._persistence_failed = True
+                logger.exception("Failed to persist LabOps data; future mutations are disabled")
+                raise RuntimeError("Could not persist LabOps data; state mutations are now fail-closed") from e
 
     @property
     def servers(self) -> List[Dict[str, Any]]:
@@ -139,15 +165,20 @@ class LabOpsDataService:
     def gpus(self) -> List[Dict[str, Any]]:
         if not self.demo_mode:
             live_gpus = self.nvml_adapter.get_live_gpu_telemetry_sync()
+            reservation_state_available = True
             try:
                 reservations = self.gpu_scheduler.list_reservations()
             except Exception:
                 reservations = []
+                reservation_state_available = False
             for g in live_gpus:
-                active = next((r for r in reservations if r["gpu_uuid"] == g.get("uuid")
-                               and r["state"] in ("RESERVED", "STARTING", "RUNNING", "STOP_REQUESTED")), None)
+                active = next((r for r in reservations if isinstance(r, dict)
+                               and r.get("gpu_uuid") == g.get("uuid")
+                               and r.get("state") in ("RESERVED", "STARTING", "RUNNING", "STOP_REQUESTED")), None)
                 g["reservation"] = active
-                g["scheduler_state"] = active["state"] if active else ("BUSY_EXTERNAL" if g.get("active_processes") else "FREE")
+                g["scheduler_state"] = observed_scheduler_state(
+                    g, reservations, reservation_state_available=reservation_state_available,
+                )
             return live_gpus
         return self._demo_gpus
 
@@ -1244,6 +1275,7 @@ class LabOpsDataService:
             return port
         raise ValueError(f"Không còn cổng SSH khả dụng trên máy chủ {server_id}")
 
+    @_serialized_state_change
     def provision_member(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Record an access request; external workspace and identity services must verify activation."""
         if payload.get("provision_ssh_access") or payload.get("provisionSshAccess"):
@@ -1323,7 +1355,6 @@ class LabOpsDataService:
                 actor=actor_id,
             )
             allocated_port = self.get_next_available_ssh_port(server_id)
-            ssh_ip = server.get("vpn_ip") or server.get("ip_address") or "192.168.167.250"
             ws_record = self.workspace_controller.request_workspace(
                 owner=username,
                 host_id=server_id,
@@ -1344,7 +1375,7 @@ class LabOpsDataService:
                 "listen_port": allocated_port,
                 "container_port": 22,
                 "protocol": "tcp",
-                "status": "RESERVED",
+                "status": "PENDING_RUNTIME_VERIFICATION",
             })
 
         now = datetime.now().isoformat(timespec="seconds")
@@ -1358,7 +1389,7 @@ class LabOpsDataService:
             "assigned_server": server_id,
             "workspace_name": workspace_name,
             "status": "PENDING_PROVISIONING",
-            "provisioning_state": "SSH_KEY_ENROLLED" if registered_key else "PENDING",
+            "provisioning_state": "PENDING_RUNTIME_VERIFICATION" if registered_key else "PENDING",
             "workspace_status": workspace_status,
             "teleport_status": "NOT_CONFIGURED",
             "storage_pool_id": pool["id"] if pool else None,
@@ -1368,11 +1399,12 @@ class LabOpsDataService:
             "storage_used_gb": 0.0,
             "backup_policy": payload.get("backup_policy", payload.get("backupPolicy", "DAILY_SNAPSHOT")),
             "shared_datasets": payload.get("shared_datasets", payload.get("sharedDatasets", ["/shared/datasets"])),
-            "ssh_status": "READY_PENDING_RUNTIME" if registered_key else "OFFLINE",
+            "ssh_status": "PENDING_RUNTIME_VERIFICATION" if registered_key else "OFFLINE",
+            "ssh_endpoint_status": "PENDING_RUNTIME_VERIFICATION" if registered_key else "NOT_CONFIGURED",
             "ssh_sessions_count": 0,
             "ssh_ip": ssh_ip,
             "ssh_port": allocated_port,
-            "ssh_key_status": "ACTIVE" if registered_key else "NOT_CONFIGURED",
+            "ssh_key_status": "REGISTERED_PENDING_RUNTIME_VERIFICATION" if registered_key else "NOT_CONFIGURED",
             "ssh_fingerprint": registered_key["fingerprint"] if registered_key else None,
             "ssh_public_key_preview": f"{raw_ssh_key[:42]}..." if registered_key else "Chưa đăng ký khóa OpenSSH",
             "ssh_public_key": raw_ssh_key if registered_key else None,
@@ -1420,6 +1452,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return member
 
+    @_serialized_state_change
     def enroll_member_ssh_key(self, username: str, label: str, public_key: str, actor: str) -> Dict[str, Any]:
         """Đăng ký khóa OpenSSH cho thành viên và tự động cấp cổng/workspace SSH nếu thành viên đã tồn tại."""
         key_rec = self.ssh_key_registry.register_key(
@@ -1431,29 +1464,37 @@ class LabOpsDataService:
         member = next((m for m in self.members if m.get("username") == username or m.get("id") == username), None)
         if member:
             server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
-            server = next((s for s in self.servers if s["id"] == server_id), None) or {}
             if not member.get("ssh_port"):
                 port = self.get_next_available_ssh_port(server_id)
-                ssh_ip = server.get("vpn_ip") or server.get("ip_address") or "192.168.167.250"
                 member["ssh_port"] = port
-                member["ssh_ip"] = ssh_ip
+                member["ssh_ip"] = None
                 self.ssh_endpoints.append({
                     "id": f"ep-{uuid.uuid4().hex[:8]}",
                     "member_id": member["id"],
                     "server_id": server_id,
-                    "listen_address": ssh_ip,
+                    "listen_address": None,
                     "listen_port": port,
                     "container_port": 22,
                     "protocol": "tcp",
-                    "status": "RESERVED",
+                    "status": "PENDING_RUNTIME_VERIFICATION",
                 })
+            if member.get("ssh_endpoint_status") != "VERIFIED" or member.get("ssh_status") != "VERIFIED":
+                member["ssh_ip"] = None
+                member["ssh_status"] = "PENDING_RUNTIME_VERIFICATION"
+                member["ssh_endpoint_status"] = "PENDING_RUNTIME_VERIFICATION"
+                member["ssh_port_status"] = "ALLOCATED_PENDING_RUNTIME_VERIFICATION"
             member["ssh_key_status"] = "ACTIVE"
             member["ssh_fingerprint"] = key_rec["fingerprint"]
             member["ssh_public_key"] = public_key.strip()
             member["ssh_public_key_preview"] = f"{public_key.strip()[:42]}..."
             member["ssh_auth_mode"] = "OPENSSH_PUBLIC_KEY"
-            member["ssh_status"] = "READY_PENDING_RUNTIME"
-            member["provisioning_state"] = "SSH_KEY_ENROLLED"
+            member["ssh_status"] = "PENDING_RUNTIME_VERIFICATION"
+            member["ssh_key_status"] = "REGISTERED_PENDING_RUNTIME_VERIFICATION"
+            for endpoint in self.ssh_endpoints:
+                if endpoint.get("member_id") == member["id"]:
+                    endpoint["listen_address"] = None
+                    endpoint["status"] = "PENDING_RUNTIME_VERIFICATION"
+            member["provisioning_state"] = "PENDING_RUNTIME_VERIFICATION"
             ws_list = self.workspace_controller.list_workspaces(owner=member["username"])
             if not ws_list:
                 ws_rec = self.workspace_controller.request_workspace(
@@ -1472,13 +1513,20 @@ class LabOpsDataService:
                 "target_type": "MEMBER",
                 "target_id": member["username"],
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "result": "ACTIVE",
+                "result": "PENDING_RUNTIME_VERIFICATION",
                 "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-                "details": f"Đã đăng ký khóa OpenSSH ({key_rec['fingerprint']}) cho @{member['username']} tại {member.get('ssh_ip')}:{member.get('ssh_port')}",
+                "details": f"Đã đăng ký khóa OpenSSH ({key_rec['fingerprint']}) cho @{member['username']}; chờ xác minh endpoint runtime.",
             })
             self._save_persistent_data()
             key_rec["member"] = member
-            key_rec["ssh_endpoint"] = f"ssh -p {member.get('ssh_port')} {member['username']}@{member.get('ssh_ip')}"
+            key_rec["ssh_endpoint"] = (
+                f"ssh -p {member['ssh_port']} {member['username']}@{member['ssh_ip']}"
+                if member.get("ssh_status") == "VERIFIED"
+                and member.get("ssh_endpoint_status") == "VERIFIED"
+                and member.get("ssh_ip")
+                and member.get("ssh_port")
+                else None
+            )
         return key_rec
 
     def register_wireguard_device(self, member_id: str, public_key: str, device_name: str, actor: str = "labops-api") -> Dict[str, Any]:
@@ -1498,28 +1546,126 @@ class LabOpsDataService:
 
     def _revoke_member_wireguard(self, member: Dict[str, Any]) -> Dict[str, Any]:
         profile = member.get("wireguard") or {}
+        if not isinstance(profile, dict):
+            profile = {"devices": []}
+            member["wireguard"] = profile
         devices = profile.get("devices", [])
+        if not isinstance(devices, list):
+            profile["status"] = "PARTIAL_FAILURE"
+            profile["revocation_failures"] = 1
+            return profile
+        failures = 0
         for device in devices:
+            if not isinstance(device, dict):
+                failures += 1
+                continue
             if device.get("status") == "REVOKED":
                 continue
             try:
-                ext_id = str(device.get("external_id") or device.get("device_id") or device.get("id"))
-                self.vpn_manager.revoke_device(ext_id, device.get("provider", "wg-easy"))
-                device["status"] = "REVOKED"
-                device["enabled"] = False
-            except Exception as exc:
-                logger.warning(f"Lỗi thu hồi thiết bị {device} trên wg-easy: {exc}")
-        profile["status"] = "REVOKED" if devices else "NOT_CONFIGURED"
+                local_id = str(device.get("device_id") or device.get("id") or "")
+                trusted = find_owned_member_device(self.members, member, local_id)
+                ext_id = str(trusted["external_id"])
+                provider = trusted.get("provider", "wg-easy")
+                if self.vpn_manager.revoke_device(ext_id, provider) is not True:
+                    failures += 1
+                    continue
+                trusted["status"] = "REVOKED"
+                trusted["enabled"] = False
+            except Exception:
+                # Provider responses and device records may contain credentials; do not log them.
+                failures += 1
+        profile["status"] = "PARTIAL_FAILURE" if failures else ("REVOKED" if devices else "NOT_CONFIGURED")
+        profile["revocation_failures"] = failures
         member["wireguard"] = profile
         return profile
 
-    def suspend_member(self, member_id: str) -> Dict[str, Any]:
-        raise RuntimeError("Use revoke_member_access so WireGuard and Teleport are processed together")
+    @_serialized_state_change
+    def bind_member_clerk_identity(
+        self, member_id: str, clerk_user_id: str, *, actor: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(clerk_user_id, str) or not CLERK_USER_ID_REGEX.fullmatch(clerk_user_id):
+            raise ValueError("Clerk user ID is invalid")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("Admin actor is required")
+        member = next(
+            (item for item in self.members if item.get("id") == member_id or item.get("username") == member_id),
+            None,
+        )
+        if member is None:
+            raise LookupError("Member not found")
+        if member.get("role") != "RESEARCHER":
+            raise ValueError("Only researcher members can be bound to Clerk identities")
+        current = member.get("clerk_user_id")
+        if current == clerk_user_id:
+            return {"member_id": member["id"], "username": member["username"], "status": "BOUND"}
+        if current:
+            raise ValueError("Member already has a different Clerk identity")
+        if any(
+            item is not member and item.get("clerk_user_id") == clerk_user_id
+            for item in self.members
+        ):
+            raise ValueError("Clerk identity is already bound")
 
+        member["clerk_user_id"] = clerk_user_id
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:12]}", "actor": actor.strip(),
+            "action": "MEMBER_IDENTITY_BOUND", "target_type": "MEMBER", "target_id": member["username"],
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "result": "SUCCESS", "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": "Admin bound a stable Clerk subject to the LabOps member record.",
+        })
+        try:
+            self._save_persistent_data()
+        except Exception:
+            member.pop("clerk_user_id", None)
+            self.audit_logs.pop(0)
+            raise
+        return {"member_id": member["id"], "username": member["username"], "status": "BOUND"}
+
+    @_serialized_state_change
+    def suspend_member(self, member_id: str, actor: str = "labops-api") -> Dict[str, Any]:
+        member = next((item for item in self.members if item.get("id") == member_id or item.get("username") == member_id), None)
+        if not member:
+            raise ValueError("Member not found")
+        fields = ("status", "lifecycle_state", "provisioning_state", "external_access_revocation")
+        old = {key: member.get(key) for key in fields}
+        old_audit_len = len(self.audit_logs)
+        member["status"] = "SUSPENDED"
+        member["lifecycle_state"] = "SUSPENDED"
+        member["provisioning_state"] = "SUSPENDED_PENDING_EXTERNAL_REVOCATION"
+        member["external_access_revocation"] = {
+            "ssh": "PENDING_EXTERNAL_REVOCATION" if member.get("ssh_status") not in (None, "", "NOT_CONFIGURED", "REVOKED") else "NOT_CONFIGURED",
+            "vpn": "PENDING_EXTERNAL_REVOCATION" if member.get("wireguard") or member.get("vpn_status") not in (None, "", "NOT_CONFIGURED", "REVOKED") else "NOT_CONFIGURED",
+            "teleport": "PENDING_EXTERNAL_REVOCATION" if member.get("teleport_status") not in (None, "", "NOT_CONFIGURED", "REVOKED") else "NOT_CONFIGURED",
+        }
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:12]}", "actor": actor,
+            "action": "MEMBER_SUSPENDED", "target_type": "MEMBER", "target_id": member["username"],
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "result": "PENDING_EXTERNAL_REVOCATION", "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "details": "Application access suspended; workspace data retained; external SSH/VPN/Teleport revocation is not claimed.",
+        })
+        try:
+            self._save_persistent_data()
+        except Exception:
+            for key, value in old.items():
+                if value is None:
+                    member.pop(key, None)
+                else:
+                    member[key] = value
+            del self.audit_logs[:max(0, len(self.audit_logs) - old_audit_len)]
+            raise
+        failures = [f"{provider}: pending external revocation" for provider, state in member["external_access_revocation"].items() if state == "PENDING_EXTERNAL_REVOCATION"]
+        return {"status": "SUSPENDED_PENDING_EXTERNAL_REVOCATION", "member": member, "failures": failures}
+
+    @_serialized_state_change
     def restore_member(self, member_id: str) -> Dict[str, Any]:
         member = next((m for m in self.members if m["id"] == member_id), None)
         if not member:
             raise ValueError(f"Không tìm thấy thành viên {member_id}")
+        pending = [name for name, state in (member.get("external_access_revocation") or {}).items() if state == "PENDING_EXTERNAL_REVOCATION"]
+        if pending:
+            raise RuntimeError("External SSH/VPN/Teleport revocation is still pending; restore is blocked")
         member["status"] = "PENDING_PROVISIONING"
         member["provisioning_state"] = "PENDING"
         member["teleport_status"] = "NOT_CONFIGURED"
@@ -1539,6 +1685,7 @@ class LabOpsDataService:
     def revoke_ssh_key(self, member_id: str) -> Dict[str, Any]:
         raise RuntimeError("Legacy SSH key management is disabled; revoke the Teleport identity instead")
 
+    @_serialized_state_change
     def update_storage_quota(self, member_id: str, new_quota_gb: int) -> Dict[str, Any]:
         member = next((m for m in self.members if m["id"] == member_id), None)
         if not member:
@@ -1576,137 +1723,38 @@ class LabOpsDataService:
         raise RuntimeError("Workspace archival is unavailable until the workspace controller is integrated")
 
     def delete_member_permanently(
-        self, member_id_or_username: str, actor: str = "admin", remove_files: bool = True
+        self, member_id_or_username: str, actor: str = "admin", remove_files: bool = False,
+        *, dry_run: bool = True, confirmation: Optional[str] = None,
+        backup_verification_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Xóa bỏ hoàn toàn tài khoản thành viên khỏi LabOps:
-        1. Dừng và xóa Docker container workspace ws-{username}
-        2. Thu hồi và xóa toàn bộ WireGuard VPN peers trên wg-easy
-        3. Thu hồi toàn bộ SSH keys trong SshKeyRegistry và dọn dẹp RAM Vault
-        4. Xóa workspace controller records
-        5. Dọn dẹp thư mục workspace trên đĩa (nếu remove_files=True)
-        6. Xóa khỏi danh sách members và ssh_endpoints
-        7. Ghi nhận Audit Log chi tiết
-        """
-        member = self._find_member(member_id_or_username)
+        member = next((item for item in self.members if item.get("id") == member_id_or_username or item.get("username") == member_id_or_username), None)
         if not member:
-            raise LookupError(f"Không tìm thấy thành viên: {member_id_or_username}")
-
-        member_id = member["id"]
-        username = member["username"]
-        server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
-
-        cleanup_summary = {
-            "docker_container_removed": False,
-            "wireguard_peers_revoked": 0,
-            "ssh_keys_revoked": 0,
-            "vault_purged": False,
-            "workspace_files_removed": False,
+            raise LookupError("Member not found")
+        username = member.get("username", "")
+        workspace_records = self.workspace_controller.list_workspaces(owner=username, legacy_endpoints=[])
+        workspaces = [ws for ws in workspace_records if ws.get("owner") == username]
+        jobs = [job for job in getattr(self, "jobs_snapshot", []) if job.get("username") == username and job.get("state") in ("RUNNING", "STARTING")]
+        inventory = {
+            "member_id": member.get("id"), "username": username,
+            "workspaces": [{"id": ws.get("id"), "name": ws.get("name"), "owner": ws.get("owner"), "state": ws.get("lifecycle_state", "UNKNOWN")} for ws in workspaces],
+            "running_jobs": jobs, "shared_datasets": "PRESERVED",
+            "user_data": "PRESERVED", "remove_files_requested": bool(remove_files),
         }
-
-        # 1. Dừng và xóa Docker container ws-{username}
-        if shutil.which("docker"):
-            try:
-                cname = f"ws-{username}"
-                subprocess.run(["docker", "rm", "-f", cname], capture_output=True, timeout=10)
-                cleanup_summary["docker_container_removed"] = True
-            except Exception as e:
-                logger.warning(f"Lỗi khi xóa container {username}: {e}")
-
-        # 2. Thu hồi và xóa toàn bộ VPN WireGuard peers trên wg-easy
-        try:
-            profile = member.get("wireguard") or {}
-            devices = profile.get("devices") or []
-            for d in devices:
-                ext_id = str(d.get("external_id") or d.get("id"))
-                try:
-                    self.vpn_manager.revoke_device(ext_id)
-                    cleanup_summary["wireguard_peers_revoked"] += 1
-                except Exception as ve:
-                    logger.warning(f"Lỗi xóa peer {ext_id}: {ve}")
-
-            # Quét dọn các client còn sót trên wg-easy có tên bắt đầu bằng username
-            if hasattr(self.vpn_manager, "wg_easy"):
-                for client in self.vpn_manager.wg_easy.list_devices():
-                    c_name = client.get("name", "")
-                    if c_name == username or c_name.startswith(f"{username}-"):
-                        try:
-                            self.vpn_manager.wg_easy.revoke_device(str(client["id"]))
-                            cleanup_summary["wireguard_peers_revoked"] += 1
-                        except Exception:
-                            pass
-        except Exception as e:
-            logger.warning(f"Lỗi dọn dẹp WireGuard cho {username}: {e}")
-
-        # 3. Thu hồi SSH keys trong SshKeyRegistry
-        try:
-            keys = self.ssh_key_registry.list_keys(username=username)
-            for k in keys:
-                self.ssh_key_registry.revoke_key(k["id"], actor=actor, is_admin=True)
-                cleanup_summary["ssh_keys_revoked"] += 1
-        except Exception as e:
-            logger.warning(f"Lỗi thu hồi SSH keys cho {username}: {e}")
-
-        # 4. Dọn dẹp RAM Vault
-        try:
-            if hasattr(self.ssh_access_manager, "vault"):
-                self.ssh_access_manager.vault._bundles.pop(member_id, None)
-                self.ssh_access_manager.vault._channel_secrets.pop(member_id, None)
-                cleanup_summary["vault_purged"] = True
-        except Exception:
-            pass
-
-        # 5. Dọn dẹp workspace files trên đĩa
-        if remove_files:
-            try:
-                ws_dir = self.ssh_access_manager.member_workspace_dir(server_id, username)
-                if os.path.exists(ws_dir):
-                    shutil.rmtree(ws_dir, ignore_errors=True)
-                    if os.path.exists(ws_dir) and shutil.which("docker"):
-                        parent_d = os.path.dirname(ws_dir)
-                        base_n = os.path.basename(ws_dir)
-                        subprocess.run(
-                            ["docker", "run", "--rm", "-v", f"{parent_d}:/parent", "alpine", "rm", "-rf", f"/parent/{base_n}"],
-                            capture_output=True,
-                            timeout=10,
-                        )
-                    cleanup_summary["workspace_files_removed"] = not os.path.exists(ws_dir)
-            except Exception as e:
-                logger.warning(f"Lỗi xóa thư mục workspace {username}: {e}")
-
-        # 6. Dọn dẹp workspace controller
-        try:
-            if hasattr(self.workspace_controller, "remove_workspace"):
-                self.workspace_controller.remove_workspace(username)
-        except Exception:
-            pass
-
-        # 7. Xóa khỏi ssh_endpoints và members
-        self.ssh_endpoints = [ep for ep in self.ssh_endpoints if ep.get("member_id") != member_id]
-        self.members = [m for m in self.members if m["id"] != member_id and m.get("username") != username]
-
-        # 8. Ghi Audit Log
-        op_id = f"op-del-{uuid.uuid4().hex[:12]}"
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor,
-            "action": "MEMBER_DELETED_PERMANENTLY",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": "SUCCESS",
-            "correlation_id": op_id,
-            "details": f"Admin '{actor}' đã xóa vĩnh viễn tài khoản @{username} (ID: {member_id}) cùng toàn bộ container, WireGuard peers và SSH access.",
-        })
-
-        self._save_persistent_data()
-        return {
-            "success": True,
-            "member_id": member_id,
-            "username": username,
-            "cleanup": cleanup_summary,
-            "operation_id": op_id,
-        }
+        blockers = []
+        if member.get("lifecycle_state", "ACTIVE") != "DELETE_ELIGIBLE": blockers.append("member is not DELETE_ELIGIBLE")
+        if member.get("status") != "SUSPENDED": blockers.append("application access is not suspended")
+        if len(workspaces) != len(workspace_records): blockers.append("workspace registry returned a cross-owner record")
+        if any(v == "PENDING_EXTERNAL_REVOCATION" for v in (member.get("external_access_revocation") or {}).values()): blockers.append("external SSH/VPN/Teleport revocation is pending")
+        if not backup_verification_id: blockers.append("verified backup receipt is required")
+        blockers.append("backup verification service is not integrated")
+        if jobs: blockers.append("running jobs must be stopped and verified by an operator")
+        blockers.append("runtime job inventory is not verified")
+        blockers.append("workspace ownership and cleanup executor are not integrated")
+        if dry_run:
+            return {"success": False, "dry_run": True, "status": "DELETE_BLOCKED" if blockers else "DELETE_ELIGIBLE", "actor": actor, "inventory": inventory, "blockers": blockers}
+        if confirmation != f"DELETE {username}":
+            raise ValueError("CONFIRMATION_REQUIRED: provide the separate exact Admin confirmation")
+        raise RuntimeError("Permanent deletion remains unavailable until backup verification, job quiescence, and trusted cleanup integrations are verified")
 
     def get_wireguard_config(self, user_id: str) -> str:
         raise RuntimeError("Client WireGuard private keys and profiles are not generated or stored by LabOps")
@@ -1714,6 +1762,7 @@ class LabOpsDataService:
     def regenerate_wireguard_profile(self, user_id: str, public_key: Optional[str] = None) -> Dict[str, Any]:
         raise RuntimeError("Use per-device enrollment with a client-generated public key")
 
+    @_serialized_state_change
     def revoke_wireguard(self, user_id: str, actor: str = "labops-api") -> Dict[str, Any]:
         member = next((m for m in self.members if m["id"] == user_id), None)
         if not member:
@@ -1732,6 +1781,7 @@ class LabOpsDataService:
     def restore_wireguard(self, user_id: str) -> Dict[str, Any]:
         raise RuntimeError("Revoked WireGuard device keys cannot be restored; enroll a new device key")
 
+    @_serialized_state_change
     def refresh_wireguard_devices(self, member_id: str) -> List[Dict[str, Any]]:
         member = next((item for item in self.members if item["id"] == member_id), None)
         if not member:
@@ -1750,6 +1800,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return devices
 
+    @_serialized_state_change
     def activate_teleport_user(self, member_id: str, actor: str = "labops-api") -> Dict[str, Any]:
         member = next((item for item in self.members if item["id"] == member_id), None)
         if not member:
@@ -1791,38 +1842,9 @@ class LabOpsDataService:
         return "NOT_VERIFIED"
 
     async def revoke_member_access(self, member_id: str, actor: str = "labops-api") -> Dict[str, Any]:
-        member = next((item for item in self.members if item["id"] == member_id), None)
-        if not member:
-            raise ValueError("Member not found")
-        failures = []
-        if member.get("teleport_status") not in {None, "", "NOT_CONFIGURED", "REVOKED"}:
-            try:
-                result = self.teleport_adapter.revoke_user(member["username"])
-                member["teleport_status"] = "REVOKED_SESSION_STATUS_UNKNOWN"
-                failures.append(result.get("reason", "Teleport sessions were not verified as terminated"))
-            except Exception:
-                member["teleport_status"] = "PARTIAL_FAILURE"
-                failures.append("Teleport identity revocation was not verified")
-        try:
-            self._revoke_member_wireguard(member)
-        except Exception:
-            failures.append("WireGuard peer revocation was not verified")
-        if member.get("ssh_port") or any(
-            ep.get("member_id") == member_id and ep.get("status") == "ACTIVE" for ep in self.ssh_endpoints
-        ):
-            failures.append("Legacy SSH endpoint is still present")
-        state = "PARTIAL_FAILURE" if failures else "SUSPENDED"
-        member["status"] = state
-        member["provisioning_state"] = state
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}", "actor": actor,
-            "action": "ACCESS_REVOKED", "target_type": "MEMBER", "target_id": member["username"],
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "result": state, "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-            "details": "Research workspace data was retained. " + "; ".join(failures or ["All configured access revocation steps were verified."]),
-        })
-        self._save_persistent_data()
-        return {"status": state, "member": member, "failures": failures}
+        # This operation only suspends application access. Runtime SSH, VPN, and
+        # Teleport changes are reported as pending until separately verified.
+        return self.suspend_member(member_id, actor=actor)
 
     def reset_member_password(self, member_id: str, new_password: Optional[str] = None, require_change: bool = True) -> Dict[str, Any]:
         raise RuntimeError("Long-lived Linux SSH passwords are disabled")
@@ -1911,361 +1933,20 @@ class LabOpsDataService:
         return str(srv.get("status", "")).lower() == "online"
 
     def provision_member_ssh_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Luồng Admin tạo và cấp quyền truy cập SSH tự động cho thành viên:
-        1. Kiểm tra username, host, tài nguyên.
-        2. Sinh cặp khóa OpenSSH Ed25519 thật được bảo vệ bằng passphrase mạnh (hoặc dùng public key nếu Admin tự dán).
-        3. Cấp mật khẩu tạm riêng cho lần đăng nhập đầu tiên (PBKDF2 hash, CHANGE_REQUIRED, có hạn sử dụng).
-        4. Tạo thư mục workspace riêng (0700) và .ssh/authorized_keys (0600).
-        5. Kiểm chứng thực tế tại runtime (host online, cách ly thư mục, giới hạn CPU/RAM/storage, SSH listener).
-        6. Chỉ chuyển sang READY khi tất cả các kiểm tra bắt buộc tại runtime đều VERIFIED.
-        7. Lưu gói kết nối (encrypted private key) và bí mật (passphrase + mật khẩu tạm) vào kho bộ nhớ tạm 1 lần.
-        """
-        actor_id = payload.get("_actor_id") or "admin"
-        enforce_canary_runtime = bool(payload.get("enforce_canary_runtime") or payload.get("enforceCanaryRuntime"))
-        temp_password_ttl_seconds = int(payload.get("temp_password_ttl_seconds") or 86400)
-
-        username = (payload.get("username") or "").strip().lower()
-        validate_linux_username(username)
-
-        existing_member = next((m for m in self.members if m.get("username") == username), None)
-        if existing_member and not payload.get("allow_existing_member"):
-            raise ValueError(f"Tên người dùng '{username}' đã tồn tại trong hệ thống")
-
-        server_id = payload.get("assigned_server") or payload.get("assignedServer") or settings.LOCAL_HOST_ID
-        server = next((item for item in self.servers if item["id"] == server_id), None)
-        if not server:
-            raise ValueError(f"Không tìm thấy máy chủ '{server_id}'")
-
-        cpu_limit = int(payload.get("cpu_limit_cores", payload.get("cpuLimitCores", 8)))
-        ram_limit = int(payload.get("ram_limit_gb", payload.get("ramLimitGb", 32)))
-        storage_quota_gb = int(payload.get("storage_quota_gb", payload.get("storageQuotaGb", 250)))
-        gpu_permissions = list(payload.get("gpu_permissions", payload.get("gpuPermissions", [])) or [])
-        workspace_name = payload.get("workspace_name") or payload.get("workspaceName") or f"ws-{username}"
-
-        require_passphrase = payload.get("require_passphrase")
-        if require_passphrase is None:
-            require_passphrase = payload.get("requirePassphrase", True)
-        require_passphrase = bool(require_passphrase)
-
-        # Tạo cặp khóa OpenSSH Ed25519 (tùy chọn có hoặc không có passphrase để kết nối thẳng 1 chạm)
-        generated = self.ssh_access_manager.generate_encrypted_ed25519_keypair(
-            username, workspace_name, require_passphrase=require_passphrase
+        """Fail closed until an ownership-aware runtime provisioner is integrated."""
+        raise RuntimeError(
+            "trusted runtime provisioning is unavailable; no workspace filesystem, Docker, SSH, or VPN changes were made"
         )
-        public_key = generated["public_key"]
-        encrypted_private_key = generated["encrypted_private_key"]
-        passphrase = generated["passphrase"]
-
-        # Tạo thư mục workspace cô lập (0700) và cài đặt public key vào authorized_keys (0600)
-        ws_fs = self.ssh_access_manager.setup_isolated_workspace_filesystem(
-            host_id=server_id,
-            username=username,
-            workspace_name=workspace_name,
-            public_key=public_key,
-            cpu_limit_cores=cpu_limit,
-            ram_limit_gb=ram_limit,
-            storage_quota_gb=storage_quota_gb,
-            gpu_permissions=gpu_permissions,
-            extra_mounts=payload.get("extra_mounts"),
-        )
-
-        # Nếu là thành viên mới, khởi tạo bản ghi thành viên qua provision_member cơ bản (bỏ cờ provision_ssh_access)
-        if not existing_member:
-            base_payload = dict(payload)
-            base_payload.pop("provision_ssh_access", None)
-            base_payload.pop("provisionSshAccess", None)
-            base_payload["ssh_public_key"] = public_key
-            base_payload["ssh_key_label"] = payload.get("ssh_key_label") or payload.get("sshKeyLabel") or "Admin-Managed Ed25519 Key"
-            member = self.provision_member(base_payload)
-        else:
-            member = existing_member
-            key_rec = self.ssh_key_registry.register_key(
-                username=username,
-                label="Admin-Managed Ed25519 Key",
-                public_key=public_key,
-                actor=actor_id,
-            )
-            if not member.get("ssh_port"):
-                member["ssh_port"] = self.get_next_available_ssh_port(server_id)
-                member["ssh_ip"] = server.get("vpn_ip") or server.get("ip_address") or "192.168.167.250"
-            member["ssh_fingerprint"] = key_rec["fingerprint"]
-            member["ssh_public_key"] = public_key
-            member["ssh_public_key_preview"] = f"{public_key[:42]}..."
-            member["ssh_key_status"] = "ACTIVE"
-
-        # Cấp mật khẩu tạm cho lần đăng nhập đầu tiên (chỉ lưu PBKDF2 hash)
-        temp_password, pw_meta = self.ssh_access_manager.issue_temporary_password(
-            member_id=member["id"],
-            username=username,
-            actor=actor_id,
-            ttl_seconds=temp_password_ttl_seconds,
-        )
-        member["password_status"] = "CHANGE_REQUIRED"
-        member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
-
-        host_online = self._is_host_online(server_id)
-        if enforce_canary_runtime and host_online:
-            canary = self.ssh_access_manager.start_canary_sshd_for_workspace(
-                server_id, username, port=int(member.get("ssh_port") or 0)
-            )
-            member["ssh_port"] = canary["port"]
-        elif server_id == settings.LOCAL_HOST_ID and shutil.which("docker"):
-            try:
-                cname = f"ws-{username}"
-                insp = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", cname], capture_output=True, text=True)
-                if insp.returncode != 0 or insp.stdout.strip() != "true":
-                    subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
-                    work_dir = ws_fs.get("workspace_dir") or ws_fs.get("work_dir")
-                    ssh_port_to_bind = int(member.get("ssh_port") or 22001)
-                    subprocess.run([
-                        "docker", "run", "-d",
-                        "--name", cname,
-                        "--restart", "unless-stopped",
-                        "-p", f"{ssh_port_to_bind}:22",
-                        "-v", f"{work_dir}:/workspace",
-                        "-e", f"USERNAME={username}",
-                        "-e", f"PUBKEY={public_key}",
-                        "-e", f"TEMPPW={temp_password}",
-                        "labops-workspace:latest",
-                        "sh", "-c",
-                        'adduser -D -s /bin/bash -h /workspace "$USERNAME" 2>/dev/null || true;'
-                        'echo "$USERNAME:$TEMPPW" | chpasswd;'
-                        'mkdir -p /workspace/.ssh;'
-                        'echo "$PUBKEY" > /workspace/.ssh/authorized_keys;'
-                        'chmod 700 /workspace;'
-                        'chmod 700 /workspace/.ssh;'
-                        'chmod 600 /workspace/.ssh/authorized_keys;'
-                        'chown -R "$USERNAME:$USERNAME" /workspace;'
-                        'chmod 700 /workspace;'
-                        'cat << "EOF" > /etc/pam.d/sshd\n'
-                        'auth      required   pam_unix.so nullok\n'
-                        'account   required   pam_unix.so\n'
-                        'password  required   pam_unix.so nullok\n'
-                        'session   required   pam_unix.so\n'
-                        'EOF\n'
-                        'cat << "EOF" > /etc/profile.d/first_login.sh\n'
-                        'if [ "$USER" != "root" ] && [ ! -f /workspace/.password_changed ]; then\n'
-                        '  echo "\n==================================================================";\n'
-                        '  echo "🔒 BẢO MẬT: BẮT BUỘC ĐỔI MẬT KHẨU TẠM Ở LẦN ĐĂNG NHẬP ĐẦU TIÊN";\n'
-                        '  echo "==================================================================";\n'
-                        '  echo "Tài khoản của bạn vừa đăng nhập bằng Mật khẩu tạm do Admin cấp.";\n'
-                        '  echo "Để đảm bảo an toàn, bạn PHẢI đổi sang Mật khẩu bí mật mới ngay bây giờ.";\n'
-                        '  echo "------------------------------------------------------------------";\n'
-                        '  for attempt in 1 2 3; do\n'
-                        '    if passwd; then\n'
-                        '      touch /workspace/.password_changed;\n'
-                        '      sed -i "s/PubkeyAuthentication no/PubkeyAuthentication yes/" /etc/ssh/sshd_config 2>/dev/null || true;\n'
-                        '      pkill -HUP sshd 2>/dev/null || true;\n'
-                        '      echo "\n🎉 ĐỔI MẬT KHẨU THÀNH CÔNG! Vui lòng đăng nhập lại bằng Mật khẩu mới hoặc Khóa SSH!\n";\n'
-                        '      sleep 2; exit 0;\n'
-                        '    fi\n'
-                        '    echo "⚠️ Đổi mật khẩu chưa thành công. Vui lòng thử lại...";\n'
-                        '  done\n'
-                        '  echo "❌ Quá số lần thử. Đóng kết nối.";\n'
-                        '  exit 1;\n'
-                        'fi\n'
-                        'EOF\n'
-                        'chmod 755 /etc/profile.d/first_login.sh;'
-                        'cat << "EOF" > /etc/ssh/sshd_config\n'
-                        'Port 22\nListenAddress 0.0.0.0\nPasswordAuthentication yes\nPubkeyAuthentication no\nStrictModes no\nPrintMotd no\nUsePAM yes\nSubsystem sftp /usr/lib/ssh/sftp-server\n'
-                        'EOF\n'
-                        'if [ -x /usr/sbin/sshd.pam ]; then exec /usr/sbin/sshd.pam -D -e; else exec /usr/sbin/sshd -D -e; fi'
-                    ], capture_output=True, text=True, timeout=15)
-            except Exception as e:
-                logger.warning(f"Không thể tự động khởi chạy Docker container cho workspace {username}: {e}")
-
-        known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
-            g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
-        ]
-        verification = self.ssh_access_manager.verify_workspace_and_runtime(
-            host_id=server_id,
-            host_online=host_online,
-            username=username,
-            workspace_name=workspace_name,
-            expected_public_key=public_key,
-            ssh_port=int(member.get("ssh_port") or 22001),
-            cpu_limit_cores=cpu_limit,
-            ram_limit_gb=ram_limit,
-            storage_quota_gb=storage_quota_gb,
-            gpu_permissions=gpu_permissions,
-            known_gpu_ids=known_gpu_ids,
-            enforce_canary_runtime=enforce_canary_runtime,
-        )
-
-        overall_state = verification["overall_status"]
-        # Chỉ báo READY khi TẤT CẢ kiểm tra bắt buộc đều VERIFIED
-        member["workspace_status"] = "READY" if overall_state == "READY" else overall_state
-        member["provisioning_state"] = "READY" if overall_state == "READY" else overall_state
-        member["status"] = "READY" if overall_state == "READY" else "PENDING_PROVISIONING"
-        member["ssh_status"] = "READY" if overall_state == "READY" else overall_state
-        member["ssh_key_status"] = "ACTIVE" if host_online else "PENDING_SYNC"
-        member["workspace_dir"] = ws_fs["workspace_dir"]
-        member["runtime_verification"] = verification
-        member["privilege_validation"] = {
-            "unprivileged_container": verification["privilege_isolation"] == "VERIFIED",
-            "sudo_test_failed_as_expected": verification["privilege_isolation"] == "VERIFIED",
-            "no_sudo_group_membership": verification["privilege_isolation"] == "VERIFIED",
-            "no_docker_socket_access": verification["privilege_isolation"] == "VERIFIED",
-            "no_incus_socket_access": verification["privilege_isolation"] == "VERIFIED",
-            "verification_timestamp": verification["verified_at"],
-            "status": "VERIFIED_SAFE" if verification["privilege_isolation"] == "VERIFIED" else "NOT_VERIFIED",
-        }
-
-        ssh_host = member.get("ssh_ip") or server.get("ip_address") or "192.168.167.250"
-        ssh_port = int(member.get("ssh_port") or 22001)
-
-        # Sinh cấu hình WireGuard (.conf) theo đúng subnet hạ tầng Rack: 10.88.30.0/24
-        # Quy hoạch IP: 10.88.30.1 (Server), 10.88.30.2 (Admin MacBook), từ 10.88.30.3 trở đi cấp động cho thành viên
-        # WireGuard VPN Configuration: Ưu tiên tích hợp tự động qua wg-easy v15
-        wg_profile = None
-        if getattr(settings, "WG_EASY_ENABLED", True):
-            try:
-                if self.vpn_manager.primary_provider.name == "wg-easy":
-                    wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính", provider_name="wg-easy")
-                    wg_conf = self.vpn_manager.get_device_configuration(str(wg_dev.get("external_id") or wg_dev["id"]), "wg-easy")
-                    if wg_conf and "[Interface]" in wg_conf:
-                        wg_client_ip = wg_dev.get("vpn_ip") or "10.88.40.2"
-                        wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
-                        wg_profile = {
-                            "wireguard_conf": wg_conf,
-                            "client_ip": wg_client_ip,
-                            "wg_public_key": wg_dev.get("public_key") or "",
-                            "server_endpoint": wg_server_endpoint,
-                            "allowed_ips": "10.88.40.0/24, 192.168.167.250/32",
-                        }
-                        wg_profile_data = member.setdefault("wireguard", {"status": "ACTIVE", "devices": []})
-                        wg_profile_data.setdefault("devices", []).append({
-                            "device_id": f"dev-{wg_dev.get('external_id') or wg_dev['id']}",
-                            "external_id": wg_dev.get("external_id") or wg_dev["id"],
-                            "provider": "wg-easy",
-                            "name": "Thiết bị chính",
-                            "client_ip": wg_client_ip,
-                            "vpn_ip": wg_client_ip,
-                            "public_key": wg_dev.get("public_key"),
-                            "server_id": "track",
-                            "server_public_key": wg_dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
-                            "server_endpoint": wg_server_endpoint,
-                            "allowed_subnets": "10.88.40.0/24",
-                            "status": "ACTIVE",
-                            "enabled": True,
-                            "enrolled_at": datetime.now(timezone.utc).isoformat(),
-                        })
-            except Exception as e:
-                logger.error(f"Lỗi tạo peer wg-easy tự động: {e}")
-
-        if wg_profile is None or not (wg_profile.get("wireguard_conf") and "[Interface]" in wg_profile["wireguard_conf"]):
-            # Dự phòng an toàn theo chuẩn wg-easy subnet 10.88.40.0/24 & port 2205
-            wg_client_ip = (member.get("wireguard") or {}).get("client_ip") or "10.88.40.50"
-            wg_server_endpoint = getattr(self.vpn_manager.wg_easy, "public_endpoint", "118.70.169.236:2204")
-            wg_server_pubkey = self.vpn_manager.get_server_public_key()
-            wg_profile = self.ssh_access_manager.generate_wireguard_client_profile(
-                username=username,
-                client_ip=str(wg_client_ip).split("/")[0],
-                server_endpoint=wg_server_endpoint,
-                server_public_key=wg_server_pubkey,
-                allowed_ips="10.88.40.0/24, 192.168.167.250/32",
-            )
-        member["wireguard"] = {
-            **(member.get("wireguard") or {}),
-            "client_ip": wg_profile["client_ip"],
-            "vpn_ip": wg_profile["client_ip"],
-            "public_key": wg_profile["wg_public_key"],
-            "server_endpoint": wg_profile["server_endpoint"],
-            "allowed_subnets": wg_profile["allowed_ips"],
-            "status": (member.get("wireguard") or {}).get("status") or "NOT_VERIFIED",
-        }
-
-        vpn_guide = (
-            f"1. [VPN WireGuard] Mở ứng dụng WireGuard -> 'Import tunnel(s) from file' -> chọn tệp '{username}-labops-wg0.conf' -> Bật kết nối (Activate).\n"
-            f"2. [Tự động cài SSH Config] Chạy lệnh: bash setup-ssh-{username}.sh (tự động cài khóa riêng và ~/.ssh/config).\n"
-            f"3. [Kết nối SSH nhanh] Gõ trực tiếp: ssh labops-{username} (hoặc ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {username}@{ssh_host}).\n"
-            f"4. Nhập Passphrase mở khóa riêng (do Admin gửi qua kênh riêng) và đổi mật khẩu tạm ở lần đăng nhập đầu tiên."
-        )
-
-        vault_info = self.ssh_access_manager.vault.store_provisioned_package(
-            member_id=member["id"],
-            username=username,
-            ssh_host=ssh_host,
-            ssh_port=ssh_port,
-            workspace_name=workspace_name,
-            workspace_path=ws_fs["work_dir"],
-            fingerprint=generated["fingerprint"],
-            encrypted_private_key=encrypted_private_key,
-            passphrase=passphrase,
-            temporary_password=temp_password,
-            temp_password_expires_at=pw_meta["temp_password_expires_at"],
-            vpn_guide=vpn_guide,
-            wireguard_conf=wg_profile["wireguard_conf"],
-            wireguard_client_ip=wg_profile["client_ip"],
-            wireguard_public_key=wg_profile["wg_public_key"],
-            wireguard_server_endpoint=wg_profile["server_endpoint"],
-        )
-        member["one_time_package"] = vault_info
-
-        op_id = f"op-prov-{uuid.uuid4().hex[:12]}"
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor_id,
-            "action": "SSH_ACCESS_PROVISIONED",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": overall_state,
-            "correlation_id": op_id,
-            "details": (
-                f"Đã khởi tạo cặp khóa Ed25519 mã hóa passphrase ({generated['fingerprint']}) và mật khẩu tạm lần đầu "
-                f"cho @{username} trên host '{server_id}' (cổng {ssh_port}). Trạng thái xác minh runtime: {overall_state}."
-            ),
-        })
-        self._save_persistent_data()
-        return member
 
     def rotate_member_ssh_keypair(
         self, member_id_or_username: str, actor: str, require_passphrase: bool = False
     ) -> Dict[str, Any]:
-        """
-        Cấp lại cặp khóa SSH mới (khi khóa cũ bị mất hoặc lộ) và thu hồi toàn bộ khóa cũ của thành viên.
-        Mặc định require_passphrase = False để kết nối thẳng 1 chạm không cần nhập mật khẩu.
-        """
-        member = self._find_member(member_id_or_username)
-        username = member["username"]
-        server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
+        """Fail closed until key rotation can atomically update and verify trusted runtime state."""
+        raise RuntimeError(
+            "trusted SSH runtime lifecycle is unavailable; existing keys were not changed"
+        )
 
-        # Thu hồi các khóa cũ trong SshKeyRegistry
-        for old_key in self.ssh_key_registry.list_keys(username=username):
-            if old_key.get("desired_state") != "REVOKED":
-                self.ssh_key_registry.revoke_key(old_key["id"], actor=actor, is_admin=True)
-
-        # Tạo cặp khóa mới và ghi đè authorized_keys của workspace
-        updated = self.provision_member_ssh_access({
-            "username": username,
-            "full_name": member.get("full_name", username),
-            "email": member.get("email", f"{username}@lab.ai.vn"),
-            "role": member.get("role", "RESEARCHER"),
-            "assigned_server": server_id,
-            "workspace_name": member.get("workspace_name") or f"ws-{username}",
-            "cpu_limit_cores": member.get("cpu_limit_cores", 8),
-            "ram_limit_gb": member.get("ram_limit_gb", 32),
-            "storage_quota_gb": member.get("storage_quota_gb", 250),
-            "gpu_permissions": member.get("gpu_permissions", []),
-            "require_passphrase": require_passphrase,
-            "allow_existing_member": True,
-            "_actor_id": actor,
-        })
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor,
-            "action": "SSH_KEYPAIR_ROTATED",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": updated["ssh_status"],
-            "correlation_id": f"op-rot-{uuid.uuid4().hex[:12]}",
-            "details": f"Đã thu hồi khóa cũ và cấp cặp khóa Ed25519 mới ({updated.get('ssh_fingerprint')}) cho @{username}.",
-        })
-        self._save_persistent_data()
-        return updated
-
+    @_serialized_state_change
     def reissue_member_temp_password(
         self, member_id_or_username: str, actor: str, ttl_seconds: int = 86400
     ) -> Dict[str, Any]:
@@ -2309,6 +1990,7 @@ class LabOpsDataService:
             "one_time_secrets": vault_meta,
         }
 
+    @_serialized_state_change
     def claim_member_access_zip(self, member_id_or_username: str, actor: str) -> Tuple[str, bytes]:
         """
         Xuất file ZIP trọn gói LabOps_Access_<username>.zip chứa:
@@ -2321,9 +2003,20 @@ class LabOpsDataService:
         member = self._find_member(member_id_or_username)
         username = member["username"]
         server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
-        server = next((s for s in self.servers if s["id"] == server_id), {})
-        ssh_host = member.get("ssh_ip") or server.get("ip_address") or "192.168.167.250"
-        ssh_port = int(member.get("ssh_port") or 22001)
+        ssh_host = member.get("ssh_ip")
+        raw_ssh_port = member.get("ssh_port")
+        if (
+            member.get("workspace_status") != "VERIFIED"
+            or member.get("ssh_status") != "VERIFIED"
+            or member.get("ssh_endpoint_status") != "VERIFIED"
+            or not isinstance(ssh_host, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,252}", ssh_host)
+            or isinstance(raw_ssh_port, bool)
+            or not isinstance(raw_ssh_port, int)
+            or not 1 <= raw_ssh_port <= 65535
+        ):
+            raise RuntimeError("SSH runtime endpoint is not verified")
+        ssh_port = raw_ssh_port
         public_key = member.get("ssh_public_key") or ""
 
         # Lấy thông tin gói 1 lần nếu còn trong vault
@@ -2339,40 +2032,27 @@ class LabOpsDataService:
         temp_pw_exp = channel_secrets.get("temp_password_expires_at") or member.get("temp_password_expires_at")
 
         priv_key = bundle.get("encrypted_private_key")
-        wg_conf = bundle.get("wireguard_conf")
-        wg_client_ip = bundle.get("wireguard_client_ip") or (member.get("wireguard") or {}).get("client_ip")
-        wg_ep = bundle.get("wireguard_server_endpoint") or (member.get("wireguard") or {}).get("server_endpoint")
-
-        if not wg_conf:
-            # 1. Thử lấy cấu hình từ thiết bị wg-easy đã đăng ký
-            profile = member.get("wireguard") or {}
-            devices = profile.get("devices") or []
-            wg_easy_dev = next((d for d in devices if d.get("provider") == "wg-easy" and d.get("status") == "ACTIVE"), None)
-            if wg_easy_dev:
-                try:
-                    ext_id = str(wg_easy_dev.get("external_id") or wg_easy_dev.get("id"))
-                    wg_conf = self.vpn_manager.get_device_configuration(ext_id, "wg-easy")
-                    wg_client_ip = wg_easy_dev.get("client_ip") or wg_easy_dev.get("vpn_ip")
-                    wg_ep = self.vpn_manager.wg_easy.public_endpoint
-                except Exception as e:
-                    logger.warning(f"Không thể lấy tệp cấu hình wg-easy cho device {wg_easy_dev}: {e}")
-
-            # 2. Nếu chưa có cấu hình, sinh profile dự phòng
-            if not wg_conf:
-                wg_server_pubkey = (
-                    os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY")
-                    or (member.get("wireguard") or {}).get("server_public_key")
-                    or "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ="
-                )
-                prof = self.ssh_access_manager.generate_wireguard_client_profile(
-                    username=username,
-                    client_ip=str(wg_client_ip or "10.88.40.2").split("/")[0],
-                    server_endpoint=wg_ep or getattr(self.vpn_manager.wg_easy, "public_endpoint", "118.70.169.236:2204"),
-                    server_public_key=wg_server_pubkey,
-                    allowed_ips="10.88.40.0/24, 192.168.167.250/32",
-                )
-                wg_conf = prof["wireguard_conf"]
-                wg_client_ip = prof["client_ip"]
+        live_devices = self.get_member_devices_synced(member["id"])
+        eligible = [
+            device for device in live_devices
+            if device.get("provider", "wg-easy") == "wg-easy"
+            and device.get("status") == "ACTIVE"
+            and device.get("enabled") is True
+            and device.get("live_sync_state") == "VERIFIED"
+        ]
+        if len(eligible) != 1:
+            raise RuntimeError("a single live, owned, enabled wg-easy device is required for an access bundle")
+        local_id = str(eligible[0].get("device_id") or eligible[0].get("id") or "")
+        trusted_device = find_owned_member_device(self.members, member, local_id)
+        external_id = str(trusted_device["external_id"])
+        try:
+            provider_config = self.vpn_manager.get_device_configuration(external_id, "wg-easy")
+            vpn_config = parse_provider_vpn_config(provider_config)
+        except Exception:
+            raise RuntimeError("provider-issued VPN configuration could not be verified") from None
+        wg_conf = vpn_config.config
+        wg_client_ip = vpn_config.client_address
+        wg_ep = vpn_config.endpoint
 
         zip_bytes = self.ssh_access_manager.build_access_zip_package(
             username=username,
@@ -2411,6 +2091,7 @@ class LabOpsDataService:
         filename = f"LabOps_Access_{username}.zip"
         return filename, zip_bytes
 
+    @_serialized_state_change
     def claim_member_key_bundle(self, member_id_or_username: str, actor: str) -> Dict[str, Any]:
         """
         Tải gói kết nối & Private key đã mã hóa bằng passphrase (CHỈ 1 LẦN DUY NHẤT).
@@ -2432,6 +2113,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return bundle
 
+    @_serialized_state_change
     def claim_member_secrets(self, member_id_or_username: str, actor: str) -> Dict[str, Any]:
         """
         Nhận Passphrase mở khóa riêng và Mật khẩu tạm đăng nhập lần đầu qua kênh riêng (CHỈ 1 LẦN DUY NHẤT).
@@ -2453,6 +2135,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return secrets_pkg
 
+    @_serialized_state_change
     def revoke_member_ssh_access(
         self,
         member_id_or_username: str,
@@ -2500,6 +2183,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return res
 
+    @_serialized_state_change
     def terminate_member_ssh_sessions(
         self, member_id_or_username: str, actor: str, confirm: bool = False
     ) -> Dict[str, Any]:
@@ -2521,6 +2205,7 @@ class LabOpsDataService:
         self._save_persistent_data()
         return res
 
+    @_serialized_state_change
     def change_member_first_login_password(
         self, username: str, temporary_password: str, new_password: str
     ) -> Dict[str, Any]:
@@ -2560,6 +2245,7 @@ class LabOpsDataService:
             self._save_persistent_data()
             raise
 
+    @_serialized_state_change
     def verify_member_workspace_password(self, username: str, password: str) -> Dict[str, Any]:
         member = self._find_member(username)
         res = self.ssh_access_manager.verify_workspace_password_login(member["username"], password)
@@ -2600,10 +2286,21 @@ class LabOpsDataService:
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
         profile = member.get("wireguard") or {}
-        devices = list(profile.get("devices") or [])
+        stored_devices = profile.get("devices") or []
+        devices = []
+        for stored in stored_devices:
+            if not isinstance(stored, dict):
+                raise RuntimeError("VPN member registry contains an invalid device record")
+            lookup_id = stored.get("device_id") or stored.get("external_id") or stored.get("id")
+            if not isinstance(lookup_id, (str, int)) or isinstance(lookup_id, bool):
+                raise RuntimeError("VPN member registry contains a device without an ID")
+            devices.append(dict(find_owned_member_device(self.members, member, str(lookup_id))))
         try:
             live_wg_clients = {str(c["id"]): c for c in self.vpn_manager.wg_easy.list_devices()}
             for d in devices:
+                if d.get("provider", "wg-easy") != "wg-easy":
+                    d["live_sync_state"] = "NOT_APPLICABLE"
+                    continue
                 ext_id = str(d.get("external_id") or d.get("id"))
                 if ext_id in live_wg_clients:
                     live = live_wg_clients[ext_id]
@@ -2612,10 +2309,17 @@ class LabOpsDataService:
                     d["last_handshake"] = live.get("last_handshake")
                     d["transfer_rx"] = live.get("transfer_rx", 0)
                     d["transfer_tx"] = live.get("transfer_tx", 0)
+                    d["live_sync_state"] = "VERIFIED"
+                else:
+                    d["live_sync_state"] = "NOT_FOUND"
         except Exception as e:
             logger.debug(f"Không thể đồng bộ live handshake từ wg-easy: {e}")
+            for d in devices:
+                if d.get("provider", "wg-easy") == "wg-easy":
+                    d["live_sync_state"] = "UNAVAILABLE"
         return devices
 
+    @_serialized_state_change
     def add_member_device(self, member_id: str, device_name: str, actor: str = "admin") -> Dict[str, Any]:
         member = self._find_member(member_id)
         if not member:
@@ -2623,19 +2327,31 @@ class LabOpsDataService:
         username = member["username"]
         dev = self.vpn_manager.create_member_device(username, device_name)
         ext_id = str(dev.get("external_id") or dev.get("id"))
+        provider_name = str(dev.get("provider") or "wg-easy")
+        if not ext_id or ext_id == "None":
+            raise RuntimeError("VPN provider did not return a verified device identity")
+        for other_member in self.members:
+            other_devices = ((other_member.get("wireguard") or {}).get("devices") or [])
+            if any(
+                isinstance(existing, dict)
+                and str(existing.get("external_id") or existing.get("id") or "") == ext_id
+                and str(existing.get("provider") or "wg-easy") == provider_name
+                for existing in other_devices
+            ):
+                raise RuntimeError("VPN provider returned an identity already assigned in the member registry")
         clean_id = re.sub(r"[^a-zA-Z0-9_-]", "_", ext_id)
         device_entry = {
             "device_id": f"dev-{clean_id}",
             "external_id": dev.get("external_id") or dev["id"],
-            "provider": dev.get("provider", "wg-easy"),
+            "provider": provider_name,
             "name": device_name,
             "client_ip": dev.get("vpn_ip", ""),
             "vpn_ip": dev.get("vpn_ip", ""),
             "public_key": dev.get("public_key", ""),
-            "server_id": "track",
+            "server_id": settings.LOCAL_HOST_ID,
             "server_public_key": dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
-            "server_endpoint": dev.get("server_endpoint") or self.vpn_manager.wg_easy.public_endpoint,
-            "allowed_subnets": dev.get("allowed_subnets") or "10.88.40.0/24",
+            "server_endpoint": dev.get("server_endpoint") or "",
+            "allowed_subnets": dev.get("allowed_subnets") or "",
             "status": "ACTIVE",
             "enabled": True,
             "enrolled_at": datetime.now(timezone.utc).isoformat(),
@@ -2660,28 +2376,24 @@ class LabOpsDataService:
         member = self._find_member(member_id)
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
-        profile = member.get("wireguard") or {}
-        devices = profile.get("devices") or []
-        dev = next((d for d in devices if d.get("device_id") == device_id or str(d.get("external_id")) == device_id or str(d.get("id")) == device_id), None)
-        if not dev:
-            raise LookupError(f"Không tìm thấy thiết bị: {device_id}")
+        dev = find_owned_member_device(self.members, member, device_id)
         ext_id = str(dev.get("external_id") or dev.get("id") or device_id)
         return self.vpn_manager.get_device_configuration(ext_id, dev.get("provider", "wg-easy"))
 
+    @_serialized_state_change
     def revoke_member_device_v2(self, member_id: str, device_id: str, actor: str = "admin") -> Dict[str, Any]:
         member = self._find_member(member_id)
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
         profile = member.get("wireguard") or {}
         devices = profile.get("devices") or []
-        dev = next((d for d in devices if d.get("device_id") == device_id or str(d.get("external_id")) == device_id or str(d.get("id")) == device_id), None)
-        if not dev:
-            raise LookupError(f"Không tìm thấy thiết bị: {device_id}")
+        dev = find_owned_member_device(self.members, member, device_id)
         ext_id = str(dev.get("external_id") or dev.get("id") or device_id)
-        self.vpn_manager.revoke_device(ext_id, dev.get("provider", "wg-easy"))
+        if self.vpn_manager.revoke_device(ext_id, dev.get("provider", "wg-easy")) is not True:
+            raise RuntimeError("VPN provider did not verify device revocation")
         dev["status"] = "REVOKED"
         dev["enabled"] = False
-        profile["devices"] = [d for d in devices if d.get("device_id") != dev.get("device_id")]
+        profile["devices"] = [entry for entry in devices if entry is not dev]
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
             "actor": actor,
@@ -2695,22 +2407,21 @@ class LabOpsDataService:
         self._save_persistent_data()
         return {"status": "REVOKED", "device_id": device_id}
 
+    @_serialized_state_change
     def toggle_member_device(self, member_id: str, device_id: str, enable: bool, actor: str = "admin") -> Dict[str, Any]:
         member = self._find_member(member_id)
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
-        profile = member.get("wireguard") or {}
-        devices = profile.get("devices") or []
-        dev = next((d for d in devices if d.get("device_id") == device_id or str(d.get("external_id")) == device_id or str(d.get("id")) == device_id), None)
-        if not dev:
-            raise LookupError(f"Không tìm thấy thiết bị: {device_id}")
+        dev = find_owned_member_device(self.members, member, device_id)
         ext_id = str(dev.get("external_id") or dev.get("id") or device_id)
         if enable:
-            self.vpn_manager.enable_device(ext_id, dev.get("provider", "wg-easy"))
+            if self.vpn_manager.enable_device(ext_id, dev.get("provider", "wg-easy")) is not True:
+                raise RuntimeError("VPN provider did not verify device enable")
             dev["status"] = "ACTIVE"
             dev["enabled"] = True
         else:
-            self.vpn_manager.disable_device(ext_id, dev.get("provider", "wg-easy"))
+            if self.vpn_manager.disable_device(ext_id, dev.get("provider", "wg-easy")) is not True:
+                raise RuntimeError("VPN provider did not verify device disable")
             dev["status"] = "DISABLED"
             dev["enabled"] = False
         self.audit_logs.insert(0, {

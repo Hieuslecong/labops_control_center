@@ -40,11 +40,11 @@ type VulnerabilitySummary struct {
 }
 
 type ScorecardSummary struct {
-	Score       float64           `json:"score"`
-	Status      string            `json:"status"` // "EVALUATED", "UNKNOWN", "NOT_CONFIGURED"
-	Checks      map[string]int    `json:"checks,omitempty"`
-	Reasons     []string          `json:"reasons,omitempty"`
-	CollectedAt *time.Time        `json:"collected_at,omitempty"`
+	Score       float64        `json:"score"`
+	Status      string         `json:"status"` // "EVALUATED", "UNKNOWN", "NOT_CONFIGURED"
+	Checks      map[string]int `json:"checks,omitempty"`
+	Reasons     []string       `json:"reasons,omitempty"`
+	CollectedAt *time.Time     `json:"collected_at,omitempty"`
 }
 
 type FindingItem struct {
@@ -57,17 +57,17 @@ type FindingItem struct {
 }
 
 type ScanReport struct {
-	Verdict           ScanState            `json:"verdict"`
-	Coverage          ScanCoverage         `json:"coverage"`
-	Vulnerabilities   VulnerabilitySummary `json:"vulnerabilities"`
-	SecretsCount      int                  `json:"secrets_count"`
-	MisconfigHighCount int                 `json:"misconfig_high_count"`
-	Scorecard         ScorecardSummary     `json:"scorecard"`
-	PolicyReasons     []string             `json:"policy_reasons"`
-	Findings          []FindingItem        `json:"findings,omitempty"`
-	ScannerVersion    string               `json:"scanner_version"`
-	DBVersion         string               `json:"db_version,omitempty"`
-	ScanDurationMs    int64                `json:"scan_duration_ms"`
+	Verdict            ScanState            `json:"verdict"`
+	Coverage           ScanCoverage         `json:"coverage"`
+	Vulnerabilities    VulnerabilitySummary `json:"vulnerabilities"`
+	SecretsCount       int                  `json:"secrets_count"`
+	MisconfigHighCount int                  `json:"misconfig_high_count"`
+	Scorecard          ScorecardSummary     `json:"scorecard"`
+	PolicyReasons      []string             `json:"policy_reasons"`
+	Findings           []FindingItem        `json:"findings,omitempty"`
+	ScannerVersion     string               `json:"scanner_version"`
+	DBVersion          string               `json:"db_version,omitempty"`
+	ScanDurationMs     int64                `json:"scan_duration_ms"`
 }
 
 type DecisionRecord struct {
@@ -94,6 +94,9 @@ type RepositoryRequest struct {
 	CacheHit        bool            `json:"cache_hit"`
 	ArtifactDigest  string          `json:"artifact_digest,omitempty"`
 	ArtifactSize    int64           `json:"artifact_size_bytes,omitempty"`
+	GitBundleDigest string          `json:"git_bundle_digest,omitempty"`
+	GitBundleSize   int64           `json:"git_bundle_size_bytes,omitempty"`
+	IdempotencyKey  string          `json:"-"`
 	Report          *ScanReport     `json:"report,omitempty"`
 	Decision        *DecisionRecord `json:"decision,omitempty"`
 	Error           string          `json:"error,omitempty"`

@@ -1,5 +1,7 @@
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from app.api.dependencies import require_admin, require_user
+from app.core.security import Principal
 from typing import List, Dict, Any
 from app.schemas.labops import EventResponse
 from app.services.labops_service import service
@@ -7,12 +9,12 @@ from app.services.labops_service import service
 router = APIRouter()
 
 @router.get("", response_model=List[EventResponse])
-async def list_events():
+async def list_events(p: Principal = Depends(require_user)):
     """List scheduled research seminars, cluster maintenance, and defense workshops"""
     return service.events
 
 @router.post("", response_model=EventResponse)
-async def create_event(payload: Dict[str, Any]):
+async def create_event(payload: Dict[str, Any], p: Principal = Depends(require_admin)):
     """Schedule a new laboratory event or maintenance window"""
     title = payload.get("title")
     if not title:
@@ -27,7 +29,7 @@ async def create_event(payload: Dict[str, Any]):
         "start_time": payload.get("start_time", "09:00"),
         "end_time": payload.get("end_time", "11:00"),
         "location": payload.get("location", "Phòng Lab"),
-        "organizer": payload.get("organizer", "Quản trị viên"),
+        "organizer": p.username,
         "related_server": payload.get("related_server"),
         "status": "SCHEDULED",
         "description": payload.get("description", "")
@@ -36,7 +38,7 @@ async def create_event(payload: Dict[str, Any]):
     return new_event
 
 @router.put("/{event_id}/status")
-async def update_event_status(event_id: str, payload: Dict[str, str]):
+async def update_event_status(event_id: str, payload: Dict[str, str], p: Principal = Depends(require_admin)):
     """Update event status (SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED)"""
     status = payload.get("status")
     if not status:

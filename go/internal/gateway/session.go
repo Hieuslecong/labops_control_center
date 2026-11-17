@@ -28,6 +28,10 @@ func NewSessionManager() *SessionManager {
 func (sm *SessionManager) RegisterSession(hello *pb.NodeHello, stream pb.NodeAgentGatewayService_TunnelServer) *NodeSession {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if old := sm.sessions[hello.NodeId]; old != nil {
+		old.Status = "OFFLINE"
+		closePendingCommands(old)
+	}
 
 	now := time.Now()
 	session := &NodeSession{
@@ -56,17 +60,66 @@ func (sm *SessionManager) RemoveSession(nodeID string) {
 
 	if sess, exists := sm.sessions[nodeID]; exists {
 		sess.Status = "OFFLINE"
-		// Hủy mọi pending commands
-		sess.pendingMu.Lock()
-		for cmdID, ch := range sess.pendingCommands {
-			close(ch)
-			delete(sess.pendingCommands, cmdID)
-		}
-		sess.pendingMu.Unlock()
+		closePendingCommands(sess)
 	}
 }
 
-func (sm *SessionManager) GetSession(nodeID string) (*NodeSession, bool) {
+func (sm *SessionManager) RemoveSessionIfCurrent(nodeID string, session *NodeSession) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.sessions[nodeID] == session {
+		session.Status = "OFFLINE"
+		closePendingCommands(session)
+	}
+}
+
+func (sm *SessionManager) IsCurrent(nodeID string, session *NodeSession) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.sessions[nodeID] == session && session.Status != "OFFLINE"
+}
+
+func closePendingCommands(session *NodeSession) {
+	session.pendingMu.Lock()
+	defer session.pendingMu.Unlock()
+	for commandID, response := range session.pendingCommands {
+		close(response)
+		delete(session.pendingCommands, commandID)
+	}
+}
+
+type NodeSessionSnapshot struct {
+	NodeID          string
+	Hostname        string
+	Role            string
+	AgentVersion    string
+	OSInfo          string
+	KernelVersion   string
+	ManagementIP    string
+	GPUCount        int32
+	Status          string
+	DegradedReasons []string
+	ConnectedAt     time.Time
+	LastHeartbeat   time.Time
+	UptimeSeconds   int64
+}
+
+func (sm *SessionManager) GetSession(nodeID string) (*NodeSessionSnapshot, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	sess, exists := sm.sessions[nodeID]
+	if !exists {
+		return nil, false
+	}
+	return &NodeSessionSnapshot{
+		NodeID: sess.NodeID, Hostname: sess.Hostname, Role: sess.Role, AgentVersion: sess.AgentVersion,
+		OSInfo: sess.OSInfo, KernelVersion: sess.KernelVersion, ManagementIP: sess.ManagementIP,
+		GPUCount: sess.GPUCount, Status: sess.Status, DegradedReasons: append([]string(nil), sess.DegradedReasons...),
+		ConnectedAt: sess.ConnectedAt, LastHeartbeat: sess.LastHeartbeat, UptimeSeconds: sess.UptimeSeconds,
+	}, true
+}
+
+func (sm *SessionManager) getSessionRef(nodeID string) (*NodeSession, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	sess, exists := sm.sessions[nodeID]
@@ -89,23 +142,29 @@ func (sm *SessionManager) ListNodes() []*NodeSummary {
 			GPUCount:        sess.GPUCount,
 			ConnectedAt:     sess.ConnectedAt,
 			LastHeartbeat:   sess.LastHeartbeat,
-			DegradedReasons: sess.DegradedReasons,
+			DegradedReasons: append([]string(nil), sess.DegradedReasons...),
 		})
 	}
 	return list
 }
 
 func (sm *SessionManager) UpdateHeartbeat(nodeID string, hb *pb.NodeHeartbeat) {
-	sm.mu.RLock()
-	sess, exists := sm.sessions[nodeID]
-	sm.mu.RUnlock()
+	sess, ok := sm.getSessionRef(nodeID)
+	if ok {
+		sm.UpdateHeartbeatForSession(sess, hb)
+	}
+}
 
-	if !exists {
+func (sm *SessionManager) UpdateHeartbeatForSession(expected *NodeSession, hb *pb.NodeHeartbeat) {
+	if hb == nil {
 		return
 	}
-
-	sess.streamMu.Lock()
-	defer sess.streamMu.Unlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if expected == nil || sm.sessions[expected.NodeID] != expected || expected.Status == "OFFLINE" {
+		return
+	}
+	sess := expected
 
 	sess.LastHeartbeat = time.Now()
 	sess.UptimeSeconds = hb.UptimeSeconds
@@ -128,59 +187,118 @@ func (sm *SessionManager) UpdateHeartbeat(nodeID string, hb *pb.NodeHeartbeat) {
 }
 
 func (sm *SessionManager) UpdateHostTelemetry(nodeID string, t *pb.HostTelemetry) {
-	if sess, ok := sm.GetSession(nodeID); ok {
-		sess.telemetryMu.Lock()
-		sess.cachedHost = t
-		sess.telemetryMu.Unlock()
+	sess, ok := sm.getSessionRef(nodeID)
+	if ok {
+		sm.UpdateHostTelemetryForSession(sess, t)
 	}
+}
+
+func (sm *SessionManager) UpdateHostTelemetryForSession(expected *NodeSession, t *pb.HostTelemetry) {
+	sm.mu.RLock()
+	current := expected != nil && sm.sessions[expected.NodeID] == expected && expected.Status != "OFFLINE"
+	if current {
+		expected.telemetryMu.Lock()
+		expected.cachedHost = t
+		expected.hostReceivedAt = time.Time{}
+		if t != nil {
+			expected.hostReceivedAt = time.Now().UTC()
+		}
+		expected.telemetryMu.Unlock()
+	}
+	sm.mu.RUnlock()
 }
 
 func (sm *SessionManager) UpdateGPUTelemetry(nodeID string, t *pb.GPUTelemetry) {
-	if sess, ok := sm.GetSession(nodeID); ok {
-		sess.telemetryMu.Lock()
-		sess.cachedGPU = t
-		if t != nil {
-			sess.GPUCount = t.GpuCount
-		}
-		sess.telemetryMu.Unlock()
+	sess, ok := sm.getSessionRef(nodeID)
+	if ok {
+		sm.UpdateGPUTelemetryForSession(sess, t)
 	}
+}
+
+func (sm *SessionManager) UpdateGPUTelemetryForSession(expected *NodeSession, t *pb.GPUTelemetry) {
+	sm.mu.Lock()
+	current := expected != nil && sm.sessions[expected.NodeID] == expected && expected.Status != "OFFLINE"
+	if current {
+		if t != nil {
+			expected.GPUCount = t.GpuCount
+		}
+		expected.telemetryMu.Lock()
+		expected.cachedGPU = t
+		expected.gpuReceivedAt = time.Time{}
+		if t != nil {
+			expected.gpuReceivedAt = time.Now().UTC()
+		}
+		expected.telemetryMu.Unlock()
+	}
+	sm.mu.Unlock()
 }
 
 func (sm *SessionManager) UpdateProcessTelemetry(nodeID string, t *pb.ProcessTelemetry) {
-	if sess, ok := sm.GetSession(nodeID); ok {
-		sess.telemetryMu.Lock()
-		sess.cachedProcess = t
-		sess.telemetryMu.Unlock()
+	sess, ok := sm.getSessionRef(nodeID)
+	if ok {
+		sm.UpdateProcessTelemetryForSession(sess, t)
 	}
+}
+
+func (sm *SessionManager) UpdateProcessTelemetryForSession(expected *NodeSession, t *pb.ProcessTelemetry) {
+	sm.mu.RLock()
+	if expected != nil && sm.sessions[expected.NodeID] == expected && expected.Status != "OFFLINE" {
+		expected.telemetryMu.Lock()
+		expected.cachedProcess = t
+		expected.telemetryMu.Unlock()
+	}
+	sm.mu.RUnlock()
 }
 
 func (sm *SessionManager) UpdateWorkspaceTelemetry(nodeID string, t *pb.WorkspaceTelemetry) {
-	if sess, ok := sm.GetSession(nodeID); ok {
-		sess.telemetryMu.Lock()
-		sess.cachedWorkspace = t
-		sess.telemetryMu.Unlock()
+	sess, ok := sm.getSessionRef(nodeID)
+	if ok {
+		sm.UpdateWorkspaceTelemetryForSession(sess, t)
 	}
 }
 
+func (sm *SessionManager) UpdateWorkspaceTelemetryForSession(expected *NodeSession, t *pb.WorkspaceTelemetry) {
+	sm.mu.RLock()
+	if expected != nil && sm.sessions[expected.NodeID] == expected && expected.Status != "OFFLINE" {
+		expected.telemetryMu.Lock()
+		expected.cachedWorkspace = t
+		expected.telemetryMu.Unlock()
+	}
+	sm.mu.RUnlock()
+}
+
 func (sm *SessionManager) GetTelemetrySnapshot(nodeID string) (map[string]any, error) {
-	sess, ok := sm.GetSession(nodeID)
+	sm.mu.RLock()
+	sess, ok := sm.sessions[nodeID]
 	if !ok {
+		sm.mu.RUnlock()
 		return nil, fmt.Errorf("node '%s' không tồn tại trong hệ thống", nodeID)
 	}
+	status, lastHeartbeat := sess.Status, sess.LastHeartbeat
+	sm.mu.RUnlock()
 
 	sess.telemetryMu.RLock()
 	defer sess.telemetryMu.RUnlock()
 
 	snapshot := map[string]any{
-		"node_id":        sess.NodeID,
-		"status":         sess.Status,
-		"last_heartbeat": sess.LastHeartbeat,
-		"host":           sess.cachedHost,
-		"gpu":            sess.cachedGPU,
-		"processes":      sess.cachedProcess,
-		"workspaces":     sess.cachedWorkspace,
+		"node_id":          sess.NodeID,
+		"status":           status,
+		"last_heartbeat":   lastHeartbeat,
+		"host":             sess.cachedHost,
+		"host_received_at": telemetryTimestamp(sess.hostReceivedAt),
+		"gpu":              sess.cachedGPU,
+		"gpu_received_at":  telemetryTimestamp(sess.gpuReceivedAt),
+		"processes":        sess.cachedProcess,
+		"workspaces":       sess.cachedWorkspace,
 	}
 	return snapshot, nil
+}
+
+func telemetryTimestamp(receivedAt time.Time) any {
+	if receivedAt.IsZero() {
+		return nil
+	}
+	return receivedAt.UTC().Format(time.RFC3339Nano)
 }
 
 // DispatchCommand gửi yêu cầu lệnh typed qua kênh gRPC streaming tới Node và đợi phản hồi
@@ -195,8 +313,16 @@ func (sm *SessionManager) DispatchCommand(ctx context.Context, req *DispatchRequ
 		}, nil
 	}
 
-	sess, ok := sm.GetSession(req.NodeID)
-	if !ok || sess.Status == "OFFLINE" {
+	sm.mu.RLock()
+	sess, ok := sm.sessions[req.NodeID]
+	if ok && sess.Status != "OFFLINE" {
+		// Hold the manager read lock through Send so revocation/replacement cannot
+		// mark this session offline between the check and the command write.
+	} else {
+		sm.mu.RUnlock()
+		ok = false
+	}
+	if !ok {
 		return &DispatchResponse{
 			Success:      false,
 			NodeID:       req.NodeID,
@@ -241,6 +367,7 @@ func (sm *SessionManager) DispatchCommand(ctx context.Context, req *DispatchRequ
 	sess.streamMu.Lock()
 	err := sess.stream.Send(cmdMsg)
 	sess.streamMu.Unlock()
+	sm.mu.RUnlock()
 
 	if err != nil {
 		return &DispatchResponse{
@@ -311,15 +438,24 @@ func (sm *SessionManager) RouteCommandResponse(resp *pb.CommandResponse) {
 	if resp == nil {
 		return
 	}
-	sess, ok := sm.GetSession(resp.NodeId)
-	if !ok {
+	sess, ok := sm.getSessionRef(resp.NodeId)
+	if ok {
+		sm.RouteCommandResponseForSession(sess, resp)
+	}
+}
+
+func (sm *SessionManager) RouteCommandResponseForSession(expected *NodeSession, resp *pb.CommandResponse) {
+	if expected == nil || resp == nil {
 		return
 	}
-
-	sess.pendingMu.Lock()
-	ch, exists := sess.pendingCommands[resp.CommandId]
-	sess.pendingMu.Unlock()
-
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.sessions[expected.NodeID] != expected || expected.Status == "OFFLINE" {
+		return
+	}
+	expected.pendingMu.Lock()
+	defer expected.pendingMu.Unlock()
+	ch, exists := expected.pendingCommands[resp.CommandId]
 	if exists && ch != nil {
 		select {
 		case ch <- resp:

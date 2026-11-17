@@ -17,13 +17,17 @@ import (
 	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
 )
 
-var sensitiveArgsPattern = regexp.MustCompile(`(?i)(--(?:password|token|secret|key|api_key|auth|credential)[=\s]+)([^\s]+)`)
+var sensitiveFlagPattern = regexp.MustCompile(`(?i)(^|\s)(--?[a-z0-9_.-]*(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth)[a-z0-9_.-]*(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s]+)`)
+var sensitiveAssignmentPattern = regexp.MustCompile(`(?i)([a-z0-9_.-]*(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth|database[-_]?url|db[-_]?url|dsn)[a-z0-9_.-]*\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s]+)`)
+var authorizationPattern = regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)([^\s,;]+)`)
 
 func sanitizeCmdline(cmd string) string {
 	if cmd == "" {
 		return ""
 	}
-	return sensitiveArgsPattern.ReplaceAllString(cmd, "${1}********")
+	sanitized := sensitiveFlagPattern.ReplaceAllString(cmd, "${1}${2}********")
+	sanitized = sensitiveAssignmentPattern.ReplaceAllString(sanitized, "${1}********")
+	return authorizationPattern.ReplaceAllString(sanitized, "${1}********")
 }
 
 func formatElapsedTime(seconds float64) string {
@@ -58,14 +62,7 @@ func NewCollector(serverID string, gpuCol *gpu.Collector) *Collector {
 		prevCPUTimes: make(map[int]uint64),
 		uidToUser:    make(map[int]string),
 	}
-	c.initUserCache()
 	return c
-}
-
-func (c *Collector) initUserCache() {
-	c.uidToUser[0] = "root"
-	c.uidToUser[1000] = "aiot-1"
-	c.uidToUser[1001] = "nhannv"
 }
 
 func (c *Collector) resolveUserLocked(uid int) string {
@@ -537,36 +534,36 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		}
 
 		pInfo := ProcessInfo{
-			Ref:               ref,
-			PID:               pid,
-			PPID:              ppid,
-			PGID:              pgid,
-			UID:               uid,
-			User:              userName,
-			Name:              procName,
-			CommandLine:       cmdline,
-			Classification:    classification,
-			Attribution:       attribution,
-			IsUserWorkload:    isUserWorkload,
-			IsRootWorkload:    isUserWorkload, // Tạm thời là root, sẽ gộp theo cây ở bước sau
-			ChildrenCount:     0,
-			TotalCPUPercent:   cpuPct,
-			TotalMemoryRSSMB:  rssMB,
-			ContainerID:       containerID,
-			Workspace:         workspace,
-			CPUPercent:        cpuPct,
-			MemoryRSSMB:       rssMB,
-			MemoryVMSMB:       vmsMB,
-			MemoryPercent:     memPct,
-			State:             state,
-			StartTime:         startTimeStr,
-			StartTimeTicks:    startTimeTicks,
-			ElapsedTime:       elapsedStr,
-			IsGPU:             isGPU,
-			GPUIndex:          gpuIdx,
-			GPUUUID:           gpuUUID,
-			VRAMMB:            vramMB,
-			IsProtected:       isProtected,
+			Ref:              ref,
+			PID:              pid,
+			PPID:             ppid,
+			PGID:             pgid,
+			UID:              uid,
+			User:             userName,
+			Name:             procName,
+			CommandLine:      cmdline,
+			Classification:   classification,
+			Attribution:      attribution,
+			IsUserWorkload:   isUserWorkload,
+			IsRootWorkload:   isUserWorkload, // Tạm thời là root, sẽ gộp theo cây ở bước sau
+			ChildrenCount:    0,
+			TotalCPUPercent:  cpuPct,
+			TotalMemoryRSSMB: rssMB,
+			ContainerID:      containerID,
+			Workspace:        workspace,
+			CPUPercent:       cpuPct,
+			MemoryRSSMB:      rssMB,
+			MemoryVMSMB:      vmsMB,
+			MemoryPercent:    memPct,
+			State:            state,
+			StartTime:        startTimeStr,
+			StartTimeTicks:   startTimeTicks,
+			ElapsedTime:      elapsedStr,
+			IsGPU:            isGPU,
+			GPUIndex:         gpuIdx,
+			GPUUUID:          gpuUUID,
+			VRAMMB:           vramMB,
+			IsProtected:      isProtected,
 		}
 
 		procs = append(procs, pInfo)
@@ -698,6 +695,9 @@ func (c *Collector) GetProcessTree(ref string) (*ProcessInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateProcessNode(parsedRef, c.serverID); err != nil {
+		return nil, err
+	}
 
 	report := c.Collect("all")
 	var root *ProcessInfo
@@ -711,6 +711,9 @@ func (c *Collector) GetProcessTree(ref string) (*ProcessInfo, error) {
 
 	if root == nil {
 		return nil, fmt.Errorf("PROCESS_NOT_FOUND: Không tìm thấy tiến trình với ref '%s'", ref)
+	}
+	if err := validateProcessIdentity(parsedRef, c.serverID, *root); err != nil {
+		return nil, err
 	}
 
 	// Đệ quy ghép children

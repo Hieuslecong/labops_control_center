@@ -12,10 +12,12 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from app.services.atomic_json import atomic_write_json
 
 ALLOWED_ROLES = {"CONTROL_PLANE", "COMPUTE_NODE", "STORAGE_NODE", "HYBRID"}
 ALLOWED_DESIRED_STATES = {"ACTIVE", "MAINTENANCE", "DRAINING", "DISABLED"}
@@ -35,6 +37,8 @@ def compute_freshness(collected_at: Optional[str]) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - dt).total_seconds()
+        if age < 0:
+            return "UNKNOWN"
         if age <= HEARTBEAT_STALE_SECONDS:
             return "ONLINE"
         if age <= HEARTBEAT_OFFLINE_SECONDS:
@@ -46,16 +50,27 @@ def compute_freshness(collected_at: Optional[str]) -> str:
 
 class HostRegistry:
     def __init__(self, data_dir: str, local_host_id: str = "track"):
-        self.data_dir = data_dir
+        self.data_dir = os.path.abspath(data_dir)
+        os.makedirs(self.data_dir, exist_ok=True)
+        if os.path.realpath(self.data_dir) != self.data_dir:
+            raise ValueError("Host registry directory must be canonical")
         self.local_host_id = local_host_id
-        self.state_path = os.path.join(data_dir, "v2_hosts.json")
+        self.state_path = os.path.join(self.data_dir, "v2_hosts.json")
         self.lock_path = self.state_path + ".lock"
-        os.makedirs(data_dir, exist_ok=True)
         self._ensure_bootstrap()
 
     @contextmanager
     def _locked(self):
-        with open(self.lock_path, "a+") as lf:
+        fd = os.open(
+            self.lock_path,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise RuntimeError("Host registry lock must be a regular file")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "r+") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
                 state = self._load()
@@ -65,16 +80,37 @@ class HostRegistry:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
     def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.state_path):
+        try:
+            fd = os.open(self.state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
             return {"hosts": [], "reconciled_at": None}
-        with open(self.state_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        except OSError as exc:
+            raise RuntimeError("Host registry state cannot be opened safely") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError("Host registry state must be a regular file")
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                fd = -1
+                state = json.load(f)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Host registry state is unreadable or corrupt") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        if not isinstance(state, dict) or not isinstance(state.get("hosts"), list):
+            raise RuntimeError("Host registry state schema is invalid")
+        seen_ids = set()
+        for host in state["hosts"]:
+            if not isinstance(host, dict) or not isinstance(host.get("id"), str) or not host["id"].strip():
+                raise RuntimeError("Host registry contains an invalid host record")
+            if host["id"] in seen_ids:
+                raise RuntimeError("Host registry contains duplicate host IDs")
+            seen_ids.add(host["id"])
+        return state
 
     def _save(self, state: Dict[str, Any]) -> None:
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.state_path)
+        atomic_write_json(self.state_path, state)
 
     def _ensure_bootstrap(self) -> None:
         with self._locked() as state:
@@ -92,9 +128,9 @@ class HostRegistry:
                     "ssh_legacy_port": 22,
                     "agent_url": "http://127.0.0.1:8091" if is_track_local else None,
                     "desired_state": "ACTIVE",
-                    "observed_state": "ONLINE" if is_track_local else "UNKNOWN",
-                    "telemetry_source": "local_psutil_nvml" if is_track_local else "NOT_CONFIGURED",
-                    "last_heartbeat_at": _now() if is_track_local else None,
+                    "observed_state": "UNKNOWN",
+                    "telemetry_source": "NOT_CONFIGURED",
+                    "last_heartbeat_at": None,
                     "created_at": _now(),
                     "updated_at": _now(),
                 },
@@ -108,9 +144,9 @@ class HostRegistry:
                     "ssh_legacy_port": 22,
                     "agent_url": None,
                     "desired_state": "ACTIVE",
-                    "observed_state": "UNKNOWN" if is_track_local else "ONLINE",
-                    "telemetry_source": "NOT_CONFIGURED" if is_track_local else "local_psutil_nvml",
-                    "last_heartbeat_at": None if is_track_local else _now(),
+                    "observed_state": "UNKNOWN",
+                    "telemetry_source": "NOT_CONFIGURED",
+                    "last_heartbeat_at": None,
                     "created_at": _now(),
                     "updated_at": _now(),
                 },
@@ -126,14 +162,16 @@ class HostRegistry:
             item = dict(h)
             live = live_map.get(h["id"])
             if live:
-                is_local_live = h["id"] == self.local_host_id and live.get("status") == "ONLINE"
-                collected_at = _now() if is_local_live else item.get("last_heartbeat_at")
-                freshness = "ONLINE" if is_local_live else compute_freshness(collected_at)
+                is_local_live = h["id"] == self.local_host_id and str(live.get("status", "")).upper() in {"ONLINE", "DEGRADED"}
+                collected_at = live.get("collected_at") or item.get("last_heartbeat_at")
+                freshness = compute_freshness(collected_at)
+                if freshness == "ONLINE" and str(live.get("status", "")).upper() == "DEGRADED":
+                    freshness = "DEGRADED"
                 item.update({
                     "observed_state": freshness,
                     "freshness": freshness,
                     "collected_at": collected_at,
-                    "telemetry_source": "psutil+nvidia-smi" if is_local_live else item.get("telemetry_source", "UNKNOWN"),
+                    "telemetry_source": live.get("source") or ("psutil+nvidia-smi" if is_local_live else item.get("telemetry_source", "UNKNOWN")),
                     "cpu_model": live.get("cpu_model"),
                     "cpu_cores": live.get("cpu_cores"),
                     "cpu_threads": live.get("cpu_threads"),

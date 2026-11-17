@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, StrictInt
 from typing import Optional
-from app.api.dependencies import require_user
+from app.api.dependencies import require_agent, require_user
 from app.core.security import Principal
 from app.services.gpu_scheduler import SchedulerError, GpuScheduler
 from typing import List, Dict, Any
@@ -8,6 +9,11 @@ from app.schemas.labops import PhysicalGpuResponse, GpuAllocateRequest
 from app.services.labops_service import service
 
 router = APIRouter()
+
+
+class RuntimeObservation(BaseModel):
+    state: str
+    pid: Optional[StrictInt] = None
 
 @router.get("", response_model=List[PhysicalGpuResponse])
 async def list_gpus(p: Principal = Depends(require_user)):
@@ -41,3 +47,21 @@ async def allocate_gpu(payload: GpuAllocateRequest, p: Principal = Depends(requi
 async def my_reservations(p: Principal = Depends(require_user)) -> List[Dict[str, Any]]:
     owner = None if p.is_admin else p.username
     return [{**r, **GpuScheduler.gpu_hours(r)} for r in service.gpu_scheduler.list_reservations(owner)]
+
+
+@router.post("/reservations/{reservation_id}/runtime")
+async def report_reservation_runtime(
+    reservation_id: str,
+    observation: RuntimeObservation,
+    p: Principal = Depends(require_agent),
+) -> Dict[str, Any]:
+    """Accept runtime state only from the node that owns the reservation."""
+    try:
+        return service.gpu_scheduler.confirm_from_agent(
+            reservation_id=reservation_id,
+            observed_state=observation.state,
+            pid=observation.pid,
+            node_id=p.node_id,
+        )
+    except SchedulerError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})

@@ -36,18 +36,8 @@ class WireGuardAdapter:
         except json.JSONDecodeError as exc:
             raise WireGuardError("WIREGUARD_SERVERS_JSON is invalid") from exc
 
-        # Tự động nạp cấu hình Rack server chính thức nếu chưa có trong biến môi trường
-        rack_pub = os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY", "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=")
-        rack_endpoint = os.getenv("LABOPS_WG_ENDPOINT", "118.70.169.236:2204")
-        if "track" not in self.server_configs:
-            self.server_configs["track"] = {
-                "server_public_key": rack_pub,
-                "server_endpoint": rack_endpoint,
-                "vpn_subnet": "10.88.30.0/24",
-                "server_vpn_ip": "10.88.30.1",
-                "client_allowed_ips": ["10.88.30.1/32", "192.168.167.250/32"],
-                "interface": self.interface,
-            }
+        # Never synthesize a Rack endpoint, VPN subnet, or public key. Each node
+        # must receive an explicitly reviewed configuration from its own environment.
         self.peers_file = os.path.join(self.data_dir, "wireguard_peers.json")
         self.lock_file = os.path.join(self.data_dir, "wireguard_peers.lock")
         self.peers: Dict[str, Dict[str, Any]] = self._load_peers()

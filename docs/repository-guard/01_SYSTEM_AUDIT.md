@@ -4,6 +4,8 @@
 **Branch:** `feature/labops-control-center`  
 **System:** Debian 13 Host (Control Plane & Node Agent)  
 
+> Historical baseline only. The CLI and enforcement recommendations below describe the state and plan on 2026-11-11. Current source uses AIOTGIT; legacy labops repository commands are disabled. See docs/hardening/AIOTGIT_SECURITY_ARCHITECTURE.md and docs/hardening/FINAL_SECURITY_READINESS.md for current evidence. This historical report is not proof of runtime enforcement.
+
 ---
 
 ## 1. MỤC TIÊU VÀ PHẠM VI KIỂM TOÁN

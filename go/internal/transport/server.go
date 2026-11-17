@@ -40,9 +40,17 @@ func NewServer(
 	dockerCtrl *docker.Controller,
 	logger *slog.Logger,
 ) *Server {
-	repoGuardSvc, err := repositoryguard.NewGuardService(cfg.RepoGuardDataDir)
-	if err != nil {
-		logger.Error("Không thể khởi tạo RepositoryGuard service", "err", err)
+	var repoGuardSvc *repositoryguard.GuardService
+	if strings.TrimSpace(cfg.RepoGuardDataDir) == "" {
+		logger.Warn("Repository Guard is disabled: LABOPS_REPO_GUARD_DATA_DIR must point to explicitly provisioned durable storage")
+	} else if len(cfg.RepositoryTokenSecret) < 32 {
+		logger.Warn("Repository Guard is disabled: scoped authorization key is not configured")
+	} else {
+		var err error
+		repoGuardSvc, err = repositoryguard.NewGuardService(cfg.RepoGuardDataDir)
+		if err != nil {
+			logger.Error("Không thể khởi tạo RepositoryGuard service", "err", err)
+		}
 	}
 
 	s := &Server{
@@ -68,8 +76,14 @@ func NewServer(
 	mux.HandleFunc("/api/v1/agent/telemetry/full", s.handleFullTelemetry)
 
 	if repoGuardSvc != nil {
-		repoHandler := repositoryguard.NewHTTPHandler(repoGuardSvc)
+		repoHandler := repositoryguard.NewHTTPHandler(
+			repoGuardSvc,
+			repositoryguard.NewScopedTokenResolver(cfg.RepositoryTokenSecret, cfg.ServerID),
+		)
 		repoHandler.RegisterRoutes(mux)
+	} else {
+		mux.HandleFunc("/api/v1/agent/repositoryguard/requests", repositoryGuardUnavailable)
+		mux.HandleFunc("/api/v1/agent/repositoryguard/", repositoryGuardUnavailable)
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port)
@@ -83,10 +97,44 @@ func NewServer(
 	return s
 }
 
+func repositoryGuardUnavailable(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, `{"error":"Repository Guard is unavailable: durable storage and authorization must be configured"}`, http.StatusServiceUnavailable)
+}
+
 // authMiddleware xác thực token bảo mật nghiêm ngặt (AT-06)
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/agent/repositoryguard/") || r.URL.Path == "/api/v1/agent/repositoryguard/requests" {
+			// Repository requests carry two independent credentials: the backend
+			// service credential proves the caller is the configured control plane,
+			// while the scoped capability proves which user/workspace action is allowed.
+			expectedAgentSecret := s.cfg.SecretToken
+			providedAgentSecret := r.Header.Get("X-LabOps-Agent-Secret")
+			if expectedAgentSecret == "" {
+				http.Error(w, `{"error":"Agent service authentication is not configured"}`, http.StatusServiceUnavailable)
+				return
+			}
+			if providedAgentSecret == "" || subtle.ConstantTimeCompare([]byte(providedAgentSecret), []byte(expectedAgentSecret)) != 1 {
+				http.Error(w, `{"error":"Unauthorized: invalid or missing agent service token"}`, http.StatusUnauthorized)
+				return
+			}
+			if len(s.cfg.RepositoryTokenSecret) < 32 {
+				http.Error(w, `{"error":"Repository authorization is not configured"}`, http.StatusServiceUnavailable)
+				return
+			}
+			header := strings.TrimSpace(r.Header.Get("Authorization"))
+			if len(header) < 8 || !strings.EqualFold(header[:7], "Bearer ") {
+				http.Error(w, `{"error":"Repository capability is required"}`, http.StatusUnauthorized)
+				return
+			}
+			if _, err := repositoryguard.VerifyScopedToken(strings.TrimSpace(header[7:]), s.cfg.RepositoryTokenSecret, time.Now()); err != nil {
+				http.Error(w, `{"error":"Invalid repository capability"}`, http.StatusUnauthorized)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -100,15 +148,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		isMutation := r.Method != http.MethodGet && r.Method != http.MethodHead
 		expectedSecret := s.cfg.SecretToken
-
-		// Mutation endpoints bắt buộc phải có secret cấu hình và token khớp (constant-time compare)
-		if isMutation || expectedSecret != "" {
-			if expectedSecret == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedSecret)) != 1 {
-				http.Error(w, `{"error":"Unauthorized: invalid or missing agent token"}`, http.StatusUnauthorized)
-				return
-			}
+		// All non-health routes, including GET, require the node-agent credential.
+		if expectedSecret == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedSecret)) != 1 {
+			http.Error(w, `{"error":"Unauthorized: invalid or missing agent token"}`, http.StatusUnauthorized)
+			return
 		}
 
 		next.ServeHTTP(w, r)
@@ -289,19 +333,21 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFullTelemetry(w http.ResponseWriter, r *http.Request) {
 	hostTel := s.hostCol.GetLatest()
 	gpuTel := s.gpuCol.GetLatest()
-	workspaces, _ := s.dockerCtrl.ListWorkspaces(r.Context())
+	workspaces, workspaceErr := s.dockerCtrl.ListWorkspaces(r.Context())
 
-	activeMembers := len(workspaces)
-	hostTel.ActiveMembers = activeMembers
+	if workspaceErr == nil && hostTel != nil {
+		hostTel.ActiveMembers = len(workspaces)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"source":           "labops-go-agent",
-		"collected_at":     time.Now().UTC().Format(time.RFC3339),
-		"server":           hostTel,
-		"gpus":             gpuTel,
-		"workspaces":       workspaces,
-		"workspaces_count": len(workspaces),
+		"source":            "labops-go-agent",
+		"collected_at":      time.Now().UTC().Format(time.RFC3339),
+		"server":            hostTel,
+		"gpus":              gpuTel,
+		"workspaces":        workspaces,
+		"workspaces_count":  len(workspaces),
+		"workspaces_status": map[bool]string{true: "VERIFIED", false: "UNAVAILABLE"}[workspaceErr == nil],
 	})
 }
 

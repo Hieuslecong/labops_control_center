@@ -2,6 +2,9 @@ import unittest
 import asyncio
 import sys
 import os
+import tempfile
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 # Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -70,8 +73,15 @@ class TestAdapters(unittest.TestCase):
         self.assertTrue(creation["success"])
 
     def test_wireguard_adapter(self):
-        adapter = WireGuardAdapter(interface="wg0")
-        status = self.loop.run_until_complete(adapter.get_peer_status())
+        with tempfile.TemporaryDirectory(prefix="labops-wg-adapter-test-") as data_dir:
+            adapter = WireGuardAdapter(interface="wg0", data_dir=data_dir, server_configs={})
+            adapter.has_wg = True
+            with patch.object(adapter, "_assert_interface"), patch.object(
+                adapter,
+                "_run",
+                return_value=CompletedProcess([], 0, "private\tserver\t51820\toff\n", ""),
+            ):
+                status = self.loop.run_until_complete(adapter.get_peer_status())
         self.assertIn(status["status"], {"ACTIVE", "NOT_CONFIGURED"})
         self.assertIn("live", status)
         self.assertNotIn("site_to_site", status)

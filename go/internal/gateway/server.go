@@ -165,7 +165,7 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 
 	// Đăng ký Session
 	session := s.sessions.RegisterSession(hello, stream)
-	defer s.sessions.RemoveSession(hello.NodeId)
+	defer s.sessions.RemoveSessionIfCurrent(hello.NodeId, session)
 
 	// Gửi phản hồi NodeRegistration
 	actionsList := make([]string, 0, len(AllowedActions))
@@ -208,20 +208,23 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 			s.logger.Warn("Ngắt kết nối đột ngột từ Node Agent", "node_id", hello.NodeId, "err", err)
 			return err
 		}
+		if !s.revocationManager.IsNodeAllowed(certNodeID) || !s.sessions.IsCurrent(hello.NodeId, session) {
+			return errors.New("mTLS session revoked or superseded")
+		}
 
 		s.handleIncomingAgentMessage(hello.NodeId, session, msg)
 	}
 }
 
 func (s *Server) handleIncomingAgentMessage(nodeID string, sess *NodeSession, msg *pb.AgentMessage) {
-	if msg == nil {
+	if msg == nil || !s.sessions.IsCurrent(nodeID, sess) || !s.revocationManager.IsNodeAllowed(nodeID) {
 		return
 	}
 
 	switch payload := msg.Payload.(type) {
 	case *pb.AgentMessage_Heartbeat:
 		hb := payload.Heartbeat
-		s.sessions.UpdateHeartbeat(nodeID, hb)
+		s.sessions.UpdateHeartbeatForSession(sess, hb)
 
 		// Gửi HeartbeatAck
 		ack := &pb.GatewayMessage{
@@ -240,19 +243,19 @@ func (s *Server) handleIncomingAgentMessage(nodeID string, sess *NodeSession, ms
 		sess.streamMu.Unlock()
 
 	case *pb.AgentMessage_HostTelemetry:
-		s.sessions.UpdateHostTelemetry(nodeID, payload.HostTelemetry)
+		s.sessions.UpdateHostTelemetryForSession(sess, payload.HostTelemetry)
 
 	case *pb.AgentMessage_GpuTelemetry:
-		s.sessions.UpdateGPUTelemetry(nodeID, payload.GpuTelemetry)
+		s.sessions.UpdateGPUTelemetryForSession(sess, payload.GpuTelemetry)
 
 	case *pb.AgentMessage_ProcessTelemetry:
-		s.sessions.UpdateProcessTelemetry(nodeID, payload.ProcessTelemetry)
+		s.sessions.UpdateProcessTelemetryForSession(sess, payload.ProcessTelemetry)
 
 	case *pb.AgentMessage_WorkspaceTelemetry:
-		s.sessions.UpdateWorkspaceTelemetry(nodeID, payload.WorkspaceTelemetry)
+		s.sessions.UpdateWorkspaceTelemetryForSession(sess, payload.WorkspaceTelemetry)
 
 	case *pb.AgentMessage_CommandResponse:
-		s.sessions.RouteCommandResponse(payload.CommandResponse)
+		s.sessions.RouteCommandResponseForSession(sess, payload.CommandResponse)
 
 	case *pb.AgentMessage_AgentError:
 		s.logger.Warn("Agent báo cáo lỗi",

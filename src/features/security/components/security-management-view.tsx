@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useTransition } from 'react';
+import React, { useState, useTransition } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,8 @@ import { Icons } from '@/components/icons';
 import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
 import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
+import { useQuery } from '@tanstack/react-query';
+import { repositoryRequestsQuery } from '@/features/labops/repository-requests-query';
 
 function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
   switch (status) {
@@ -92,8 +94,9 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
 }
 
 export function SecurityManagementView() {
-  const [requests, setRequests] = useState<RepositoryGuardRequest[]>([]);
-  const [loading, setLoading] = useState(true);
+  const requestsQuery = useQuery({ ...repositoryRequestsQuery(), refetchInterval: 5000 });
+  const requests = requestsQuery.data ?? [];
+  const loading = requestsQuery.isFetching;
   const [isPending, startTransition] = useTransition();
 
   // Modals
@@ -106,23 +109,6 @@ export function SecurityManagementView() {
   // Form submit state
   const [repoUrl, setRepoUrl] = useState('');
   const [ref, setRef] = useState('HEAD');
-
-  const fetchRequests = async () => {
-    setLoading(true);
-    const res = await labopsCall<RepositoryGuardRequest[]>('repositories/requests');
-    if (res.ok && Array.isArray(res.data)) {
-      setRequests(res.data);
-    }
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    void fetchRequests();
-    const timer = setInterval(() => {
-      void fetchRequests();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, []);
 
   // KPIs
   const autoApprovedCount = requests.filter(
@@ -154,7 +140,7 @@ export function SecurityManagementView() {
       setSubmitDialogOpen(false);
       setRepoUrl('');
       setRef('HEAD');
-      void fetchRequests();
+      void requestsQuery.refetch();
     });
   };
 
@@ -181,7 +167,7 @@ export function SecurityManagementView() {
       );
       setDecisionModalOpen(false);
       setDecisionReason('');
-      void fetchRequests();
+      void requestsQuery.refetch();
     });
   };
 
@@ -244,20 +230,20 @@ export function SecurityManagementView() {
         <div className='flex flex-col gap-2'>
           <div className='flex items-center justify-between'>
             <h4 className='text-sm font-bold tracking-tight'>
-              Cổng Kiểm duyệt Mã nguồn Tự động (Repository Security Gateway)
+              Repository Approval Workflow
             </h4>
             <Badge variant='outline' className='text-[10px] font-mono'>
-              ZERO-TRUST REPOSITORY EGRESS
+              APPROVAL WORKFLOW · EGRESS UNVERIFIED
             </Badge>
           </div>
           <div className='grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 pt-1 text-center text-xs'>
             {[
-              { step: '1. Gửi Repo & Ref', desc: 'Xác minh HTTPS URL' },
-              { step: '2. Pin Commit SHA', desc: 'Chống TOCTOU Attack' },
-              { step: '3. Quarantine Download', desc: 'Cô lập No-Exec, Quota' },
-              { step: '4. Trivy & Scorecard', desc: 'Quét CVE, Secrets, SAST' },
-              { step: '5. Auto-Policy Engine', desc: 'Tự duyệt hoặc báo Admin' },
-              { step: '6. Verified Delivery', desc: 'Phân phối vào Workspace' }
+              { step: '1. Gửi Repo & Ref', desc: 'URL policy validation' },
+              { step: '2. Pin Commit SHA', desc: 'Commit-bound request' },
+              { step: '3. Quarantine Fetch', desc: 'Broker-owned fetch path' },
+              { step: '4. Scanner Pipeline', desc: 'Actual result controls state' },
+              { step: '5. Approval Decision', desc: 'Pending is not approved' },
+              { step: '6. Git Bundle', desc: 'Scoped delivery endpoint' }
             ].map((s) => (
               <div
                 key={s.step}
@@ -280,15 +266,14 @@ export function SecurityManagementView() {
                 Yêu cầu Kiểm duyệt & Phân phối Kho mã
               </CardTitle>
               <CardDescription className='text-xs'>
-                Kiểm soát luồng nạp mã nguồn vào Docker Workspace, phát hiện rủi ro cung ứng và ngăn
-                chặn clone trực tiếp
+                Theo dõi request và quyết định duyệt. Bảng này không chứng minh workspace đã chặn tải trực tiếp từ Internet.
               </CardDescription>
             </div>
             <div className='flex items-center gap-2'>
               <Button
                 variant='outline'
                 size='sm'
-                onClick={() => void fetchRequests()}
+                onClick={() => void requestsQuery.refetch()}
                 disabled={loading}
                 className='h-8 text-xs gap-1.5'
               >
@@ -320,11 +305,22 @@ export function SecurityManagementView() {
                 </tr>
               </thead>
               <tbody className='divide-y divide-border/60'>
-                {requests.length === 0 ? (
+                {requestsQuery.isPending ? (
                   <tr>
                     <td colSpan={7} className='py-8 text-center text-muted-foreground'>
-                      Chưa có yêu cầu kiểm duyệt kho mã nào. Bấm &quot;Gửi Repo Kiểm duyệt&quot; hoặc
-                      sử dụng CLI `labops clone` trong terminal.
+                      Đang tải yêu cầu kiểm duyệt...
+                    </td>
+                  </tr>
+                ) : requestsQuery.isError && requests.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className='py-8 text-center text-destructive'>
+                      <span role='alert'>Không thể tải yêu cầu kiểm duyệt. Hãy thử lại.</span>
+                    </td>
+                  </tr>
+                ) : requests.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className='py-8 text-center text-muted-foreground'>
+                      Chưa có yêu cầu kiểm duyệt kho mã nào. Gửi request tại đây; `aiotgit` chỉ dùng được sau khi CLI và Broker endpoint được provision cho workspace.
                     </td>
                   </tr>
                 ) : (
@@ -667,8 +663,8 @@ export function SecurityManagementView() {
 
               <div className='p-2.5 rounded-lg border bg-muted/20 text-[11px] text-muted-foreground'>
                 Hệ thống sẽ tải snapshot về vùng Quarantine cô lập (No-Exec, giới hạn 500MB), phân
-                tích tĩnh các lỗ hổng CVE và phát hiện rò rỉ khóa bí mật. Nếu đạt chính sách an ninh,
-                mã nguồn sẽ được tự động phân phối vào workspace.
+                tích tĩnh các lỗ hổng CVE và phát hiện rò rỉ khóa bí mật. Nếu đạt chính sách an
+                ninh, mã nguồn sẽ được tự động phân phối vào workspace.
               </div>
             </div>
 

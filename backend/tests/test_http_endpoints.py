@@ -6,6 +6,10 @@ import threading
 from urllib.request import urlopen, Request
 from http.server import ThreadingHTTPServer
 
+from _safety_gate import require_live_test_opt_in
+
+require_live_test_opt_in("test_http_endpoints.py")
+
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)

@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +63,7 @@ func NewHTTPControlPlaneServer(
 	mux.HandleFunc("/api/v1/gateway/revoke", h.handleRevoke)
 	mux.HandleFunc("/api/v1/gateway/issue-cert", h.handleIssueCert)
 
-	addr := fmt.Sprintf("%s:%d", bindAddr, port)
+	addr := net.JoinHostPort(bindAddr, strconv.Itoa(port))
 	h.server = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
@@ -73,7 +76,7 @@ func NewHTTPControlPlaneServer(
 
 // verifyControlAuth kiểm tra token xác thực của Control Plane API
 func (h *HTTPControlPlaneServer) verifyControlAuth(r *http.Request) bool {
-	if h.controlSecret == "" {
+	if len(h.controlSecret) < 32 {
 		// Nếu chưa cấu hình secret xác thực, từ chối mọi yêu cầu đặc quyền (fail-closed)
 		return false
 	}
@@ -92,8 +95,18 @@ func (h *HTTPControlPlaneServer) verifyControlAuth(r *http.Request) bool {
 }
 
 func (h *HTTPControlPlaneServer) Start() error {
+	if !IsLoopbackControlBind(h.bindAddr) {
+		return errors.New("Gateway Control Plane HTTP API must bind to a loopback IP address")
+	}
 	h.logger.Info("🌐 LabOps Gateway Control Plane HTTP API đang lắng nghe", "address", h.server.Addr)
 	return h.server.ListenAndServe()
+}
+
+// IsLoopbackControlBind rejects public and DNS-resolved bind addresses for the
+// privileged Gateway HTTP control API. The gRPC Agent endpoint is separate.
+func IsLoopbackControlBind(address string) bool {
+	ip := net.ParseIP(strings.TrimSpace(address))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (h *HTTPControlPlaneServer) Stop(ctx context.Context) error {
@@ -181,6 +194,7 @@ func (h *HTTPControlPlaneServer) handleDispatch(w http.ResponseWriter, r *http.R
 	}
 
 	var req DispatchRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Lỗi parse request body: %v", err), http.StatusBadRequest)
 		return
@@ -190,13 +204,42 @@ func (h *HTTPControlPlaneServer) handleDispatch(w http.ResponseWriter, r *http.R
 		http.Error(w, "Thiếu node_id hoặc action", http.StatusBadRequest)
 		return
 	}
+	if !AllowedActions[req.Action] {
+		http.Error(w, "Action không nằm trong allowlist", http.StatusForbidden)
+		return
+	}
+	if req.TimeoutSeconds < 0 || req.TimeoutSeconds > 300 {
+		http.Error(w, "Timeout không hợp lệ", http.StatusBadRequest)
+		return
+	}
+	// The shared secret authenticates the backend service, not a human operator.
+	// Never accept a caller-supplied actor as a verified person.
+	req.ActorID = "labops-control-plane"
 
 	resp, err := h.sessionManager.DispatchCommand(r.Context(), &req)
 	if err != nil {
 		h.logger.Error("Lỗi dispatch command", "node_id", req.NodeID, "action", req.Action, "err", err)
+		status := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		http.Error(w, "Gateway dispatch failed", status)
+		return
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	if resp == nil {
+		http.Error(w, "Gateway returned no dispatch result", http.StatusBadGateway)
+		return
+	}
+	status := http.StatusOK
+	if !resp.Success {
+		status = http.StatusBadGateway
+		if resp.ErrorCode == "ACTION_NOT_ALLOWED" {
+			status = http.StatusForbidden
+		} else if resp.ErrorCode == "DEADLINE_EXCEEDED" || resp.ErrorCode == "CLIENT_CANCELLED" {
+			status = http.StatusGatewayTimeout
+		}
+	}
+	writeJSON(w, status, resp)
 }
 
 type EnrollRequest struct {
@@ -223,11 +266,25 @@ func (h *HTTPControlPlaneServer) handleEnrollToken(w http.ResponseWriter, r *htt
 		http.Error(w, "Thiếu node_id", http.StatusBadRequest)
 		return
 	}
+	nodeID, err := pki.NormalizeNodeID(req.NodeID)
+	if err != nil {
+		http.Error(w, "node_id không hợp lệ", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = nodeID
 	if req.TTLMinutes <= 0 {
 		req.TTLMinutes = 15
 	}
+	if req.TTLMinutes > 60 {
+		http.Error(w, "TTL tối đa là 60 phút", http.StatusBadRequest)
+		return
+	}
 
 	token := h.tokenManager.GenerateToken(req.NodeID, time.Duration(req.TTLMinutes)*time.Minute)
+	if token == "" {
+		http.Error(w, "Không thể tạo token: thiếu secret hợp lệ hoặc node_id không hợp lệ", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":    req.NodeID,
 		"token":      token,
@@ -259,12 +316,23 @@ func (h *HTTPControlPlaneServer) handleRevoke(w http.ResponseWriter, r *http.Req
 		http.Error(w, "Thiếu node_id", http.StatusBadRequest)
 		return
 	}
+	nodeID, err := pki.NormalizeNodeID(req.NodeID)
+	if err != nil {
+		http.Error(w, "node_id không hợp lệ", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = nodeID
 	if req.Reason == "" {
 		req.Reason = "Thu hồi quyền truy cập bởi Admin"
 	}
 
-	h.revocationMgr.RevokeNode(req.NodeID, req.Reason)
 	h.sessionManager.RemoveSession(req.NodeID)
+	err = h.revocationMgr.RevokeNode(req.NodeID, req.Reason)
+	if err != nil {
+		h.logger.Error("Cannot persist revocation", "err", err)
+		http.Error(w, "Revocation persistence failed", http.StatusInternalServerError)
+		return
+	}
 
 	h.logger.Warn("Đã thu hồi chứng chỉ và ngắt phiên của node", "node_id", req.NodeID, "reason", req.Reason)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -295,6 +363,12 @@ func (h *HTTPControlPlaneServer) handleIssueCert(w http.ResponseWriter, r *http.
 		http.Error(w, "Thiếu node_id hoặc enrollment_token", http.StatusBadRequest)
 		return
 	}
+	nodeID, err := pki.NormalizeNodeID(req.NodeID)
+	if err != nil {
+		http.Error(w, "node_id không hợp lệ", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = nodeID
 
 	// Xác minh token gắn chặt với đúng NodeID và chỉ sử dụng một lần duy nhất
 	if !h.tokenManager.ConsumeTokenForNode(req.EnrollmentToken, req.NodeID) {
@@ -311,14 +385,18 @@ func (h *HTTPControlPlaneServer) handleIssueCert(w http.ResponseWriter, r *http.
 		return
 	}
 
-	h.revocationMgr.AllowNode(req.NodeID)
+	if err := h.revocationMgr.AllowNode(req.NodeID); err != nil {
+		h.logger.Error("Cannot persist allowlist", "err", err)
+		http.Error(w, "Allowlist persistence failed", http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_id":         req.NodeID,
-		"ca_certificate":  string(h.pkiCA.CertPEM),
-		"certificate":     string(bundle.CertPEM),
-		"private_key":     string(bundle.KeyPEM),
-		"issued_at_unix":  time.Now().Unix(),
+		"node_id":        req.NodeID,
+		"ca_certificate": string(h.pkiCA.CertPEM),
+		"certificate":    string(bundle.CertPEM),
+		"private_key":    string(bundle.KeyPEM),
+		"issued_at_unix": time.Now().Unix(),
 	})
 }
 
@@ -327,4 +405,3 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
-

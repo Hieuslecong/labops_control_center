@@ -31,6 +31,10 @@ class TestScanner(unittest.TestCase):
         self.assertEqual(s["state"], "FAILED")
         self.assertIn("NOT_CONFIGURED", s["error"])
 
+    @unittest.skipUnless(
+        os.environ.get("LABOPS_RUN_REAL_TRIVY_TESTS") == "1",
+        "real Trivy subprocess test requires an isolated opt-in environment",
+    )
     def test_real_trivy_binary_executes_on_aiotlab_rack(self):
         if not shutil.which("trivy"):
             self.skipTest("trivy binary not installed")

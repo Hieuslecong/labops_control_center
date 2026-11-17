@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type AuditLogger struct {
@@ -15,13 +17,31 @@ type AuditLogger struct {
 }
 
 func NewAuditLogger(logPath string) (*AuditLogger, error) {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0750); err != nil {
+	if logPath == "" {
+		return nil, fmt.Errorf("audit log path is required")
+	}
+	abs, err := filepath.Abs(logPath)
+	if err != nil {
 		return nil, err
 	}
-	return &AuditLogger{filePath: logPath}, nil
+	if err := os.MkdirAll(filepath.Dir(abs), 0750); err != nil {
+		return nil, err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil || parent != filepath.Dir(abs) {
+		return nil, fmt.Errorf("audit log directory must be canonical")
+	}
+	if info, err := os.Lstat(abs); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("audit log must be a regular file")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return &AuditLogger{filePath: abs}, nil
 }
 
-func (al *AuditLogger) LogEvent(actor, action, targetType, targetID, result, details string) {
+func (al *AuditLogger) LogEvent(actor, action, targetType, targetID, result, details string) error {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 
@@ -38,16 +58,23 @@ func (al *AuditLogger) LogEvent(actor, action, targetType, targetID, result, det
 
 	data, err := json.Marshal(event)
 	if err != nil {
-		return
+		return err
 	}
 
-	f, err := os.OpenFile(al.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	fd, err := unix.Open(al.filePath, unix.O_CREAT|unix.O_WRONLY|unix.O_APPEND|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0640)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-
-	_, _ = f.Write(append(data, '\n'))
+	f := os.NewFile(uintptr(fd), al.filePath)
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (al *AuditLogger) GetRecentEvents(limit int) []AuditLogEvent {

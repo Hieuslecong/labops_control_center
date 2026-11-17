@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,10 +159,6 @@ func TestApprovedArtifactStore(t *testing.T) {
 	// Tạo archive giả lập
 	fakeTar := filepath.Join(tempDir, "sample.tar.gz")
 	content := []byte("package main\nfunc main() {}\n")
-	hasher := sha256.New()
-	hasher.Write(content)
-	digest := hex.EncodeToString(hasher.Sum(nil))
-
 	f, err := os.Create(fakeTar)
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +170,17 @@ func TestApprovedArtifactStore(t *testing.T) {
 	_ = tw.Close()
 	_ = gw.Close()
 	_ = f.Close()
+	archive, err := os.Open(fakeTar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, archive); err != nil {
+		archive.Close()
+		t.Fatal(err)
+	}
+	_ = archive.Close()
+	digest := hex.EncodeToString(hasher.Sum(nil))
 
 	qw := &QuarantineWorkspace{
 		ArchiveFile:  fakeTar,
@@ -199,6 +207,43 @@ func TestApprovedArtifactStore(t *testing.T) {
 	_, hitMiss := store.GetApproved("https://github.com/org/repo", "9999999999999999999999999999999999999999")
 	if hitMiss {
 		t.Fatal("Expected cache miss for unknown commit")
+	}
+	if err := os.WriteFile(entry.ArtifactPath, []byte("tampered"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit := store.GetApproved("https://github.com/org/repo", "1111222233334444555566667777888899990000"); hit {
+		t.Fatal("tampered artifact was returned as approved")
+	}
+}
+
+func TestApprovedArtifactStoreFailsOnCorruptIndexAndWrongDigest(t *testing.T) {
+	root := t.TempDir()
+	corrupt := filepath.Join(root, "corrupt")
+	if err := os.Mkdir(corrupt, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "index.json"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewApprovedArtifactStore(corrupt); err == nil {
+		t.Fatal("corrupt index was silently reset")
+	}
+
+	store, err := NewApprovedArtifactStore(filepath.Join(root, "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := os.Create(filepath.Join(root, "archive.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write([]byte("artifact")); err != nil {
+		t.Fatal(err)
+	}
+	_ = archive.Close()
+	_, err = store.StoreApproved("https://github.com/org/repo", "1111222233334444555566667777888899990000", "scanner", "db", "admin", &QuarantineWorkspace{ArchiveFile: filepath.Join(root, "archive.tar.gz"), DigestSHA256: strings.Repeat("0", 64)})
+	if err == nil {
+		t.Fatal("wrong quarantine digest was approved")
 	}
 }
 
@@ -292,6 +337,7 @@ func TestGuardService_CrashRecovery(t *testing.T) {
     "id": "req-stale-01",
     "repo_url": "https://github.com/test/repo",
     "canonical_repo": "https://github.com/test/repo",
+    "submitted_by": "test-user",
     "commit_sha": "1234567890123456789012345678901234567890",
     "state": "SCANNING",
     "policy_version": "labops-repo-policy-2026.11-v2"

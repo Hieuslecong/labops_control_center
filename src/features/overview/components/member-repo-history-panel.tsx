@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useTransition } from 'react';
+import { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,9 +13,10 @@ import {
   DialogDescription
 } from '@/components/ui/dialog';
 import { Icons } from '@/components/icons';
-import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
 import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
+import { useQuery } from '@tanstack/react-query';
+import { repositoryRequestsQuery } from '@/features/labops/repository-requests-query';
 import Link from 'next/link';
 
 function getApprovalBadge(status: SecurityReviewStatus | string) {
@@ -138,10 +139,10 @@ function formatDateTime(isoString?: string): { formatted: string; relative: stri
 }
 
 export function MemberRepoHistoryPanel() {
-  const [requests, setRequests] = useState<RepositoryGuardRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [, startTransition] = useTransition();
+  const requestsQuery = useQuery({ ...repositoryRequestsQuery(), refetchInterval: 5000 });
+  const requests = requestsQuery.data ?? [];
+  const loading = requestsQuery.isPending;
+  const isRefreshing = requestsQuery.isFetching;
 
   // Filters
   const [selectedMember, setSelectedMember] = useState<string>('all');
@@ -150,30 +151,6 @@ export function MemberRepoHistoryPanel() {
 
   // Selected for detail modal
   const [selectedReq, setSelectedReq] = useState<RepositoryGuardRequest | null>(null);
-
-  const fetchHistory = async (showLoading = false) => {
-    if (showLoading) setLoading(true);
-    setIsRefreshing(true);
-    try {
-      const res = await labopsCall<RepositoryGuardRequest[]>('repositories/requests');
-      if (res.ok && Array.isArray(res.data)) {
-        setRequests(res.data);
-      }
-    } catch {
-      // silent fail on poll
-    } finally {
-      setLoading(false);
-      setIsRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    void fetchHistory(true);
-    const interval = setInterval(() => {
-      void fetchHistory(false);
-    }, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Distinct member list for filter
   const memberList = useMemo(() => {
@@ -259,17 +236,17 @@ export function MemberRepoHistoryPanel() {
                 </CardTitle>
                 <Badge
                   variant='outline'
-                  className='text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 shrink-0 hidden sm:inline-flex'
+                  className='text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30 shrink-0 hidden sm:inline-flex'
                 >
-                  ZERO-TRUST EGRESS
+                  APPROVAL STATUS · EGRESS UNVERIFIED
                 </Badge>
               </div>
               <CardDescription className='text-xs text-muted-foreground truncate'>
-                Ghi nhận lịch sử kèm thời gian thực tế toàn bộ yêu cầu tải mã nguồn qua{' '}
+                Ghi nhận request trong Repository Guard. Đây không phải bằng chứng{' '}
                 <code className='bg-muted px-1 py-0.5 rounded text-[11px] font-mono text-foreground'>
-                  gitlabops clone
+                  aiotgit clone
                 </code>{' '}
-                — phân loại chi tiết theo từng thành viên (được duyệt & bị từ chối/chặn).
+                đã được cài hoặc egress trực tiếp đã bị chặn.
               </CardDescription>
             </div>
           </div>
@@ -278,7 +255,7 @@ export function MemberRepoHistoryPanel() {
             <Button
               variant='outline'
               size='sm'
-              onClick={() => void fetchHistory(true)}
+              onClick={() => void requestsQuery.refetch()}
               disabled={isRefreshing}
               className='h-8 text-xs gap-1.5'
             >
@@ -462,16 +439,24 @@ export function MemberRepoHistoryPanel() {
                       </div>
                     </td>
                   </tr>
+                ) : requestsQuery.isError && requests.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className='py-8 text-center text-destructive'>
+                      <span role='alert'>Không thể tải lịch sử repository. Hãy thử làm mới.</span>
+                    </td>
+                  </tr>
                 ) : filteredRequests.length === 0 ? (
                   <tr>
                     <td colSpan={6} className='py-8 text-center text-muted-foreground'>
                       <div className='flex flex-col items-center justify-center gap-1.5'>
                         <Icons.shield className='size-6 text-muted-foreground/50' />
-                        <span className='font-medium'>Không tìm thấy yêu cầu clone nào phù hợp bộ lọc</span>
+                        <span className='font-medium'>
+                          Không tìm thấy yêu cầu clone nào phù hợp bộ lọc
+                        </span>
                         <span className='text-[11px] text-muted-foreground/80'>
                           Các lệnh thực thi qua{' '}
                           <code className='bg-muted px-1 rounded text-foreground font-mono'>
-                            gitlabops clone
+                            aiotgit clone
                           </code>{' '}
                           sẽ xuất hiện tự động tại đây.
                         </span>
@@ -496,7 +481,10 @@ export function MemberRepoHistoryPanel() {
                         }`}
                       >
                         {/* 1. Thời gian */}
-                        <td className='py-2.5 px-3 whitespace-nowrap'>
+                        <td
+                          aria-label='Thời gian gửi yêu cầu'
+                          className='py-2.5 px-3 whitespace-nowrap'
+                        >
                           <div className='flex flex-col'>
                             <span className='font-mono font-medium text-foreground text-[11px] flex items-center gap-1'>
                               <Icons.clock className='size-3 text-muted-foreground shrink-0' />
@@ -509,7 +497,10 @@ export function MemberRepoHistoryPanel() {
                         </td>
 
                         {/* 2. Thành viên */}
-                        <td className='py-2.5 px-3 whitespace-nowrap'>
+                        <td
+                          aria-label='Thành viên gửi yêu cầu'
+                          className='py-2.5 px-3 whitespace-nowrap'
+                        >
                           <div className='flex items-center gap-1.5'>
                             <div className='size-6 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-[10px] uppercase shrink-0'>
                               {(r.submitted_by || 'U')[0]}
@@ -528,7 +519,7 @@ export function MemberRepoHistoryPanel() {
                         </td>
 
                         {/* 3. Kho lưu trữ & Nhánh */}
-                        <td className='py-2.5 px-3'>
+                        <td aria-label='Repository và nhánh được yêu cầu' className='py-2.5 px-3'>
                           <div className='flex flex-col gap-0.5 min-w-0'>
                             <div className='flex items-center gap-1.5 min-w-0'>
                               <Icons.github className='size-3.5 text-muted-foreground shrink-0' />
@@ -650,7 +641,7 @@ export function MemberRepoHistoryPanel() {
                                   {r.report.policy_reasons[0]}
                                 </span>
                               ) : (
-                                <span>Tiêu chuẩn LabOps Zero-Trust</span>
+                                <span>Chưa có finding summary từ scanner</span>
                               )}
                             </div>
                           </div>
@@ -687,8 +678,12 @@ export function MemberRepoHistoryPanel() {
                 <Icons.shield className='size-5 text-primary' /> Chi tiết Kiểm duyệt Repository
               </DialogTitle>
               <DialogDescription className='text-xs'>
-                Mã yêu cầu: <span className='font-mono text-foreground font-semibold'>{selectedReq.id}</span> •
-                Gửi bởi: <span className='font-mono font-semibold text-foreground'>@{selectedReq.submitted_by}</span>
+                Mã yêu cầu:{' '}
+                <span className='font-mono text-foreground font-semibold'>{selectedReq.id}</span> •
+                Gửi bởi:{' '}
+                <span className='font-mono font-semibold text-foreground'>
+                  @{selectedReq.submitted_by}
+                </span>
               </DialogDescription>
             </DialogHeader>
 
@@ -696,7 +691,9 @@ export function MemberRepoHistoryPanel() {
               {/* Summary metadata box */}
               <div className='grid grid-cols-2 gap-2 p-2.5 rounded-lg border bg-muted/20'>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Kho lưu trữ GitHub</span>
+                  <span className='text-[10px] text-muted-foreground block'>
+                    Kho lưu trữ GitHub
+                  </span>
                   <a
                     href={selectedReq.canonical_repo || selectedReq.repo_url}
                     target='_blank'
@@ -712,21 +709,32 @@ export function MemberRepoHistoryPanel() {
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Nhánh / Tag</span>
-                  <span className='font-mono font-semibold'>{selectedReq.requested_ref || 'HEAD'}</span>
+                  <span className='font-mono font-semibold'>
+                    {selectedReq.requested_ref || 'HEAD'}
+                  </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Commit SHA (40-hex)</span>
-                  <span className='font-mono font-semibold truncate block' title={selectedReq.commit_sha}>
+                  <span className='text-[10px] text-muted-foreground block'>
+                    Commit SHA (40-hex)
+                  </span>
+                  <span
+                    className='font-mono font-semibold truncate block'
+                    title={selectedReq.commit_sha}
+                  >
                     {selectedReq.commit_sha || 'Chưa phân giải'}
                   </span>
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Thời gian gửi</span>
-                  <span className='text-foreground'>{formatDateTime(selectedReq.submitted_at).formatted}</span>
+                  <span className='text-foreground'>
+                    {formatDateTime(selectedReq.submitted_at).formatted}
+                  </span>
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Cập nhật lần cuối</span>
-                  <span className='text-foreground'>{formatDateTime(selectedReq.updated_at).formatted}</span>
+                  <span className='text-foreground'>
+                    {formatDateTime(selectedReq.updated_at).formatted}
+                  </span>
                 </div>
               </div>
 
@@ -817,9 +825,18 @@ export function MemberRepoHistoryPanel() {
                     Biên bản quyết định của Quản trị viên
                   </span>
                   <div className='text-[11px] text-muted-foreground mt-1'>
-                    <div>Người duyệt: <span className='font-mono text-foreground font-semibold'>@{selectedReq.decision.reviewer}</span></div>
-                    <div>Thời điểm: {formatDateTime(selectedReq.decision.reviewed_at).formatted}</div>
-                    <div className='mt-1 text-foreground italic'>&ldquo;{selectedReq.decision.reason}&rdquo;</div>
+                    <div>
+                      Người duyệt:{' '}
+                      <span className='font-mono text-foreground font-semibold'>
+                        @{selectedReq.decision.reviewer}
+                      </span>
+                    </div>
+                    <div>
+                      Thời điểm: {formatDateTime(selectedReq.decision.reviewed_at).formatted}
+                    </div>
+                    <div className='mt-1 text-foreground italic'>
+                      &ldquo;{selectedReq.decision.reason}&rdquo;
+                    </div>
                   </div>
                 </div>
               )}
@@ -830,4 +847,3 @@ export function MemberRepoHistoryPanel() {
     </Card>
   );
 }
-

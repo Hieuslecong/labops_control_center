@@ -34,9 +34,12 @@ class VPNManager:
         return self.wg_easy
 
     def get_provider(self, name: Optional[str] = None) -> VPNProvider:
-        if name and name == "legacy-wg0":
-            return self.legacy
-        return self.wg_easy
+        if name is None:
+            return self.wg_easy
+        try:
+            return self.providers[name]
+        except KeyError as exc:
+            raise VPNProviderError(f"VPN provider không được hỗ trợ: {name}") from exc
 
     def get_vpn_system_overview(self) -> Dict[str, Any]:
         """Tổng hợp trạng thái toàn bộ hệ sinh thái VPN (wg-easy và legacy wg0)."""
@@ -89,10 +92,12 @@ class VPNManager:
         provider = self.get_provider(provider_name)
         try:
             status = provider.get_connection_status()
-            if status.get("server_public_key"):
-                return status["server_public_key"]
+            key = status.get("server_public_key")
+            if isinstance(key, str) and key.strip():
+                return key
         except Exception:
             pass
-        return getattr(settings, "LABOPS_WG_SERVER_PUBLIC_KEY", "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=")
+        configured_key = getattr(settings, "LABOPS_WG_SERVER_PUBLIC_KEY", "")
+        return configured_key if isinstance(configured_key, str) else ""
 
 

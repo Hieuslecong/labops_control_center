@@ -2,6 +2,8 @@
 **Policy Version:** `labops-repo-policy-2026.11-v2`  
 **Classification:** Internal Security Standard  
 
+> Policy design only. The presence of this policy document does not prove scanner completeness, approval correctness or delivery enforcement. Runtime scanner, approval-to-bundle and workspace delivery remain unverified; see docs/hardening/AIOTGIT_FUNCTIONAL_TEST_REPORT.md.
+
 ---
 
 ## 1. MỤC TIÊU VÀ NGUYÊN TẮC VẬN HÀNH
@@ -22,7 +24,7 @@ Giảm thiểu tối đa việc can thiệp thủ công từ Quản trị viên 
                                            |
              +-----------------------------+-----------------------------+
              |                             |                             |
-      (Vi phạm cấm)                 (Cần đánh giá)                 (Đạt chuẩn 100%)
+      (Vi phạm cấm)                 (Cần đánh giá)                 (Đạt tiêu chí policy)
              v                             v                             v
        [ REJECTED ]               [ REVIEW_REQUIRED ]             [ AUTO_APPROVED ]
   • Có rò rỉ Secrets/Keys        • Có Lỗ hổng mức HIGH          • 0 Secrets

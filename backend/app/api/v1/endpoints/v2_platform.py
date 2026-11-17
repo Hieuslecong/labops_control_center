@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from app.api.dependencies import require_admin, require_agent, require_user
-from app.core.security import Principal
+from app.core.security import AuthError, Principal, require_node_agent_for_host
 from app.services.labops_service import service
 from app.services.workspace_controller import WorkspaceSecurityError
 
@@ -28,6 +28,8 @@ async def register_v2_host(payload: Dict[str, Any], p: Principal = Depends(requi
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/hosts/{host_id}/agent/heartbeat")
@@ -37,7 +39,10 @@ async def record_agent_heartbeat(
     p: Principal = Depends(require_agent),
 ) -> Dict[str, Any]:
     try:
+        require_node_agent_for_host(p, host_id)
         return service.host_registry.record_agent_heartbeat(host_id, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail) from e
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -76,6 +81,7 @@ async def create_v2_workspace(
             pids_limit=int(payload.get("pids_limit", 4096)),
             storage_quota_gb=int(payload.get("storage_quota_gb", 200)),
             gpu_uuid=payload.get("gpu_uuid"),
+            repository_policy_mode=str(payload.get("repository_policy_mode", "UNENFORCED")),
             privileged=bool(payload.get("privileged", False)),
             mount_docker_socket=bool(payload.get("mount_docker_socket", False)),
             extra_mounts=payload.get("extra_mounts"),
@@ -173,8 +179,10 @@ async def download_ssh_access_zip(member_id: str, p: Principal = Depends(require
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi đóng gói file ZIP: {e}")
+        raise HTTPException(status_code=500, detail="Không thể tạo gói truy cập") from e
 
 
 @router.post("/ssh-access/{member_id}/claim-key-bundle")
@@ -208,6 +216,8 @@ async def rotate_ssh_keypair(
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/ssh-access/{member_id}/reissue-temp-password")

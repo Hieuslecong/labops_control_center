@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import logging
-import secrets
 from typing import Dict, Any
 
 # Ensure backend root is in sys.path
@@ -11,9 +10,16 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from app.core.config import settings
-from app.core.security import AuthError, principal_from_authorization, require_node_agent, require_role
+from app.core.security import (
+    AuthError,
+    authorize_fallback_request,
+    principal_from_authorization,
+    require_node_agent_for_host,
+    require_role,
+)
 from app.services.gpu_scheduler import GpuScheduler, SchedulerError
 from app.services.job_access import visible_jobs
+from app.services.resource_access import find_visible_workspace
 from app.services.workspace_controller import WorkspaceSecurityError
 from app.services.labops_service import service
 
@@ -184,32 +190,25 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 
-    PUBLIC_PATHS = ("/api/v1/health", "/health", "/api/v1/monitoring/health")
-    ADMIN_PREFIXES = ("/api/v1/users", "/api/v1/admin", "/api/v1/ssh", "/api/v1/access", "/api/v1/audit-logs",
-                      "/api/v1/events", "/api/v1/security/reviews", "/api/v1/storage-pools", "/api/v1/workspaces")
+    PUBLIC_PATHS = ("/api/v1/health", "/health")
 
-    def _authenticate(self, path: str):
+    def _authenticate(self, path: str, method: str):
         """Trả về Principal hoặc None (đã gửi lỗi). Fail-closed."""
         if path in self.PUBLIC_PATHS or not path.startswith("/api/"):
             return "PUBLIC"
         try:
             principal = principal_from_authorization(self.headers.get("Authorization"))
-            if path.startswith(self.ADMIN_PREFIXES):
-                require_role(principal, "ADMIN")
-            return principal
+            return authorize_fallback_request(method, path, principal, service.members)
         except AuthError as e:
             self._send_json(e.status, {"detail": e.detail})
             return None
 
     def _require_admin_api(self) -> bool:
-        configured = settings.LABOPS_ADMIN_API_TOKEN
-        if not configured:
-            self._send_json(503, {"detail": "Access management authentication is not configured"})
-            return False
-        authorization = self.headers.get("Authorization", "")
-        token = authorization[7:] if authorization.startswith("Bearer ") else ""
-        if not token or not secrets.compare_digest(token, configured):
-            self._send_json(401, {"detail": "Unauthorized"})
+        try:
+            principal = principal_from_authorization(self.headers.get("Authorization"))
+            require_role(principal, "ADMIN")
+        except AuthError as error:
+            self._send_json(error.status, {"detail": error.detail})
             return False
         return True
 
@@ -230,7 +229,7 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
-        principal = self._authenticate(path)
+        principal = self._authenticate(path, "GET")
         if principal is None:
             return
         if path == "/api/v1/security/scans":
@@ -389,7 +388,15 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, filtered)
         elif path.startswith("/api/v1/workspaces/") and path.endswith("/processes"):
             ws_id = path.split("/")[4]
-            self._send_json(200, service.get_workspace_processes(ws_id))
+            owner = None if principal.is_admin else principal.username
+            workspaces = service.workspace_controller.list_workspaces(
+                owner=owner, legacy_endpoints=service.ssh_endpoints
+            )
+            workspace = find_visible_workspace(workspaces, ws_id, principal)
+            if workspace is None:
+                self._send_json(404, {"detail": "Workspace not found"})
+                return
+            self._send_json(200, service.get_workspace_processes(str(workspace.get("name") or ws_id)))
         elif path == "/api/v1/monitoring/health":
             self._send_json(200, service.get_monitoring_health())
         elif path == "/api/v1/security":
@@ -428,8 +435,10 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 return
             except LookupError as e:
                 self._send_json(404, {"detail": str(e)})
+            except RuntimeError as e:
+                self._send_json(503, {"detail": str(e)})
             except Exception as e:
-                self._send_json(500, {"detail": f"Lỗi khi đóng gói file ZIP: {e}"})
+                self._send_json(500, {"detail": "Không thể tạo gói truy cập"})
         elif path == "/api/v1/v2/vpn/overview":
             self._send_json(200, service.get_vpn_system_overview())
         elif path == "/api/v1/v2/vpn/devices":
@@ -478,7 +487,7 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
-        principal = self._authenticate(path)
+        principal = self._authenticate(path, "POST")
         if principal is None:
             return
         
@@ -501,6 +510,8 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"detail": str(e)})
             except WorkspaceSecurityError as e:
                 self._send_json(e.http_status, {"detail": e.message})
+            except RuntimeError as e:
+                self._send_json(503, {"detail": str(e)})
             return
         if path.startswith("/api/v1/users/") and path.endswith("/revoke"):
             if not principal.is_admin:
@@ -565,8 +576,8 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(409, {"detail": str(e)})
         elif path.startswith("/api/v1/v2/hosts/") and path.endswith("/agent/heartbeat"):
             try:
-                require_node_agent(principal)
                 host_id = path.split("/")[5]
+                require_node_agent_for_host(principal, host_id)
                 self._send_json(200, service.host_registry.record_agent_heartbeat(host_id, body))
             except AuthError as e:
                 self._send_json(e.status, {"detail": e.detail})
@@ -651,6 +662,8 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"detail": str(e)})
             except WorkspaceSecurityError as e:
                 self._send_json(e.http_status, {"detail": e.message})
+            except RuntimeError as e:
+                self._send_json(503, {"detail": str(e)})
         elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/claim-key-bundle"):
             if not principal.is_admin:
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép tải gói khóa riêng"})
@@ -679,6 +692,8 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, _format_member(rotated))
             except LookupError as e:
                 self._send_json(404, {"detail": str(e)})
+            except RuntimeError as e:
+                self._send_json(503, {"detail": str(e)})
         elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/reissue-temp-password"):
             if not principal.is_admin:
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép cấp lại mật khẩu tạm"})
@@ -768,7 +783,7 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
-        principal = self._authenticate(path)
+        principal = self._authenticate(path, "DELETE")
         if principal is None:
             return
         if path.startswith("/api/v1/v2/members/") and "/devices/" in path:
@@ -790,12 +805,25 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[{self.log_date_time_string()}] {self.address_string()} - {format%args}\n")
 
 
-def run_server(host="0.0.0.0", port=8000):
+def run_server(host=None, port=None):
+    host = host or os.getenv("LABOPS_BIND_HOST", "0.0.0.0")
+    reload_enabled = (
+        settings.DEMO_MODE
+        and os.getenv("LABOPS_DEV_RELOAD", "").lower() == "true"
+        and os.getenv("LABOPS_ENVIRONMENT", "production").lower() != "production"
+    )
+    if port is None:
+        try:
+            port = int(os.getenv("LABOPS_BACKEND_PORT", "8000"))
+        except ValueError as exc:
+            raise RuntimeError("LABOPS_BACKEND_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("LABOPS_BACKEND_PORT must be between 1 and 65535")
     if has_fastapi:
         try:
             import uvicorn
             print(f"🚀 Khởi chạy LabOps Control Center API bằng FastAPI/Uvicorn trên http://{host}:{port}")
-            uvicorn.run("app.main:app", host=host, port=port, reload=True)
+            uvicorn.run("app.main:app", host=host, port=port, reload=reload_enabled)
             return
         except ImportError:
             pass
@@ -812,4 +840,4 @@ def run_server(host="0.0.0.0", port=8000):
 
 
 if __name__ == "__main__":
-    run_server(host="0.0.0.0", port=8000)
+    run_server()

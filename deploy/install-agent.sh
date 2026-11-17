@@ -5,6 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [[ "${1:-}" != "--apply" ]]; then
+    echo "Dry run only: review this script and rerun with --apply after operator approval."
+    exit 0
+fi
+
 echo "=========================================================="
 echo "🚀 CÀI ĐẶT LABOPS GO NODE AGENT TRÊN DEBIAN"
 echo "=========================================================="

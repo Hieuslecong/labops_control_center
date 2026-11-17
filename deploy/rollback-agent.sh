@@ -4,6 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [[ "${1:-}" != "--apply" ]]; then
+    echo "Dry run only: this script can stop Gateway and Agent services. Rerun with --apply after operator approval."
+    exit 0
+fi
+
 echo "⏪ THỰC HIỆN ROLLBACK LABOPS ZERO-TRUST MULTI-NODE HẠ TẦNG..."
 
 # 1. Dừng systemd agent và gateway nếu đang chạy

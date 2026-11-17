@@ -4,6 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [[ "${1:-}" != "--apply" ]]; then
+    echo "Dry run only: this script builds and may restart the Agent. Rerun with --apply after operator approval."
+    exit 0
+fi
+
 echo "🔄 Đang nâng cấp LabOps Go Agent..."
 export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
 

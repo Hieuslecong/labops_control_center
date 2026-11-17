@@ -15,9 +15,16 @@ import psutil
 logger = logging.getLogger(__name__)
 
 # Patterns to sanitize sensitive arguments from process cmdlines
-SENSITIVE_ARGS_PATTERN = re.compile(
-    r'(--(?:password|token|secret|key|api_key|auth|credential)[=\s]+)([^\s]+)',
-    re.IGNORECASE
+SENSITIVE_FLAG_PATTERN = re.compile(
+    r'(^|\s)(--?[a-z0-9_.-]*(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth)[a-z0-9_.-]*(?:=|\s+))(?:"[^"]*"|\'[^\']*\'|[^\s]+)',
+    re.IGNORECASE,
+)
+SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r'([a-z0-9_.-]*(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth|database[-_]?url|db[-_]?url|dsn)[a-z0-9_.-]*\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s]+)',
+    re.IGNORECASE,
+)
+AUTHORIZATION_PATTERN = re.compile(
+    r'(authorization\s*:\s*bearer\s+)([^\s,;]+)', re.IGNORECASE
 )
 
 # Research & AI workload classification heuristics
@@ -46,7 +53,11 @@ def sanitize_cmdline(cmdline_parts: List[str]) -> str:
     if not cmdline_parts:
         return ""
     full_cmd = " ".join(cmdline_parts)
-    sanitized = SENSITIVE_ARGS_PATTERN.sub(r'\1********', full_cmd)
+    sanitized = SENSITIVE_FLAG_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}********", full_cmd
+    )
+    sanitized = SENSITIVE_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}********", sanitized)
+    sanitized = AUTHORIZATION_PATTERN.sub(lambda match: f"{match.group(1)}********", sanitized)
     return sanitized
 
 def format_elapsed_time(seconds: float) -> str:
@@ -72,7 +83,10 @@ class ProcessMonitorAdapter:
         self.demo_mode = demo_mode
         self.agent_url = f"http://127.0.0.1:{agent_port}"
         self.has_nvidia_smi = shutil.which("nvidia-smi") is not None
-        self.data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        configured_data_dir = os.getenv("LABOPS_STATE_DIR", "").strip()
+        self.data_dir = os.path.abspath(configured_data_dir or os.path.join(
+            os.path.dirname(__file__), "..", "..", "data"
+        ))
         os.makedirs(self.data_dir, exist_ok=True)
         self.history_file = os.path.join(self.data_dir, "process_history.json")
 

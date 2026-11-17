@@ -49,7 +49,17 @@ export async function getLocalSession(): Promise<LocalSession | null> {
     }
 
     const data = JSON.parse(payloadBuf.toString('utf-8'));
-    if (!Number.isSafeInteger(data.exp) || data.exp <= Math.floor(Date.now() / 1000)) {
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      !Number.isSafeInteger(data.iat) ||
+      !Number.isSafeInteger(data.exp) ||
+      data.iss !== 'labops-local' ||
+      data.aud !== 'labops-web' ||
+      data.iat > now + 30 ||
+      data.exp <= now ||
+      data.exp <= data.iat ||
+      data.exp - data.iat > 60 * 60
+    ) {
       return null;
     }
     if (typeof data.sub !== 'string' || !data.sub.trim() || (data.role !== 'ADMIN' && data.role !== 'RESEARCHER')) {
@@ -83,9 +93,7 @@ export async function getUserRole(): Promise<'ADMIN' | 'RESEARCHER' | null> {
 
     const { orgId, has, sessionClaims } = session;
     const metadataRole = String(
-      (sessionClaims?.metadata as { role?: string } | undefined)?.role ||
-        (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role ||
-        ''
+      (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role || ''
     ).toUpperCase();
 
     // Default-deny: Chỉ cấp quyền ADMIN khi được xác thực rõ ràng qua org:admin hoặc metadata role ADMIN

@@ -4,6 +4,9 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export async function POST(request: Request) {
   try {
+    if (request.headers.get('origin') !== new URL(request.url).origin) {
+      return NextResponse.json({ error: 'Nguồn yêu cầu không hợp lệ hoặc bị thiếu' }, { status: 403 });
+    }
     const body = await request.json().catch(() => ({}));
     const username = String(body?.username || '').trim();
     const password = String(body?.password || '');
@@ -41,14 +44,18 @@ export async function POST(request: Request) {
       );
     }
 
-    // Cấp phiên đăng nhập 7 ngày
-    const ttlSeconds = 7 * 24 * 3600;
-    const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+    // Local login sessions are short lived and are not API bearer tokens.
+    const ttlSeconds = 60 * 60;
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const exp = issuedAt + ttlSeconds;
     const payloadObj = {
-      sub: 'admin',
+      sub: expectedUser,
       role: 'ADMIN',
       member_id: null,
-      exp
+      iat: issuedAt,
+      exp,
+      iss: 'labops-local',
+      aud: 'labops-web'
     };
 
     const payloadBuf = Buffer.from(JSON.stringify(payloadObj), 'utf-8');

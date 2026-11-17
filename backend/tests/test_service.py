@@ -2,6 +2,8 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -16,7 +18,10 @@ class TestLabOpsDataServiceV2(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.svc = LabOpsDataService(demo_mode=False, data_dir=self.tmp.name)
-        self.telemetry = [{"id": "h1-gpu-00", "uuid": FAKE_UUID, "server_id": "h1", "active_processes": []}]
+        self.telemetry = [{
+            "id": "h1-gpu-00", "uuid": FAKE_UUID, "server_id": "h1", "active_processes": [],
+            "live": True, "freshness": "ONLINE", "collected_at": datetime.now(timezone.utc).isoformat(),
+        }]
         self.svc.nvml_adapter.get_live_gpu_telemetry_sync = lambda: self.telemetry
         self.svc.gpu_scheduler.telemetry_fn = lambda: self.telemetry
         self.base_gpu = [{"id": "h1-gpu-00", "uuid": FAKE_UUID, "server_id": "h1", "active_processes": []}]
@@ -24,6 +29,11 @@ class TestLabOpsDataServiceV2(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_default_state_directory_can_be_overridden_for_isolated_tests(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"LABOPS_STATE_DIR": root}):
+            isolated = LabOpsDataService(demo_mode=True)
+        self.assertEqual(isolated.data_dir, os.path.abspath(root))
 
     def test_demo_mode_not_implicit_under_unittest(self):
         os.environ.pop("LABOPS_MODE", None)
@@ -37,47 +47,47 @@ class TestLabOpsDataServiceV2(unittest.TestCase):
         self.assertFalse(res["reservation"]["runtime_verified"])
 
     def test_double_allocation_rejected(self):
-        self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+        self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")
         with self.assertRaises(SchedulerError) as ctx:
-            self.svc.allocate_gpu("h1-gpu-00", "bob", "FULL_GPU_EXCLUSIVE")
+            self.svc.allocate_gpu("h1-gpu-00", "bob", "FULL_GPU_EXCLUSIVE", job_name="bob-job")
         self.assertEqual(ctx.exception.code, "GPU_ALREADY_RESERVED")
 
     def test_external_process_blocks_exclusive(self):
         self.telemetry[0]["active_processes"] = [{"pid": 42}]
         with self.assertRaises(SchedulerError) as ctx:
-            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")
         self.assertEqual(ctx.exception.code, "GPU_BUSY_EXTERNAL")
 
     def test_unobserved_gpu_fails_closed(self):
         self.svc.gpu_scheduler.telemetry_fn = lambda: []
         with self.assertRaises(SchedulerError) as ctx:
-            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")
         self.assertEqual(ctx.exception.code, "GPU_NOT_OBSERVED")
 
     def test_shared_vram_mode_rejected(self):
         with self.assertRaises(SchedulerError) as ctx:
-            self.svc.allocate_gpu("h1-gpu-00", "alice", "SHARED", requested_vram_gb=8)
+            self.svc.allocate_gpu("h1-gpu-00", "alice", "SHARED", requested_vram_gb=8, job_name="alice-job")
         self.assertEqual(ctx.exception.code, "MODE_NOT_SUPPORTED")
 
     def test_idempotency_key_returns_same_reservation(self):
-        a = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", idempotency_key="k1")
-        b = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", idempotency_key="k1")
+        a = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job", idempotency_key="k1")
+        b = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job", idempotency_key="k1")
         self.assertEqual(a["reservation"]["id"], b["reservation"]["id"])
 
     def test_researcher_cannot_stop_others_job(self):
-        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")["reservation"]
         with self.assertRaises(SchedulerError) as ctx:
             self.svc.stop_job(r["id"], actor="bob", is_admin=False)
         self.assertEqual(ctx.exception.http_status, 403)
 
     def test_stop_unstarted_reservation_releases(self):
-        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")["reservation"]
         res = self.svc.stop_job(r["id"], actor="alice", is_admin=False)
         self.assertEqual(res["state"], "RELEASED")
 
     def test_stop_running_requires_agent_verification(self):
-        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE")["reservation"]
-        self.svc.gpu_scheduler.confirm_from_agent(r["id"], "RUNNING", 999)
+        r = self.svc.allocate_gpu("h1-gpu-00", "alice", "FULL_GPU_EXCLUSIVE", job_name="alice-job")["reservation"]
+        self.svc.gpu_scheduler.confirm_from_agent(r["id"], "RUNNING", 999, node_id="h1")
         res = self.svc.stop_job(r["id"], actor="admin", is_admin=True)
         self.assertEqual(res["state"], "STOP_REQUESTED")
         self.assertEqual(res["verification"], "PENDING_VERIFICATION")

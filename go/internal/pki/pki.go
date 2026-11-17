@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -56,6 +57,10 @@ type RevocationData struct {
 type RevocationManager struct {
 	mu           sync.RWMutex
 	filePath     string
+	loadErr      error
+	persistErr   error
+	persistHook  func(string) error
+	statePresent bool
 	revokedNodes map[string]string // node_id -> reason
 	allowedNodes map[string]bool   // node_id -> allowed
 }
@@ -77,73 +82,307 @@ func NewRevocationManagerWithPersistence(filePath string) *RevocationManager {
 }
 
 func (rm *RevocationManager) loadFromDisk() {
-	if rm.filePath == "" || !fileExists(rm.filePath) {
-		return
-	}
-	data, err := os.ReadFile(rm.filePath)
-	if err != nil {
-		return
-	}
-	var rd RevocationData
-	if err := json.Unmarshal(data, &rd); err == nil {
-		if rd.RevokedNodes != nil {
-			rm.revokedNodes = rd.RevokedNodes
-		}
-		if rd.AllowedNodes != nil {
-			rm.allowedNodes = rd.AllowedNodes
-		}
-	}
-}
-
-func (rm *RevocationManager) saveToDiskLocked() {
 	if rm.filePath == "" {
 		return
 	}
-	rd := RevocationData{
-		RevokedNodes: rm.revokedNodes,
-		AllowedNodes: rm.allowedNodes,
-		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
-	}
-	data, err := json.MarshalIndent(rd, "", "  ")
-	if err != nil {
+	if _, err := os.Lstat(rm.filePath + ".pending"); err == nil {
+		rm.loadErr = errors.New("revocation update was interrupted; manual fail-closed recovery is required")
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		rm.loadErr = err
 		return
 	}
-	_ = os.WriteFile(rm.filePath, data, 0600)
+	info, err := os.Lstat(rm.filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		rm.loadErr = err
+		return
+	}
+	rm.statePresent = true
+	if !info.Mode().IsRegular() {
+		rm.loadErr = errors.New("revocation state must be a regular file")
+		return
+	}
+	data, err := os.ReadFile(rm.filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		rm.loadErr = err
+		return
+	}
+	var rd RevocationData
+	if err := json.Unmarshal(data, &rd); err != nil {
+		rm.loadErr = err
+		return
+	}
+	if rd.AllowedNodes == nil || rd.RevokedNodes == nil {
+		rm.loadErr = errors.New("invalid revocation state")
+		return
+	}
+	rm.allowedNodes, rm.revokedNodes = rd.AllowedNodes, rd.RevokedNodes
 }
 
-func (rm *RevocationManager) AllowNode(nodeID string) {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
-	if nodeID == "" {
-		return
+func (rm *RevocationManager) LoadError() error {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if rm.loadErr != nil {
+		return rm.loadErr
+	}
+	return rm.persistErr
+}
+
+// StatePresent reports whether a persisted allowlist already existed at startup.
+func (rm *RevocationManager) StatePresent() bool {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.statePresent
+}
+
+// BootstrapAllowedNodes is a one-time explicit bootstrap for a missing state file.
+// It never merges into or overwrites an existing allowlist.
+func (rm *RevocationManager) BootstrapAllowedNodes(nodeIDs []string) error {
+	if rm.filePath == "" {
+		return errors.New("persistent revocation state is required for bootstrap")
+	}
+	if len(nodeIDs) == 0 {
+		return errors.New("bootstrap allowlist must contain at least one node")
 	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	if rm.loadErr != nil {
+		return rm.loadErr
+	}
+	if rm.persistErr != nil {
+		return rm.persistErr
+	}
+	if rm.statePresent || len(rm.allowedNodes) != 0 || len(rm.revokedNodes) != 0 {
+		return errors.New("bootstrap is allowed only when no persisted state exists")
+	}
+	bootstrap := make(map[string]bool, len(nodeIDs))
+	for _, raw := range nodeIDs {
+		nodeID, err := NormalizeNodeID(raw)
+		if err != nil {
+			return err
+		}
+		bootstrap[nodeID] = true
+	}
+	if len(bootstrap) == 0 {
+		return errors.New("bootstrap allowlist must contain at least one valid node")
+	}
+	rm.allowedNodes = bootstrap
+	if err := rm.saveToDiskLocked(); err != nil {
+		rm.persistErr = err
+		return err
+	}
+	rm.statePresent = true
+	return nil
+}
+
+func (rm *RevocationManager) saveToDiskLocked() error {
+	if rm.filePath == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(RevocationData{RevokedNodes: rm.revokedNodes, AllowedNodes: rm.allowedNodes, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(rm.filePath)
+	// A durable pending marker makes a crash or failed write fail closed on the
+	// next startup. If the filesystem cannot create this marker at all, durability
+	// cannot be guaranteed; the running manager still latches persistErr and denies
+	// every node, and the caller receives an error.
+	markerPath := rm.filePath + ".pending"
+	marker, err := os.OpenFile(markerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create revocation recovery marker: %w", err)
+	}
+	if _, err = marker.Write([]byte("revocation update pending\n")); err == nil {
+		err = marker.Sync()
+	}
+	if closeErr := marker.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("persist revocation recovery marker: %w", err)
+	}
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open revocation directory for sync: %w", err)
+	}
+	if err = dirHandle.Sync(); err != nil {
+		_ = dirHandle.Close()
+		return fmt.Errorf("sync revocation recovery marker: %w", err)
+	}
+	if err = dirHandle.Close(); err != nil {
+		return fmt.Errorf("close revocation directory: %w", err)
+	}
+	if rm.persistHook != nil {
+		if err := rm.persistHook("create"); err != nil {
+			return err
+		}
+	}
+	f, err := os.CreateTemp(dir, ".revocations-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(0600); err == nil && rm.persistHook != nil {
+		err = rm.persistHook("write")
+	}
+	if err == nil {
+		var n int
+		n, err = f.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+	}
+	if err == nil && rm.persistHook != nil {
+		err = rm.persistHook("file_sync")
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if rm.persistHook != nil {
+		if err = rm.persistHook("rename"); err != nil {
+			return err
+		}
+	}
+	if err = os.Rename(name, rm.filePath); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if rm.persistHook != nil {
+		if err = rm.persistHook("dir_sync"); err != nil {
+			return err
+		}
+	}
+	if err := d.Sync(); err != nil {
+		return err
+	}
+	if err := d.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(markerPath); err != nil {
+		return fmt.Errorf("remove revocation recovery marker: %w", err)
+	}
+	d, err = os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("reopen revocation directory after marker removal: %w", err)
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	if err := d.Close(); err != nil {
+		return err
+	}
+	rm.statePresent = true
+	return nil
+}
+
+func (rm *RevocationManager) AllowNode(nodeID string) error {
+	nodeID, err := NormalizeNodeID(nodeID)
+	if err != nil {
+		return err
+	}
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if rm.loadErr != nil {
+		return rm.loadErr
+	}
+	if rm.persistErr != nil {
+		return rm.persistErr
+	}
+	if _, revoked := rm.revokedNodes[nodeID]; revoked {
+		return errors.New("revoked node cannot be enrolled")
+	}
+	oldAllowed, hadAllowed := rm.allowedNodes[nodeID]
+	oldReason, hadRevoked := rm.revokedNodes[nodeID]
 	rm.allowedNodes[nodeID] = true
 	delete(rm.revokedNodes, nodeID)
-	rm.saveToDiskLocked()
+	if err := rm.saveToDiskLocked(); err != nil {
+		if hadAllowed {
+			rm.allowedNodes[nodeID] = oldAllowed
+		} else {
+			delete(rm.allowedNodes, nodeID)
+		}
+		if hadRevoked {
+			rm.revokedNodes[nodeID] = oldReason
+		}
+		rm.persistErr = err
+		return err
+	}
+	return nil
 }
 
-func (rm *RevocationManager) RevokeNode(nodeID string, reason string) {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
-	if nodeID == "" {
-		return
+func (rm *RevocationManager) RevokeNode(nodeID string, reason string) error {
+	nodeID, err := NormalizeNodeID(nodeID)
+	if err != nil {
+		return err
 	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	if rm.loadErr != nil {
+		return rm.loadErr
+	}
+	if rm.persistErr != nil {
+		return rm.persistErr
+	}
 	delete(rm.allowedNodes, nodeID)
 	rm.revokedNodes[nodeID] = reason
-	rm.saveToDiskLocked()
+	if err := rm.saveToDiskLocked(); err != nil {
+		rm.persistErr = err
+		return err
+	}
+	return nil
 }
 
 func (rm *RevocationManager) IsNodeAllowed(nodeID string) bool {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	nodeID, err := NormalizeNodeID(nodeID)
+	if err != nil {
+		return false
+	}
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
+	if rm.loadErr != nil || rm.persistErr != nil {
+		return false
+	}
 	if _, revoked := rm.revokedNodes[nodeID]; revoked {
 		return false
 	}
-	if len(rm.allowedNodes) > 0 {
-		return rm.allowedNodes[nodeID]
+	return rm.allowedNodes[nodeID]
+}
+
+func NormalizeNodeID(raw string) (string, error) {
+	nodeID := strings.TrimSpace(strings.ToLower(raw))
+	if !validNodeID(nodeID) {
+		return "", errors.New("invalid node ID")
+	}
+	return nodeID, nil
+}
+
+func validNodeID(nodeID string) bool {
+	if nodeID == "" || len(nodeID) > 63 {
+		return false
+	}
+	for i, r := range nodeID {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || (i > 0 && r == '-') {
+			continue
+		}
+		return false
 	}
 	return true
 }
@@ -174,9 +413,9 @@ func GenerateOrLoadCA(caDir string) (*CACertificate, error) {
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization:  []string{"LabOps AI Infrastructure"},
+			Organization:       []string{"LabOps AI Infrastructure"},
 			OrganizationalUnit: []string{"Security Root CA"},
-			CommonName:    "LabOps Control Center Root CA (V2)",
+			CommonName:         "LabOps Control Center Root CA (V2)",
 		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(DefaultCAValidity),
@@ -314,9 +553,10 @@ func IssueGatewayCert(ca *CACertificate, hosts []string) (*CertBundle, error) {
 
 // IssueNodeCert phát hành chứng chỉ Client mTLS cho một Node Agent cụ thể
 func IssueNodeCert(ca *CACertificate, nodeID string) (*CertBundle, error) {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
-	if nodeID == "" {
-		return nil, errors.New("nodeID không được rỗng")
+	var err error
+	nodeID, err = NormalizeNodeID(nodeID)
+	if err != nil {
+		return nil, errors.New("nodeID không hợp lệ")
 	}
 
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -373,15 +613,10 @@ func ExtractNodeIDFromCert(cert *x509.Certificate) (string, error) {
 	for _, dns := range cert.DNSNames {
 		if strings.HasSuffix(dns, NodeSANPrefix) {
 			nodeID := strings.TrimSuffix(dns, NodeSANPrefix)
-			if nodeID != "" {
+			if validNodeID(nodeID) {
 				return nodeID, nil
 			}
 		}
-	}
-
-	// 2. Fallback sang CommonName
-	if cert.Subject.CommonName != "" {
-		return cert.Subject.CommonName, nil
 	}
 
 	return "", errors.New("chứng chỉ client không chứa Node ID hợp lệ trong SAN hoặc CommonName")
@@ -460,9 +695,6 @@ type EnrollmentTokenManager struct {
 }
 
 func NewEnrollmentTokenManager(secret string) *EnrollmentTokenManager {
-	if secret == "" {
-		secret = "labops-enrollment-default-secret-salt"
-	}
 	return &EnrollmentTokenManager{
 		secret: []byte(secret),
 		tokens: make(map[string]*tokenRecord),
@@ -470,12 +702,18 @@ func NewEnrollmentTokenManager(secret string) *EnrollmentTokenManager {
 }
 
 func (etm *EnrollmentTokenManager) GenerateToken(nodeID string, ttl time.Duration) string {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	var err error
+	nodeID, err = NormalizeNodeID(nodeID)
+	if len(etm.secret) < 32 || err != nil || ttl <= 0 || ttl > time.Hour {
+		return ""
+	}
 	etm.mu.Lock()
 	defer etm.mu.Unlock()
 
 	randBytes := make([]byte, 16)
-	_, _ = rand.Read(randBytes)
+	if _, err := rand.Read(randBytes); err != nil {
+		return ""
+	}
 	h := sha256.New()
 	h.Write(etm.secret)
 	h.Write([]byte(nodeID))
@@ -493,7 +731,11 @@ func (etm *EnrollmentTokenManager) GenerateToken(nodeID string, ttl time.Duratio
 
 // ConsumeTokenForNode xác minh token thuộc về đúng nodeID và chỉ được sử dụng một lần duy nhất
 func (etm *EnrollmentTokenManager) ConsumeTokenForNode(token string, nodeID string) bool {
-	nodeID = strings.TrimSpace(strings.ToLower(nodeID))
+	var err error
+	nodeID, err = NormalizeNodeID(nodeID)
+	if err != nil {
+		return false
+	}
 	etm.mu.Lock()
 	defer etm.mu.Unlock()
 
@@ -505,7 +747,7 @@ func (etm *EnrollmentTokenManager) ConsumeTokenForNode(token string, nodeID stri
 		// Phát hiện gian lận: token được cấp cho Node A nhưng mang sang ghi danh cho Node B
 		return false
 	}
-	if time.Now().Unix() > rec.ExpiresAt {
+	if time.Now().Unix() >= rec.ExpiresAt {
 		delete(etm.tokens, token)
 		return false
 	}
@@ -523,7 +765,7 @@ func (etm *EnrollmentTokenManager) ConsumeToken(token string) bool {
 	if !exists || rec == nil || rec.Used {
 		return false
 	}
-	if time.Now().Unix() > rec.ExpiresAt {
+	if time.Now().Unix() >= rec.ExpiresAt {
 		delete(etm.tokens, token)
 		return false
 	}
@@ -536,4 +778,3 @@ func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
-

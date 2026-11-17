@@ -7,7 +7,7 @@
 ## 1. THIẾT KẾ KHO LƯU TRỮ ARTIFACT ĐÃ PHÊ DUYỆT
 
 Để ngăn chặn việc quét lại lặp đi lặp lại cùng một commit SHA giữa các thành viên trong phòng lab, hệ thống duy trì một **Approved Artifact Store** cục bộ:
-- **Đường dẫn**: `$LABOPS_DATA_DIR/approved_store/`
+- **Đường dẫn**: thư mục approved_store bên dưới LABOPS_REPO_GUARD_DATA_DIR được operator provision trên persistent storage; ứng dụng không tự chọn /tmp làm mặc định.
 - **Quy tắc đặt tên tệp**: Content-Addressed theo chữ ký số SHA-256: `<sha256_digest>.tar.gz`
 - **Chỉ mục Index (`index.json`)**:
   ```json
@@ -16,7 +16,7 @@
       "canonical_repo": "https://github.com/gin-gonic/gin",
       "commit_sha": "a1b2c3d4e5f6789012345678901234567890abcd",
       "artifact_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "artifact_path": "/tmp/labops-repositoryguard/approved_store/e3b0c442....tar.gz",
+      "artifact_path": "<configured-durable-data-dir>/approved_store/e3b0c442....tar.gz",
       "artifact_size": 2450190,
       "policy_version": "labops-repo-policy-2026.11-v2",
       "scanner_version": "0.76.2",

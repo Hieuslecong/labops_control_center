@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -362,10 +361,17 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 
 	start := time.Now()
 	resp := &pb.CommandResponse{
-		CommandId:       req.CommandId,
-		RequestId:       req.RequestId,
-		NodeId:          c.cfg.ServerID,
-		ExecutedAtUnix:  time.Now().Unix(),
+		CommandId:      req.CommandId,
+		RequestId:      req.RequestId,
+		NodeId:         c.cfg.ServerID,
+		ExecutedAtUnix: time.Now().Unix(),
+	}
+	if !gatewayReadOnlyActionAllowed(req.Action) {
+		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
+		resp.ErrorCode = "ACTION_REQUIRES_DELEGATED_AUTHORIZATION"
+		resp.ErrorMessage = "Gateway machine authentication does not authorize destructive node actions"
+		c.sendCommandResponse(sender, resp, start)
+		return
 	}
 
 	switch req.Action {
@@ -382,63 +388,22 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 		resp.ResultPayload = b
 
 	case "COLLECT_TELEMETRY":
+		workspaces, workspaceErr := c.dockerCtrl.ListWorkspaces(context.Background())
 		snapshot := map[string]any{
-			"host":       c.hostCol.GetLatest(),
-			"gpu":        c.gpuCol.GetLatest(),
-			"processes":  c.procCol.Collect("all"),
-			"workspaces": nil,
-		}
-		if ws, err := c.dockerCtrl.ListWorkspaces(context.Background()); err == nil {
-			snapshot["workspaces"] = ws
+			"host":                c.hostCol.GetLatest(),
+			"gpu":                 c.gpuCol.GetLatest(),
+			"processes":           c.procCol.Collect("all"),
+			"workspaces":          workspaces,
+			"workspaces_verified": workspaceErr == nil,
 		}
 		b, _ := json.Marshal(snapshot)
-		resp.Status = pb.CommandResponse_SUCCESS
 		resp.ResultPayload = b
-
-	case "TERMINATE_PROCESS":
-		ref := req.Parameters["ref"]
-		if ref == "" {
-			pidStr := req.Parameters["pid"]
-			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-				if pInfo, pErr := c.procCol.GetProcessByPID(pid); pErr == nil && pInfo != nil {
-					ref = pInfo.Ref
-				}
-			}
-		}
-		if ref == "" {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "INVALID_PROCESS_REF"
-			resp.ErrorMessage = "Thiếu tham số ref hoặc không tìm thấy process tương ứng với PID"
+		if workspaceErr != nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "WORKSPACE_REGISTRY_UNAVAILABLE"
+			resp.ErrorMessage = "Workspace ownership registry is unavailable; workspace telemetry is unverified"
 		} else {
-			res, termErr := c.procCtrl.TerminateProcess(ref, 10, true)
-			if termErr != nil {
-				resp.Status = pb.CommandResponse_FAILED
-				resp.ErrorCode = "TERMINATE_FAILED"
-				resp.ErrorMessage = termErr.Error()
-			} else {
-				resp.Status = pb.CommandResponse_SUCCESS
-				b, _ := json.Marshal(res)
-				resp.ResultPayload = b
-			}
-		}
-
-	case "STOP_DOCKER_WORKSPACE":
-		cid := req.Parameters["container_id"]
-		if cid == "" {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "INVALID_CONTAINER_ID"
-			resp.ErrorMessage = "Thiếu tham số container_id"
-		} else {
-			stopErr := c.dockerCtrl.StopContainer(cid, 10)
-			if stopErr != nil {
-				resp.Status = pb.CommandResponse_FAILED
-				resp.ErrorCode = "STOP_CONTAINER_FAILED"
-				resp.ErrorMessage = stopErr.Error()
-			} else {
-				resp.Status = pb.CommandResponse_SUCCESS
-				b, _ := json.Marshal(map[string]any{"stopped": cid, "status": "exited"})
-				resp.ResultPayload = b
-			}
+			resp.Status = pb.CommandResponse_SUCCESS
 		}
 
 	default:
@@ -447,8 +412,20 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 		resp.ErrorMessage = fmt.Sprintf("Hành động '%s' không được hỗ trợ trên node", req.Action)
 	}
 
-	resp.ExecutionDurationMs = time.Since(start).Milliseconds()
+	c.sendCommandResponse(sender, resp, start)
+}
 
+func gatewayReadOnlyActionAllowed(action string) bool {
+	switch action {
+	case "INSPECT_HOST", "INSPECT_GPUS", "COLLECT_TELEMETRY":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *TunnelClient) sendCommandResponse(sender *safeStreamSender, resp *pb.CommandResponse, started time.Time) {
+	resp.ExecutionDurationMs = time.Since(started).Milliseconds()
 	resMsg := &pb.AgentMessage{
 		MessageId:     newUUID(),
 		TimestampUnix: time.Now().Unix(),
@@ -471,6 +448,11 @@ func toProtoHost(nodeID string, h *host.HostTelemetry) *pb.HostTelemetry {
 	}
 	return &pb.HostTelemetry{
 		NodeId:           nodeID,
+		Status:           h.Status,
+		IpAddress:        h.IPAddress,
+		DiskType:         h.DiskType,
+		CollectedAt:      h.CollectedAt,
+		IsRealHost:       h.IsRealHost,
 		Hostname:         h.Hostname,
 		CpuUsagePercent:  h.CPUUsagePercent,
 		CpuCores:         int32(h.CPUCores),
@@ -505,18 +487,20 @@ func toProtoGPU(nodeID string, g *gpu.SystemGPUReport) *pb.GPUTelemetry {
 		}
 
 		gpus = append(gpus, &pb.GPUInfo{
-			Index:                   int32(it.Index),
-			Name:                    it.Name,
-			Uuid:                    it.UUID,
-			MemoryTotalMb:           it.MemoryTotalMB,
-			MemoryUsedMb:            it.MemoryUsedMB,
-			MemoryFreeMb:            it.MemoryFreeMB,
-			GpuUtilizationPercent:   float64(it.UtilizationGPUPct),
+			Index:                    int32(it.Index),
+			Name:                     it.Name,
+			Uuid:                     it.UUID,
+			PciBusId:                 it.PCIBusID,
+			MemoryTotalMb:            it.MemoryTotalMB,
+			MemoryUsedMb:             it.MemoryUsedMB,
+			MemoryFreeMb:             it.MemoryFreeMB,
+			GpuUtilizationPercent:    float64(it.UtilizationGPUPct),
 			MemoryUtilizationPercent: float64(it.UtilizationMemPct),
-			TemperatureCelsius:      int32(it.TemperatureC),
-			PowerUsageWatts:         float64(it.PowerWatts),
-			PowerLimitWatts:         float64(it.PowerLimitWatts),
-			Processes:               procs,
+			TemperatureCelsius:       int32(it.TemperatureC),
+			PowerUsageWatts:          float64(it.PowerWatts),
+			PowerLimitWatts:          float64(it.PowerLimitWatts),
+			EnforcementState:         it.EnforcementState,
+			Processes:                procs,
 		})
 	}
 
@@ -525,6 +509,10 @@ func toProtoGPU(nodeID string, g *gpu.SystemGPUReport) *pb.GPUTelemetry {
 		DriverVersion: g.DriverVersion,
 		GpuCount:      int32(g.Count),
 		Gpus:          gpus,
+		Status:        g.Status,
+		CollectedAt:   g.CollectedAt,
+		CudaVersion:   g.CUDAVersion,
+		Source:        g.Source,
 	}
 }
 
@@ -568,15 +556,15 @@ func toProtoWorkspace(nodeID string, ws []docker.WorkspaceContainer) *pb.Workspa
 	list := make([]*pb.WorkspaceInfo, 0, len(ws))
 	for _, it := range ws {
 		list = append(list, &pb.WorkspaceInfo{
-			ContainerId:    it.ID,
-			Name:           it.Name,
-			Owner:          it.MemberUsername,
-			Status:         it.Status,
-			Image:          it.Image,
-			SshPort:        int32(it.SSHPort),
-			CpuCoresLimit:  int32(it.CPULimitCores),
-			RamMbLimit:     it.RAMLimitBytes / (1024 * 1024),
-			CreatedAt:      it.CreatedAt,
+			ContainerId:   it.ID,
+			Name:          it.Name,
+			Owner:         it.MemberUsername,
+			Status:        it.Status,
+			Image:         it.Image,
+			SshPort:       int32(it.SSHPort),
+			CpuCoresLimit: int32(it.CPULimitCores),
+			RamMbLimit:    it.RAMLimitBytes / (1024 * 1024),
+			CreatedAt:     it.CreatedAt,
 		})
 	}
 	return &pb.WorkspaceTelemetry{

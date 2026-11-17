@@ -32,6 +32,10 @@ func main() {
 
 	// 2. Nạp cấu hình runtime
 	cfg := config.LoadFromEnv()
+	if len(cfg.SecretToken) < 32 {
+		logger.Error("LABOPS_AGENT_SECRET must be explicitly configured with at least 32 characters")
+		os.Exit(1)
+	}
 	logger.Info("Cấu hình Node Agent",
 		"server_id", cfg.ServerID,
 		"server_name", cfg.ServerName,
@@ -45,7 +49,16 @@ func main() {
 	hostCollector := host.NewCollector(cfg)
 	gpuCollector := gpu.NewCollector()
 	procCollector := process.NewCollector(cfg.ServerID, gpuCollector)
-	dockerCtrl := docker.NewController(cfg.DockerSocket)
+	var workspaceRegistry docker.WorkspaceRegistry
+	if cfg.BackendAPIURL != "" {
+		registry, err := docker.NewHTTPWorkspaceRegistry(cfg.BackendAPIURL, cfg.SecretToken, cfg.ServerID)
+		if err != nil {
+			logger.Error("Invalid trusted workspace registry configuration", "err", err)
+			os.Exit(1)
+		}
+		workspaceRegistry = registry
+	}
+	dockerCtrl := docker.NewControllerWithRegistry(cfg.DockerSocket, cfg.ServerID, workspaceRegistry)
 
 	// 4. Khởi chạy goroutine lấy mẫu định kỳ trong nền (Background sampling)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,4 +121,3 @@ func main() {
 
 	logger.Info("🛑 LabOps Go Node Agent đã dừng an toàn.")
 }
-

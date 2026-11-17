@@ -14,6 +14,27 @@ type ProcessRefStruct struct {
 	StartTimeTicks uint64
 }
 
+func validateProcessNode(parsed *ProcessRefStruct, serverID string) error {
+	if parsed == nil || serverID == "" || parsed.ServerID != serverID {
+		return fmt.Errorf("PROCESS_REF_NODE_MISMATCH: ProcessRef không thuộc node này")
+	}
+	return nil
+}
+
+func validateProcessIdentity(parsed *ProcessRefStruct, serverID string, process ProcessInfo) error {
+	if err := validateProcessNode(parsed, serverID); err != nil {
+		return err
+	}
+	expectedContainer := parsed.ContainerID
+	if expectedContainer == "host" {
+		expectedContainer = ""
+	}
+	if parsed.PID != process.PID || parsed.StartTimeTicks != process.StartTimeTicks || expectedContainer != process.ContainerID {
+		return fmt.Errorf("PROCESS_REF_IDENTITY_MISMATCH: ProcessRef không khớp PID, start time hoặc container hiện tại")
+	}
+	return nil
+}
+
 // BuildRef tạo chuỗi ProcessRef an toàn
 func BuildRef(serverID, containerID string, pid int, startTimeTicks uint64) string {
 	cid := containerID

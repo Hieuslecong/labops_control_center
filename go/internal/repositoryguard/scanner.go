@@ -25,12 +25,12 @@ type TrivyOutput struct {
 			Title            string `json:"Title"`
 		} `json:"Vulnerabilities"`
 		Misconfigurations []struct {
-			ID          string `json:"ID"`
-			Title       string `json:"Title"`
-			Severity    string `json:"Severity"`
-			Message     string `json:"Message"`
-			Resolution  string `json:"Resolution"`
-			PrimaryURL  string `json:"PrimaryURL"`
+			ID         string `json:"ID"`
+			Title      string `json:"Title"`
+			Severity   string `json:"Severity"`
+			Message    string `json:"Message"`
+			Resolution string `json:"Resolution"`
+			PrimaryURL string `json:"PrimaryURL"`
 		} `json:"Misconfigurations"`
 		Secrets []struct {
 			RuleID    string `json:"RuleID"`

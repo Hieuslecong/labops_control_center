@@ -12,6 +12,8 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from app.adapters.wireguard_adapter import WireGuardAdapter, WireGuardError
+from app.adapters.legacy_wireguard_provider import LegacyWireGuardProvider
+from app.adapters.vpn_provider import VPNProviderError
 from app.services.labops_service import LabOpsDataService
 
 
@@ -48,6 +50,16 @@ class TestWireGuardProvisioning(unittest.TestCase):
             self.adapter.allocate_vpn_ip("track")
         with self.assertRaises(WireGuardError):
             self.adapter.register_peer("u1", "not-a-key", "10.66.66.10", "ws1", "workstation")
+
+    def test_no_default_rack_endpoint_and_legacy_profile_is_disabled(self):
+        unconfigured = WireGuardAdapter(
+            interface="wg0", data_dir=self.temp.name, server_configs={}, local_host_id="track"
+        )
+        self.assertNotIn("track", unconfigured.server_configs)
+        with self.assertRaises(WireGuardError):
+            unconfigured._server("track")
+        with self.assertRaisesRegex(VPNProviderError, "LEGACY_VPN_READ_ONLY"):
+            LegacyWireGuardProvider(adapter=unconfigured).get_client_configuration("client-id")
 
     def test_wg_set_failure_does_not_persist_peer(self):
         public_key = key(bytes(range(33, 65)))

@@ -1,10 +1,14 @@
 package gpu
 
 import (
+	"os"
 	"testing"
 )
 
 func TestGPUCollector_Collect(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("GPU collector test queries live NVIDIA telemetry")
+	}
 	collector := NewCollector()
 	if collector == nil {
 		t.Fatal("NewCollector trả về nil")
@@ -34,4 +38,3 @@ func TestGPUCollector_Collect(t *testing.T) {
 		}
 	}
 }
-

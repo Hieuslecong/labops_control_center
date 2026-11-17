@@ -74,6 +74,31 @@ class TestMemberProvisioningSecurity(unittest.TestCase):
         self.assertEqual(len(self.svc.storage_allocations), allocation_count)
         self.assertEqual(len(self.svc.ssh_endpoints), endpoint_count)
 
+    def test_enrolled_key_does_not_advertise_unverified_ssh_endpoint(self):
+        with patch.object(self.svc, "get_next_available_ssh_port", return_value=22400):
+            member = self.svc.provision_member(self.payload(ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test"))
+
+        self.assertEqual(member["ssh_status"], "PENDING_RUNTIME_VERIFICATION")
+        self.assertIsNone(member["ssh_ip"])
+        self.assertEqual(member["ssh_port"], 22400)
+        endpoint = next(item for item in self.svc.ssh_endpoints if item["member_id"] == member["id"])
+        self.assertIsNone(endpoint["listen_address"])
+        self.assertEqual(endpoint["status"], "PENDING_RUNTIME_VERIFICATION")
+
+    def test_later_key_enrollment_keeps_endpoint_pending_until_runtime_verification(self):
+        member = self.svc.provision_member(self.payload())
+        with patch.object(self.svc, "get_next_available_ssh_port", return_value=22401):
+            result = self.svc.enroll_member_ssh_key(
+                "secure_tester", "test key",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test",
+                actor="admin-test",
+            )
+
+        self.assertEqual(member["ssh_status"], "PENDING_RUNTIME_VERIFICATION")
+        self.assertIsNone(member["ssh_ip"])
+        self.assertEqual(member["ssh_port"], 22401)
+        self.assertIsNone(result["ssh_endpoint"])
+
     def test_production_without_persisted_members_does_not_load_demo_users(self):
         production = LabOpsDataService(demo_mode=False, data_dir=self.data_dir.name)
         self.assertEqual(production.members, [])
@@ -150,8 +175,10 @@ class TestMemberProvisioningSecurity(unittest.TestCase):
         restored = self.svc.restore_member(member["id"])
         self.assertEqual(restored["status"], "PENDING_PROVISIONING")
         res = self.svc.delete_member_permanently(member["id"])
-        self.assertTrue(res.get("success", False))
-        self.assertNotIn(member, self.svc.members)
+        self.assertFalse(res.get("success", False))
+        self.assertTrue(res.get("dry_run", False))
+        self.assertEqual(res.get("status"), "DELETE_BLOCKED")
+        self.assertIn(member, self.svc.members)
 
 
 if __name__ == "__main__":

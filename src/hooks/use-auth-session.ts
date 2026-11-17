@@ -61,18 +61,11 @@ export function useAuthSession() {
     notifyListeners();
   }, []);
 
-  // Determine effective role:
-  // 1. Preview role if set by Admin
-  // 2. Server session role from /api/labops/session
-  // 3. Client clerk user metadata fallback
+  // The server session is the only role authority. Client metadata must never
+  // promote the navigation shell to Admin while the session endpoint is absent.
   const rawRole: 'ADMIN' | 'RESEARCHER' = useMemo(() => {
-    if (session?.role) return session.role;
-    const metadataRole = String(
-      (user?.publicMetadata as { role?: string })?.role || ''
-    ).toUpperCase();
-    if (metadataRole === 'RESEARCHER') return 'RESEARCHER';
-    return 'ADMIN'; // Default
-  }, [session, user]);
+    return session?.role === 'ADMIN' ? 'ADMIN' : 'RESEARCHER';
+  }, [session]);
 
   const effectiveRole: 'ADMIN' | 'RESEARCHER' = useMemo(() => {
     if (previewRole && rawRole === 'ADMIN') return previewRole;

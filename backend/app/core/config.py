@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     LABOPS_SESSION_SECRET: str = os.getenv("LABOPS_SESSION_SECRET", "")
     LABOPS_ADMIN_API_TOKEN: str = os.getenv("LABOPS_ADMIN_API_TOKEN", "")
     LABOPS_NODE_AGENT_TOKEN: str = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
+    LABOPS_NODE_AGENT_TOKENS: str = os.getenv("LABOPS_NODE_AGENT_TOKENS", "")
+    LABOPS_AIOTGIT_SIGNING_KEY: str = os.getenv("LABOPS_AIOTGIT_SIGNING_KEY", "")
 
     # Storage Configuration (Default 37TB Data Drive)
     DEFAULT_USER_DATA_DIR: str = os.getenv("LABOPS_USER_DATA_DIR", "/media/LabOps-Data/users")
@@ -68,8 +70,8 @@ class Settings(BaseSettings):
 
     # WireGuard & wg-easy v15 Configuration
     WG_EASY_API_URL: str = os.getenv("WG_EASY_API_URL", "http://127.0.0.1:51821")
-    WG_EASY_ADMIN_USER: str = os.getenv("WG_EASY_ADMIN_USER", "admin")
-    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "LabOpsSecureVPN2026!")
+    WG_EASY_ADMIN_USER: str = os.getenv("WG_EASY_ADMIN_USER", "")
+    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "")
     WG_EASY_PUBLIC_ENDPOINT: str = os.getenv("WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
     WG_EASY_VPN_SUBNET: str = os.getenv("WG_EASY_VPN_SUBNET", "10.88.40.0/24")
     WG_EASY_ENABLED: bool = os.getenv("WG_EASY_ENABLED", "true").lower() == "true"
@@ -79,10 +81,7 @@ class Settings(BaseSettings):
         return self.LABOPS_MODE.lower() == "demo" and self.LABOPS_ALLOW_MOCK_DATA
 
     # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://labops:labops_secret@localhost:5432/labops_db"
-    )
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [

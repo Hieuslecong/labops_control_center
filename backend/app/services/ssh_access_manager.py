@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.vpn_ssh_service import SshKeyRegistry, compute_ssh_fingerprint
 from app.services.workspace_controller import FORBIDDEN_MOUNT_PREFIXES, WorkspaceSecurityError
+from app.services.vpn_config import parse_provider_vpn_config
 
 SAFE_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{2,31}$")
 RESERVED_USERNAMES = {
@@ -476,53 +477,8 @@ class SshAccessManager:
 
     @staticmethod
     def _get_or_create_server_wg_public_key(data_dir: str) -> str:
-        """
-        Lấy hoặc khởi tạo khóa công khai máy chủ WireGuard hợp lệ chuẩn Curve25519 (đúng 32 bytes Base64).
-        Đảm bảo ứng dụng WireGuard trên máy khách (Windows, Mac, iOS, Android) không báo lỗi
-        'Peer’s public key must be a 32-byte key in base64 encoding'.
-        """
-        key_file = os.path.join(data_dir, "wireguard_server_keys.json")
-        try:
-            if os.path.exists(key_file):
-                with open(key_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    pub = data.get("server_public_key", "")
-                    raw = base64.b64decode(pub)
-                    if len(raw) == 32:
-                        return pub
-        except Exception:
-            pass
-
-        wg_bin = shutil.which("wg") or "/usr/bin/wg"
-        if os.path.exists(wg_bin):
-            try:
-                gen = subprocess.run([wg_bin, "genkey"], capture_output=True, text=True, check=True, timeout=5)
-                priv = gen.stdout.strip()
-                pub = subprocess.run(
-                    [wg_bin, "pubkey"], input=priv + "\n", capture_output=True, text=True, check=True, timeout=5
-                ).stdout.strip()
-            except Exception:
-                priv, pub = None, None
-        else:
-            priv, pub = None, None
-
-        if not pub:
-            import base64 as _b64
-            raw_priv = bytearray(os.urandom(32))
-            raw_priv[0] &= 248
-            raw_priv[31] &= 127
-            raw_priv[31] |= 64
-            priv = _b64.b64encode(bytes(raw_priv)).decode("ascii")
-            pub = _b64.b64encode(hashlib.sha256(bytes(raw_priv)).digest()).decode("ascii")
-
-        try:
-            os.makedirs(data_dir, mode=0o700, exist_ok=True)
-            with open(key_file, "w", encoding="utf-8") as f:
-                json.dump({"server_public_key": pub, "created_at": _now_iso()}, f, indent=2)
-            os.chmod(key_file, 0o600)
-        except Exception:
-            pass
-        return pub
+        """Server-side WireGuard key generation is disabled; use provider-issued state."""
+        raise RuntimeError("server-generated WireGuard keys are disabled")
 
     @staticmethod
     def generate_wireguard_client_profile(
@@ -531,69 +487,11 @@ class SshAccessManager:
         client_ip: str,
         server_endpoint: str,
         server_public_key: str,
-        allowed_ips: str = "10.200.0.0/24, 192.168.167.250/32",
-        dns: str = "1.1.1.1",
+        allowed_ips: Optional[str] = None,
+        dns: Optional[str] = None,
     ) -> Dict[str, str]:
-        """
-        Sinh cặp khóa WireGuard Curve25519 thật bằng /usr/bin/wg genkey | /usr/bin/wg pubkey
-        và xuất nội dung file cấu hình chuẩn <username>-labops-wg0.conf để import trực tiếp vào
-        ứng dụng WireGuard (Windows / macOS / Linux / iOS / Android).
-        Private key của WireGuard chỉ nằm trong RAM 1 lần, không bao giờ lưu xuống đĩa.
-        """
-        wg_bin = shutil.which("wg") or "/usr/bin/wg"
-        if os.path.exists(wg_bin):
-            gen = subprocess.run([wg_bin, "genkey"], capture_output=True, text=True, check=True, timeout=5)
-            wg_priv = gen.stdout.strip()
-            pub = subprocess.run(
-                [wg_bin, "pubkey"],
-                input=wg_priv + "\n",
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=5,
-            )
-            wg_pub = pub.stdout.strip()
-        else:
-            import base64 as _b64
-            raw_priv = bytearray(os.urandom(32))
-            raw_priv[0] &= 248
-            raw_priv[31] &= 127
-            raw_priv[31] |= 64
-            wg_priv = _b64.b64encode(bytes(raw_priv)).decode("ascii")
-            wg_pub = _b64.b64encode(hashlib.sha256(bytes(raw_priv)).digest()).decode("ascii")
-
-        # Đảm bảo server_public_key là Curve25519 32-byte Base64 hợp lệ tuyệt đối
-        try:
-            import base64 as _b64
-            raw_spk = _b64.b64decode(server_public_key, validate=True)
-            if len(raw_spk) != 32:
-                raise ValueError("invalid length")
-            valid_server_pubkey = server_public_key
-        except Exception:
-            valid_server_pubkey = SshAccessManager._get_or_create_server_wg_public_key("/tmp")
-
-        conf_text = (
-            f"# Cấu hình WireGuard VPN cho @{username} — LabOps Control Center V2\n"
-            f"# Import trực tiếp file này vào ứng dụng WireGuard (Add Tunnel -> Import tunnel(s) from file)\n"
-            f"[Interface]\n"
-            f"PrivateKey = {wg_priv}\n"
-            f"Address = {client_ip}/32\n"
-            f"DNS = {dns}\n\n"
-            f"[Peer]\n"
-            f"PublicKey = {valid_server_pubkey}\n"
-            f"Endpoint = {server_endpoint}\n"
-            f"AllowedIPs = {allowed_ips}\n"
-            f"PersistentKeepalive = 25\n"
-        )
-        return {
-            "wg_private_key": wg_priv,
-            "wg_public_key": wg_pub,
-            "client_ip": client_ip,
-            "server_endpoint": server_endpoint,
-            "server_public_key": valid_server_pubkey,
-            "allowed_ips": allowed_ips,
-            "wireguard_conf": conf_text,
-        }
+        """Server-generated VPN profiles are disabled; only provider-issued configs are accepted."""
+        raise RuntimeError("server-generated WireGuard client profiles are disabled")
 
     @staticmethod
     def build_access_zip_package(
@@ -642,8 +540,9 @@ class SshAccessManager:
         buf = io.BytesIO()
         host_alias = f"labops-{username}"
         has_priv = bool(private_key and private_key.strip())
-        wg_ip = wireguard_client_ip or "10.88.30.x"
-        wg_ep = wireguard_endpoint or "118.70.169.236:2204"
+        parsed_vpn = parse_provider_vpn_config(wireguard_conf)
+        wg_ip = parsed_vpn.client_address
+        wg_ep = parsed_vpn.endpoint
 
         ssh_config_content = (
             f"# Cấu hình OpenSSH LabOps Control Center cho @{username}\n"
@@ -858,8 +757,7 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             zf.writestr(f"{root}/README.md", readme_content)
             
             # 2. WireGuard
-            if wireguard_conf:
-                zf.writestr(f"{root}/wireguard/labops.conf", wireguard_conf)
+            zf.writestr(f"{root}/wireguard/labops.conf", parsed_vpn.config)
             zf.writestr(
                 f"{root}/wireguard/SETUP.md",
                 "# CẤU HÌNH WIREGUARD VPN\n"

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from app.api.dependencies import require_user
-from app.core.security import Principal
+from app.core.security import AuthError, Principal, resolve_owner_filter
 from app.services.labops_service import service
 
 router = APIRouter()
@@ -31,10 +31,14 @@ async def list_processes(
     Lấy danh sách tiến trình thời gian thực từ Go Node Agent.
     Hỗ trợ lọc theo server, thành viên, workspace, GPU và phân loại 4 nhóm.
     """
+    try:
+        effective_username = resolve_owner_filter(p, username)
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
     items = service.list_processes(
         server_id=server_id,
         classification=classification,
-        username=username,
+        username=effective_username,
         workspace_id=workspace_id,
         gpu_id=gpu_id,
         search=search
@@ -52,7 +56,16 @@ async def get_process_tree(
 ) -> Dict[str, Any]:
     """Lấy cấu trúc cây tiến trình phân cấp (Parent-Child) cho một ProcessRef."""
     try:
+        if not p.is_admin:
+            owned = service.list_processes(
+                server_id=None, classification=None, username=p.username,
+                workspace_id=None, gpu_id=None, search=None,
+            )
+            if not any(item.get("ref") == ref for item in owned):
+                raise HTTPException(status_code=404, detail="Không tìm thấy tiến trình được phép truy cập")
         return service.get_process_tree(ref)
+    except HTTPException:
+        raise
     except Exception as e:
         err_msg = str(e)
         if "PROCESS_NOT_FOUND" in err_msg:

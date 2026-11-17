@@ -129,6 +129,8 @@ async def create_member(payload: MemberCreateRequest, actor: str = Depends(requi
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except WorkspaceSecurityError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.put("/{user_id}/status")
@@ -137,7 +139,7 @@ async def update_member_status(user_id: str, payload: Dict[str, str], actor: str
         raise HTTPException(status_code=409, detail="Only verified access revocation is supported; restore/archive are not automatic")
     try:
         result = await service.revoke_member_access(user_id, actor=actor)
-        return {"success": result["status"] == "SUSPENDED", "id": user_id, "status": result["status"]}
+        return {"success": result["status"].startswith("SUSPENDED"), "id": user_id, "status": result["status"], "external_revocation": result["member"].get("external_access_revocation", {})}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -150,9 +152,31 @@ async def delete_user(
     actor: str = Depends(require_labops_admin),
 ):
     try:
-        result = service.delete_member_permanently(user_id, actor=actor)
-        return {"success": True, "id": user_id, "result": result}
+        result = service.delete_member_permanently(user_id, actor=actor, dry_run=True)
+        raise HTTPException(status_code=409, detail=result)
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi xóa tài khoản: {exc}") from exc
+
+
+@router.post("/{user_id}/deletion/preview")
+async def preview_member_deletion(user_id: str, actor: str = Depends(require_labops_admin)):
+    try:
+        return service.delete_member_permanently(user_id, actor=actor, dry_run=True)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{user_id}/deletion/confirm")
+async def confirm_member_deletion(user_id: str, payload: Dict[str, str], actor: str = Depends(require_labops_admin)):
+    try:
+        return service.delete_member_permanently(
+            user_id, actor=actor, dry_run=False,
+            confirmation=payload.get("confirmation"),
+            backup_verification_id=payload.get("backup_verification_id"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

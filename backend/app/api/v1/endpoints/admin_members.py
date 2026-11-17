@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.dependencies import require_labops_admin
-from app.schemas.labops import MemberCreateRequest, MemberResponse, StorageQuotaUpdateRequest
+from app.schemas.labops import ClerkIdentityBindingRequest, MemberCreateRequest, MemberResponse, StorageQuotaUpdateRequest
 from app.services.labops_service import service
 from app.services.workspace_controller import WorkspaceSecurityError
 
@@ -18,6 +18,8 @@ async def provision_member(payload: MemberCreateRequest, actor: str = Depends(re
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except WorkspaceSecurityError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/{user_id}/suspend", response_model=MemberResponse)
@@ -29,6 +31,22 @@ async def suspend_member(user_id: str, actor: str = Depends(require_labops_admin
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.put("/{user_id}/identity")
+async def bind_member_identity(
+    user_id: str,
+    payload: ClerkIdentityBindingRequest,
+    actor: str = Depends(require_labops_admin),
+):
+    try:
+        return service.bind_member_clerk_identity(user_id, payload.clerk_user_id, actor=actor)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Member not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Member identity persistence failed") from exc
 
 
 @router.post("/{user_id}/restore", response_model=MemberResponse)

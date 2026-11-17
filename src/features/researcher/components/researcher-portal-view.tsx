@@ -31,13 +31,26 @@ interface WorkspaceRecord {
   runtime_type: string;
   image_ref: string;
   ssh_host_port?: number;
-  vpn_bind_ip?: string;
+  ssh_host?: string;
+  ssh_readiness?: string;
   cpu_cores_limit: number;
   ram_mb_limit: number;
   pids_limit: number;
   storage_quota_gb?: number;
   lifecycle_state: string;
   observed_state: string;
+  runtime_verification?: string;
+  repository_policy_mode?: string;
+  egress_verification?: string;
+}
+
+interface AioGitTokenResponse {
+  access_token: string;
+  expires_in: number;
+  workspace_id: string;
+  node_id: string;
+  repository_policy_mode?: string;
+  egress_verification?: string;
 }
 
 interface ReservationRecord {
@@ -84,6 +97,9 @@ interface ResearcherSnapshot {
     fullName?: string;
     email?: string;
     vpn_ip?: string;
+    vpn_status?: string;
+    ssh_status?: string;
+    ssh_endpoint_status?: string;
     assigned_port?: number;
     status?: string;
     createdAt?: string;
@@ -113,6 +129,8 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
   const [keyLabel, setKeyLabel] = useState('Laptop Nghiên cứu');
   const [publicKey, setPublicKey] = useState('');
   const [submittingKey, setSubmittingKey] = useState(false);
+  const [issuingAioGitToken, setIssuingAioGitToken] = useState(false);
+  const [aioGitToken, setAioGitToken] = useState<AioGitTokenResponse | null>(null);
 
   const loadSnapshot = async () => {
     setLoading(true);
@@ -165,21 +183,59 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
     void loadSnapshot();
   };
 
+  const handleIssueAioGitToken = async () => {
+    if (!primaryWorkspace?.id || primaryWorkspace.runtime_verification !== 'VERIFIED') {
+      toast.error('Workspace chưa được xác minh để cấp AIOTGIT token');
+      return;
+    }
+    setIssuingAioGitToken(true);
+    setAioGitToken(null);
+    const result = await labopsCall<AioGitTokenResponse>('repositories/cli-token', {
+      method: 'POST',
+      body: { workspace_id: primaryWorkspace.id }
+    });
+    setIssuingAioGitToken(false);
+    if (!result.ok || !result.data?.access_token || result.data.workspace_id !== primaryWorkspace.id) {
+      toast.error('Không thể cấp AIOTGIT token', { description: result.error || 'Backend trả về thông tin token không hợp lệ' });
+      return;
+    }
+    setAioGitToken(result.data);
+    toast.success('Đã cấp token AIOTGIT giới hạn theo workspace', {
+      description: `Token hết hạn sau ${result.data.expires_in} giây và chỉ được giữ trong trang này.`
+    });
+  };
+
+  const copyAioGitToken = async () => {
+    if (!aioGitToken) return;
+    try {
+      await navigator.clipboard.writeText(aioGitToken.access_token);
+      toast.success('Đã sao chép token AIOTGIT');
+    } catch {
+      toast.error('Không thể truy cập clipboard của trình duyệt');
+    }
+  };
+
   // Primary workspace
   const primaryWorkspace = snapshot?.workspaces?.[0];
+  const sshHost = primaryWorkspace?.ssh_host;
+  const sshPort = primaryWorkspace?.ssh_host_port;
   const isWorkspaceReady =
-    primaryWorkspace?.observed_state === 'RUNNING' && Boolean(primaryWorkspace?.ssh_host_port);
+    primaryWorkspace?.observed_state === 'RUNNING' &&
+    primaryWorkspace?.ssh_readiness === 'VERIFIED' &&
+    snapshot?.member?.ssh_status === 'VERIFIED' &&
+    snapshot?.member?.ssh_endpoint_status === 'VERIFIED' &&
+    Boolean(sshHost) &&
+    typeof sshPort === 'number' &&
+    Number.isInteger(sshPort);
 
   // Dynamic SSH command
-  const sshHost = primaryWorkspace?.vpn_bind_ip || snapshot?.member?.vpn_ip || '192.168.167.250';
-  const sshPort = primaryWorkspace?.ssh_host_port || snapshot?.member?.assigned_port;
   const username = snapshot?.username || 'researcher';
 
-  const dynamicSshCommand = isWorkspaceReady && sshPort
+  const dynamicSshCommand = isWorkspaceReady && sshHost && sshPort
     ? `ssh -i ~/.ssh/id_ed25519 -p ${sshPort} ${username}@${sshHost}`
     : '';
 
-  const vscodeRemoteSnippet = isWorkspaceReady && sshPort
+  const vscodeRemoteSnippet = isWorkspaceReady && sshHost && sshPort
     ? `Host labops-${username}
     HostName ${sshHost}
     Port ${sshPort}
@@ -207,7 +263,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
             </div>
             <p className='text-blue-900/90 dark:text-blue-200/80'>
               Phạm vi cô lập: Bạn chỉ xem và thao tác trên workspace, khóa SSH, GPU và tiến trình của chính mình.
-              Quyền root máy chủ vật lý và Docker daemon bị từ chối theo chính sách bảo mật Zero-Trust.
+              Trạng thái quyền ứng dụng không xác nhận cô lập host, Docker hoặc outbound network. Workspace SSH legacy cần được kiểm chứng riêng.
             </p>
           </div>
           <Button size='sm' variant='outline' onClick={() => void loadSnapshot()} className='text-xs' disabled={loading}>
@@ -264,7 +320,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 </Badge>
                 {primaryWorkspace?.ssh_host_port && (
                   <span className='text-[11px] text-muted-foreground'>
-                    Port: <strong>{primaryWorkspace.ssh_host_port}</strong>
+                    Cổng dự kiến: <strong>{primaryWorkspace.ssh_host_port}</strong>
                   </span>
                 )}
               </div>
@@ -279,7 +335,9 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
               <div className='mt-2 text-[11px] text-muted-foreground flex items-center justify-between'>
                 <span>VPN IP:</span>
                 <code className='font-mono font-bold text-foreground'>
-                  {snapshot?.member?.vpn_ip || primaryWorkspace?.vpn_bind_ip || 'Chưa gán IP'}
+                  {snapshot?.member?.vpn_status === 'VERIFIED' && snapshot.member.vpn_ip
+                    ? snapshot.member.vpn_ip
+                    : 'Chưa xác minh'}
                 </code>
               </div>
             </Card>
@@ -339,7 +397,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 Quy trình 5 Bước Kết nối An toàn vào Workspace
               </CardTitle>
               <CardDescription className='text-xs'>
-                Tuân thủ mô hình bảo mật Zero-Trust: Thiết bị cá nhân → WireGuard VPN nội bộ → Cổng SSH cô lập → Container riêng
+                Hướng dẫn kết nối không phải bằng chứng runtime. Trạng thái SSH/VPN chỉ được báo VERIFIED khi có xác nhận từ backend tương ứng.
               </CardDescription>
             </CardHeader>
             <CardContent className='space-y-5 text-xs'>
@@ -352,8 +410,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                   <span className='font-bold text-xs'>Cấu hình WireGuard VPN (.conf)</span>
                 </div>
                 <p className='text-muted-foreground pl-8 text-[11px]'>
-                  Cài đặt WireGuard client trên laptop (macOS/Windows/Linux) và import file cấu hình do Quản trị viên cấp.
-                  VPN kết nối thẳng vào mạng nội bộ của LabOps mà không mở cổng ra Internet công cộng.
+                  Chỉ import cấu hình do Quản trị viên cấp. Trạng thái kết nối và quyền truy cập VPN phải được xác minh riêng; trang này không thay đổi VPN runtime.
                 </p>
               </div>
 
@@ -523,9 +580,9 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                     <div className='rounded-md border border-amber-300 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200'>
                       <div className='font-semibold'>Workspace chưa sẵn sàng kết nối</div>
                       <p className='mt-1 text-[11px]'>
-                        Container workspace của bạn đang ở trạng thái{' '}
-                        <strong>{primaryWorkspace?.observed_state || 'PENDING'}</strong> hoặc chưa được phân bổ cổng SSH.
-                        Vui lòng nhấn <strong>&quot;Làm mới dữ liệu&quot;</strong> hoặc liên hệ Quản trị viên LabOps để khởi chạy.
+                        Workspace đang ở trạng thái <strong>{primaryWorkspace?.observed_state || 'PENDING'}</strong>;
+                        endpoint SSH chỉ hiển thị sau khi runtime và quyền truy cập được xác minh.
+                        Vui lòng nhấn <strong>&quot;Làm mới dữ liệu&quot;</strong> hoặc liên hệ Quản trị viên LabOps.
                       </p>
                     </div>
                   )}
@@ -545,7 +602,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
               <CardHeader className='pb-3'>
                 <CardTitle className='text-sm font-bold'>Thông số Môi trường Workspace</CardTitle>
                 <CardDescription className='text-xs'>
-                  Container Docker cô lập với cgroups v2, không quyền root máy chủ
+                  Các giới hạn hiển thị là metadata workspace; host isolation và container privileges chưa được attested tại đây.
                 </CardDescription>
               </CardHeader>
               <CardContent className='space-y-3 text-xs'>
@@ -566,9 +623,24 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                       </Badge>
                     </div>
                     <div className='flex items-center justify-between border-b pb-2'>
+                      <span className='text-muted-foreground'>Repository egress:</span>
+                      <Badge
+                        variant='outline'
+                        className={
+                          primaryWorkspace.egress_verification === 'VERIFIED_NO_NETWORK'
+                            ? 'font-mono text-[10px] text-emerald-700 border-emerald-300'
+                            : 'font-mono text-[10px] text-amber-700 border-amber-300'
+                        }
+                      >
+                        {primaryWorkspace.egress_verification || 'NOT_VERIFIED'}
+                      </Badge>
+                    </div>
+                    <div className='flex items-center justify-between border-b pb-2'>
                       <span className='text-muted-foreground'>Cổng SSH mở:</span>
                       <span className='font-mono font-bold text-foreground'>
-                        {primaryWorkspace.ssh_host_port ?? 'Chưa cấp'}
+                        {primaryWorkspace.ssh_readiness === 'VERIFIED'
+                          ? primaryWorkspace.ssh_host_port ?? 'Chưa cấp'
+                          : 'Chưa xác minh'}
                       </span>
                     </div>
                     <div className='flex items-center justify-between border-b pb-2'>
@@ -602,12 +674,10 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
               </CardHeader>
               <CardContent className='space-y-3 text-xs'>
                 <div className='rounded-md border bg-muted/20 p-3 space-y-1.5'>
-                  <div className='text-muted-foreground text-[11px]'>Đường dẫn thư mục cá nhân trên máy chủ:</div>
-                  <div className='font-mono font-bold text-xs select-all text-foreground'>
-                    /media/LabOps-Data/{username}
-                  </div>
+                  <div className='text-muted-foreground text-[11px]'>Storage:</div>
+                  <div className='font-bold text-xs text-foreground'>Được quản lý theo workspace registry</div>
                   <p className='text-[11px] text-muted-foreground pt-1'>
-                    Thư mục này được mount trực tiếp vào container của bạn. Toàn bộ code, checkpoints, models và datasets đặt tại đây sẽ không bị mất khi container khởi động lại.
+                    Mount path, retention, backup và khả năng phục hồi cần được runtime kiểm chứng trước khi xem là đã xác nhận.
                   </p>
                 </div>
 
@@ -615,19 +685,19 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                   <div className='flex items-center justify-between border-b pb-2'>
                     <span className='text-muted-foreground'>Hạn mức lưu trữ (Quota):</span>
                     <span className='font-semibold'>
-                      {primaryWorkspace?.storage_quota_gb ? `${primaryWorkspace.storage_quota_gb} GB` : 'Chưa giới hạn'}
+                      {primaryWorkspace?.storage_quota_gb ? `${primaryWorkspace.storage_quota_gb} GB` : 'Chưa xác minh'}
                     </span>
                   </div>
                   <div className='flex items-center justify-between border-b pb-2'>
                     <span className='text-muted-foreground'>Quyền Docker Socket:</span>
-                    <Badge variant='outline' className='text-rose-600 bg-rose-500/10 border-rose-300 text-[10px]'>
-                      DENIED (Không gắn docker.sock)
+                    <Badge variant='outline' className='text-amber-700 bg-amber-500/10 border-amber-300 text-[10px]'>
+                      NOT VERIFIED
                     </Badge>
                   </div>
                   <div className='flex items-center justify-between'>
                     <span className='text-muted-foreground'>Quyền Sudo Máy chủ:</span>
-                    <Badge variant='outline' className='text-rose-600 bg-rose-500/10 border-rose-300 text-[10px]'>
-                      DENIED (Không có quyền sudo root)
+                    <Badge variant='outline' className='text-amber-700 bg-amber-500/10 border-amber-300 text-[10px]'>
+                      NOT VERIFIED
                     </Badge>
                   </div>
                 </div>
@@ -641,28 +711,67 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
               <div className='flex flex-wrap items-center justify-between gap-2'>
                 <div>
                   <CardTitle className='text-sm font-bold flex items-center gap-2'>
-                    <Icons.shield className='size-4 text-emerald-600' /> Tải Kho Mã An Toàn (Repository Security Gateway)
+                    <Icons.shield className='size-4 text-amber-600' /> Repository Approval Workflow
                   </CardTitle>
                   <CardDescription className='text-xs'>
-                    Mã nguồn từ GitHub/GitLab được tự động quét mã độc, lộ bí mật và CVE trước khi tải vào workspace
+                    Repository request và kết quả scanner được hiển thị tại đây. Egress isolation chỉ được coi là bật sau khi pilot được kiểm chứng.
                   </CardDescription>
                 </div>
-                <Badge variant='outline' className='text-[10px] font-mono border-emerald-300 text-emerald-700 bg-emerald-500/10'>
-                  Zero-Trust Supply Chain Gate
+                <Badge variant='outline' className='text-[10px] font-mono border-amber-300 text-amber-700 bg-amber-500/10'>
+                  Approval workflow · Egress chưa được xác minh
                 </Badge>
               </div>
             </CardHeader>
             <CardContent className='space-y-4 text-xs'>
               <div className='rounded-md border bg-muted/30 p-3 space-y-2'>
                 <div className='font-semibold text-foreground text-xs'>
-                  Cách tải kho mã vào thư mục làm việc bằng CLI:
+                  Lệnh tải được duyệt bằng CLI:
                 </div>
                 <div className='rounded bg-black p-2.5 font-mono text-[11px] text-emerald-400 select-all'>
-                  labops clone https://github.com/organization/your-repo --dest /workspace/work/your-repo
+                  aiotgit clone -b main https://github.com/owner/repo.git project
+                </div>
+                <div className='rounded bg-black p-2.5 font-mono text-[11px] text-emerald-400 select-all'>
+                  aiotgit status
                 </div>
                 <p className='text-[11px] text-muted-foreground'>
-                  Hệ thống sẽ tự động quét bằng Trivy scanner, xác minh SHA-256 digest và tự động phê duyệt nếu an toàn.
+                  `aiotgit` không fallback sang GitHub khi Broker lỗi. CLI, Broker URL và workspace token phải được provision trước; lệnh Git cục bộ tiếp tục dùng `git`.
                 </p>
+                <div className='flex flex-wrap items-center gap-2 pt-1'>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => void handleIssueAioGitToken()}
+                    disabled={
+                      issuingAioGitToken ||
+                      !primaryWorkspace?.id ||
+                      primaryWorkspace.runtime_verification !== 'VERIFIED'
+                    }
+                  >
+                    {issuingAioGitToken ? 'Đang cấp token...' : 'Cấp token CLI 15 phút'}
+                  </Button>
+                  {aioGitToken && (
+                    <>
+                      <Input
+                        aria-label='Token AIOTGIT đã che'
+                        type='password'
+                        value={aioGitToken.access_token}
+                        readOnly
+                        className='max-w-sm font-mono text-xs'
+                      />
+                      <Button size='sm' variant='outline' onClick={() => void copyAioGitToken()}>
+                        Sao chép token
+                      </Button>
+                    </>
+                  )}
+                </div>
+                <p className='text-[11px] text-amber-700 dark:text-amber-300'>
+                  Token chỉ nằm trong bộ nhớ trang và bị xóa khi rời trang; không gửi token qua chat/log. Cấp token không chứng minh CLI đã cài hoặc workspace đã chặn Internet trực tiếp.
+                </p>
+                {aioGitToken && (
+                  <p className='text-[11px] text-muted-foreground'>
+                    Policy: {aioGitToken.repository_policy_mode || 'UNENFORCED'} · egress: {aioGitToken.egress_verification || 'NOT_ENFORCED'}
+                  </p>
+                )}
               </div>
 
               {repoRequests.length > 0 ? (
@@ -703,7 +812,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 </div>
               ) : (
                 <p className='text-[11px] text-muted-foreground'>
-                  Bạn chưa có yêu cầu kiểm duyệt kho mã nào. Sử dụng lệnh <code>labops clone</code> trong workspace để tải kho mã an toàn.
+                  Chưa có repository request nào. `aiotgit` chỉ dùng được trong workspace đã được cấu hình CLI, token scope và Broker.
                 </p>
               )}
             </CardContent>

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-// GPUProcess lưu tiến trình đang dùng VRAM trên GPU
+// GPUProcess lưu tiến trình đang dùng VRAM trên GPU.
 type GPUProcess struct {
 	PID           int    `json:"pid"`
 	ProcessName   string `json:"name"`
@@ -20,7 +21,7 @@ type GPUProcess struct {
 	Username      string `json:"username,omitempty"`
 }
 
-// GPUTelemetry chứa thông tin chi tiết của 1 card GPU NVIDIA A30
+// GPUTelemetry chứa số liệu quan sát trực tiếp từ NVIDIA-SMI.
 type GPUTelemetry struct {
 	Index             int          `json:"index"`
 	UUID              string       `json:"uuid"`
@@ -35,10 +36,10 @@ type GPUTelemetry struct {
 	PowerWatts        int          `json:"power_watts"`
 	PowerLimitWatts   int          `json:"power_limit_watts"`
 	ActiveProcesses   []GPUProcess `json:"active_processes"`
-	EnforcementState  string       `json:"enforcement_state"` // HARDWARE_ENFORCED, MONITOR_ONLY
+	EnforcementState  string       `json:"enforcement_state"`
 }
 
-// SystemGPUReport báo cáo toàn bộ hệ thống GPU
+// SystemGPUReport báo cáo toàn bộ hệ thống GPU.
 type SystemGPUReport struct {
 	Source        string         `json:"source"`
 	CollectedAt   string         `json:"collected_at"`
@@ -49,7 +50,7 @@ type SystemGPUReport struct {
 	GPUs          []GPUTelemetry `json:"gpus"`
 }
 
-// Collector quản lý việc thu thập định kỳ thông số GPU từ NVIDIA-SMI
+// Collector quản lý thu thập số liệu từ NVIDIA-SMI.
 type Collector struct {
 	mu            sync.RWMutex
 	driverVersion string
@@ -58,7 +59,6 @@ type Collector struct {
 	lastPollTime  time.Time
 }
 
-// NewCollector khởi tạo GPU Collector
 func NewCollector() *Collector {
 	c := &Collector{}
 	c.initStaticDriverVersions()
@@ -67,151 +67,198 @@ func NewCollector() *Collector {
 }
 
 func (c *Collector) initStaticDriverVersions() {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader")
-	if out, err := cmd.Output(); err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) > 0 {
-			c.driverVersion = strings.TrimSpace(lines[0])
-		}
+	if out, err := exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader").Output(); err == nil {
+		c.driverVersion = parseDriverVersion(string(out))
 	}
-	if c.driverVersion == "" {
-		c.driverVersion = "550.120"
+	if out, err := exec.Command("nvidia-smi").Output(); err == nil {
+		c.cudaVersion = parseCUDAVersion(string(out))
 	}
-	c.cudaVersion = "12.4"
 }
 
-// queryNvidiaMetrics thực thi một lệnh truy vấn tổng hợp duy nhất tới nvidia-smi
+func parseDriverVersion(output string) string {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if value := strings.TrimSpace(line); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseCUDAVersion(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if _, value, found := strings.Cut(line, "CUDA Version:"); found {
+			fields := strings.Fields(strings.Trim(strings.TrimSpace(value), "|"))
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+	return ""
+}
+
+func parseGPUCSVLine(line string) (GPUTelemetry, error) {
+	parts := strings.Split(line, ",")
+	if len(parts) < 12 {
+		return GPUTelemetry{}, fmt.Errorf("GPU telemetry row has %d fields; expected 12", len(parts))
+	}
+	values := make([]string, len(parts))
+	for i, part := range parts {
+		values[i] = strings.TrimSpace(part)
+	}
+	index, err := strconv.Atoi(values[0])
+	if err != nil || index < 0 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU index")
+	}
+	memTotal, err := strconv.ParseUint(values[4], 10, 64)
+	if err != nil || memTotal == 0 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU memory total")
+	}
+	memUsed, err := strconv.ParseUint(values[5], 10, 64)
+	if err != nil || memUsed > memTotal {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU memory used")
+	}
+	memFree, err := strconv.ParseUint(values[6], 10, 64)
+	if err != nil || memFree > memTotal {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU memory free")
+	}
+	utilGPU, err := strconv.Atoi(values[7])
+	if err != nil || utilGPU < 0 || utilGPU > 100 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU utilization")
+	}
+	utilMem, err := strconv.Atoi(values[8])
+	if err != nil || utilMem < 0 || utilMem > 100 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU memory utilization")
+	}
+	temp, err := strconv.Atoi(values[9])
+	if err != nil || temp < 0 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU temperature")
+	}
+	powerDraw, err := strconv.ParseFloat(values[10], 64)
+	if err != nil || powerDraw < 0 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU power draw")
+	}
+	powerLimit, err := strconv.ParseFloat(values[11], 64)
+	if err != nil || powerLimit < 0 {
+		return GPUTelemetry{}, fmt.Errorf("invalid GPU power limit")
+	}
+	if values[1] == "" || values[2] == "" {
+		return GPUTelemetry{}, fmt.Errorf("GPU UUID and model are required")
+	}
+	return GPUTelemetry{
+		Index: index, UUID: values[1], Name: values[2], PCIBusID: values[3],
+		MemoryTotalMB: memTotal, MemoryUsedMB: memUsed, MemoryFreeMB: memFree,
+		UtilizationGPUPct: utilGPU, UtilizationMemPct: utilMem, TemperatureC: temp,
+		PowerWatts: int(powerDraw), PowerLimitWatts: int(powerLimit),
+		ActiveProcesses: []GPUProcess{}, EnforcementState: "MONITOR_ONLY",
+	}, nil
+}
+
 func (c *Collector) queryNvidiaMetrics() *SystemGPUReport {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
-	// Truy vấn các chỉ số GPU dạng CSV
 	queryArgs := []string{
 		"--query-gpu=index,uuid,name,pci.bus_id,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit",
 		"--format=csv,noheader,nounits",
 	}
-
-	cmd := exec.CommandContext(ctx, "nvidia-smi", queryArgs...)
-	out, err := cmd.Output()
+	out, err := exec.CommandContext(ctx, "nvidia-smi", queryArgs...).Output()
 	if err != nil {
 		return &SystemGPUReport{
-			Source:        "labops-go-agent",
-			CollectedAt:   time.Now().UTC().Format(time.RFC3339),
-			Status:        "UNAVAILABLE",
-			DriverVersion: c.driverVersion,
-			CUDAVersion:   c.cudaVersion,
-			Count:         0,
-			GPUs:          []GPUTelemetry{},
+			Source: "labops-go-agent", CollectedAt: time.Now().UTC().Format(time.RFC3339),
+			Status: "UNAVAILABLE", DriverVersion: c.driverVersion, CUDAVersion: c.cudaVersion,
+			GPUs: []GPUTelemetry{},
 		}
 	}
 
 	gpus := make([]GPUTelemetry, 0, 4)
+	seenUUIDs, seenIndexes := make(map[string]bool), make(map[int]bool)
+	degraded := false
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, ",")
-		if len(parts) < 12 {
+		gpu, parseErr := parseGPUCSVLine(line)
+		if parseErr != nil || seenUUIDs[gpu.UUID] || seenIndexes[gpu.Index] {
+			degraded = true
 			continue
 		}
-
-		idx, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-		uuid := strings.TrimSpace(parts[1])
-		name := strings.TrimSpace(parts[2])
-		pci := strings.TrimSpace(parts[3])
-		memTot, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
-		memUsed, _ := strconv.ParseUint(strings.TrimSpace(parts[5]), 10, 64)
-		memFree, _ := strconv.ParseUint(strings.TrimSpace(parts[6]), 10, 64)
-		utilGpu, _ := strconv.Atoi(strings.TrimSpace(parts[7]))
-		utilMem, _ := strconv.Atoi(strings.TrimSpace(parts[8]))
-		temp, _ := strconv.Atoi(strings.TrimSpace(parts[9]))
-		pwrDrawFloat, _ := strconv.ParseFloat(strings.TrimSpace(parts[10]), 64)
-		pwrLimitFloat, _ := strconv.ParseFloat(strings.TrimSpace(parts[11]), 64)
-
-		g := GPUTelemetry{
-			Index:             idx,
-			UUID:              uuid,
-			Name:              name,
-			PCIBusID:          pci,
-			MemoryTotalMB:     memTot,
-			MemoryUsedMB:      memUsed,
-			MemoryFreeMB:      memFree,
-			UtilizationGPUPct: utilGpu,
-			UtilizationMemPct: utilMem,
-			TemperatureC:      temp,
-			PowerWatts:        int(pwrDrawFloat),
-			PowerLimitWatts:   int(pwrLimitFloat),
-			ActiveProcesses:   []GPUProcess{},
-			EnforcementState:  "MONITOR_ONLY", // Tuân thủ nguyên tắc Phase 5.3
-		}
-		gpus = append(gpus, g)
+		seenUUIDs[gpu.UUID], seenIndexes[gpu.Index] = true, true
+		gpus = append(gpus, gpu)
+	}
+	if scanner.Err() != nil || len(gpus) == 0 {
+		degraded = true
 	}
 
-	// Đọc danh sách tiến trình compute đang chạy trên GPU
 	procCmd := exec.CommandContext(ctx, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits")
-	if procOut, err := procCmd.Output(); err == nil {
+	procOut, procErr := procCmd.Output()
+	if procErr != nil {
+		degraded = true
+	} else {
 		procScanner := bufio.NewScanner(bytes.NewReader(procOut))
 		for procScanner.Scan() {
-			pLine := strings.TrimSpace(procScanner.Text())
-			if pLine == "" {
+			line := strings.TrimSpace(procScanner.Text())
+			if line == "" {
 				continue
 			}
-			pParts := strings.Split(pLine, ",")
-			if len(pParts) >= 4 {
-				pUUID := strings.TrimSpace(pParts[0])
-				pid, _ := strconv.Atoi(strings.TrimSpace(pParts[1]))
-				pName := strings.TrimSpace(pParts[2])
-				pMem, _ := strconv.ParseUint(strings.TrimSpace(pParts[3]), 10, 64)
-
-				for i := range gpus {
-					if gpus[i].UUID == pUUID {
-						gpus[i].ActiveProcesses = append(gpus[i].ActiveProcesses, GPUProcess{
-							PID:          pid,
-							ProcessName:  pName,
-							UsedMemoryMB: pMem,
-						})
-						break
-					}
+			parts := strings.Split(line, ",")
+			if len(parts) < 4 {
+				degraded = true
+				continue
+			}
+			gpuUUID := strings.TrimSpace(parts[0])
+			pid, pidErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+			name := strings.TrimSpace(parts[2])
+			memory, memoryErr := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+			if gpuUUID == "" || pidErr != nil || pid <= 0 || name == "" || memoryErr != nil {
+				degraded = true
+				continue
+			}
+			matched := false
+			for i := range gpus {
+				if gpus[i].UUID == gpuUUID {
+					gpus[i].ActiveProcesses = append(gpus[i].ActiveProcesses, GPUProcess{PID: pid, ProcessName: name, UsedMemoryMB: memory})
+					matched = true
+					break
 				}
 			}
+			if !matched {
+				degraded = true
+			}
+		}
+		if procScanner.Err() != nil {
+			degraded = true
 		}
 	}
 
+	status := "VERIFIED"
+	if degraded {
+		status = "DEGRADED"
+	}
 	return &SystemGPUReport{
-		Source:        "labops-go-agent",
-		CollectedAt:   time.Now().UTC().Format(time.RFC3339),
-		Status:        "VERIFIED",
-		DriverVersion: c.driverVersion,
-		CUDAVersion:   c.cudaVersion,
-		Count:         len(gpus),
-		GPUs:          gpus,
+		Source: "labops-go-agent", CollectedAt: time.Now().UTC().Format(time.RFC3339),
+		Status: status, DriverVersion: c.driverVersion, CUDAVersion: c.cudaVersion,
+		Count: len(gpus), GPUs: gpus,
 	}
 }
 
-// Collect thu thập và cập nhật cache nếu thời gian vượt quá chu kỳ tối thiểu (3s)
 func (c *Collector) Collect() *SystemGPUReport {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// Tránh spam subprocess nếu được gọi nhiều lần trong 3 giây
 	if time.Since(c.lastPollTime) < 3*time.Second && c.latestReport != nil {
 		return c.latestReport
 	}
-
 	c.latestReport = c.queryNvidiaMetrics()
 	c.lastPollTime = time.Now()
 	return c.latestReport
 }
 
-// GetLatest lấy báo cáo GPU gần nhất
 func (c *Collector) GetLatest() *SystemGPUReport {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.latestReport == nil {
-		c.mu.RUnlock()
+	latest := c.latestReport
+	c.mu.RUnlock()
+	if latest == nil {
 		return c.Collect()
 	}
-	return c.latestReport
+	return latest
 }

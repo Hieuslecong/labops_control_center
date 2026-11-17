@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 var (
 	sha40Regex    = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	repoPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_.\-]+/[a-zA-Z0-9_.\-]+$`)
+	refNameRegex  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
 )
 
 // NormalizeAndValidateURL kiểm tra URL GitHub hợp lệ và chống tấn công SSRF / Injection
@@ -32,6 +32,9 @@ func NormalizeAndValidateURL(rawURL string) (canonical, owner, repo string, err 
 	if strings.ToLower(u.Scheme) != "https" {
 		return "", "", "", errors.New("chỉ chấp nhận giao thức https:// cho kho mã bên ngoài")
 	}
+	if u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Port() != "" && u.Port() != "443" {
+		return "", "", "", errors.New("URL kho mã không được chứa query, fragment, opaque path hoặc port tùy ý")
+	}
 
 	// 2. Chỉ chấp nhận github.com (hoặc gitlab.com)
 	host := strings.ToLower(u.Hostname())
@@ -49,7 +52,7 @@ func NormalizeAndValidateURL(rawURL string) (canonical, owner, repo string, err 
 	trimmedPath = strings.TrimSuffix(trimmedPath, ".git")
 
 	parts := strings.Split(trimmedPath, "/")
-	if len(parts) != 2 || !repoPathRegex.MatchString(trimmedPath) {
+	if len(parts) != 2 || !repoPathRegex.MatchString(trimmedPath) || parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
 		return "", "", "", errors.New("định dạng kho mã phải có dạng 'owner/repository'")
 	}
 
@@ -63,52 +66,90 @@ func NormalizeAndValidateURL(rawURL string) (canonical, owner, repo string, err 
 // ResolveCommitSHA xác định commit SHA 40 ký tự hex từ branch, tag hoặc commit sẵn có
 func ResolveCommitSHA(ctx context.Context, repoURL, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
-	if sha40Regex.MatchString(ref) {
+	if validCommitSHA(ref) {
 		return strings.ToLower(ref), nil
+	}
+	if ref == "" {
+		ref = "HEAD"
+	}
+	if !validRequestedRef(ref) {
+		return "", errors.New("repository reference is invalid")
 	}
 
 	// Sử dụng git ls-remote để lấy commit SHA thực tế từ remote mà không cần clone
 	ctxTimeout, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctxTimeout, "git", "ls-remote", repoURL, ref)
-	out, err := cmd.Output()
-	if err != nil {
-		// Thử resolve HEAD nếu ref trống
-		if ref == "" || ref == "HEAD" {
-			cmdHead := exec.CommandContext(ctxTimeout, "git", "ls-remote", "--symref", repoURL, "HEAD")
-			outHead, errHead := cmdHead.Output()
-			if errHead == nil {
-				lines := strings.Split(string(outHead), "\n")
-				for _, l := range lines {
-					fields := strings.Fields(l)
-					if len(fields) >= 2 && fields[1] == "HEAD" && sha40Regex.MatchString(fields[0]) {
-						return strings.ToLower(fields[0]), nil
-					}
-				}
-			}
+	if ref == "HEAD" {
+		cmd := trustedGitCommand(ctxTimeout, "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+			"-c", "http.followRedirects=false", "ls-remote", "--symref", "--", repoURL, "HEAD")
+		out, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve repository HEAD: %w", err)
 		}
-		return "", fmt.Errorf("không thể phân giải ref '%s' từ kho %s: %w", ref, repoURL, err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, l := range lines {
-		fields := strings.Fields(l)
-		if len(fields) >= 2 && sha40Regex.MatchString(fields[0]) {
-			return strings.ToLower(fields[0]), nil
-		}
-	}
-
-	// Nếu ref trống nhưng chưa resolve được, gọi trực tiếp với HEAD
-	if ref == "" {
-		cmdHead := exec.CommandContext(ctxTimeout, "git", "ls-remote", repoURL, "HEAD")
-		if outHead, errHead := cmdHead.Output(); errHead == nil {
-			fields := strings.Fields(string(outHead))
-			if len(fields) >= 1 && sha40Regex.MatchString(fields[0]) {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[1] == "HEAD" && sha40Regex.MatchString(fields[0]) {
 				return strings.ToLower(fields[0]), nil
 			}
 		}
+		return "", errors.New("repository HEAD did not resolve to a commit")
 	}
 
-	return "", fmt.Errorf("không tìm thấy commit tương ứng với reference '%s'", ref)
+	refs := []string{ref}
+	if !strings.HasPrefix(ref, "refs/") {
+		refs = []string{"refs/heads/" + ref, "refs/tags/" + ref, "refs/tags/" + ref + "^{}"}
+	} else if strings.HasPrefix(ref, "refs/tags/") {
+		refs = append(refs, ref+"^{}")
+	}
+	cmdArgs := append([]string{"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false", "ls-remote", "--", repoURL}, refs...)
+	cmd := trustedGitCommand(ctxTimeout, cmdArgs...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve repository ref %q: %w", ref, err)
+	}
+	matches := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && sha40Regex.MatchString(fields[0]) {
+			matches[fields[1]] = strings.ToLower(fields[0])
+		}
+	}
+	var resolved []string
+	for _, candidate := range refs {
+		if strings.HasSuffix(candidate, "^{}") {
+			continue
+		}
+		if sha, ok := matches[candidate+"^{}"]; ok {
+			resolved = append(resolved, sha)
+		} else if sha, ok := matches[candidate]; ok {
+			resolved = append(resolved, sha)
+		}
+	}
+	if len(resolved) == 0 {
+		return "", fmt.Errorf("repository reference %q was not found", ref)
+	}
+	for _, sha := range resolved[1:] {
+		if sha != resolved[0] {
+			return "", fmt.Errorf("repository reference %q is ambiguous between branch and tag", ref)
+		}
+	}
+	return resolved[0], nil
+}
+
+func validRequestedRef(ref string) bool {
+	if ref == "HEAD" {
+		return true
+	}
+	if !refNameRegex.MatchString(ref) || strings.Contains(ref, "..") || strings.Contains(ref, "//") ||
+		strings.Contains(ref, "@{") || strings.HasSuffix(ref, ".") || strings.HasSuffix(ref, ".lock") ||
+		strings.HasSuffix(ref, "/") || strings.HasPrefix(ref, "/") {
+		return false
+	}
+	for _, part := range strings.Split(ref, "/") {
+		if part == "." || part == ".." || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
 }

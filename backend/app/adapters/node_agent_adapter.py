@@ -15,6 +15,7 @@ import os
 import platform
 import shutil
 import subprocess
+from http import HTTPStatus
 import urllib.error
 import urllib.request
 import uuid
@@ -208,11 +209,9 @@ class NodeAgentClient:
 
         # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel)
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
-        control_secret = (
-            os.getenv("LABOPS_GATEWAY_CONTROL_SECRET")
-            or os.getenv("LABOPS_SESSION_SECRET")
-            or os.getenv("LABOPS_ADMIN_API_TOKEN", "")
-        )
+        control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "")
+        if not control_secret:
+            raise NodeAgentError("GATEWAY_AUTH_NOT_CONFIGURED", "LABOPS_GATEWAY_CONTROL_SECRET chưa được cấu hình.", 503)
         gw_headers = {"Content-Type": "application/json"}
         if control_secret:
             gw_headers["Authorization"] = f"Bearer {control_secret}"
@@ -247,6 +246,14 @@ class NodeAgentClient:
                     raise NodeAgentError(gw_data.get("error_code", "GATEWAY_ERROR"), gw_data.get("error_message", "Lỗi điều khiển từ xa"), 500)
         except NodeAgentError:
             raise
+        except urllib.error.HTTPError as exc:
+            if exc.code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN, HTTPStatus.BAD_REQUEST):
+                raise NodeAgentError("GATEWAY_REQUEST_REJECTED", f"Gateway từ chối yêu cầu (HTTP {exc.code}).", exc.code) from exc
+            if exc.code < 500:
+                raise NodeAgentError("GATEWAY_REQUEST_REJECTED", f"Gateway từ chối yêu cầu (HTTP {exc.code}).", 502) from exc
+            # A 5xx response can indicate an unavailable Gateway; direct Agent fallback
+            # remains authenticated with the separate node-agent credential.
+            pass
         except Exception:
             # Fallback sang kết nối trực tiếp agent_url nếu Gateway chưa bật hoặc node offline
             pass

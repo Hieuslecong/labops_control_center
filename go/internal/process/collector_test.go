@@ -6,6 +6,9 @@ import (
 )
 
 func TestProcessCollector_CollectCurrentProcess(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("process collector test enumerates live host /proc entries")
+	}
 	collector := NewCollector("track", nil)
 	report := collector.Collect("all")
 
@@ -103,4 +106,3 @@ func TestProcessClassification_Rules(t *testing.T) {
 		t.Errorf("Kỳ vọng 'jupyter-lab' là Verified Workload, nhận được: %v, %s", isWorkload, attr)
 	}
 }
-

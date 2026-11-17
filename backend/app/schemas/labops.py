@@ -292,6 +292,12 @@ class MemberCreateRequest(BaseSchema):
     require_passphrase: Optional[bool] = Field(None, alias="requirePassphrase")
     enforce_canary_runtime: Optional[bool] = Field(None, alias="enforceCanaryRuntime")
 
+class ClerkIdentityBindingRequest(BaseSchema):
+    clerk_user_id: str = Field(
+        alias="clerkUserId", min_length=11, max_length=101,
+        pattern=r"^user_[A-Za-z0-9_-]{6,96}$",
+    )
+
 class MemberResponse(BaseSchema):
     id: str
     full_name: str = Field(alias="fullName")

@@ -9,15 +9,9 @@ import (
 
 // AllowedActions định nghĩa danh sách các hành động điều khiển từ xa được phép thực thi
 var AllowedActions = map[string]bool{
-	"INSPECT_HOST":               true,
-	"INSPECT_GPUS":               true,
-	"VERIFY_PROCESS_PID":         true,
-	"PROVISION_DOCKER_WORKSPACE": true,
-	"STOP_DOCKER_WORKSPACE":      true,
-	"SYNC_SSH_AUTHORIZED_KEYS":   true,
-	"INSPECT_WIREGUARD_PEERS":    true,
-	"COLLECT_TELEMETRY":          true,
-	"TERMINATE_PROCESS":          true,
+	"INSPECT_HOST":      true,
+	"INSPECT_GPUS":      true,
+	"COLLECT_TELEMETRY": true,
 }
 
 // NodeSession đại diện cho một phiên kết nối gRPC streaming của Compute Node
@@ -47,6 +41,8 @@ type NodeSession struct {
 	cachedGPU       *pb.GPUTelemetry
 	cachedProcess   *pb.ProcessTelemetry
 	cachedWorkspace *pb.WorkspaceTelemetry
+	hostReceivedAt  time.Time
+	gpuReceivedAt   time.Time
 	telemetryMu     sync.RWMutex
 }
 
@@ -66,12 +62,12 @@ type NodeSummary struct {
 
 // DispatchRequest yêu cầu gửi lệnh tới node từ Controller
 type DispatchRequest struct {
-	NodeID          string            `json:"node_id"`
-	Action          string            `json:"action"`
-	Parameters      map[string]string `json:"parameters"`
-	TimeoutSeconds  int64             `json:"timeout_seconds"`
-	ActorID         string            `json:"actor_id"`
-	IdempotencyKey  string            `json:"idempotency_key"`
+	NodeID         string            `json:"node_id"`
+	Action         string            `json:"action"`
+	Parameters     map[string]string `json:"parameters"`
+	TimeoutSeconds int64             `json:"timeout_seconds"`
+	ActorID        string            `json:"actor_id"`
+	IdempotencyKey string            `json:"idempotency_key"`
 }
 
 // DispatchResponse kết quả trả về cho Controller
@@ -85,4 +81,3 @@ type DispatchResponse struct {
 	Result       any    `json:"result,omitempty"`
 	DurationMs   int64  `json:"duration_ms"`
 }
-

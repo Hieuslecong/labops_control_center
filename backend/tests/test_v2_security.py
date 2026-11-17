@@ -1,7 +1,11 @@
 import os
+import json
+import hmac
+import hashlib
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -12,10 +16,20 @@ from app.core.security import (AuthError, issue_token, principal_from_authorizat
 SECRET = "unit-secret"
 
 
+def sign_payload(payload):
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(SECRET.encode(), encoded, hashlib.sha256).digest()
+    return f"{security._b64e(encoded)}.{security._b64e(signature)}"
+
+
 class TestV2Security(unittest.TestCase):
     def setUp(self):
-        os.environ["LABOPS_SESSION_SECRET"] = SECRET
-        os.environ["LABOPS_NODE_AGENT_TOKEN"] = "agent-token-xyz"
+        self.environment = patch.dict(os.environ, {
+            "LABOPS_SESSION_SECRET": SECRET,
+            "LABOPS_NODE_AGENT_TOKENS": '{"track":"agent-token-xyz"}',
+        }, clear=True)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
 
     def test_missing_header_401(self):
         with self.assertRaises(AuthError) as c:
@@ -30,9 +44,39 @@ class TestV2Security(unittest.TestCase):
             verify_token(forged)
 
     def test_expired_token_rejected(self):
-        tok = issue_token("alice", "RESEARCHER", ttl=-5)
+        now = int(time.time())
+        tok = sign_payload({
+            "sub": "alice", "role": "RESEARCHER", "member_id": None,
+            "iat": now - 10, "exp": now - 5, "iss": "labops-bff", "aud": "labops-api",
+        })
         with self.assertRaises(AuthError):
             verify_token(tok)
+
+    def test_token_requires_bff_issuer_and_api_audience(self):
+        now = int(time.time())
+        token = sign_payload({
+            "sub": "alice", "role": "RESEARCHER", "member_id": None,
+            "iat": now, "exp": now + 60, "iss": "labops-local", "aud": "labops-web",
+        })
+        with self.assertRaises(AuthError):
+            verify_token(token)
+
+    def test_token_lifetime_is_bounded_and_issued_at_is_required(self):
+        now = int(time.time())
+        token = sign_payload({
+            "sub": "alice", "role": "RESEARCHER", "member_id": None,
+            "iat": now, "exp": now + 901, "iss": "labops-bff", "aud": "labops-api",
+        })
+        with self.assertRaises(AuthError):
+            verify_token(token)
+
+        missing_iat = {
+            "sub": "alice", "role": "RESEARCHER", "member_id": None,
+            "exp": now + 60, "iss": "labops-bff", "aud": "labops-api",
+        }
+        token = sign_payload(missing_iat)
+        with self.assertRaises(AuthError):
+            verify_token(token)
 
     def test_no_secret_fails_closed(self):
         os.environ["LABOPS_SESSION_SECRET"] = ""
@@ -45,6 +89,14 @@ class TestV2Security(unittest.TestCase):
         with self.assertRaises(AuthError) as c:
             require_role(p, "ADMIN")
         self.assertEqual(c.exception.status, 403)
+
+    def test_api_token_carries_and_validates_stable_external_subject(self):
+        principal = verify_token(issue_token(
+            "user_abc123", "RESEARCHER", auth_subject="user_abc123",
+        ))
+        self.assertEqual(principal.auth_subject, "user_abc123")
+        with self.assertRaises(AuthError):
+            issue_token("alice", "RESEARCHER", auth_subject="../alice")
 
     def test_ownership(self):
         p = verify_token(issue_token("alice", "RESEARCHER"))

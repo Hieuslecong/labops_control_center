@@ -92,17 +92,8 @@ class LegacyWireGuardProvider(VPNProvider):
         return {"total_rx_bytes": 0, "total_tx_bytes": 0}
 
     def get_client_configuration(self, device_id: str) -> str:
-        peer = self.adapter.peers.get(device_id) or {}
-        client_ip = peer.get("client_ip", "10.88.30.2")
-        return (
-            "[Interface]\n"
-            "PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
-            f"Address = {client_ip}/32\n"
-            "DNS = 1.1.1.1\n\n"
-            "[Peer]\n"
-            "PublicKey = jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=\n"
-            "Endpoint = 118.70.169.236:2204\n"
-            "AllowedIPs = 10.88.30.0/24, 192.168.167.250/32\n"
+        raise VPNProviderError(
+            "LEGACY_VPN_READ_ONLY: Không thể cấp cấu hình client hoặc khóa WireGuard từ adapter legacy."
         )
 
     def reconcile_state(self) -> Dict[str, Any]:

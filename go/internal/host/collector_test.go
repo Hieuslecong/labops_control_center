@@ -1,6 +1,7 @@
 package host
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,6 +9,9 @@ import (
 )
 
 func TestHostCollector_Collect(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("host telemetry collector test reads live Rack host metrics")
+	}
 	cfg := &config.AgentConfig{
 		ServerID:   "track",
 		ServerName: "Test Rack Server",
@@ -72,4 +76,3 @@ func TestHostCollector_CPUSampleDelta(t *testing.T) {
 		t.Errorf("Kỳ vọng usage ~53.33%%, nhận được: %f", usage)
 	}
 }
-

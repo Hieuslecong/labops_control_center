@@ -10,8 +10,8 @@ import (
 )
 
 type ScorecardCLIOutput struct {
-	Date   string  `json:"date"`
-	Repo   struct {
+	Date string `json:"date"`
+	Repo struct {
 		Name   string `json:"name"`
 		Commit string `json:"commit"`
 	} `json:"repo"`

@@ -68,9 +68,7 @@ export async function GET(request: Request) {
     }
 
     const metadataRole = String(
-      (sessionClaims?.metadata as { role?: string } | undefined)?.role ||
-        (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role ||
-        ''
+      (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role || ''
     ).toUpperCase();
 
     // Default-deny: Mặc định RESEARCHER, chỉ nâng quyền ADMIN khi có xác thực org:admin hoặc metadata ADMIN

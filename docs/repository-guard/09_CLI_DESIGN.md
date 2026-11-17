@@ -1,51 +1,38 @@
-# LABOPS REPOSITORY GUARD — CLI DESIGN (PHASE 4 & 19)
-**Binary:** `bin/labops`  
-**Target:** Researcher Workspaces & Terminal Usage  
+# AIOTGIT CLI Design — Current Source Behavior
 
----
+Snapshot: 2026-11-17
 
-## 1. CÚ PHÁP VÀ LỆNH HỖ TRỢ
+## Supported commands
 
-```bash
-# 1. Clone an toàn qua Security Gateway
-labops clone <repo_url> [--ref <ref>] [--dest <path>]
+AIOTGIT exposes only:
 
-# 2. Liệt kê các yêu cầu kiểm duyệt gần đây
-labops repo list
+- aiotgit clone [-b BRANCH | --ref REF] URL [DESTINATION]
+- aiotgit status [REQUEST_ID]
 
-# 3. Xem trạng thái chi tiết của một yêu cầu
-labops repo status <request_id>
+The ordinary Git executable remains available for local operations such as status, log, branch, add and commit. AIOTGIT has no generic Git passthrough and does not fall back to GitHub when its Broker is unavailable.
 
-# 4. Phân phối thủ công một artifact đã duyệt vào thư mục
-labops repo deliver <request_id> <dest_directory>
+The legacy labops clone and labops repo commands are disabled in the current Go source. They return a nonzero status and direct the user to AIOTGIT. Regression tests cover this denial.
 
-# 5. Xem phiên bản
-labops version
-```
+## Clone behavior
 
----
+1. Read a short-lived workspace-scoped token from a user-owned private regular file.
+2. Validate the workspace-relative destination and reject symlink path components.
+3. Submit the repository/ref and idempotency key to the configured Broker API.
+4. Poll only the request bound to the signed workspace capability.
+5. Do not create a destination while pending, rejected, failed or unavailable.
+6. Retrieve an approved Git bundle only after an approved state.
+7. Verify bundle digest and pinned commit.
+8. Import with system Git while disabling hooks and ambient Git configuration.
+9. Verify HEAD and clean working tree, remove the temporary bundle remote, and atomically publish without replacing an existing destination.
 
-## 2. TRẢI NGHIỆM TERMINAL THỰC TẾ
+Unit tests use a fake Broker and generated temporary Git bundles. They verify local Git metadata and local commit operations. No live approval-to-delivery integration was run.
 
-```text
-==========================================================
-🛡️  LabOps Repository Guard — Automated Security Gateway
-==========================================================
-Kho mã:   https://github.com/gin-gonic/gin
-Nhánh/Ref: v1.9.1
-Người gửi: researcher
-----------------------------------------------------------
-Mã yêu cầu: req-b2a8c4f109de
-Đang xử lý quy trình kiểm duyệt an toàn...
-🔍 Đang xác minh nguồn kho mã và phân giải commit SHA...
-⚡ Đã gắn commit SHA: d354a480d0d5d4d5e6b7c8a9f0e1d2c3b4a5f6e7
-📦 Đang kiểm tra bộ nhớ đệm kho mã đã được phê duyệt...
-📥 Cache Miss -> Đang tải về vùng Quarantine cô lập (No-Exec, Limit 500MB)...
-🔬 Đang chạy Trivy Security Scan (Lỗ hổng CVE, Secrets, Misconfig)...
-⚖️  Đang đánh giá theo chính sách bảo mật LabOps...
-----------------------------------------------------------
-✅ [AUTO_APPROVED] Kho mã đạt 100% tiêu chuẩn an toàn LabOps!
-🔒 Chữ ký số SHA-256 Digest: 8f4a2b1c9d...
-🚀 Đang phân phối mã nguồn đã xác minh vào: gin ...
-🎉 Hoàn tất phân phối mã! Thư mục đã sẵn sàng để nghiên cứu.
-```
+## Status behavior
+
+Without an ID, the CLI requests the newest workspace-scoped request. With an ID, it validates the request ID and asks the Broker for only that request. Authorization is server-side; caller-supplied owner IDs are not used.
+
+## Provisioning is not complete
+
+No actual workspace image or provisioner installs the CLI, Broker URL or short-lived token. There is no tested terminal broker or no-network pilot. The command examples describe the source interface, not a currently available production workspace feature.
+
+Overall status: unit-tested, NOT_READY for runtime use.

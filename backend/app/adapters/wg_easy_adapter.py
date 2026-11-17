@@ -5,7 +5,7 @@ Cung cấp toàn bộ tính năng quản trị WireGuard VPN tự động:
 - Lấy tệp cấu hình .conf dùng ngay
 - Quản lý kích hoạt/vô hiệu hóa/thu hồi peer
 - Giám sát lưu lượng Rx/Tx và thời điểm Handshake thực tế
-- Tự động đảm bảo subnet 10.88.40.0/24 được áp dụng
+- Kiểm tra subnet mà không thay đổi cấu hình mạng
 """
 from __future__ import annotations
 
@@ -35,10 +35,11 @@ class WgEasyAdapter(VPNProvider):
         timeout: int = 5,
     ) -> None:
         self.base_url = (base_url or getattr(settings, "WG_EASY_API_URL", "http://127.0.0.1:51821")).rstrip("/")
-        self.username = username or getattr(settings, "WG_EASY_ADMIN_USER", "admin")
-        self.password = password or getattr(settings, "WG_EASY_ADMIN_PASSWORD", "LabOpsSecureVPN2026!")
+        self.username = username if username is not None else getattr(settings, "WG_EASY_ADMIN_USER", "")
+        self.password = password or getattr(settings, "WG_EASY_ADMIN_PASSWORD", "")
         self.public_endpoint = public_endpoint or getattr(settings, "WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
         self.vpn_subnet = vpn_subnet or getattr(settings, "WG_EASY_VPN_SUBNET", "10.88.40.0/24")
+        self.enabled = bool(getattr(settings, "WG_EASY_ENABLED", True))
         self.timeout = timeout
         self._circuit_open_until = 0.0
         self._failure_count = 0
@@ -49,6 +50,8 @@ class WgEasyAdapter(VPNProvider):
         return "wg-easy"
 
     def _auth_header(self) -> str:
+        if not self.username or not self.password:
+            raise VPNProviderError("Chưa cấu hình thông tin xác thực wg-easy")
         raw = f"{self.username}:{self.password}".encode("utf-8")
         return f"Basic {base64.b64encode(raw).decode('ascii')}"
 
@@ -59,6 +62,8 @@ class WgEasyAdapter(VPNProvider):
         data: Optional[Dict[str, Any]] = None,
         is_text_response: bool = False,
     ) -> Any:
+        if not self.enabled:
+            raise VPNProviderError("wg-easy integration is disabled")
         now = time.time()
         if now < self._circuit_open_until:
             raise VPNProviderError(f"wg-easy API đang tạm ngưng do lỗi kết nối trước đó (chờ thử lại)")
@@ -88,63 +93,79 @@ class WgEasyAdapter(VPNProvider):
                 except json.JSONDecodeError:
                     return body.decode("utf-8", errors="replace")
         except HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
-            msg = f"wg-easy API trả về mã lỗi {e.code}: {e.reason}"
-            try:
-                parsed = json.loads(err_body)
-                if isinstance(parsed, dict) and parsed.get("message"):
-                    msg = f"{msg} — {parsed['message']}"
-            except Exception:
-                if err_body:
-                    msg = f"{msg} — {err_body[:200]}"
-            raise VPNProviderError(msg) from e
+            raise VPNProviderError(f"wg-easy API trả về mã lỗi HTTP {e.code}") from e
         except (URLError, TimeoutError, OSError) as e:
             self._failure_count += 1
             if self._failure_count >= 3:
                 self._circuit_open_until = time.time() + 15.0
-            raise VPNProviderError(f"Không thể kết nối tới wg-easy tại {self.base_url}: {e}") from e
+            raise VPNProviderError("Không thể kết nối tới wg-easy API đã cấu hình") from e
 
     def ensure_subnet_configured(self) -> None:
-        """Đảm bảo CIDR mạng WireGuard trong wg-easy khớp với 10.88.40.0/24."""
-        try:
-            iface = self._request("api/admin/interface", method="GET")
-            if isinstance(iface, dict):
-                current_cidr = iface.get("ipv4Cidr", "")
-                if current_cidr != self.vpn_subnet:
-                    logger.info(f"Cập nhật subnet WireGuard wg-easy từ {current_cidr} sang {self.vpn_subnet}")
-                    self._request(
-                        "api/admin/interface/cidr",
-                        method="POST",
-                        data={"ipv4Cidr": self.vpn_subnet, "ipv6Cidr": "fdcc:ad94:bacf:61a4::cafe:0/112"},
-                    )
-        except Exception as e:
-            logger.warning(f"Không thể kiểm tra/cập nhật subnet WireGuard trên wg-easy: {e}")
+        """Cảnh báo khi CIDR khác cấu hình; không thay đổi mạng đang hoạt động."""
+        iface = self._request("api/admin/interface", method="GET")
+        if not isinstance(iface, dict) or not isinstance(iface.get("ipv4Cidr"), str):
+            raise VPNProviderError("wg-easy không trả về CIDR hợp lệ")
+        if iface["ipv4Cidr"] != self.vpn_subnet:
+            logger.warning("CIDR wg-easy khác cấu hình LabOps: thực tế %s, cấu hình %s", iface["ipv4Cidr"], self.vpn_subnet)
 
     def list_devices(self) -> List[Dict[str, Any]]:
         raw_list = self._request("api/client", method="GET")
         if not isinstance(raw_list, list):
-            return []
+            raise VPNProviderError("wg-easy trả về danh sách thiết bị không hợp lệ")
         devices = []
+        seen_ids = set()
         for c in raw_list:
             if not isinstance(c, dict):
-                continue
+                raise VPNProviderError("wg-easy trả về phần tử thiết bị không hợp lệ")
+            external_id = c.get("id")
+            enabled = c.get("enabled")
+            if not isinstance(external_id, (str, int)) or isinstance(external_id, bool) or not str(external_id).strip():
+                raise VPNProviderError("wg-easy trả về thiết bị không có ID hợp lệ")
+            external_id = str(external_id)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", external_id) or external_id in seen_ids:
+                raise VPNProviderError("wg-easy trả về ID thiết bị không hợp lệ hoặc trùng lặp")
+            seen_ids.add(external_id)
+            if type(enabled) is not bool:
+                raise VPNProviderError("wg-easy trả về trạng thái enabled không hợp lệ")
+            counters = []
+            for field in ("transferRx", "transferTx"):
+                value = c.get(field, 0)
+                if type(value) is not int or value < 0:
+                    raise VPNProviderError("wg-easy trả về bộ đếm lưu lượng không hợp lệ")
+                counters.append(value)
+            name = c.get("name", "Device")
+            if not isinstance(name, str):
+                raise VPNProviderError("wg-easy trả về tên thiết bị không hợp lệ")
             devices.append({
-                "id": str(c.get("id")),
+                "id": external_id,
                 "provider": self.name,
-                "external_id": c.get("id"),
-                "name": str(c.get("name") or "Device"),
+                "external_id": external_id,
+                "name": name or "Device",
                 "vpn_ip": str(c.get("ipv4Address") or "").split("/")[0],
                 "public_key": str(c.get("publicKey") or ""),
-                "enabled": bool(c.get("enabled", True)),
-                "status": "ACTIVE" if c.get("enabled", True) else "DISABLED",
+                "enabled": enabled,
+                "status": "ACTIVE" if enabled else "DISABLED",
                 "last_handshake": c.get("latestHandshakeAt"),
-                "transfer_rx": int(c.get("transferRx") or 0),
-                "transfer_tx": int(c.get("transferTx") or 0),
+                "transfer_rx": counters[0],
+                "transfer_tx": counters[1],
                 "created_at": c.get("createdAt"),
                 "updated_at": c.get("updatedAt"),
                 "expires_at": c.get("expiresAt"),
             })
         return devices
+
+    @staticmethod
+    def _client_path(device_id: str, suffix: str = "") -> str:
+        if not isinstance(device_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device_id):
+            raise VPNProviderError("wg-easy device ID không hợp lệ")
+        return f"api/client/{device_id}{suffix}"
+
+    @staticmethod
+    def _check_action_response(response: Any, action: str) -> None:
+        if not isinstance(response, dict):
+            raise VPNProviderError(f"wg-easy trả về phản hồi {action} không hợp lệ")
+        if "success" in response and response.get("success") is not True:
+            raise VPNProviderError(f"wg-easy không xác nhận {action} thành công")
 
     def create_device(
         self,
@@ -157,20 +178,15 @@ class WgEasyAdapter(VPNProvider):
         self.ensure_subnet_configured()
         payload = {"name": name, "expiresAt": expires_at}
         res = self._request("api/client", method="POST", data=payload)
-        client_id = res.get("clientId")
+        client_id = res.get("clientId") if isinstance(res, dict) else None
         if not client_id:
-            raise VPNProviderError(f"wg-easy không trả về clientId hợp lệ: {res}")
+            raise VPNProviderError("wg-easy không trả về clientId hợp lệ")
         # Lấy thông tin chi tiết client vừa tạo
         device = self.get_device(str(client_id))
         if not device:
-            return {
-                "id": str(client_id),
-                "provider": self.name,
-                "external_id": client_id,
-                "name": name,
-                "status": "ACTIVE",
-                "enabled": true,
-            }
+            raise VPNProviderError("Đã yêu cầu tạo client nhưng chưa xác minh được client trên wg-easy")
+        if device.get("enabled") is not True:
+            raise VPNProviderError("Client mới tạo chưa được xác minh ở trạng thái enabled")
         return device
 
     def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -181,29 +197,40 @@ class WgEasyAdapter(VPNProvider):
         return None
 
     def disable_device(self, device_id: str) -> bool:
-        res = self._request(f"api/client/{device_id}/disable", method="POST", data={})
-        return bool(res.get("success", True))
+        response = self._request(self._client_path(device_id, "/disable"), method="POST", data={})
+        self._check_action_response(response, "disable")
+        device = self.get_device(device_id)
+        if not device or device.get("enabled") is not False:
+            raise VPNProviderError("Không xác minh được trạng thái disabled của thiết bị")
+        return True
 
     def enable_device(self, device_id: str) -> bool:
-        res = self._request(f"api/client/{device_id}/enable", method="POST", data={})
-        return bool(res.get("success", True))
+        response = self._request(self._client_path(device_id, "/enable"), method="POST", data={})
+        self._check_action_response(response, "enable")
+        device = self.get_device(device_id)
+        if not device or device.get("enabled") is not True:
+            raise VPNProviderError("Không xác minh được trạng thái enabled của thiết bị")
+        return True
 
     def revoke_device(self, device_id: str) -> bool:
-        res = self._request(f"api/client/{device_id}", method="DELETE")
-        return bool(res.get("success", True))
+        response = self._request(self._client_path(device_id), method="DELETE")
+        self._check_action_response(response, "revoke")
+        if self.get_device(device_id) is not None:
+            raise VPNProviderError("wg-easy vẫn trả về thiết bị sau yêu cầu revoke")
+        return True
 
     def get_client_configuration(self, device_id: str) -> str:
         """Tải file .conf từ wg-easy để đóng gói trực tiếp vào ZIP."""
-        conf_text = self._request(f"api/client/{device_id}/configuration", method="GET", is_text_response=True)
+        conf_text = self._request(self._client_path(device_id, "/configuration"), method="GET", is_text_response=True)
         if not conf_text or not isinstance(conf_text, str) or "[Interface]" not in conf_text:
             raise VPNProviderError(f"Không thể lấy tệp cấu hình hợp lệ cho thiết bị {device_id}")
-        if self.public_endpoint:
-            conf_text = re.sub(r"Endpoint\s*=\s*[^\r\n]+", f"Endpoint = {self.public_endpoint}", conf_text)
         return conf_text
 
     def get_connection_status(self) -> Dict[str, Any]:
         try:
             iface = self._request("api/admin/interface", method="GET")
+            if not isinstance(iface, dict) or not isinstance(iface.get("ipv4Cidr"), str) or not iface["ipv4Cidr"].strip():
+                raise VPNProviderError("wg-easy không trả về interface schema hợp lệ")
             clients = self.list_devices()
             active_handshakes = sum(
                 1 for c in clients if c.get("last_handshake") and c.get("status") == "ACTIVE"
@@ -214,17 +241,17 @@ class WgEasyAdapter(VPNProvider):
             return {
                 "provider": self.name,
                 "service_health": "HEALTHY",
-                "status": "ACTIVE",
-                "container_running": True,
+                "status": "API_RESPONSIVE",
+                "container_running": None,
                 "public_endpoint": self.public_endpoint,
-                "vpn_subnet": iface.get("ipv4Cidr", self.vpn_subnet) if isinstance(iface, dict) else self.vpn_subnet,
-                "interface_name": "wg0 (wg-easy)",
+                "public_endpoint_source": "configuration",
+                "vpn_subnet": iface["ipv4Cidr"],
+                "interface_name": iface.get("name"),
                 "server_public_key": server_pub,
                 "total_clients": len(clients),
                 "active_handshakes": active_handshakes,
                 "total_rx_bytes": total_rx,
                 "total_tx_bytes": total_tx,
-                "version": "15.x",
                 "web_ui_url": self.base_url,
                 "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
@@ -233,7 +260,7 @@ class WgEasyAdapter(VPNProvider):
                 "provider": self.name,
                 "service_health": "UNAVAILABLE",
                 "status": "UNAVAILABLE",
-                "container_running": False,
+                "container_running": None,
                 "public_endpoint": self.public_endpoint,
                 "vpn_subnet": self.vpn_subnet,
                 "error": str(e),

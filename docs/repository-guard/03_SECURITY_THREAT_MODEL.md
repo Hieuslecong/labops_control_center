@@ -28,7 +28,7 @@
 | **THREAT-05** | **SSRF / Internal Network Probing** | URL độc hại như `https://127.0.0.1/...` hoặc `file:///etc/passwd`. | `NormalizeAndValidateURL` chỉ cho phép giao thức `https://` và tên miền `github.com` (hoặc `gitlab.com`); cấm credentials, cấm IP nội bộ, cấm domain cục bộ. |
 | **THREAT-06** | **Credential Exposure in Logs / UI** | Khóa API, token phát hiện trong mã bị in ra màn hình hoặc audit log dưới dạng plaintext. | Hàm `maskSecret()` tự động che giấu giá trị bí mật (chỉ giữ 3 ký tự đầu và 3 ký tự cuối, ví dụ `AKI******PLE`). |
 | **THREAT-07** | **Scanner Crash Fail-Open** | Scanner gặp lỗi hoặc timeout nhưng hệ thống tự ý phê duyệt do nhánh fallback sai sót. | Động cơ chính sách áp dụng nguyên tắc **Fail-Closed**: nếu một loại quét bắt buộc gặp lỗi (`INCOMPLETE`), trạng thái bắt buộc là `REVIEW_REQUIRED` hoặc `FAILED`, không bao giờ `AUTO_APPROVED`. |
-| **THREAT-08** | **Direct Git Bypass** | Thành viên chạy trực tiếp `git clone` trong container bỏ qua cổng kiểm duyệt. | Thí điểm Network Egress Policy (chặn cổng 443 và 22 đến GitHub IP) trên container, chỉ cho phép nhận mã qua `labops clone`. |
+| **THREAT-08** | **Direct Git Bypass** | Thành viên chạy Git hoặc HTTP downloader trực tiếp khi workspace còn outbound access, hoặc dùng host SSH shell. | AIOTGIT chỉ kiểm soát luồng đi qua Broker; direct egress/host-shell boundary chưa được kiểm thử. Cần pilot mới với egress boundary và terminal broker riêng. Host firewall scripts hiện fail closed và không áp dụng rule. Trạng thái: HOST_ENFORCEMENT_NOT_VERIFIED. |
 
 ---
 

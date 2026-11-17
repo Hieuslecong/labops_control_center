@@ -14,9 +14,24 @@ function b64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-export function issueLabOpsToken(username: string, role: 'ADMIN' | 'RESEARCHER', secret: string): string {
+export function issueLabOpsToken(
+  username: string,
+  role: 'ADMIN' | 'RESEARCHER',
+  secret: string,
+  authSubject?: string
+): string {
+  const issuedAt = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
-    JSON.stringify({ sub: username, role, member_id: null, exp: Math.floor(Date.now() / 1000) + 300 })
+    JSON.stringify({
+      sub: username,
+      role,
+      member_id: null,
+      auth_subject: authSubject || null,
+      iat: issuedAt,
+      exp: issuedAt + 300,
+      iss: 'labops-bff',
+      aud: 'labops-api'
+    })
   );
   const sig = createHmac('sha256', secret).update(payload).digest();
   return `${b64url(payload)}.${b64url(sig)}`;
@@ -39,6 +54,7 @@ export async function proxyLabOps(
   const localSession = await getLocalSession();
   let username: string;
   let role: 'ADMIN' | 'RESEARCHER';
+  let authSubject: string | undefined;
   if (localSession) {
     ({ username, role } = localSession);
   } else {
@@ -50,20 +66,24 @@ export async function proxyLabOps(
     }
     const { userId, orgId, has, sessionClaims } = session;
     if (!userId) return NextResponse.json({ detail: 'Yêu cầu đăng nhập' }, { status: 401 });
+    // Only server-managed Clerk public metadata or the verified organization
+    // permission can grant Admin. Generic/custom session claims are not an
+    // authorization source.
     const metadataRole = String(
-      (sessionClaims?.metadata as { role?: string } | undefined)?.role ||
       (sessionClaims?.publicMetadata as { role?: string } | undefined)?.role || ''
     ).toUpperCase();
     role = metadataRole === 'ADMIN' || (orgId && typeof has === 'function' && has({ role: 'org:admin' }))
       ? 'ADMIN' : 'RESEARCHER';
-    username = (sessionClaims?.username as string | undefined) ||
-      (sessionClaims?.email as string | undefined)?.split('@')[0] || userId;
+    // User-controlled profile names and email prefixes are not stable LabOps identities.
+    // The backend resolves this immutable Clerk subject to an Admin-bound member record.
+    username = userId;
+    authSubject = userId;
   }
 
   const method = request.method;
   const originHeader = request.headers.get('origin');
-  if (method !== 'GET' && originHeader && originHeader !== new URL(request.url).origin) {
-    return NextResponse.json({ detail: 'Nguồn yêu cầu (Origin) không hợp lệ' }, { status: 403 });
+  if (method !== 'GET' && originHeader !== new URL(request.url).origin) {
+    return NextResponse.json({ detail: 'Nguồn yêu cầu (Origin) không hợp lệ hoặc bị thiếu' }, { status: 403 });
   }
 
   const path = segments.join('/').replace(/^\/+/, '');
@@ -75,7 +95,7 @@ export async function proxyLabOps(
     return NextResponse.json({ detail: 'Chỉ quản trị viên LabOps được phép thực hiện thao tác này' }, { status: 403 });
   }
 
-  const token = issueLabOpsToken(username, role, secret);
+  const token = issueLabOpsToken(username, role, secret, authSubject);
 
   const search = new URL(request.url).search;
   try {

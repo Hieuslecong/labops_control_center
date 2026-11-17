@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,29 +33,32 @@ func main() {
 	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "127.0.0.1")
 	pkiDir := getEnvStr("LABOPS_GATEWAY_PKI_DIR", "")
 	tokenSecret := getEnvStr("LABOPS_GATEWAY_TOKEN_SECRET", "")
-	if tokenSecret == "" {
-		tokenSecret = getEnvStr("LABOPS_SESSION_SECRET", "labops-zero-trust-secret-salt-2026")
-	}
-
 	controlSecret := getEnvStr("LABOPS_GATEWAY_CONTROL_SECRET", "")
-	if controlSecret == "" {
-		controlSecret = getEnvStr("LABOPS_SESSION_SECRET", "")
+	if !gateway.IsLoopbackControlBind(httpBind) {
+		logger.Error("LABOPS_GATEWAY_HTTP_BIND must be a loopback IP; public control-plane binding is forbidden")
+		os.Exit(1)
 	}
-	if controlSecret == "" {
-		controlSecret = getEnvStr("LABOPS_ADMIN_API_TOKEN", "")
+	if len(tokenSecret) < 32 {
+		logger.Error("LABOPS_GATEWAY_TOKEN_SECRET must be explicitly configured with at least 32 characters")
+		os.Exit(1)
+	}
+	if len(controlSecret) < 32 {
+		logger.Error("LABOPS_GATEWAY_CONTROL_SECRET must be explicitly configured with at least 32 characters")
+		os.Exit(1)
 	}
 
 	if pkiDir == "" {
-		home, _ := os.UserHomeDir()
-		defaultDir := filepath.Join(home, ".labops", "pki")
-		if err := os.MkdirAll(defaultDir, 0700); err == nil {
-			pkiDir = defaultDir
-		} else {
-			// Fallback sang data/pki trong thư mục làm việc hiện tại
-			cwd, _ := os.Getwd()
-			pkiDir = filepath.Join(cwd, "data", "pki")
-			_ = os.MkdirAll(pkiDir, 0700)
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			logger.Error("Cannot resolve the service home directory for PKI state")
+			os.Exit(1)
 		}
+		defaultDir := filepath.Join(home, ".labops", "pki")
+		if err := os.MkdirAll(defaultDir, 0700); err != nil {
+			logger.Error("Cannot create PKI state directory", "err", err)
+			os.Exit(1)
+		}
+		pkiDir = defaultDir
 	}
 
 	logger.Info("Cấu hình Agent Gateway",
@@ -63,6 +67,25 @@ func main() {
 		"bind_addr", bindAddr,
 		"pki_dir", pkiDir,
 	)
+
+	// Load and validate authorization state before generating or serving any PKI material.
+	revocationFile := filepath.Join(pkiDir, "revocations.json")
+	rm := pki.NewRevocationManagerWithPersistence(revocationFile)
+	if err := rm.LoadError(); err != nil {
+		logger.Error("Invalid revocation state", "err", err)
+		os.Exit(1)
+	}
+	if !rm.StatePresent() {
+		rawBootstrap := strings.TrimSpace(os.Getenv("LABOPS_GATEWAY_BOOTSTRAP_NODES"))
+		if rawBootstrap == "" {
+			logger.Error("Revocation state is missing; set LABOPS_GATEWAY_BOOTSTRAP_NODES explicitly before first startup")
+			os.Exit(1)
+		}
+		if err := rm.BootstrapAllowedNodes(strings.Split(rawBootstrap, ",")); err != nil {
+			logger.Error("Gateway allowlist bootstrap failed", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	// 1. Khởi tạo / nạp Root CA
 	ca, err := pki.GenerateOrLoadCA(pkiDir)
@@ -86,15 +109,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Khởi tạo Revocation & Token Manager với lưu trữ bền vững trên đĩa
-	revocationFile := filepath.Join(pkiDir, "revocations.json")
-	rm := pki.NewRevocationManagerWithPersistence(revocationFile)
-	// Chỉ thêm allow mặc định nếu chưa từng có danh sách revoked/allowed được lưu trước đó
-	if !rm.IsNodeAllowed("track") && rm.IsNodeAllowed("track") {
-		rm.AllowNode("track")
-		rm.AllowNode("workstation")
-	}
-
+	// 3. Token manager uses an explicitly configured secret; no default secret exists.
 	tm := pki.NewEnrollmentTokenManager(tokenSecret)
 
 	// 4. Cấu hình TLS 1.3 mTLS cho gRPC
@@ -174,4 +189,3 @@ func getEnvInt(key string, defVal int) int {
 	}
 	return defVal
 }
-

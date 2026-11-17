@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 )
 
 func TestTunnelClientEndToEndWithGateway(t *testing.T) {
+	if os.Getenv("LABOPS_ENABLE_LIVE_TESTS") != "1" {
+		t.Skip("loopback Gateway/Agent and host telemetry test requires an isolated live-test opt-in")
+	}
 	tempDir, err := os.MkdirTemp("", "labops-agent-tunnel-test-*")
 	if err != nil {
 		t.Fatalf("Lỗi tạo tempdir: %v", err)
@@ -100,7 +104,7 @@ func TestTunnelClientEndToEndWithGateway(t *testing.T) {
 	gpuCol := gpu.NewCollector()
 	procCol := process.NewCollector(nodeID, gpuCol)
 	procCtrl := process.NewController(procCol)
-	dockerCtrl := docker.NewController("/var/run/docker.sock")
+	dockerCtrl := docker.NewController(filepath.Join(tempDir, "fake-docker.sock"))
 
 	client := NewTunnelClient(cfg, hostCol, gpuCol, procCol, procCtrl, dockerCtrl, nil)
 
@@ -110,7 +114,7 @@ func TestTunnelClientEndToEndWithGateway(t *testing.T) {
 	client.Start(ctx)
 
 	// Đợi Agent kết nối và đăng ký thành công trên Gateway
-	var sess *gateway.NodeSession
+	var sess *gateway.NodeSessionSnapshot
 	for i := 0; i < 20; i++ {
 		time.Sleep(100 * time.Millisecond)
 		s, ok := gwServer.SessionManager().GetSession(nodeID)
@@ -151,4 +155,17 @@ func TestTunnelClientEndToEndWithGateway(t *testing.T) {
 		t.Fatalf("Lệnh COLLECT_TELEMETRY thất bại: %+v", teleResp)
 	}
 	t.Logf("Dispatch COLLECT_TELEMETRY thành công trong %d ms", teleResp.DurationMs)
+}
+
+func TestGatewayReadOnlyActionAllowlistRejectsMutations(t *testing.T) {
+	for _, action := range []string{"INSPECT_HOST", "INSPECT_GPUS", "COLLECT_TELEMETRY"} {
+		if !gatewayReadOnlyActionAllowed(action) {
+			t.Errorf("read-only action %s was denied", action)
+		}
+	}
+	for _, action := range []string{"TERMINATE_PROCESS", "STOP_DOCKER_WORKSPACE", "RUN_SHELL"} {
+		if gatewayReadOnlyActionAllowed(action) {
+			t.Errorf("destructive or arbitrary action %s was allowed without delegated authorization", action)
+		}
+	}
 }

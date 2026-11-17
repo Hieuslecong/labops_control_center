@@ -121,6 +121,11 @@ message HostTelemetry {
   int64 uptime_seconds = 13;
   uint64 net_rx_bytes_sec = 14;
   uint64 net_tx_bytes_sec = 15;
+  string status = 16;
+  string ip_address = 17;
+  string disk_type = 18;
+  string collected_at = 19;
+  bool is_real_host = 20;
 }
 
 message GPUInfo {
@@ -137,6 +142,8 @@ message GPUInfo {
   double power_limit_watts = 11;
   string driver_version = 12;
   repeated GPUProcessInfo processes = 13;
+  string pci_bus_id = 14;
+  string enforcement_state = 15;
 }
 
 message GPUProcessInfo {
@@ -151,6 +158,10 @@ message GPUTelemetry {
   string driver_version = 2;
   int32 gpu_count = 3;
   repeated GPUInfo gpus = 4;
+  string status = 5;
+  string collected_at = 6;
+  string cuda_version = 7;
+  string source = 8;
 }
 
 message ProcessInfo {

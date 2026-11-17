@@ -1,35 +1,23 @@
-# LABOPS REPOSITORY GUARD — NETWORK EGRESS ENFORCEMENT PILOT (PHASE 9 & 19)
-**Scope:** Pilot Docker Workspace Container Only (`ws-pilot`)  
-**Safety Protocol:** Strict Zero-Interruption on Production GPU Jobs & VPN  
+# Workspace Egress Enforcement — Current Status
 
----
+Snapshot: 2026-11-17
+Result: HOST_ENFORCEMENT_NOT_VERIFIED
 
-## 1. NGUYÊN TẮC AN TOÀN
+## Supersedes the earlier pilot proposal
 
-1. **Tuyệt đối không sửa đổi tường lửa toàn cục của Host**: Không chặn các cổng của hệ điều hành Debian host hoặc interface `wg0` của WireGuard `wg-easy`.
-2. **Không ảnh hưởng các workspace khác**: Chỉ áp dụng cho đúng địa chỉ IP của container thí điểm thông qua chain cô lập `LABOPS-PILOT-EGRESS` được gắn vào hook `DOCKER-USER`.
-3. **Rollback 100% trong 1 lệnh**: Mọi thay đổi đều được dọn dẹp sạch sẽ khi chạy kịch bản `scripts/pilot_workspace_rollback.sh`.
+The older proposal to append Docker-specific iptables rules was not applied. The pilot and rollback scripts in the current clone are fail-closed no-op guards and exit with an error. They do not change host firewall, Docker, routing, DNS or network state. No script was executed.
 
----
+The previous claim that a one-command rollback guarantees restoration is withdrawn. No rollback can be claimed without a recorded prior state and verification.
 
-## 2. CHÍNH SÁCH KIỂM SOÁT MẠNG THÍ ĐIỂM
+## Evidence
 
-| Luồng Mạng (Traffic Flow) | Đích Đến / Giao Thức | Hành Động | Giải Thích |
-|---|---|---|---|
-| **Internal DNS** | UDP/TCP Cổng 53 | **ACCEPT** | Cho phép container phân giải tên miền cần thiết. |
-| **LabOps Gateway Agent** | TCP Cổng 9100, 8000 | **ACCEPT** | Cho phép container giao tiếp với CLI `labops clone` và BFF Control Plane. |
-| **Direct Git SSH** | TCP Cổng 22 | **REJECT** | Chặn hoàn toàn thao tác clone/push qua SSH trực tiếp từ workspace. |
-| **Direct GitHub HTTPS** | TCP Cổng 443 đến GitHub CIDRs | **REJECT** | Chặn thao tác `git clone https://github.com/...` trực tiếp bỏ qua cổng kiểm duyệt. |
+- Source attestation rejects a workspace marked REPOSITORY_ENFORCED unless observed Docker NetworkMode is none and the registry records VERIFIED_NO_NETWORK.
+- Fake registry/runtime tests exercise bridge rejection and none-mode attestation.
+- Static egress script safety test passes.
+- No pilot container, Docker network, network namespace or host rule was created.
+- No direct Git, HTTP, proxy, IPv4/IPv6 or DNS bypass was tested from a workspace.
+- Current source has no authenticated terminal broker. The actual Researcher SSH termination point is unknown.
 
----
+## Required next step
 
-## 3. KỊCH BẢN THỰC THI & ROLLBACK
-
-- **Kích hoạt chính sách thí điểm**:
-  ```bash
-  sudo ./scripts/pilot_workspace_egress.sh ws-pilot
-  ```
-- **Hủy bỏ và khôi phục trạng thái ban đầu**:
-  ```bash
-  sudo ./scripts/pilot_workspace_rollback.sh
-  ```
+Use a newly provisioned disposable pilot, not an existing workspace. First implement and test workspace provisioning, identity-scoped terminal attach, durable artifact storage, Broker channel, mount/capability restrictions and package/data access. Then test direct downloads inside the pilot. Host firewall changes require a separate operator-approved change request with exact rules, scope, outside-band access and verified rollback.

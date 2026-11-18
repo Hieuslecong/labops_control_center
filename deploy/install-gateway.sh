@@ -31,12 +31,19 @@ else
 fi
 chmod +x "${ROOT_DIR}/bin/labops-gateway"
 
-# 2. Khởi tạo thư mục PKI
-PKI_DIR="/home/aiot-1/.labops/pki"
+# 2. Khởi tạo thư mục PKI (chống symlink escalation khi chạy dưới quyền root)
+LABOPS_STATE_DIR="/home/aiot-1/.labops"
+PKI_DIR="${LABOPS_STATE_DIR}/pki"
+if [ -L "${LABOPS_STATE_DIR}" ] || [ -L "${PKI_DIR}" ]; then
+    echo "❌ Lỗi bảo mật: phát hiện symlink tại ${LABOPS_STATE_DIR} hoặc ${PKI_DIR}, từ chối thay đổi quyền sở hữu."
+    exit 1
+fi
 mkdir -p "${PKI_DIR}"
-chmod 700 "${PKI_DIR}"
+chmod 700 "${LABOPS_STATE_DIR}" "${PKI_DIR}"
 if [ "$(id -u)" -eq 0 ]; then
-    chown -R aiot-1:aiot-1 "/home/aiot-1/.labops"
+    find "${LABOPS_STATE_DIR}" -maxdepth 3 -type l -exec sh -c 'echo "❌ Từ chối symlink trong PKI: $1"; exit 1' _ {} \;
+    chown -h aiot-1:aiot-1 "${LABOPS_STATE_DIR}" "${PKI_DIR}"
+    find "${PKI_DIR}" -maxdepth 2 \( -type f -o -type d \) -exec chown -h aiot-1:aiot-1 {} +
 fi
 echo "📁 [2/3] Đã cấu hình thư mục Root CA PKI: ${PKI_DIR}"
 

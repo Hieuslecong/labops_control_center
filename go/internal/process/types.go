@@ -66,11 +66,16 @@ type ProcessReport struct {
 
 // ControlResult kết quả thực thi tín hiệu tiến trình
 type ControlResult struct {
-	Status      string    `json:"status"`       // TERMINATED | KILLED | TIMEOUT_STILL_RUNNING
-	Action      string    `json:"action"`       // SIGTERM | SIGKILL
-	Ref         string    `json:"ref"`
-	PID         int       `json:"pid"`
-	Message     string    `json:"message"`
-	ExecutedAt  time.Time `json:"executed_at"`
-	PIDsKilled  []int     `json:"pids_killed,omitempty"`
+	Status             string         `json:"status"` // TERMINATED | KILLED | TIMEOUT_STILL_RUNNING | FAILED_STILL_RUNNING | PARTIAL_FAILURE
+	Action             string         `json:"action"` // SIGTERM | SIGKILL
+	Verification       string         `json:"verification"` // VERIFIED | PARTIAL_FAILURE | STILL_RUNNING | FAILED
+	Ref                string         `json:"ref"`
+	PID                int            `json:"pid"`
+	Message            string         `json:"message"`
+	ExecutedAt         time.Time      `json:"executed_at"`
+	PIDsSignaled       []int          `json:"pids_signaled,omitempty"`
+	PIDsKilled         []int          `json:"pids_killed,omitempty"`
+	PIDsRemaining      []int          `json:"pids_remaining,omitempty"`
+	SkippedDescendants []string       `json:"skipped_descendants,omitempty"`
+	SignalErrors       map[int]string `json:"signal_errors,omitempty"`
 }

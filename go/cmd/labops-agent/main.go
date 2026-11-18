@@ -30,8 +30,12 @@ func main() {
 	logger.Info("🚀 KHỞI ĐỘNG LABOPS GO NODE AGENT (HIGH-PERFORMANCE)")
 	logger.Info("==========================================================")
 
-	// 2. Nạp cấu hình runtime
+	// 2. Nạp cấu hình runtime & kiểm tra fail-closed
 	cfg := config.LoadFromEnv()
+	if err := cfg.Validate(); err != nil {
+		logger.Error("Cấu hình Node Agent không hợp lệ (fail-closed)", "err", err)
+		os.Exit(1)
+	}
 	logger.Info("Cấu hình Node Agent",
 		"server_id", cfg.ServerID,
 		"server_name", cfg.ServerName,
@@ -41,11 +45,15 @@ func main() {
 		"docker_socket", cfg.DockerSocket,
 	)
 
-	// 3. Khởi tạo các bộ thu thập dữ liệu (Zero fork-exec host collector)
+	// 3. Khởi tạo các bộ thu thập dữ liệu (Zero fork-exec host collector) & Trusted Workspace Registry
 	hostCollector := host.NewCollector(cfg)
 	gpuCollector := gpu.NewCollector()
 	procCollector := process.NewCollector(cfg.ServerID, gpuCollector)
-	dockerCtrl := docker.NewController(cfg.DockerSocket)
+	wsRegistry, regErr := docker.NewTrustedRegistry(cfg.WorkspaceRegistryPath)
+	if regErr != nil {
+		logger.Error("Trusted Workspace Registry bị hỏng hoặc không đọc được (fail-closed cho thao tác Docker)", "path", cfg.WorkspaceRegistryPath, "err", regErr)
+	}
+	dockerCtrl := docker.NewControllerWithRegistry(cfg.DockerSocket, cfg.ServerID, wsRegistry)
 
 	// 4. Khởi chạy goroutine lấy mẫu định kỳ trong nền (Background sampling)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -7,23 +7,27 @@ import (
 
 // ProtectedProcessNames danh sách tên tiến trình hệ thống bất khả xâm phạm
 var ProtectedProcessNames = map[string]bool{
-	"systemd":       true,
-	"init":          true,
-	"kthreadd":      true,
-	"dockerd":       true,
-	"containerd":    true,
-	"docker-proxy":  true,
-	"labops-agent":  true,
-	"postgres":      true,
-	"postgresql":    true,
-	"journald":      true,
+	"systemd":        true,
+	"init":           true,
+	"kthreadd":       true,
+	"dockerd":        true,
+	"containerd":     true,
+	"docker-proxy":   true,
+	"labops-agent":   true,
+	"labops-gateway": true,
+	"9router":        true,
+	"postgres":       true,
+	"postgresql":     true,
+	"journald":       true,
 	"systemd-logind": true,
-	"systemd-udevd": true,
+	"systemd-udevd":  true,
 }
 
 // ProtectedKeywords từ khóa trong cmdline chỉ các dịch vụ cốt lõi
 var ProtectedCmdKeywords = []string{
 	"labops-agent",
+	"labops-gateway",
+	"9router",
 	"app.main:app",
 	"app.main",
 	"uvicorn app.main",

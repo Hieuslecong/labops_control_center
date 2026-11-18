@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -9,45 +10,65 @@ import (
 
 // AgentConfig chứa các thiết lập vận hành của LabOps Go Agent.
 type AgentConfig struct {
-	ServerID                 string        `json:"server_id"`
-	ServerName               string        `json:"server_name"`
-	Hostname                 string        `json:"hostname"`
-	BindAddr                 string        `json:"bind_addr"`
-	Port                     int           `json:"port"`
-	SecretToken              string        `json:"-"`
-	DockerSocket             string        `json:"docker_socket"`
-	HostInterval             time.Duration `json:"host_interval"`
-	GPUInterval              time.Duration `json:"gpu_interval"`
-	ProcessInterval          time.Duration `json:"process_interval"`
-	IsContainerized          bool          `json:"is_containerized"`
-	RepoGuardDataDir         string        `json:"repo_guard_data_dir"`
-	GatewayEnabled           bool          `json:"gateway_enabled"`
-	GatewayURL               string        `json:"gateway_url"`
-	GatewayCertPath          string        `json:"gateway_cert_path"`
-	GatewayKeyPath           string        `json:"gateway_key_path"`
-	GatewayCAPath            string        `json:"gateway_ca_path"`
-	GatewayServerName        string        `json:"gateway_server_name"`
+	ServerID              string        `json:"server_id"`
+	ServerName            string        `json:"server_name"`
+	Hostname              string        `json:"hostname"`
+	BindAddr              string        `json:"bind_addr"`
+	Port                  int           `json:"port"`
+	SecretToken           string        `json:"-"`
+	DelegationSecret      string        `json:"-"`
+	BrokerVerifySecret    string        `json:"-"`
+	WorkspaceRegistryPath string        `json:"workspace_registry_path"`
+	DockerSocket          string        `json:"docker_socket"`
+	HostInterval          time.Duration `json:"host_interval"`
+	GPUInterval           time.Duration `json:"gpu_interval"`
+	ProcessInterval       time.Duration `json:"process_interval"`
+	IsContainerized       bool          `json:"is_containerized"`
+	RepoGuardDataDir      string        `json:"repo_guard_data_dir"`
+	GatewayEnabled        bool          `json:"gateway_enabled"`
+	GatewayURL            string        `json:"gateway_url"`
+	GatewayCertPath       string        `json:"gateway_cert_path"`
+	GatewayKeyPath        string        `json:"gateway_key_path"`
+	GatewayCAPath         string        `json:"gateway_ca_path"`
+	GatewayServerName     string        `json:"gateway_server_name"`
+}
+
+// Validate kiểm tra cấu hình Agent bắt buộc phải fail-closed khi thiếu secret.
+func (c *AgentConfig) Validate() error {
+	if c == nil {
+		return fmt.Errorf("agent config is nil")
+	}
+	if strings.TrimSpace(c.ServerID) == "" {
+		return fmt.Errorf("LABOPS_SERVER_ID is required")
+	}
+	if len(strings.TrimSpace(c.SecretToken)) < 16 {
+		return fmt.Errorf("LABOPS_AGENT_SECRET is required and must be at least 16 characters (fail-closed)")
+	}
+	return nil
 }
 
 // LoadFromEnv nạp cấu hình từ biến môi trường và phát hiện môi trường host thực tế.
 func LoadFromEnv() *AgentConfig {
 	cfg := &AgentConfig{
-		ServerID:         getEnv("LABOPS_SERVER_ID", "track"),
-		ServerName:       getEnv("LABOPS_SERVER_NAME", "Server 01 — Server Rack (aiotlab-rack • Cục bộ)"),
-		BindAddr:         getEnv("LABOPS_AGENT_BIND_ADDR", "127.0.0.1"),
-		Port:             getEnvInt("LABOPS_AGENT_PORT", 9100),
-		SecretToken:      getEnv("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026"),
-		DockerSocket:     getEnv("DOCKER_HOST", "/var/run/docker.sock"),
-		HostInterval:     5 * time.Second,
-		GPUInterval:      5 * time.Second,
-		ProcessInterval:  10 * time.Second,
-		RepoGuardDataDir: getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/tmp/labops-repositoryguard"),
-		GatewayEnabled:   getEnvBool("LABOPS_GATEWAY_ENABLED", false),
-		GatewayURL:       getEnv("LABOPS_GATEWAY_URL", "192.168.167.250:9443"),
-		GatewayCertPath:  getEnv("LABOPS_GATEWAY_CERT_PATH", "/etc/labops/certs/client.crt"),
-		GatewayKeyPath:   getEnv("LABOPS_GATEWAY_KEY_PATH", "/etc/labops/certs/client.key"),
-		GatewayCAPath:    getEnv("LABOPS_GATEWAY_CA_PATH", "/etc/labops/certs/ca.crt"),
-		GatewayServerName: getEnv("LABOPS_GATEWAY_SERVER_NAME", "gateway.control-plane.labops.local"),
+		ServerID:              getEnv("LABOPS_SERVER_ID", "track"),
+		ServerName:            getEnv("LABOPS_SERVER_NAME", "Server 01 — Server Rack (aiotlab-rack • Cục bộ)"),
+		BindAddr:              getEnv("LABOPS_AGENT_BIND_ADDR", "127.0.0.1"),
+		Port:                  getEnvInt("LABOPS_AGENT_PORT", 9100),
+		SecretToken:           strings.TrimSpace(os.Getenv("LABOPS_AGENT_SECRET")),
+		DelegationSecret:      strings.TrimSpace(os.Getenv("LABOPS_DELEGATION_SECRET")),
+		BrokerVerifySecret:    strings.TrimSpace(os.Getenv("LABOPS_REPO_BROKER_SECRET")),
+		WorkspaceRegistryPath: getEnv("LABOPS_WORKSPACE_REGISTRY_PATH", "/var/lib/labops/workspace_registry.json"),
+		DockerSocket:          getEnv("DOCKER_HOST", "/var/run/docker.sock"),
+		HostInterval:          5 * time.Second,
+		GPUInterval:           5 * time.Second,
+		ProcessInterval:       10 * time.Second,
+		RepoGuardDataDir:      getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/var/lib/labops/repositoryguard"),
+		GatewayEnabled:        getEnvBool("LABOPS_GATEWAY_ENABLED", false),
+		GatewayURL:            getEnv("LABOPS_GATEWAY_URL", "192.168.167.250:9443"),
+		GatewayCertPath:       getEnv("LABOPS_GATEWAY_CERT_PATH", "/etc/labops/certs/client.crt"),
+		GatewayKeyPath:        getEnv("LABOPS_GATEWAY_KEY_PATH", "/etc/labops/certs/client.key"),
+		GatewayCAPath:         getEnv("LABOPS_GATEWAY_CA_PATH", "/etc/labops/certs/ca.crt"),
+		GatewayServerName:     getEnv("LABOPS_GATEWAY_SERVER_NAME", "gateway.control-plane.labops.local"),
 	}
 
 	// Tự động kích hoạt Gateway nếu tìm thấy đủ bộ chứng chỉ mTLS có quyền đọc trên đĩa (trừ khi bị tắt rõ ràng)

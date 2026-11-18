@@ -319,3 +319,207 @@ func TestGRPCGatewayMTLSTunnel(t *testing.T) {
 		t.Fatalf("Session chưa được cập nhật ONLINE: %v", sess)
 	}
 }
+
+func TestSessionReconnectRaceDoesNotMarkNewSessionOffline(t *testing.T) {
+	sm := NewSessionManager()
+	sess1 := sm.RegisterSession(&pb.NodeHello{NodeId: "workstation", Hostname: "aiot-ws1"}, nil)
+	sess2 := sm.RegisterSession(&pb.NodeHello{NodeId: "workstation", Hostname: "aiot-ws1"}, nil)
+
+	if sess2.Generation <= sess1.Generation || sess2.SessionID == sess1.SessionID {
+		t.Fatalf("Kỳ vọng generation & session ID mới khi reconnect: s1=(%d,%s), s2=(%d,%s)",
+			sess1.Generation, sess1.SessionID, sess2.Generation, sess2.SessionID)
+	}
+
+	// Stream cũ đóng muộn gọi RemoveSessionIfMatch -> KHÔNG ĐƯỢC đánh dấu sess2 OFFLINE!
+	if removed := sm.RemoveSessionIfMatch("workstation", sess1.SessionID); removed {
+		t.Fatal("RemoveSessionIfMatch không được xóa/đánh dấu OFFLINE phiên mới hơn")
+	}
+	curr, ok := sm.GetSession("workstation")
+	if !ok || curr.Status != "ONLINE" || curr.SessionID != sess2.SessionID {
+		t.Fatalf("Phiên hiện tại bị đánh dấu OFFLINE nhầm khi stream cũ ngắt: %+v", curr)
+	}
+
+	// Chỉ khi sess2 đóng mới đánh dấu OFFLINE
+	if removed := sm.RemoveSessionIfMatch("workstation", sess2.SessionID); !removed {
+		t.Fatal("Kỳ vọng RemoveSessionIfMatch trả true khi khớp sess2.SessionID")
+	}
+	currAfter, _ := sm.GetSession("workstation")
+	if currAfter.Status != "OFFLINE" {
+		t.Fatalf("Kỳ vọng OFFLINE sau khi sess2 ngắt, nhận: %s", currAfter.Status)
+	}
+}
+
+func TestGatewayDelegationAndReplayProtection(t *testing.T) {
+	secret := "gateway-delegation-hmac-secret-2026"
+	sm := NewSessionManager()
+	sm.SetDelegationSecurity(secret, true)
+	sm.RegisterSession(&pb.NodeHello{NodeId: "workstation", Hostname: "aiot-ws1"}, nil)
+
+	// 1. Dispatch không có DelegationToken -> bị từ chối REJECTED_UNAUTHORIZED
+	respNoTok, err := sm.DispatchCommand(context.Background(), &DispatchRequest{
+		NodeID: "workstation",
+		Action: "INSPECT_HOST",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respNoTok.Status != "REJECTED_UNAUTHORIZED" || respNoTok.ErrorCode != "DELEGATION_INVALID" {
+		t.Fatalf("Kỳ vọng từ chối thiếu token, nhận: %+v", respNoTok)
+	}
+
+	// 2. RESEARCHER cố gắng gọi action Admin (PROVISION_DOCKER_WORKSPACE / KILL_PROCESS) -> REJECTED
+	paramsAdmin := map[string]string{"workspace_id": "ws-target", "owner": "other"}
+	resTok, err := SignDelegationToken(secret, DelegationClaims{
+		ActorID:      "researcher1",
+		ActorRole:    "RESEARCHER",
+		ServiceID:    "fastapi-bff",
+		Action:       "PROVISION_DOCKER_WORKSPACE",
+		NodeID:       "workstation",
+		WorkspaceID:  "ws-researcher1",
+		Audience:     DelegationAudience,
+		RequestID:    "req-1",
+		Nonce:        "nonce-1",
+		ParamsSHA256: ComputeParamsHash(paramsAdmin),
+		IssuedAt:     time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	respPriv, _ := sm.DispatchCommand(context.Background(), &DispatchRequest{
+		NodeID:               "workstation",
+		Action:               "PROVISION_DOCKER_WORKSPACE",
+		Parameters:           paramsAdmin,
+		ActorID:              "researcher1",
+		AuthorizationContext: resTok,
+	})
+	if respPriv.Status != "REJECTED_UNAUTHORIZED" || respPriv.ErrorCode != "ACTION_UNAUTHORIZED" {
+		t.Fatalf("RESEARCHER không được phép chạy action ADMIN: %+v", respPriv)
+	}
+
+	// 3. RESEARCHER tác động workspace người khác (STOP_DOCKER_WORKSPACE) -> REJECTED
+	crossTok, _ := SignDelegationToken(secret, DelegationClaims{
+		ActorID:      "researcher1",
+		ActorRole:    "RESEARCHER",
+		ServiceID:    "fastapi-bff",
+		Action:       "STOP_DOCKER_WORKSPACE",
+		NodeID:       "workstation",
+		WorkspaceID:  "ws-researcher1",
+		Audience:     DelegationAudience,
+		RequestID:    "req-2",
+		Nonce:        "nonce-2",
+		ParamsSHA256: ComputeParamsHash(paramsAdmin),
+		IssuedAt:     time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	respCross, _ := sm.DispatchCommand(context.Background(), &DispatchRequest{
+		NodeID:               "workstation",
+		Action:               "STOP_DOCKER_WORKSPACE",
+		Parameters:           paramsAdmin,
+		AuthorizationContext: crossTok,
+	})
+	if respCross.Status != "REJECTED_UNAUTHORIZED" {
+		t.Fatalf("RESEARCHER không được phép dừng workspace người khác: %+v", respCross)
+	}
+
+	// 4. Replay cùng Nonce với token ADMIN hợp lệ -> lần 2 bị chặn REPLAY_DETECTED
+	ownParams := map[string]string{"workspace_id": "ws-researcher1", "owner": "researcher1", "container_id": "cid-1"}
+	validAdminTok, _ := SignDelegationToken(secret, DelegationClaims{
+		ActorID:      "admin1",
+		ActorRole:    "ADMIN",
+		ServiceID:    "fastapi-bff",
+		Action:       "STOP_DOCKER_WORKSPACE",
+		NodeID:       "workstation",
+		WorkspaceID:  "ws-researcher1",
+		Audience:     DelegationAudience,
+		RequestID:    "req-3",
+		Nonce:        "nonce-unique-3",
+		ParamsSHA256: ComputeParamsHash(ownParams),
+		IssuedAt:     time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	// stream == nil nên lần 1 qua tới STREAM_SEND_FAILED sau khi Pass auth + ReserveNonce
+	r1, _ := sm.DispatchCommand(context.Background(), &DispatchRequest{
+		NodeID:               "workstation",
+		Action:               "STOP_DOCKER_WORKSPACE",
+		Parameters:           ownParams,
+		AuthorizationContext: validAdminTok,
+	})
+	if r1.ErrorCode != "STREAM_SEND_FAILED" {
+		t.Fatalf("Kỳ vọng auth hợp lệ đi qua ReplayGuard tới bước send stream, nhận: %+v", r1)
+	}
+	r2, _ := sm.DispatchCommand(context.Background(), &DispatchRequest{
+		NodeID:               "workstation",
+		Action:               "STOP_DOCKER_WORKSPACE",
+		Parameters:           ownParams,
+		AuthorizationContext: validAdminTok,
+	})
+	if r2.Status != "REJECTED_UNAUTHORIZED" || r2.ErrorCode != "REPLAY_DETECTED" {
+		t.Fatalf("Kỳ vọng REPLAY_DETECTED khi tái sử dụng nonce, nhận: %+v", r2)
+	}
+}
+
+func TestRouteCommandResponse_RejectsCrossNodeSpoof(t *testing.T) {
+	sm := NewSessionManager()
+	sm.RegisterSession(&pb.NodeHello{NodeId: "node-victim", Hostname: "victim"}, nil)
+	liveVictim, _ := sm.getLiveSession("node-victim")
+	ch := make(chan *pb.CommandResponse, 1)
+	liveVictim.pendingMu.Lock()
+	liveVictim.pendingCommands["cmd-123"] = ch
+	liveVictim.pendingMu.Unlock()
+
+	// Attacker stream cố gửi response mang NodeId = node-victim -> bị chặn!
+	sm.RouteCommandResponse("node-attacker", &pb.CommandResponse{
+		CommandId: "cmd-123",
+		NodeId:    "node-victim",
+		Status:    pb.CommandResponse_SUCCESS,
+	})
+	select {
+	case <-ch:
+		t.Fatal("Không được phép định tuyến CommandResponse sang node khác qua node-attacker stream")
+	default:
+	}
+
+	// Stream hợp lệ của node-victim mới định tuyến được
+	sm.RouteCommandResponse("node-victim", &pb.CommandResponse{
+		CommandId: "cmd-123",
+		NodeId:    "node-victim",
+		Status:    pb.CommandResponse_SUCCESS,
+	})
+	select {
+	case resp := <-ch:
+		if resp.Status != pb.CommandResponse_SUCCESS {
+			t.Fatalf("Expected SUCCESS, got %v", resp.Status)
+		}
+	default:
+		t.Fatal("Expected legitimate response to route to node-victim")
+	}
+}
+
+func TestHTTPControlPlane_NoAutoUnrevoke(t *testing.T) {
+	tmpDir := t.TempDir()
+	ca, err := pki.GenerateOrLoadCA(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := NewSessionManager()
+	tm := pki.NewEnrollmentTokenManager("test-enroll-secret-2026")
+	rm := pki.NewRevocationManagerWithPersistence(tmpDir + "/rev.json")
+	if err := rm.AllowNode("node-rev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.RevokeNode("node-rev", "compromised"); err != nil {
+		t.Fatal(err)
+	}
+	controlSecret := "test-control-secret-2026"
+	httpSrv := NewHTTPControlPlaneServer("127.0.0.1", 0, sm, ca, tm, rm, controlSecret, nil)
+
+	body, _ := json.Marshal(map[string]any{"node_id": "node-rev", "ttl_minutes": 5})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/enroll", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+controlSecret)
+	w := httptest.NewRecorder()
+	httpSrv.handleEnrollToken(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("Kỳ vọng 403 Forbidden khi cố enroll lại node đã bị thu hồi, nhận: %d", w.Code)
+	}
+}

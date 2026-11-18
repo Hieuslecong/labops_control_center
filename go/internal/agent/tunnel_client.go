@@ -17,6 +17,7 @@ import (
 
 	"github.com/Hieuslecong/labops_control_center/go/internal/config"
 	"github.com/Hieuslecong/labops_control_center/go/internal/docker"
+	"github.com/Hieuslecong/labops_control_center/go/internal/gateway"
 	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/pki"
@@ -28,13 +29,14 @@ import (
 
 // TunnelClient quản lý kết nối gRPC streaming mTLS từ Agent lên Gateway
 type TunnelClient struct {
-	cfg        *config.AgentConfig
-	hostCol    *host.Collector
-	gpuCol     *gpu.Collector
-	procCol    *process.Collector
-	procCtrl   *process.Controller
-	dockerCtrl *docker.Controller
-	logger     *slog.Logger
+	cfg         *config.AgentConfig
+	hostCol     *host.Collector
+	gpuCol      *gpu.Collector
+	procCol     *process.Collector
+	procCtrl    *process.Controller
+	dockerCtrl  *docker.Controller
+	replayGuard *gateway.ReplayGuard
+	logger      *slog.Logger
 }
 
 func NewTunnelClient(
@@ -50,13 +52,14 @@ func NewTunnelClient(
 		logger = slog.Default()
 	}
 	return &TunnelClient{
-		cfg:        cfg,
-		hostCol:    hostCol,
-		gpuCol:     gpuCol,
-		procCol:    procCol,
-		procCtrl:   procCtrl,
-		dockerCtrl: dockerCtrl,
-		logger:     logger,
+		cfg:         cfg,
+		hostCol:     hostCol,
+		gpuCol:      gpuCol,
+		procCol:     procCol,
+		procCtrl:    procCtrl,
+		dockerCtrl:  dockerCtrl,
+		replayGuard: gateway.NewReplayGuard(),
+		logger:      logger,
 	}
 }
 
@@ -356,16 +359,85 @@ func (c *TunnelClient) telemetrySenderRoutine(ctx context.Context, sender *safeS
 func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.CommandRequest) {
 	c.logger.Info("Nhận yêu cầu lệnh từ Gateway",
 		"command_id", req.CommandId,
+		"request_id", req.RequestId,
 		"action", req.Action,
 		"actor", req.ActorId,
 	)
 
 	start := time.Now()
 	resp := &pb.CommandResponse{
-		CommandId:       req.CommandId,
-		RequestId:       req.RequestId,
-		NodeId:          c.cfg.ServerID,
-		ExecutedAtUnix:  time.Now().Unix(),
+		CommandId:      req.CommandId,
+		RequestId:      req.RequestId,
+		NodeId:         c.cfg.ServerID,
+		ExecutedAtUnix: time.Now().Unix(),
+	}
+
+	// 1. Kiểm tra mục tiêu NodeID khớp chính xác Node đang chạy
+	if strings.TrimSpace(req.NodeId) != "" && !strings.EqualFold(req.NodeId, c.cfg.ServerID) {
+		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
+		resp.ErrorCode = "NODE_MISMATCH"
+		resp.ErrorMessage = fmt.Sprintf("Lệnh nhắm tới node '%s' nhưng agent hiện tại là '%s'", req.NodeId, c.cfg.ServerID)
+		c.sendCommandResponse(sender, resp, start)
+		return
+	}
+
+	// 2. Kiểm tra hạn dùng lệnh (deadline enforcement)
+	if req.IssuedAtUnix > 0 && req.DeadlineSeconds > 0 && time.Now().Unix() > req.IssuedAtUnix+req.DeadlineSeconds {
+		resp.Status = pb.CommandResponse_REJECTED_DEADLINE_EXCEEDED
+		resp.ErrorCode = "COMMAND_EXPIRED"
+		resp.ErrorMessage = "Lệnh đã quá thời hạn thực thi"
+		c.sendCommandResponse(sender, resp, start)
+		return
+	}
+
+	// 3. Xác thực DelegationToken + Action authorization + Replay/Idempotency tại Agent (Defense-in-Depth)
+	actorScope := strings.TrimSpace(req.ActorId)
+	paramsHash := gateway.ComputeParamsHash(req.Parameters)
+	if strings.TrimSpace(c.cfg.DelegationSecret) != "" || strings.TrimSpace(req.AuthorizationContext) != "" {
+		claims, err := gateway.VerifyDelegationToken(c.cfg.DelegationSecret, req.AuthorizationContext, time.Now())
+		if err != nil {
+			resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
+			resp.ErrorCode = "DELEGATION_INVALID"
+			resp.ErrorMessage = err.Error()
+			c.sendCommandResponse(sender, resp, start)
+			return
+		}
+		if err := gateway.ActionAuthorizationCheck(claims, c.cfg.ServerID, req.Action, req.Parameters); err != nil {
+			resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
+			resp.ErrorCode = "ACTION_UNAUTHORIZED"
+			resp.ErrorMessage = err.Error()
+			c.sendCommandResponse(sender, resp, start)
+			return
+		}
+		if c.replayGuard != nil {
+			if err := c.replayGuard.ReserveNonce(claims.Nonce, time.Unix(claims.ExpiresAt, 0)); err != nil {
+				resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
+				resp.ErrorCode = "REPLAY_DETECTED"
+				resp.ErrorMessage = err.Error()
+				c.sendCommandResponse(sender, resp, start)
+				return
+			}
+		}
+		actorScope = claims.ActorID
+	}
+
+	if req.IdempotencyKey != "" && c.replayGuard != nil {
+		if cached, hit, idempErr := c.replayGuard.CheckIdempotency(actorScope, req.Action, req.IdempotencyKey, paramsHash); idempErr != nil {
+			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
+			resp.ErrorCode = "IDEMPOTENCY_CONFLICT"
+			resp.ErrorMessage = idempErr.Error()
+			c.sendCommandResponse(sender, resp, start)
+			return
+		} else if hit && cached != nil {
+			resp.Status = pb.CommandResponse_SUCCESS
+			resp.IdempotentReplay = true
+			if cached.Result != nil {
+				b, _ := json.Marshal(cached.Result)
+				resp.ResultPayload = b
+			}
+			c.sendCommandResponse(sender, resp, start)
+			return
+		}
 	}
 
 	switch req.Action {
@@ -397,7 +469,7 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 
 	case "TERMINATE_PROCESS":
 		ref := req.Parameters["ref"]
-		if ref == "" {
+		if ref == "" && strings.TrimSpace(c.cfg.DelegationSecret) == "" {
 			pidStr := req.Parameters["pid"]
 			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
 				if pInfo, pErr := c.procCol.GetProcessByPID(pid); pErr == nil && pInfo != nil {
@@ -408,7 +480,7 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 		if ref == "" {
 			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
 			resp.ErrorCode = "INVALID_PROCESS_REF"
-			resp.ErrorMessage = "Thiếu tham số ref hoặc không tìm thấy process tương ứng với PID"
+			resp.ErrorMessage = "Thiếu tham số ref chuẩn (cần ref có starttime ticks)"
 		} else {
 			res, termErr := c.procCtrl.TerminateProcess(ref, 10, true)
 			if termErr != nil {
@@ -422,14 +494,73 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 			}
 		}
 
+	case "PROVISION_DOCKER_WORKSPACE":
+		var provReq docker.ProvisionRequest
+		if rawJSON, ok := req.Parameters["spec_json"]; ok && rawJSON != "" {
+			if err := json.Unmarshal([]byte(rawJSON), &provReq); err != nil {
+				resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
+				resp.ErrorCode = "INVALID_PROVISION_SPEC"
+				resp.ErrorMessage = fmt.Sprintf("spec_json không hợp lệ: %v", err)
+				break
+			}
+		} else {
+			uid, _ := strconv.Atoi(req.Parameters["uid"])
+			gid, _ := strconv.Atoi(req.Parameters["gid"])
+			port, _ := strconv.Atoi(req.Parameters["ssh_port"])
+			cpuCores, _ := strconv.Atoi(req.Parameters["cpu_limit_cores"])
+			ramMB, _ := strconv.ParseInt(req.Parameters["ram_limit_mb"], 10, 64)
+			pidsLim, _ := strconv.ParseInt(req.Parameters["pids_limit"], 10, 64)
+			gen, _ := strconv.ParseUint(req.Parameters["generation"], 10, 64)
+			provReq = docker.ProvisionRequest{
+				WorkspaceID:     req.Parameters["workspace_id"],
+				Name:            req.Parameters["name"],
+				MemberID:        req.Parameters["member_id"],
+				MemberUsername:  req.Parameters["owner"],
+				UID:             uid,
+				GID:             gid,
+				ImageRef:        req.Parameters["image_ref"],
+				ImageDigest:     req.Parameters["image_digest"],
+				StorageRoot:     req.Parameters["storage_root"],
+				SSHPort:         port,
+				VPNBindIP:       req.Parameters["vpn_bind_ip"],
+				CPULimitCores:   cpuCores,
+				RAMLimitMB:      ramMB,
+				PidsLimit:       pidsLim,
+				Generation:      gen,
+				NetworkIsolated: req.Parameters["network_isolated"] == "true",
+				AuditActor:      actorScope,
+				CorrelationID:   req.RequestId,
+			}
+		}
+		rec, provErr := c.dockerCtrl.ProvisionWorkspace(context.Background(), provReq)
+		if provErr != nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "PROVISION_FAILED"
+			resp.ErrorMessage = provErr.Error()
+			if rec != nil {
+				b, _ := json.Marshal(rec)
+				resp.ResultPayload = b
+			}
+		} else {
+			resp.Status = pb.CommandResponse_SUCCESS
+			b, _ := json.Marshal(rec)
+			resp.ResultPayload = b
+		}
+
 	case "STOP_DOCKER_WORKSPACE":
 		cid := req.Parameters["container_id"]
+		wsID := req.Parameters["workspace_id"]
 		if cid == "" {
 			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
 			resp.ErrorCode = "INVALID_CONTAINER_ID"
 			resp.ErrorMessage = "Thiếu tham số container_id"
 		} else {
-			stopErr := c.dockerCtrl.StopContainer(cid, 10)
+			var stopErr error
+			if wsID != "" && docker.IsCanonicalContainerID(cid) {
+				stopErr = c.dockerCtrl.StopWorkspaceContainer(context.Background(), wsID, cid, 10)
+			} else {
+				stopErr = c.dockerCtrl.StopContainer(cid, 10)
+			}
 			if stopErr != nil {
 				resp.Status = pb.CommandResponse_FAILED
 				resp.ErrorCode = "STOP_CONTAINER_FAILED"
@@ -441,12 +572,46 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 			}
 		}
 
+	case "ARCHIVE_REMOVE_DOCKER_WORKSPACE":
+		cid := req.Parameters["container_id"]
+		wsID := req.Parameters["workspace_id"]
+		if wsID == "" || !docker.IsCanonicalContainerID(cid) {
+			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
+			resp.ErrorCode = "INVALID_CANONICAL_WORKSPACE"
+			resp.ErrorMessage = "Yêu cầu workspace_id và container_id 64-hex chuẩn"
+		} else if remErr := c.dockerCtrl.RemoveStoppedWorkspaceContainer(context.Background(), wsID, cid); remErr != nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "REMOVE_CONTAINER_FAILED"
+			resp.ErrorMessage = remErr.Error()
+		} else {
+			resp.Status = pb.CommandResponse_SUCCESS
+			b, _ := json.Marshal(map[string]any{"removed": cid, "workspace_id": wsID, "status": "deleted"})
+			resp.ResultPayload = b
+		}
+
 	default:
 		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
 		resp.ErrorCode = "UNSUPPORTED_ACTION"
 		resp.ErrorMessage = fmt.Sprintf("Hành động '%s' không được hỗ trợ trên node", req.Action)
 	}
 
+	if req.IdempotencyKey != "" && resp.Status == pb.CommandResponse_SUCCESS && c.replayGuard != nil {
+		var parsed any
+		if len(resp.ResultPayload) > 0 {
+			_ = json.Unmarshal(resp.ResultPayload, &parsed)
+		}
+		c.replayGuard.RecordIdempotency(actorScope, req.Action, req.IdempotencyKey, paramsHash, &gateway.DispatchResponse{
+			Success: true,
+			NodeID:  c.cfg.ServerID,
+			Status:  "SUCCESS",
+			Result:  parsed,
+		}, 10*time.Minute)
+	}
+
+	c.sendCommandResponse(sender, resp, start)
+}
+
+func (c *TunnelClient) sendCommandResponse(sender *safeStreamSender, resp *pb.CommandResponse, start time.Time) {
 	resp.ExecutionDurationMs = time.Since(start).Milliseconds()
 
 	resMsg := &pb.AgentMessage{

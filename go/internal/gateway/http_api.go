@@ -58,6 +58,8 @@ func NewHTTPControlPlaneServer(
 	mux.HandleFunc("/api/v1/gateway/dispatch", h.handleDispatch)
 	mux.HandleFunc("/api/v1/gateway/enroll", h.handleEnrollToken)
 	mux.HandleFunc("/api/v1/gateway/revoke", h.handleRevoke)
+	mux.HandleFunc("/api/v1/gateway/unrevoke", h.handleUnrevoke)
+	mux.HandleFunc("/api/v1/gateway/revoke-cert", h.handleRevokeCert)
 	mux.HandleFunc("/api/v1/gateway/issue-cert", h.handleIssueCert)
 
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)
@@ -163,6 +165,8 @@ func (h *HTTPControlPlaneServer) handleNodeDetail(w http.ResponseWriter, r *http
 		AgentVersion:    sess.AgentVersion,
 		ManagementIP:    sess.ManagementIP,
 		GPUCount:        sess.GPUCount,
+		SessionID:       sess.SessionID,
+		Generation:      sess.Generation,
 		ConnectedAt:     sess.ConnectedAt,
 		LastHeartbeat:   sess.LastHeartbeat,
 		DegradedReasons: sess.DegradedReasons,
@@ -196,7 +200,11 @@ func (h *HTTPControlPlaneServer) handleDispatch(w http.ResponseWriter, r *http.R
 		h.logger.Error("Lỗi dispatch command", "node_id", req.NodeID, "action", req.Action, "err", err)
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	statusCode := http.StatusOK
+	if resp != nil && resp.Status == "REJECTED_UNAUTHORIZED" {
+		statusCode = http.StatusForbidden
+	}
+	writeJSON(w, statusCode, resp)
 }
 
 type EnrollRequest struct {
@@ -219,8 +227,16 @@ func (h *HTTPControlPlaneServer) handleEnrollToken(w http.ResponseWriter, r *htt
 		http.Error(w, "Lỗi cú pháp JSON", http.StatusBadRequest)
 		return
 	}
-	if req.NodeID == "" {
-		http.Error(w, "Thiếu node_id", http.StatusBadRequest)
+	if !pki.IsValidNodeID(req.NodeID) {
+		http.Error(w, "node_id không hợp lệ", http.StatusBadRequest)
+		return
+	}
+	if h.revocationMgr.IsNodeRevoked(req.NodeID) {
+		http.Error(w, fmt.Sprintf("Node '%s' đang bị thu hồi; phải gọi /unrevoke tường minh trước khi ghi danh lại", req.NodeID), http.StatusForbidden)
+		return
+	}
+	if err := h.revocationMgr.AllowNode(req.NodeID); err != nil {
+		http.Error(w, fmt.Sprintf("Không thể cấp phép node '%s': %v", req.NodeID, err), http.StatusForbidden)
 		return
 	}
 	if req.TTLMinutes <= 0 {
@@ -228,8 +244,12 @@ func (h *HTTPControlPlaneServer) handleEnrollToken(w http.ResponseWriter, r *htt
 	}
 
 	token := h.tokenManager.GenerateToken(req.NodeID, time.Duration(req.TTLMinutes)*time.Minute)
+	if token == "" {
+		http.Error(w, "Enrollment secret chưa được cấu hình (fail-closed)", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_id":    req.NodeID,
+		"node_id":    strings.ToLower(strings.TrimSpace(req.NodeID)),
 		"token":      token,
 		"expires_in": req.TTLMinutes * 60,
 	})
@@ -263,7 +283,10 @@ func (h *HTTPControlPlaneServer) handleRevoke(w http.ResponseWriter, r *http.Req
 		req.Reason = "Thu hồi quyền truy cập bởi Admin"
 	}
 
-	h.revocationMgr.RevokeNode(req.NodeID, req.Reason)
+	if err := h.revocationMgr.RevokeNode(req.NodeID, req.Reason); err != nil {
+		http.Error(w, fmt.Sprintf("Lỗi lưu trạng thái thu hồi: %v", err), http.StatusInternalServerError)
+		return
+	}
 	h.sessionManager.RemoveSession(req.NodeID)
 
 	h.logger.Warn("Đã thu hồi chứng chỉ và ngắt phiên của node", "node_id", req.NodeID, "reason", req.Reason)
@@ -272,6 +295,69 @@ func (h *HTTPControlPlaneServer) handleRevoke(w http.ResponseWriter, r *http.Req
 		"node_id": req.NodeID,
 		"message": fmt.Sprintf("Node '%s' đã bị thu hồi", req.NodeID),
 	})
+}
+
+type UnrevokeRequest struct {
+	NodeID string `json:"node_id"`
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+}
+
+func (h *HTTPControlPlaneServer) handleUnrevoke(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Chỉ hỗ trợ POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var req UnrevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Lỗi cú pháp JSON", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" || strings.TrimSpace(req.Actor) == "" {
+		http.Error(w, "Thiếu node_id hoặc actor", http.StatusBadRequest)
+		return
+	}
+	if err := h.revocationMgr.UnrevokeNode(req.NodeID, req.Actor, req.Reason); err != nil {
+		http.Error(w, fmt.Sprintf("Lỗi un-revoke node: %v", err), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"node_id": req.NodeID,
+		"message": "Đã gỡ thu hồi node và lưu audit; các chứng chỉ cũ đã thu hồi vẫn bị chặn",
+	})
+}
+
+type RevokeCertRequest struct {
+	NodeID      string `json:"node_id"`
+	SerialHex   string `json:"serial_hex"`
+	Fingerprint string `json:"fingerprint_sha256"`
+	Reason      string `json:"reason"`
+}
+
+func (h *HTTPControlPlaneServer) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyControlAuth(r) {
+		http.Error(w, "Yêu cầu xác thực Gateway Control Plane (HTTP 401)", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Chỉ hỗ trợ POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var req RevokeCertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Lỗi cú pháp JSON", http.StatusBadRequest)
+		return
+	}
+	if err := h.revocationMgr.RevokeCertificate(req.NodeID, req.SerialHex, req.Fingerprint, req.Reason); err != nil {
+		http.Error(w, fmt.Sprintf("Lỗi thu hồi chứng chỉ: %v", err), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 type IssueCertRequest struct {
@@ -296,11 +382,23 @@ func (h *HTTPControlPlaneServer) handleIssueCert(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Xác minh token gắn chặt với đúng NodeID và chỉ sử dụng một lần duy nhất
-	if !h.tokenManager.ConsumeTokenForNode(req.EnrollmentToken, req.NodeID) {
+	// 1. Xác minh token hợp lệ & khớp đúng NodeID trước (trả 401 nếu sai/hết hạn/dùng lại)
+	if !h.tokenManager.ValidateTokenForNode(req.EnrollmentToken, req.NodeID) {
 		h.logger.Warn("Từ chối cấp chứng chỉ: Token không hợp lệ, hết hạn hoặc sai node_id",
 			"claimed_node", req.NodeID)
 		http.Error(w, "Token ghi danh (enrollment token) không hợp lệ, đã hết hạn hoặc không khớp với node_id", http.StatusUnauthorized)
+		return
+	}
+
+	// 2. Không tự động un-revoke hoặc cấp cho node chưa được Admin pre-allow!
+	if err := h.revocationMgr.CanIssueForNode(req.NodeID); err != nil {
+		http.Error(w, fmt.Sprintf("Từ chối cấp chứng chỉ: %v", err), http.StatusForbidden)
+		return
+	}
+
+	// 3. Tiêu thụ one-time token (chống race concurrent consumption)
+	if !h.tokenManager.ConsumeTokenForNode(req.EnrollmentToken, req.NodeID) {
+		http.Error(w, "Token ghi danh đã được sử dụng hoặc hết hạn", http.StatusUnauthorized)
 		return
 	}
 
@@ -311,14 +409,16 @@ func (h *HTTPControlPlaneServer) handleIssueCert(w http.ResponseWriter, r *http.
 		return
 	}
 
-	h.revocationMgr.AllowNode(req.NodeID)
+	_ = h.revocationMgr.RecordCertIssued(req.NodeID, bundle.Cert, "enrollment-token")
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_id":         req.NodeID,
-		"ca_certificate":  string(h.pkiCA.CertPEM),
-		"certificate":     string(bundle.CertPEM),
-		"private_key":     string(bundle.KeyPEM),
-		"issued_at_unix":  time.Now().Unix(),
+		"node_id":        req.NodeID,
+		"ca_certificate": string(h.pkiCA.CertPEM),
+		"certificate":    string(bundle.CertPEM),
+		"private_key":    string(bundle.KeyPEM),
+		"serial_hex":     strings.ToLower(bundle.Cert.SerialNumber.Text(16)),
+		"fingerprint":    pki.CertFingerprintSHA256(bundle.Cert),
+		"issued_at_unix": time.Now().Unix(),
 	})
 }
 

@@ -47,3 +47,18 @@ func TestParseNvidiaIntMetric_DecimalValues(t *testing.T) {
 	}
 }
 
+func TestGPUCollector_GetLatestConcurrentNoPanic(t *testing.T) {
+	collector := NewCollector()
+	done := make(chan *SystemGPUReport, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			done <- collector.GetLatest()
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		if r := <-done; r == nil {
+			t.Errorf("GetLatest trả về nil khi chạy đồng thời")
+		}
+	}
+}
+

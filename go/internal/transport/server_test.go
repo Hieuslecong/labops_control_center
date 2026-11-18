@@ -110,4 +110,21 @@ func TestServer_Endpoints(t *testing.T) {
 	if wLocalhostMut.Code != http.StatusUnauthorized {
 		t.Errorf("AT-06 Vi phạm: Localhost request không có token phải bị từ chối 401, nhận: %d", wLocalhostMut.Code)
 	}
+
+	// 7. Test Fail-Closed when SecretToken is empty (GET and POST must reject with 503)
+	emptyCfg := &config.AgentConfig{
+		ServerID:    "workstation",
+		ServerName:  "FailClosed Test",
+		Hostname:    "aiot-ws1",
+		BindAddr:    "127.0.0.1",
+		Port:        9101,
+		SecretToken: "",
+	}
+	emptySrv := NewServer(emptyCfg, host.NewCollector(emptyCfg), gpuCol, procCol, dockerCtrl, logger)
+	reqGetEmpty := httptest.NewRequest("GET", "/api/v1/agent/host", nil)
+	wGetEmpty := httptest.NewRecorder()
+	emptySrv.httpSrv.Handler.ServeHTTP(wGetEmpty, reqGetEmpty)
+	if wGetEmpty.Code != http.StatusServiceUnavailable {
+		t.Errorf("Kỳ vọng 503 fail-closed khi thiếu LABOPS_AGENT_SECRET, nhận: %d", wGetEmpty.Code)
+	}
 }

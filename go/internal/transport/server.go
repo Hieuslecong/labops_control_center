@@ -68,7 +68,11 @@ func NewServer(
 	mux.HandleFunc("/api/v1/agent/telemetry/full", s.handleFullTelemetry)
 
 	if repoGuardSvc != nil {
-		repoHandler := repositoryguard.NewHTTPHandler(repoGuardSvc)
+		repoHandler := repositoryguard.NewHTTPHandlerWithConfig(
+			repoGuardSvc,
+			cfg.BrokerVerifySecret,
+			[]string{"/workspaces", "/mnt", "/var/lib/labops/workspaces", "/home"},
+		)
 		repoHandler.RegisterRoutes(mux)
 	}
 
@@ -100,18 +104,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		isMutation := r.Method != http.MethodGet && r.Method != http.MethodHead
-		expectedSecret := s.cfg.SecretToken
-
-		// Mutation endpoints bắt buộc phải có secret cấu hình và token khớp (constant-time compare)
-		if isMutation || expectedSecret != "" {
-			if expectedSecret == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedSecret)) != 1 {
-				http.Error(w, `{"error":"Unauthorized: invalid or missing agent token"}`, http.StatusUnauthorized)
-				return
-			}
+		// AT-06: Fail-closed — toàn bộ /api/v1/agent/* (cả GET lẫn POST) bắt buộc có SecretToken cấu hình và khớp (constant-time compare)
+		expectedSecret := strings.TrimSpace(s.cfg.SecretToken)
+		if expectedSecret == "" {
+			writeJSONError(w, http.StatusServiceUnavailable, "Service unavailable: agent authentication secret is not configured")
+			return
+		}
+		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedSecret)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "Unauthorized: invalid or missing agent token")
+			return
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": msg,
 	})
 }
 
@@ -152,19 +164,19 @@ func (s *Server) handleProcessTelemetry(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleProcessTree(w http.ResponseWriter, r *http.Request) {
 	ref := r.URL.Query().Get("ref")
 	if ref == "" {
-		http.Error(w, `{"error":"Thiếu tham số 'ref'"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Thiếu tham số 'ref'")
 		return
 	}
 
 	tree, err := s.procCol.GetProcessTree(ref)
 	if err != nil {
 		s.logger.Warn("Lỗi tìm cây tiến trình", "ref", ref, "err", err)
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tree)
+	_ = json.NewEncoder(w).Encode(tree)
 }
 
 type terminateRequest struct {
@@ -195,7 +207,7 @@ func (s *Server) handleProcessTerminate(w http.ResponseWriter, r *http.Request) 
 		s.logger.Warn("Từ chối hoặc thất bại khi dừng tiến trình", "ref", req.Ref, "err", err)
 		status := http.StatusInternalServerError
 		errStr := err.Error()
-		if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") {
+		if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") || strings.Contains(errStr, "PERMISSION_DENIED") || strings.Contains(errStr, "HOST_MISMATCH") || strings.Contains(errStr, "CONTAINER_MISMATCH") {
 			status = http.StatusForbidden
 		} else if strings.Contains(errStr, "PID_RECYCLED") {
 			status = http.StatusConflict
@@ -246,9 +258,9 @@ func (s *Server) handleProcessKill(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Từ chối hoặc thất bại khi buộc dừng tiến trình", "ref", req.Ref, "err", err)
 		status := http.StatusInternalServerError
 		errStr := err.Error()
-		if strings.Contains(errStr, "FORCE_CONFIRMATION_REQUIRED") {
+		if strings.Contains(errStr, "FORCE_CONFIRMATION_REQUIRED") || strings.Contains(errStr, "INVALID_PROCESS_REF") {
 			status = http.StatusBadRequest
-		} else if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") {
+		} else if strings.Contains(errStr, "PROTECTED_PROCESS_DENIED") || strings.Contains(errStr, "PERMISSION_DENIED") || strings.Contains(errStr, "HOST_MISMATCH") || strings.Contains(errStr, "CONTAINER_MISMATCH") {
 			status = http.StatusForbidden
 		} else if strings.Contains(errStr, "PID_RECYCLED") {
 			status = http.StatusConflict
@@ -273,11 +285,11 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	workspaces, err := s.dockerCtrl.ListWorkspaces(r.Context())
 	if err != nil {
 		s.logger.Error("Lỗi đọc danh sách workspaces", "err", err)
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"source":       "labops-go-agent",
 		"collected_at": time.Now().UTC().Format(time.RFC3339),
 		"count":        len(workspaces),
@@ -291,14 +303,18 @@ func (s *Server) handleFullTelemetry(w http.ResponseWriter, r *http.Request) {
 	gpuTel := s.gpuCol.GetLatest()
 	workspaces, _ := s.dockerCtrl.ListWorkspaces(r.Context())
 
-	activeMembers := len(workspaces)
-	hostTel.ActiveMembers = activeMembers
+	var serverSnapshot *host.HostTelemetry
+	if hostTel != nil {
+		copyTel := *hostTel
+		copyTel.ActiveMembers = len(workspaces)
+		serverSnapshot = &copyTel
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"source":           "labops-go-agent",
 		"collected_at":     time.Now().UTC().Format(time.RFC3339),
-		"server":           hostTel,
+		"server":           serverSnapshot,
 		"gpus":             gpuTel,
 		"workspaces":       workspaces,
 		"workspaces_count": len(workspaces),

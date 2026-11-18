@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,12 +11,45 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Hieuslecong/labops_control_center/go/internal/gateway"
 	"github.com/Hieuslecong/labops_control_center/go/internal/pki"
 )
+
+func generateEphemeralHex(byteLen int) (string, error) {
+	b := make([]byte, byteLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func resolveDedicatedSecret(logger *slog.Logger, devEphemeral bool, envKeys ...string) string {
+	for _, k := range envKeys {
+		if val := strings.TrimSpace(os.Getenv(k)); val != "" {
+			if len(val) < 16 {
+				logger.Error("Secret cấu hình quá ngắn (tối thiểu 16 ký tự)", "env_var", k)
+				os.Exit(1)
+			}
+			return val
+		}
+	}
+	if devEphemeral {
+		gen, err := generateEphemeralHex(32)
+		if err != nil {
+			logger.Error("Không thể sinh ephemeral dev secret", "err", err)
+			os.Exit(1)
+		}
+		logger.Warn("⚠️ LABOPS_DEV_EPHEMERAL_SECRETS=true: đang dùng secret tạm thời cho môi trường phát triển", "env_var", envKeys[0])
+		return gen
+	}
+	logger.Error("Thiếu biến môi trường secret bắt buộc (fail-closed, không dùng fallback mặc định)", "required_env", strings.Join(envKeys, " | "))
+	os.Exit(1)
+	return ""
+}
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -31,18 +66,12 @@ func main() {
 	bindAddr := getEnvStr("LABOPS_GATEWAY_BIND_ADDR", "0.0.0.0")
 	httpBind := getEnvStr("LABOPS_GATEWAY_HTTP_BIND", "127.0.0.1")
 	pkiDir := getEnvStr("LABOPS_GATEWAY_PKI_DIR", "")
-	tokenSecret := getEnvStr("LABOPS_GATEWAY_TOKEN_SECRET", "")
-	if tokenSecret == "" {
-		tokenSecret = getEnvStr("LABOPS_SESSION_SECRET", "labops-zero-trust-secret-salt-2026")
-	}
+	devEphemeral := strings.EqualFold(strings.TrimSpace(os.Getenv("LABOPS_DEV_EPHEMERAL_SECRETS")), "true")
 
-	controlSecret := getEnvStr("LABOPS_GATEWAY_CONTROL_SECRET", "")
-	if controlSecret == "" {
-		controlSecret = getEnvStr("LABOPS_SESSION_SECRET", "")
-	}
-	if controlSecret == "" {
-		controlSecret = getEnvStr("LABOPS_ADMIN_API_TOKEN", "")
-	}
+	// Tách biệt rõ secret từng mục đích (không fallback sang LABOPS_SESSION_SECRET / LABOPS_ADMIN_API_TOKEN)
+	enrollmentSecret := resolveDedicatedSecret(logger, devEphemeral, "LABOPS_ENROLLMENT_SECRET", "LABOPS_GATEWAY_TOKEN_SECRET")
+	controlSecret := resolveDedicatedSecret(logger, devEphemeral, "LABOPS_GATEWAY_CONTROL_SECRET")
+	delegationSecret := resolveDedicatedSecret(logger, devEphemeral, "LABOPS_DELEGATION_SECRET")
 
 	if pkiDir == "" {
 		home, _ := os.UserHomeDir()
@@ -86,16 +115,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Khởi tạo Revocation & Token Manager với lưu trữ bền vững trên đĩa
+	// 3. Khởi tạo Revocation & Token Manager với lưu trữ bền vững trên đĩa (deny-by-default)
 	revocationFile := filepath.Join(pkiDir, "revocations.json")
 	rm := pki.NewRevocationManagerWithPersistence(revocationFile)
-	// Chỉ thêm allow mặc định nếu chưa từng có danh sách revoked/allowed được lưu trước đó
-	if !rm.IsNodeAllowed("track") && rm.IsNodeAllowed("track") {
-		rm.AllowNode("track")
-		rm.AllowNode("workstation")
+	// Chỉ cấp allowlist ban đầu khi được chỉ định rõ trong LABOPS_ALLOWED_NODES
+	if allowedEnv := strings.TrimSpace(os.Getenv("LABOPS_ALLOWED_NODES")); allowedEnv != "" {
+		for _, rawNode := range strings.Split(allowedEnv, ",") {
+			nid := strings.TrimSpace(rawNode)
+			if nid != "" && !rm.IsNodeAllowed(nid) {
+				rm.AllowNode(nid)
+			}
+		}
 	}
 
-	tm := pki.NewEnrollmentTokenManager(tokenSecret)
+	tm := pki.NewEnrollmentTokenManager(enrollmentSecret)
 
 	// 4. Cấu hình TLS 1.3 mTLS cho gRPC
 	serverTLS, err := pki.BuildServerTLSConfig(ca.CertPEM, gwCert.CertPEM, gwCert.KeyPEM, rm)
@@ -109,6 +142,8 @@ func main() {
 		BindAddr:          bindAddr,
 		GRPCPort:          grpcPort,
 		RevocationManager: rm,
+		DelegationSecret:  delegationSecret,
+		RequireDelegation: true,
 		Logger:            logger,
 	}
 

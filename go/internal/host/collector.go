@@ -445,12 +445,17 @@ func (c *Collector) Collect() *HostTelemetry {
 	return telemetry
 }
 
-// GetLatest trả về telemetry được cache gần nhất
+// GetLatest trả về bản sao nông telemetry được cache gần nhất (tránh race & recursive RLock deadlock)
 func (c *Collector) GetLatest() *HostTelemetry {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.latest == nil {
-		return c.Collect()
+	latest := c.latest
+	c.mu.RUnlock()
+	if latest == nil {
+		latest = c.Collect()
 	}
-	return c.latest
+	if latest == nil {
+		return nil
+	}
+	cp := *latest
+	return &cp
 }

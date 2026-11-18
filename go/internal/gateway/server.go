@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/Hieuslecong/labops_control_center/go/internal/pki"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/protobuf/proto"
 )
 
 // Server đại diện cho LabOps Go Agent Gateway
@@ -37,6 +39,8 @@ type Config struct {
 	HTTPPort          int
 	CADir             string
 	RevocationManager *pki.RevocationManager
+	DelegationSecret  string
+	RequireDelegation bool
 	Logger            *slog.Logger
 }
 
@@ -46,6 +50,7 @@ func NewServer(cfg *Config, ca *pki.CACertificate, tlsCfg *tls.Config) (*Server,
 		cfg.Logger = slog.Default()
 	}
 	if cfg.RevocationManager == nil {
+		// Fail-closed: empty allowlist denies all unknown nodes
 		cfg.RevocationManager = pki.NewRevocationManager()
 	}
 
@@ -56,8 +61,13 @@ func NewServer(cfg *Config, ca *pki.CACertificate, tlsCfg *tls.Config) (*Server,
 		grpc.MaxSendMsgSize(32*1024*1024),
 	)
 
+	sm := NewSessionManager()
+	if cfg.DelegationSecret != "" || cfg.RequireDelegation {
+		sm.SetDelegationSecurity(cfg.DelegationSecret, cfg.RequireDelegation)
+	}
+
 	s := &Server{
-		sessions:          NewSessionManager(),
+		sessions:          sm,
 		pkiManager:        ca,
 		revocationManager: cfg.RevocationManager,
 		grpcServer:        grpcSrv,
@@ -126,9 +136,9 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 		return fmt.Errorf("mTLS: không thể nhận diện Node ID: %w", err)
 	}
 
-	if !s.revocationManager.IsNodeAllowed(certNodeID) {
-		s.logger.Warn("Từ chối kết nối gRPC: Node ID đã bị thu hồi hoặc từ chối", "node_id", certNodeID)
-		return fmt.Errorf("mTLS: node %s đã bị thu hồi quyền truy cập", certNodeID)
+	if err := s.revocationManager.IsCertAllowed(peerCert); err != nil {
+		s.logger.Warn("Từ chối kết nối gRPC: Chứng chỉ hoặc Node không được phép", "node_id", certNodeID, "err", err)
+		return err
 	}
 
 	// 2. Chờ nhận bản tin đầu tiên NodeHello
@@ -146,8 +156,8 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 		return errors.New("bản tin mở đầu bắt buộc phải là NodeHello")
 	}
 
-	// Xác nhận Node ID khai báo trùng khớp tuyệt đối với Node ID trong SAN chứng chỉ
-	if hello.NodeId != certNodeID {
+	// Xác nhận Node ID khai báo trùng khớp không phân biệt hoa/thường với Node ID trong chứng chỉ
+	if !strings.EqualFold(strings.TrimSpace(hello.NodeId), certNodeID) {
 		s.logger.Error("Phát hiện giả mạo danh tính: Node ID khai báo khác với chứng chỉ client",
 			"claimed", hello.NodeId,
 			"cert", certNodeID,
@@ -155,17 +165,35 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 		return errors.New("giả mạo danh tính: Node ID không khớp với Client Certificate")
 	}
 
+	// Không cho unknown/revoked node tự động phê duyệt khi Tunnel mở
+	if !s.revocationManager.IsNodeAllowed(certNodeID) {
+		_ = stream.Send(&pb.GatewayMessage{
+			MessageId:     newUUID(),
+			TimestampUnix: time.Now().Unix(),
+			Payload: &pb.GatewayMessage_RegistrationAck{
+				RegistrationAck: &pb.NodeRegistration{
+					Approved: false,
+					NodeId:   certNodeID,
+					Message:  "Node chưa nằm trong allowlist hoặc đã bị thu hồi",
+				},
+			},
+		})
+		return fmt.Errorf("node %s không được phép đăng ký", certNodeID)
+	}
+
 	s.logger.Info("✅ Node Agent đã kết nối thành công qua mTLS TLS 1.3",
-		"node_id", hello.NodeId,
+		"node_id", certNodeID,
 		"hostname", hello.Hostname,
 		"gpus", hello.GpuCount,
 		"agent_version", hello.AgentVersion,
 		"remote_addr", p.Addr.String(),
 	)
 
-	// Đăng ký Session
-	session := s.sessions.RegisterSession(hello, stream)
-	defer s.sessions.RemoveSession(hello.NodeId)
+	// Đăng ký Session với SessionID/Generation chống race khi reconnect
+	helloNormalized := proto.Clone(hello).(*pb.NodeHello)
+	helloNormalized.NodeId = certNodeID
+	session := s.sessions.RegisterSession(helloNormalized, stream)
+	defer s.sessions.RemoveSessionIfMatch(certNodeID, session.SessionID)
 
 	// Gửi phản hồi NodeRegistration
 	actionsList := make([]string, 0, len(AllowedActions))
@@ -209,19 +237,26 @@ func (s *Server) Tunnel(stream pb.NodeAgentGatewayService_TunnelServer) error {
 			return err
 		}
 
-		s.handleIncomingAgentMessage(hello.NodeId, session, msg)
+		s.handleIncomingAgentMessage(certNodeID, session, msg)
 	}
 }
 
-func (s *Server) handleIncomingAgentMessage(nodeID string, sess *NodeSession, msg *pb.AgentMessage) {
+func (s *Server) handleIncomingAgentMessage(certNodeID string, sess *NodeSession, msg *pb.AgentMessage) {
 	if msg == nil {
+		return
+	}
+	if msg.NodeId != "" && !strings.EqualFold(msg.NodeId, certNodeID) {
+		s.logger.Warn("Bỏ qua bản tin có NodeId không khớp với chứng chỉ mTLS",
+			"cert_node", certNodeID,
+			"msg_node", msg.NodeId,
+		)
 		return
 	}
 
 	switch payload := msg.Payload.(type) {
 	case *pb.AgentMessage_Heartbeat:
 		hb := payload.Heartbeat
-		s.sessions.UpdateHeartbeat(nodeID, hb)
+		s.sessions.UpdateHeartbeat(certNodeID, hb)
 
 		// Gửi HeartbeatAck
 		ack := &pb.GatewayMessage{
@@ -240,23 +275,23 @@ func (s *Server) handleIncomingAgentMessage(nodeID string, sess *NodeSession, ms
 		sess.streamMu.Unlock()
 
 	case *pb.AgentMessage_HostTelemetry:
-		s.sessions.UpdateHostTelemetry(nodeID, payload.HostTelemetry)
+		s.sessions.UpdateHostTelemetry(certNodeID, payload.HostTelemetry)
 
 	case *pb.AgentMessage_GpuTelemetry:
-		s.sessions.UpdateGPUTelemetry(nodeID, payload.GpuTelemetry)
+		s.sessions.UpdateGPUTelemetry(certNodeID, payload.GpuTelemetry)
 
 	case *pb.AgentMessage_ProcessTelemetry:
-		s.sessions.UpdateProcessTelemetry(nodeID, payload.ProcessTelemetry)
+		s.sessions.UpdateProcessTelemetry(certNodeID, payload.ProcessTelemetry)
 
 	case *pb.AgentMessage_WorkspaceTelemetry:
-		s.sessions.UpdateWorkspaceTelemetry(nodeID, payload.WorkspaceTelemetry)
+		s.sessions.UpdateWorkspaceTelemetry(certNodeID, payload.WorkspaceTelemetry)
 
 	case *pb.AgentMessage_CommandResponse:
-		s.sessions.RouteCommandResponse(payload.CommandResponse)
+		s.sessions.RouteCommandResponse(certNodeID, payload.CommandResponse)
 
 	case *pb.AgentMessage_AgentError:
 		s.logger.Warn("Agent báo cáo lỗi",
-			"node_id", nodeID,
+			"node_id", certNodeID,
 			"code", payload.AgentError.Code,
 			"message", payload.AgentError.Message,
 		)

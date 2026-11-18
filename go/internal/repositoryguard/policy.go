@@ -15,7 +15,8 @@ func EvaluatePolicy(report *ScanReport) (verdict ScanState, reasons []string) {
 	}
 
 	coverage := report.Coverage
-	isComplete := coverage.OverallCoverage == "POLICY_COMPLETE"
+	hasAuxiliaryGaps := coverage.Submodules != "NOT_PRESENT" || coverage.LFS != "NOT_PRESENT"
+	isComplete := coverage.OverallCoverage == "POLICY_COMPLETE" && !hasAuxiliaryGaps
 
 	// 1. Phân loại các lý do
 	if report.SecretsCount > 0 {
@@ -30,7 +31,13 @@ func EvaluatePolicy(report *ScanReport) (verdict ScanState, reasons []string) {
 	if report.MisconfigHighCount > 0 {
 		reasons = append(reasons, fmt.Sprintf("Phát hiện %d cấu hình sai cấp độ HIGH/CRITICAL", report.MisconfigHighCount))
 	}
-	if !isComplete {
+	if coverage.Submodules != "NOT_PRESENT" {
+		reasons = append(reasons, fmt.Sprintf("Kho mã chứa Git submodules chưa kiểm tra (submodules=%s)", coverage.Submodules))
+	}
+	if coverage.LFS != "NOT_PRESENT" {
+		reasons = append(reasons, fmt.Sprintf("Kho mã chứa Git LFS pointers chưa kiểm tra (lfs=%s)", coverage.LFS))
+	}
+	if coverage.OverallCoverage != "POLICY_COMPLETE" {
 		reasons = append(reasons, fmt.Sprintf("Phạm vi quét chưa đầy đủ (Scan coverage: %s)", coverage.VulnerabilityScan))
 	}
 
@@ -40,7 +47,7 @@ func EvaluatePolicy(report *ScanReport) (verdict ScanState, reasons []string) {
 		return StateRejected, reasons
 	}
 
-	// - Có High vuln, High misconfig, hoặc Coverage thiếu -> REVIEW_REQUIRED (Fail-closed)
+	// - Có High vuln, High misconfig, Submodules/LFS, hoặc Coverage thiếu -> REVIEW_REQUIRED (Fail-closed)
 	if !isComplete || report.Vulnerabilities.High > 0 || report.MisconfigHighCount > 0 {
 		return StateReviewRequired, reasons
 	}

@@ -10,26 +10,60 @@ GATEWAY_HOST="${2:-192.168.167.250}"
 GATEWAY_HTTP_PORT="${3:-9444}"
 GATEWAY_GRPC_PORT="${4:-9443}"
 TARGET_CERT_DIR="${5:-/etc/labops/certs}"
+AGENT_BIND_ADDR="${LABOPS_AGENT_BIND_ADDR:-127.0.0.1}"
+
+GATEWAY_SCHEME="https"
+CURL_FLAGS="-fsS"
+if [[ "${LABOPS_ALLOW_INSECURE_LOOPBACK:-false}" == "true" ]]; then
+    if [[ "${GATEWAY_HOST}" != "127.0.0.1" && "${GATEWAY_HOST}" != "localhost" ]]; then
+        echo "❌ Từ chối --allow-insecure-loopback cho host không phải loopback: ${GATEWAY_HOST}"
+        exit 1
+    fi
+    GATEWAY_SCHEME="http"
+fi
+if [[ "${ALLOW_INSECURE_HTTP:-}" == "true" ]] || [[ " $* " == *" --allow-insecure-loopback "* ]]; then
+    if [[ "${GATEWAY_HOST}" != "127.0.0.1" && "${GATEWAY_HOST}" != "localhost" ]]; then
+        echo "❌ Từ chối plain HTTP enrollment ra ngoài loopback (${GATEWAY_HOST}); bắt buộc dùng TLS/HTTPS"
+        exit 1
+    fi
+    GATEWAY_SCHEME="http"
+fi
+
+if [[ "${GATEWAY_SCHEME}" != "https" && "${GATEWAY_HOST}" != "127.0.0.1" && "${GATEWAY_HOST}" != "localhost" ]]; then
+    echo "❌ Từ chối truyền enrollment token / private key qua HTTP không mã hóa tới ${GATEWAY_HOST}"
+    exit 1
+fi
 
 echo "=========================================================="
 echo "🛡️ LABOPS ZERO-TRUST NODE ENROLLMENT (mTLS PROVISIONING)"
 echo "=========================================================="
 echo "Node ID:            ${NODE_ID}"
 echo "Gateway Host:       ${GATEWAY_HOST}"
-echo "Gateway HTTP API:   http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
+echo "Gateway API URL:    ${GATEWAY_SCHEME}://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
 echo "Gateway gRPC mTLS:  ${GATEWAY_HOST}:${GATEWAY_GRPC_PORT}"
 echo "Thư mục chứng chỉ:  ${TARGET_CERT_DIR}"
 echo "=========================================================="
 
-# 1. Kiểm tra curl và jq
-for tool in curl jq; do
+# 1. Kiểm tra curl, jq, openssl
+for tool in curl jq openssl; do
     if ! command -v "$tool" &>/dev/null; then
         echo "❌ Thiếu công cụ bắt buộc: $tool. Vui lòng cài đặt: sudo apt install -y $tool"
         exit 1
     fi
 done
 
-CONTROL_SECRET="${6:-${LABOPS_GATEWAY_CONTROL_SECRET:-${LABOPS_SESSION_SECRET:-${LABOPS_ADMIN_API_TOKEN:-}}}}"
+CONTROL_SECRET="${6:-${LABOPS_GATEWAY_CONTROL_SECRET:-}}"
+if [ -z "${CONTROL_SECRET}" ] && [ -z "${ENROLLMENT_TOKEN:-}" ]; then
+    echo "❌ Thiếu LABOPS_GATEWAY_CONTROL_SECRET hoặc ENROLLMENT_TOKEN (không dùng session/admin fallback)."
+    exit 1
+fi
+
+AGENT_SECRET="${LABOPS_AGENT_SECRET:-}"
+if [ -z "${AGENT_SECRET}" ]; then
+    AGENT_SECRET="$(openssl rand -hex 32)"
+    echo "🔐 Đã sinh ngẫu nhiên LABOPS_AGENT_SECRET mới (64 ký tự hex)."
+fi
+
 AUTH_HEADER=""
 if [ -n "${CONTROL_SECRET}" ]; then
     AUTH_HEADER="-H Authorization: Bearer ${CONTROL_SECRET}"
@@ -40,13 +74,13 @@ TOKEN="${ENROLLMENT_TOKEN:-}"
 # 2. Yêu cầu cấp Enrollment Token từ Gateway Control Plane (nếu chưa được cấp sẵn)
 if [ -z "${TOKEN}" ]; then
     echo "🔑 [1/4] Yêu cầu One-Time Enrollment Token từ Gateway Control Plane..."
-    ENROLL_RESP=$(curl -s -f -X POST "http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/enroll" \
+    ENROLL_RESP=$(curl ${CURL_FLAGS} -X POST "${GATEWAY_SCHEME}://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/enroll" \
         -H "Content-Type: application/json" \
         ${AUTH_HEADER} \
         -d "{\"node_id\": \"${NODE_ID}\", \"ttl_minutes\": 15}" || true)
 
     if [ -z "${ENROLL_RESP}" ]; then
-        echo "❌ Không thể kết nối tới Gateway Control Plane hoặc chưa xác thực tại http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
+        echo "❌ Không thể kết nối tới Gateway Control Plane hoặc chưa xác thực tại ${GATEWAY_SCHEME}://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}"
         exit 1
     fi
 
@@ -57,12 +91,12 @@ if [ -z "${TOKEN}" ]; then
     fi
     echo "✅ Đã nhận Enrollment Token (có hiệu lực trong 15 phút)"
 else
-    echo "🔑 [1/4] Sử dụng Enrollment Token được chỉ định trước: ${TOKEN:0:8}..."
+    echo "🔑 [1/4] Sử dụng Enrollment Token được chỉ định trước."
 fi
 
 # 3. Sử dụng token để nhận cặp chứng chỉ và private key từ Gateway CA
 echo "📜 [2/4] Trao đổi Token lấy Chứng chỉ mTLS Client TLS 1.3..."
-ISSUE_RESP=$(curl -s -f -X POST "http://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/issue-cert" \
+ISSUE_RESP=$(curl ${CURL_FLAGS} -X POST "${GATEWAY_SCHEME}://${GATEWAY_HOST}:${GATEWAY_HTTP_PORT}/api/v1/gateway/issue-cert" \
     -H "Content-Type: application/json" \
     -d "{\"node_id\": \"${NODE_ID}\", \"enrollment_token\": \"${TOKEN}\"}")
 
@@ -78,9 +112,9 @@ fi
 # 4. Lưu chứng chỉ an toàn với quyền hạn nghiêm ngặt
 echo "💾 [3/4] Lưu chứng chỉ và khóa bí mật vào ${TARGET_CERT_DIR}..."
 mkdir -p "${TARGET_CERT_DIR}"
-echo "${CA_CERT}" > "${TARGET_CERT_DIR}/ca.crt"
-echo "${CLIENT_CERT}" > "${TARGET_CERT_DIR}/client.crt"
-echo "${CLIENT_KEY}" > "${TARGET_CERT_DIR}/client.key"
+printf '%s\n' "${CA_CERT}" > "${TARGET_CERT_DIR}/ca.crt"
+printf '%s\n' "${CLIENT_CERT}" > "${TARGET_CERT_DIR}/client.crt"
+printf '%s\n' "${CLIENT_KEY}" > "${TARGET_CERT_DIR}/client.key"
 
 chmod 644 "${TARGET_CERT_DIR}/ca.crt"
 chmod 644 "${TARGET_CERT_DIR}/client.crt"
@@ -96,9 +130,9 @@ cat <<EOF > "${CONFIG_FILE}"
 # LabOps Node Agent Environment
 LABOPS_SERVER_ID="${NODE_ID}"
 LABOPS_SERVER_NAME="Server Workstation (${NODE_ID} • 1x NVIDIA A30)"
-LABOPS_AGENT_BIND_ADDR="0.0.0.0"
+LABOPS_AGENT_BIND_ADDR="${AGENT_BIND_ADDR}"
 LABOPS_AGENT_PORT="9100"
-LABOPS_AGENT_SECRET="labops-workstation-verified-token-2026"
+LABOPS_AGENT_SECRET="${AGENT_SECRET}"
 DOCKER_HOST="/var/run/docker.sock"
 
 # Zero-Trust Gateway Tunnel

@@ -1,7 +1,13 @@
 package pki
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -199,5 +205,104 @@ func TestRevocationPersistenceAcrossRestart(t *testing.T) {
 	}
 	if !rm2.IsNodeAllowed("ws-good-actor") {
 		t.Fatal("ws-good-actor phải tiếp tục được phép sau khi Gateway restart")
+	}
+}
+
+func TestPKISecurityFailClosedAndRevocationInvariants(t *testing.T) {
+	// 1. Empty allowlist MUST deny-by-default
+	emptyRM := NewRevocationManager()
+	if emptyRM.IsNodeAllowed("any-node") {
+		t.Fatal("Empty allowlist must fail-closed (deny-by-default)")
+	}
+
+	// 2. Corrupt revocations.json MUST fail-closed and reject mutations
+	tmpDir := t.TempDir()
+	corruptFile := filepath.Join(tmpDir, "revocations.json")
+	if err := os.WriteFile(corruptFile, []byte(`{"revoked_nodes": {corrupt`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	corruptRM := NewRevocationManagerWithPersistence(corruptFile)
+	if !corruptRM.IsCorrupted() {
+		t.Fatal("Expected corrupted flag to be true on invalid JSON")
+	}
+	if corruptRM.IsNodeAllowed("workstation") {
+		t.Fatal("Corrupt PKI state MUST deny all nodes")
+	}
+	if err := corruptRM.AllowNode("workstation"); err == nil {
+		t.Fatal("Corrupt PKI state MUST refuse AllowNode mutations")
+	}
+
+	// 3. Auto-unrevoke prevention & certificate serial/fingerprint permanence
+	revFile := filepath.Join(tmpDir, "rev2.json")
+	rm := NewRevocationManagerWithPersistence(revFile)
+	if err := rm.AllowNode("node-a"); err != nil {
+		t.Fatal(err)
+	}
+	ca, err := GenerateOrLoadCA(filepath.Join(tmpDir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCert, err := IssueNodeCert(ca, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.RevokeCertificate("node-a", oldCert.Cert.SerialNumber.Text(16), CertFingerprintSHA256(oldCert.Cert), "stolen key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.RevokeNode("node-a", "host compromised"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.AllowNode("node-a"); err == nil {
+		t.Fatal("AllowNode MUST reject automatically un-revoking a revoked node")
+	}
+	if err := rm.UnrevokeNode("node-a", "sec-admin", "hardware wiped"); err != nil {
+		t.Fatalf("Explicit UnrevokeNode failed: %v", err)
+	}
+	// Stolen old certificate serial MUST still be rejected even after node un-revoke
+	if err := rm.IsCertAllowed(oldCert.Cert); err == nil {
+		t.Fatal("Revoked certificate serial/fingerprint MUST remain denied after UnrevokeNode")
+	}
+	newCert, err := IssueNodeCert(ca, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rm.IsCertAllowed(newCert.Cert); err != nil {
+		t.Fatalf("Freshly issued certificate for un-revoked node-a should be allowed: %v", err)
+	}
+
+	// 4. Empty enrollment token manager secret MUST fail-closed
+	emptyETM := NewEnrollmentTokenManager("")
+	if tok := emptyETM.GenerateToken("node-a", time.Minute); tok != "" {
+		t.Fatal("EnrollmentTokenManager with empty secret must return empty token")
+	}
+	if emptyETM.ConsumeToken("anything") || emptyETM.ConsumeTokenForNode("anything", "node-a") {
+		t.Fatal("EnrollmentTokenManager with empty secret must reject all consume attempts")
+	}
+
+	// 5. ExtractNodeIDFromCert rejects CN without SAN and rejects CN/SAN mismatch
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cnOnlyTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(999),
+		Subject:      pkix.Name{CommonName: "spoof-node"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	cnOnlyDER, _ := x509.CreateCertificate(rand.Reader, cnOnlyTpl, ca.Cert, &priv.PublicKey, ca.Key)
+	cnOnlyCert, _ := x509.ParseCertificate(cnOnlyDER)
+	if _, err := ExtractNodeIDFromCert(cnOnlyCert); err == nil {
+		t.Fatal("ExtractNodeIDFromCert MUST reject CN-only cert lacking .node.labops.local SAN")
+	}
+
+	mismatchTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1000),
+		Subject:      pkix.Name{CommonName: "wrong-cn"},
+		DNSNames:     []string{"node-a" + NodeSANPrefix},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	mismatchDER, _ := x509.CreateCertificate(rand.Reader, mismatchTpl, ca.Cert, &priv.PublicKey, ca.Key)
+	mismatchCert, _ := x509.ParseCertificate(mismatchDER)
+	if _, err := ExtractNodeIDFromCert(mismatchCert); err == nil {
+		t.Fatal("ExtractNodeIDFromCert MUST reject cert where CommonName != SAN nodeID")
 	}
 }

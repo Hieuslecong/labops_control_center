@@ -1,26 +1,30 @@
 package repositoryguard
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 type CacheEntry struct {
-	CanonicalRepo   string    `json:"canonical_repo"`
-	CommitSHA       string    `json:"commit_sha"`
-	ArtifactDigest  string    `json:"artifact_digest"`
-	ArtifactPath    string    `json:"artifact_path"`
-	ArtifactSize    int64     `json:"artifact_size"`
-	PolicyVersion   string    `json:"policy_version"`
-	ScannerVersion  string    `json:"scanner_version"`
-	DBVersion       string    `json:"db_version"`
-	ApprovedAt      time.Time `json:"approved_at"`
-	ApprovedBy      string    `json:"approved_by"` // "BOT_AUTO_APPROVAL" hoặc admin username
+	CanonicalRepo  string    `json:"canonical_repo"`
+	CommitSHA      string    `json:"commit_sha"`
+	ArtifactDigest string    `json:"artifact_digest"`
+	ArtifactPath   string    `json:"artifact_path"`
+	ArtifactSize   int64     `json:"artifact_size"`
+	PolicyVersion  string    `json:"policy_version"`
+	ScannerVersion string    `json:"scanner_version"`
+	DBVersion      string    `json:"db_version"`
+	ApprovedAt     time.Time `json:"approved_at"`
+	ApprovedBy     string    `json:"approved_by"` // "BOT_AUTO_APPROVAL" hoặc admin username
 }
 
 type ApprovedArtifactStore struct {
@@ -42,8 +46,11 @@ func NewApprovedArtifactStore(storeDir string) (*ApprovedArtifactStore, error) {
 	}
 
 	if err := s.loadIndex(); err != nil {
-		// Khởi tạo index trống nếu chưa có
-		_ = s.saveIndex()
+		if os.IsNotExist(err) {
+			_ = s.saveIndexLocked()
+		} else {
+			return nil, fmt.Errorf("approved store index bị hỏng (fail-closed): %w", err)
+		}
 	}
 
 	return s, nil
@@ -69,13 +76,15 @@ func (s *ApprovedArtifactStore) loadIndex() error {
 
 	s.entries = make(map[string]*CacheEntry)
 	for _, entry := range list {
-		s.entries[s.cacheKey(entry.CanonicalRepo, entry.CommitSHA)] = entry
+		if entry != nil {
+			s.entries[s.cacheKey(entry.CanonicalRepo, entry.CommitSHA)] = entry
+		}
 	}
 	return nil
 }
 
-func (s *ApprovedArtifactStore) saveIndex() error {
-	var list []*CacheEntry
+func (s *ApprovedArtifactStore) saveIndexLocked() error {
+	list := make([]*CacheEntry, 0, len(s.entries))
 	for _, entry := range s.entries {
 		list = append(list, entry)
 	}
@@ -85,76 +94,159 @@ func (s *ApprovedArtifactStore) saveIndex() error {
 		return err
 	}
 
-	tmp := s.indexPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	tmp, err := os.CreateTemp(s.storeDir, "index.json.tmp.*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.indexPath)
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, s.indexPath)
 }
 
-// GetApproved kiểm tra xem commit này đã được duyệt và có artifact hợp lệ hay không
+// GetApproved kiểm tra commit đã duyệt, đúng PolicyVersion hiện tại và có artifact thực sự hợp lệ.
 func (s *ApprovedArtifactStore) GetApproved(canonicalRepo, commitSHA string) (*CacheEntry, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	key := s.cacheKey(canonicalRepo, commitSHA)
 	entry, ok := s.entries[key]
-	if !ok {
+	if !ok || entry == nil {
+		return nil, false
+	}
+	if entry.PolicyVersion != CurrentPolicyVersion {
+		return nil, false
+	}
+	if strings.TrimSpace(entry.ArtifactDigest) == "" {
 		return nil, false
 	}
 
-	// Xác minh tệp artifact thực tế trên đĩa
-	if _, err := os.Stat(entry.ArtifactPath); err != nil {
+	info, err := os.Stat(entry.ArtifactPath)
+	if err != nil || info.IsDir() {
 		return nil, false
 	}
 
-	return entry, true
+	cp := *entry
+	return &cp, true
 }
 
-// StoreApproved sao chép gói archive đã quét vào Approved Artifact Store
+// RevokeEntry xóa commit khỏi approved store khi bị thu hồi.
+func (s *ApprovedArtifactStore) RevokeEntry(canonicalRepo, commitSHA string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.cacheKey(canonicalRepo, commitSHA)
+	if ent, ok := s.entries[key]; ok && ent != nil {
+		if ent.ArtifactPath != "" {
+			_ = os.Chmod(ent.ArtifactPath, 0600)
+			_ = os.Remove(ent.ArtifactPath)
+		}
+		delete(s.entries, key)
+		return s.saveIndexLocked()
+	}
+	return nil
+}
+
+// StoreApproved đối chiếu SHA-256 trước khi promote vào Approved Store bất biến (temp + fsync + chmod 0440 + rename).
 func (s *ApprovedArtifactStore) StoreApproved(canonicalRepo, commitSHA, scannerVer, dbVer, approvedBy string, qw *QuarantineWorkspace) (*CacheEntry, error) {
+	if qw == nil || strings.TrimSpace(qw.ArchiveFile) == "" || strings.TrimSpace(qw.DigestSHA256) == "" {
+		return nil, errors.New("thiếu archive quarantine hoặc digest SHA-256")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Lưu tệp content-addressed theo SHA-256 digest
-	targetFilename := fmt.Sprintf("%s.tar.gz", qw.DigestSHA256)
-	targetPath := filepath.Join(s.storeDir, targetFilename)
-
-	// Copy archive vào kho lưu trữ được bảo vệ
 	src, err := os.Open(qw.ArchiveFile)
 	if err != nil {
 		return nil, fmt.Errorf("không thể đọc file archive từ quarantine: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+	tmpFile, err := os.CreateTemp(s.storeDir, "artifact.tmp.*")
 	if err != nil {
-		return nil, fmt.Errorf("không thể tạo file artifact trong store: %w", err)
+		return nil, fmt.Errorf("không thể tạo tệp tạm artifact: %w", err)
 	}
-	defer dst.Close()
+	tmpPath := tmpFile.Name()
 
-	size, err := io.Copy(dst, src)
-	if err != nil {
-		return nil, fmt.Errorf("lỗi copy artifact: %w", err)
+	hasher := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher), io.LimitReader(src, MaxRepoSizeBytes+1))
+	if copyErr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("lỗi copy artifact: %w", copyErr)
+	}
+	if size > MaxRepoSizeBytes {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, errors.New("kích thước artifact vượt giới hạn tối đa")
+	}
+
+	actualDigest := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actualDigest, qw.DigestSHA256) {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("TOCTOU_QUARANTINE_MISMATCH: digest quarantine bị thay đổi trước khi phê duyệt (expected %s, got %s)", qw.DigestSHA256, actualDigest)
+	}
+
+	if err := tmpFile.Chmod(0440); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+
+	targetFilename := fmt.Sprintf("%s.tar.gz", actualDigest)
+	targetPath := filepath.Join(s.storeDir, targetFilename)
+	if existingInfo, statErr := os.Stat(targetPath); statErr == nil && !existingInfo.IsDir() {
+		// Artifact content-addressed cùng digest đã tồn tại ở chế độ read-only -> giữ nguyên
+		_ = os.Remove(tmpPath)
+	} else if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("không thể niêm phong artifact vào approved store: %w", err)
 	}
 
 	entry := &CacheEntry{
 		CanonicalRepo:  canonicalRepo,
 		CommitSHA:      commitSHA,
-		ArtifactDigest: qw.DigestSHA256,
+		ArtifactDigest: actualDigest,
 		ArtifactPath:   targetPath,
 		ArtifactSize:   size,
 		PolicyVersion:  CurrentPolicyVersion,
 		ScannerVersion: scannerVer,
 		DBVersion:      dbVer,
-		ApprovedAt:     time.Now(),
+		ApprovedAt:     time.Now().UTC(),
 		ApprovedBy:     approvedBy,
 	}
 
 	s.entries[s.cacheKey(canonicalRepo, commitSHA)] = entry
-	if err := s.saveIndex(); err != nil {
+	if err := s.saveIndexLocked(); err != nil {
 		return nil, fmt.Errorf("lỗi lưu index approved store: %w", err)
 	}
 
-	return entry, nil
+	cp := *entry
+	return &cp, nil
 }

@@ -214,13 +214,13 @@ func (c *Collector) Collect() *SystemGPUReport {
 	return c.latestReport
 }
 
-// GetLatest lấy báo cáo GPU gần nhất
+// GetLatest lấy báo cáo GPU gần nhất (không gây double-RUnlock)
 func (c *Collector) GetLatest() *SystemGPUReport {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.latestReport == nil {
-		c.mu.RUnlock()
+	report := c.latestReport
+	c.mu.RUnlock()
+	if report == nil {
 		return c.Collect()
 	}
-	return c.latestReport
+	return report
 }

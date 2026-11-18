@@ -67,16 +67,21 @@ func ResolveCommitSHA(ctx context.Context, repoURL, ref string) (string, error) 
 		return strings.ToLower(ref), nil
 	}
 
-	// Sử dụng git ls-remote để lấy commit SHA thực tế từ remote mà không cần clone
+	// Sử dụng git config cấm hooks, filters, submodules và file:// khi phân giải SHA từ remote
 	ctxTimeout, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctxTimeout, "git", "ls-remote", repoURL, ref)
+	safeArgs := SafeGitConfigArgs()
+	lsArgs := append(append([]string{}, safeArgs...), "ls-remote", repoURL, ref)
+	cmd := exec.CommandContext(ctxTimeout, "git", lsArgs...)
+	cmd.Env = SafeGitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		// Thử resolve HEAD nếu ref trống
 		if ref == "" || ref == "HEAD" {
-			cmdHead := exec.CommandContext(ctxTimeout, "git", "ls-remote", "--symref", repoURL, "HEAD")
+			symArgs := append(append([]string{}, safeArgs...), "ls-remote", "--symref", repoURL, "HEAD")
+			cmdHead := exec.CommandContext(ctxTimeout, "git", symArgs...)
+			cmdHead.Env = SafeGitEnv()
 			outHead, errHead := cmdHead.Output()
 			if errHead == nil {
 				lines := strings.Split(string(outHead), "\n")
@@ -101,7 +106,9 @@ func ResolveCommitSHA(ctx context.Context, repoURL, ref string) (string, error) 
 
 	// Nếu ref trống nhưng chưa resolve được, gọi trực tiếp với HEAD
 	if ref == "" {
-		cmdHead := exec.CommandContext(ctxTimeout, "git", "ls-remote", repoURL, "HEAD")
+		headArgs := append(append([]string{}, safeArgs...), "ls-remote", repoURL, "HEAD")
+		cmdHead := exec.CommandContext(ctxTimeout, "git", headArgs...)
+		cmdHead.Env = SafeGitEnv()
 		if outHead, errHead := cmdHead.Output(); errHead == nil {
 			fields := strings.Fields(string(outHead))
 			if len(fields) >= 1 && sha40Regex.MatchString(fields[0]) {

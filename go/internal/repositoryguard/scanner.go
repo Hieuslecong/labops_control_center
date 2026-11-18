@@ -1,11 +1,14 @@
 package repositoryguard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -65,6 +68,48 @@ func GetTrivyVersion() (version string, dbUpdated string, err error) {
 	return info.Version, info.VulnerabilityDB.UpdatedAt, nil
 }
 
+// InspectAuxiliaryFeatures kiểm tra .gitmodules và con trỏ Git LFS thực tế trong mã nguồn.
+func InspectAuxiliaryFeatures(sourceDir string) (submodulesStatus, lfsStatus string) {
+	submodulesStatus = "NOT_PRESENT"
+	lfsStatus = "NOT_PRESENT"
+
+	if st, err := os.Lstat(filepath.Join(sourceDir, ".gitmodules")); err == nil && !st.IsDir() {
+		submodulesStatus = "PRESENT_UNFETCHED"
+	}
+
+	lfsSig := []byte("version https://git-lfs.github.com/spec/v1")
+	_ = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if filepath.Base(path) == ".gitattributes" {
+			data, rErr := os.ReadFile(ioLimitPath(path, 64*1024))
+			_ = data
+			_ = rErr
+			if raw, rErr2 := os.ReadFile(path); rErr2 == nil && strings.Contains(string(raw), "filter=lfs") {
+				lfsStatus = "PRESENT_UNFETCHED"
+				return filepath.SkipAll
+			}
+		}
+		if info.Size() > 0 && info.Size() <= 512 {
+			f, oErr := os.Open(path)
+			if oErr == nil {
+				buf := make([]byte, 256)
+				n, _ := f.Read(buf)
+				_ = f.Close()
+				if bytes.Contains(buf[:n], lfsSig) {
+					lfsStatus = "PRESENT_UNFETCHED"
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	return submodulesStatus, lfsStatus
+}
+
+func ioLimitPath(p string, _ int64) string { return p }
+
 // RunTrivyScan thực thi quét tĩnh trên thư mục quarantine đã được cách ly
 func RunTrivyScan(ctx context.Context, sourceDir string) (*ScanReport, error) {
 	start := time.Now()
@@ -76,6 +121,7 @@ func RunTrivyScan(ctx context.Context, sourceDir string) (*ScanReport, error) {
 	}
 
 	version, dbDate, _ := GetTrivyVersion()
+	submodStatus, lfsStatus := InspectAuxiliaryFeatures(sourceDir)
 
 	// 2. Chạy trivy fs quét toàn diện (vuln, secret, misconfig)
 	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -90,25 +136,34 @@ func RunTrivyScan(ctx context.Context, sourceDir string) (*ScanReport, error) {
 	)
 
 	out, err := cmd.Output()
+	overall := "POLICY_COMPLETE"
+	if submodStatus != "NOT_PRESENT" || lfsStatus != "NOT_PRESENT" {
+		overall = "INCOMPLETE_UNFETCHED_REFS"
+	}
 	coverage := ScanCoverage{
 		VulnerabilityScan:    "COMPLETED",
 		SecretScan:           "COMPLETED",
 		MisconfigurationScan: "COMPLETED",
-		Submodules:           "NOT_PRESENT",
-		LFS:                  "NOT_PRESENT",
-		OverallCoverage:      "POLICY_COMPLETE",
+		Submodules:           submodStatus,
+		LFS:                  lfsStatus,
+		OverallCoverage:      overall,
 	}
 
 	if err != nil {
-		// Nếu trivy gặp lỗi trả mã khác 0, kiểm tra xem có xuất JSON được không
 		if len(out) == 0 {
 			return nil, fmt.Errorf("trivy fs thất bại không xuất được kết quả: %w", err)
 		}
 	}
 
 	var parsed TrivyOutput
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		return nil, fmt.Errorf("lỗi unmarshal kết quả JSON từ trivy: %w", err)
+	if uErr := json.Unmarshal(out, &parsed); uErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("trivy fs lỗi (%w) và JSON không hợp lệ: %v", err, uErr)
+		}
+		return nil, fmt.Errorf("lỗi unmarshal kết quả JSON từ trivy: %w", uErr)
+	}
+	if err != nil && parsed.SchemaVersion == 0 && len(parsed.Results) == 0 {
+		return nil, fmt.Errorf("trivy fs trả về mã lỗi không hợp lệ: %w", err)
 	}
 
 	// 3. Tổng hợp số liệu và phân loại

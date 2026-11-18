@@ -7,6 +7,7 @@ import (
 type ScanState string
 
 const (
+	StateRequested        ScanState = "REQUESTED"
 	StateSubmitted        ScanState = "SUBMITTED"
 	StateValidating       ScanState = "VALIDATING"
 	StateResolvingCommit  ScanState = "RESOLVING_COMMIT"
@@ -17,10 +18,15 @@ const (
 	StateAutoApproved     ScanState = "AUTO_APPROVED"
 	StateReviewRequired   ScanState = "REVIEW_REQUIRED"
 	StateManuallyApproved ScanState = "MANUALLY_APPROVED"
+	StateApproved         ScanState = "APPROVED"
 	StateRejected         ScanState = "REJECTED"
 	StateFailed           ScanState = "FAILED"
+	StateExpired          ScanState = "EXPIRED"
+	StateRevoked          ScanState = "REVOKED"
 	StatePublishing       ScanState = "PUBLISHING"
+	StateDelivering       ScanState = "DELIVERING"
 	StateDelivered        ScanState = "DELIVERED"
+	StateDeliveryFailed   ScanState = "DELIVERY_FAILED"
 )
 
 type ScanCoverage struct {
@@ -97,7 +103,14 @@ type RepositoryRequest struct {
 	Report          *ScanReport     `json:"report,omitempty"`
 	Decision        *DecisionRecord `json:"decision,omitempty"`
 	Error           string          `json:"error,omitempty"`
-	PolicyVersion   string          `json:"policy_version"`
+	PolicyVersion      string          `json:"policy_version"`
+	ScannerVersion     string          `json:"scanner_version,omitempty"`
+	DBVersion          string          `json:"db_version,omitempty"`
+	ArtifactProvenance string          `json:"artifact_provenance,omitempty"`
+	DeliveredAt        *time.Time      `json:"delivered_at,omitempty"`
+	DeliveryPath       string          `json:"delivery_path,omitempty"`
+	DeliveryStatus     string          `json:"delivery_status,omitempty"`
+	ExpiresAt          *time.Time      `json:"expires_at,omitempty"`
 }
 
 type DeliverPayload struct {

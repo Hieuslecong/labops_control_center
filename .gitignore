@@ -83,3 +83,4 @@ graphify-out/
 *.zip
 bin/
 
+*.log

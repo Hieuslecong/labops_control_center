@@ -161,7 +161,8 @@ if is_backend_healthy; then
     echo -e "${GREEN}✅ LabOps Backend API V2 đang hoạt động trên cổng 8000.${NC}"
 else
     echo -e "${YELLOW}⚡ Đang khởi động LabOps FastAPI Backend API...${NC}"
-    "$PYTHON_BIN" -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 >/dev/null 2>&1 &
+    mkdir -p "$PROJECT_DIR/backend"
+    "$PYTHON_BIN" -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 > "$PROJECT_DIR/backend/uvicorn.log" 2>&1 &
     STARTED_BACKEND_PID=$!
 
     # Đợi backend phản hồi health check (tối đa 15 giây)
@@ -177,7 +178,12 @@ else
     if [ "$ready" = true ]; then
         echo -e "${GREEN}✅ FastAPI Backend đã sẵn sàng tại http://127.0.0.1:8000 (PID: $STARTED_BACKEND_PID).${NC}"
     else
-        echo -e "${RED}❌ Không thể khởi động Backend API cổng 8000. Vui lòng kiểm tra log.${NC}"
+        echo -e "${RED}❌ Không thể khởi động Backend API cổng 8000.${NC}"
+        if [ -f "$PROJECT_DIR/backend/uvicorn.log" ]; then
+            echo -e "${YELLOW}--- Chi tiết lỗi (backend/uvicorn.log) ---${NC}"
+            tail -n 15 "$PROJECT_DIR/backend/uvicorn.log"
+            echo -e "${YELLOW}------------------------------------------${NC}"
+        fi
         exit 1
     fi
 fi

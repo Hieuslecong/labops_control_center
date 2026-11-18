@@ -1,4 +1,5 @@
 import os
+import copy
 import time
 import json
 import shutil
@@ -88,6 +89,8 @@ class HostMonitorAdapter:
         self.is_demo_mode = is_demo_mode
         self.local_host_id = local_host_id or settings.LOCAL_HOST_ID
         self.is_containerized = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        self._telemetry_cache: Dict[tuple, tuple[float, Dict[str, Any]]] = {}
+        self._nvidia_versions_cache: Optional[tuple[float, Dict[str, str]]] = None
 
     def _get_cpu_model(self) -> str:
         try:
@@ -112,6 +115,9 @@ class HostMonitorAdapter:
             return "Không xác định"
 
     def _get_nvidia_versions(self) -> Dict[str, str]:
+        now = time.monotonic()
+        if self._nvidia_versions_cache and (now - self._nvidia_versions_cache[0]) < 300.0:
+            return dict(self._nvidia_versions_cache[1])
         if not shutil.which("nvidia-smi"):
             return {"driver": "Chưa cài đặt", "cuda": "Chưa cài đặt"}
         try:
@@ -124,7 +130,9 @@ class HostMonitorAdapter:
                     parts = line.split("CUDA Version:")
                     if len(parts) > 1:
                         cuda = parts[1].split()[0].replace("|", "").strip()
-            return {"driver": driver, "cuda": cuda}
+            result = {"driver": driver, "cuda": cuda}
+            self._nvidia_versions_cache = (now, dict(result))
+            return result
         except Exception as e:
             logger.warning(f"Failed to query NVIDIA versions: {e}")
             return {"driver": "Unavailable", "cuda": "Unavailable"}
@@ -262,6 +270,16 @@ class HostMonitorAdapter:
         return None
 
     def _build_local_telemetry(self, server_id: str, display_name: str, location: str) -> Dict[str, Any]:
+        cache_key = (self.local_host_id, self.is_demo_mode, server_id, display_name, location)
+        now = time.monotonic()
+        cached = self._telemetry_cache.get(cache_key)
+        if cached and (now - cached[0]) < 2.0:
+            return copy.deepcopy(cached[1])
+        data = self._collect_local_telemetry(server_id, display_name, location)
+        self._telemetry_cache[cache_key] = (now, copy.deepcopy(data))
+        return data
+
+    def _collect_local_telemetry(self, server_id: str, display_name: str, location: str) -> Dict[str, Any]:
         # Ưu tiên lấy trực tiếp từ Go Agent nếu đang hoạt động
         go_data = self._fetch_go_agent_telemetry(server_id, display_name, location)
         if go_data:

@@ -129,8 +129,8 @@ export function SafeMemberDeleteDialog({
   const effectivePreview = preview?.member_id === member.id ? preview : null;
   const isPreviewLoading = loadingPreview || (open && !effectivePreview && previewError === null);
   const currentStatus = effectivePreview?.current_status || member.status || 'UNKNOWN';
-  const isSuspendedOrArchived = currentStatus === 'SUSPENDED' || currentStatus === 'ARCHIVED';
-  const isArchived = currentStatus === 'ARCHIVED';
+  const isArchived = currentStatus === 'ARCHIVED' || currentStatus === 'DELETE_ELIGIBLE';
+  const isSuspendedOrArchived = currentStatus === 'SUSPENDED' || isArchived;
   const activeProcessesCount = effectivePreview?.active_workloads?.active_processes?.length ?? 0;
   const activeReservationsCount =
     effectivePreview?.active_workloads?.active_reservations?.length ?? 0;

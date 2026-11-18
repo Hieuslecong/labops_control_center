@@ -276,18 +276,21 @@ class LabOpsDataService:
             logger.exception("Failed to persist LabOps data")
             raise RuntimeError("Could not persist LabOps data") from e
 
-    @property
-    def servers(self) -> List[Dict[str, Any]]:
+    def _collect_servers(self, jobs_snapshot: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         if not self.demo_mode:
             ws = self.host_monitor.get_local_workstation_telemetry()
             track = self.host_monitor.get_remote_track_telemetry()
             ws["active_members"] = sum(1 for m in self.members if m.get("assigned_server") == "workstation" and m.get("status") == "ACTIVE")
             track["active_members"] = sum(1 for m in self.members if m.get("assigned_server") == "track" and m.get("status") == "ACTIVE")
-            jobs_by_server = self.jobs
+            jobs_by_server = jobs_snapshot if jobs_snapshot is not None else self.jobs
             ws["active_jobs"] = sum(1 for job in jobs_by_server if job.get("serverId", job.get("server_id")) == "workstation")
             track["active_jobs"] = sum(1 for job in jobs_by_server if job.get("serverId", job.get("server_id")) == "track")
             return [track, ws]
         return self._demo_servers
+
+    @property
+    def servers(self) -> List[Dict[str, Any]]:
+        return self._collect_servers()
 
     @servers.setter
     def servers(self, val: List[Dict[str, Any]]):
@@ -1153,10 +1156,14 @@ class LabOpsDataService:
                 setattr(self, attribute, value)
 
     def get_summary(self) -> Dict[str, Any]:
-        used_vram_gb = round(sum(gpu["vram_used_mb"] for gpu in self.gpus) / 1024, 1)
-        total_vram_gb = round(sum(gpu.get("vram_total_mb", 0) for gpu in self.gpus) / 1024, 1)
-        active_gpus = sum(1 for gpu in self.gpus if gpu["vram_used_mb"] > 0)
-        
+        gpus_snapshot = self.gpus
+        jobs_snapshot = self.jobs
+        servers_snapshot = self._collect_servers(jobs_snapshot=jobs_snapshot)
+
+        used_vram_gb = round(sum(gpu["vram_used_mb"] for gpu in gpus_snapshot) / 1024, 1)
+        total_vram_gb = round(sum(gpu.get("vram_total_mb", 0) for gpu in gpus_snapshot) / 1024, 1)
+        active_gpus = sum(1 for gpu in gpus_snapshot if gpu["vram_used_mb"] > 0)
+
         if not self.demo_mode:
             real_ssh = self.process_monitor.get_real_ssh_sessions()
             online_ssh = real_ssh.get("total_count", 0)
@@ -1165,18 +1172,18 @@ class LabOpsDataService:
             online_ssh = sum(1 for m in self.members if m["ssh_status"] == "ONLINE")
             active_sessions = sum(m["ssh_sessions_count"] for m in self.members)
 
-        running_jobs = sum(1 for j in self.jobs if j.get("status") == "RUNNING")
-        
+        running_jobs = sum(1 for j in jobs_snapshot if j.get("status") == "RUNNING")
+
         return {
             "servers": {
-                "total": len(self.servers),
-                "online": sum(1 for s in self.servers if s["status"] == "online"),
-                "offline": sum(1 for s in self.servers if s["status"] == "offline"),
-                "unknown": sum(1 for s in self.servers if s["status"] in {"unknown", "degraded"})
+                "total": len(servers_snapshot),
+                "online": sum(1 for s in servers_snapshot if s["status"] == "online"),
+                "offline": sum(1 for s in servers_snapshot if s["status"] == "offline"),
+                "unknown": sum(1 for s in servers_snapshot if s["status"] in {"unknown", "degraded"})
             },
             "gpus": {
-                "totalCount": len(self.gpus),
-            "model": ", ".join(sorted({gpu.get("model", "") for gpu in self.gpus if gpu.get("model")})) or "UNKNOWN",
+                "totalCount": len(gpus_snapshot),
+                "model": ", ".join(sorted({gpu.get("model", "") for gpu in gpus_snapshot if gpu.get("model")})) or "UNKNOWN",
                 "aggregateVramGb": int(total_vram_gb),
                 "activeCount": active_gpus,
                 "usedVramGb": int(used_vram_gb)
@@ -1188,8 +1195,8 @@ class LabOpsDataService:
             },
             "jobs": {
                 "running": running_jobs,
-                "pending": sum(1 for job in self.jobs if job.get("status") == "PENDING"),
-                "failed": sum(1 for job in self.jobs if job.get("status") == "FAILED")
+                "pending": sum(1 for job in jobs_snapshot if job.get("status") == "PENDING"),
+                "failed": sum(1 for job in jobs_snapshot if job.get("status") == "FAILED")
             },
             "gpuHours": {"today": None, "last7Days": None, "previousPeriodChangePercent": None},
             "alerts": {"critical": None, "warnings": None, "unresolvedIncidents": None}

@@ -1,0 +1,23 @@
+# 03 — MÔ HÌNH ĐE DỌA BẢO MẬT (SECURITY THREAT MODEL)
+
+- **Branch**: `hardening/labops-v2`
+- **Mục tiêu**: Phân tích các bề mặt tấn công theo STRIDE trên 4 tầng kiến trúc LabOps Control Center V2 và đối chiếu biện pháp phòng thủ đã triển khai.
+
+---
+
+## 1. Bề mặt Tấn công & Biện pháp Phòng thủ (STRIDE)
+
+| Nhóm Đe dọa | Kịch bản tấn công tiêu biểu | Cơ chế kiểm soát đã triển khai | Tệp / Ký hiệu xác minh |
+|---|---|---|---|
+| **Spoofing (Giả mạo danh tính)** | Client tự gắn header `X-LabOps-Actor: admin`, đánh cắp token đã logout, hoặc giả mạo Node Agent khác trong tunnel mTLS. | 1. Gỡ bỏ hoàn toàn `X-LabOps-Actor` ở BFF & FastAPI.<br>2. Cookie `labops_session` ký HMAC-SHA256 kèm `jti`, `scope='session'`, max `28800s` (`session-token.ts`).<br>3. `/auth/logout` & `suspend_member` ghi thu hồi `jti`/`revoked_before` vào `RevokedTokenRecord`.<br>4. mTLS Gateway trích xuất node ID từ chứng chỉ SPIFFE (`ExtractNodeIDFromCert`) và chặn giả mạo chéo node (`RouteCommandResponse`). | `src/lib/session-token.ts`, `src/app/api/labops/_lib.ts`, `backend/app/core/security.py`, `go/internal/pki/pki.go`, `go/internal/gateway/server.go` |
+| **Tampering (Can thiệp dữ liệu / mã nguồn)** | Sửa file backup trước khi restore; chèn hook `.git/hooks` hoặc symlink thoát workspace trong `git clone`; sửa tham số khi gateway ủy quyền lệnh. | 1. `labops_db_backup_restore.py` băm SHA-256 mọi file JSONL & SQLite snapshot vào `manifest.json` và fail-closed trước khi ghi DB.<br>2. `SafeGitConfigArgs` tắt `core.hooksPath`, `protocol.file.allow=never`, `submodule.recurse=false`, LFS smudge; kiểm tra path depth & symlink.<br>3. `SignDelegationToken` gắn `ComputeParamsHash` & `ReplayGuard`. | `scripts/labops_db_backup_restore.py`, `go/internal/repositoryguard/security.go`, `go/internal/gateway/delegation.go` |
+| **Repudiation (Chối bỏ hành động)** | Quản trị viên xóa thành viên, duyệt repo hoặc tắt tiến trình GPU mà không có dấu vết hoặc dùng chung mật khẩu admin mà không xác nhận lại đối tượng. | Mọi hành động nhạy cảm ghi bảng `audit_events` kèm `correlation_id`, `actor`, `target_id`; thao tác `DELETE /v2/members/{id}` ghi `DeletionOperationRecord` và yêu cầu Step-Up token gắn đúng `action='DELETE_MEMBER'` & `target_id`. | `backend/app/db/models.py`, `backend/app/services/member_lifecycle.py`, `backend/app/api/v1/endpoints/auth.py` |
+| **Information Disclosure (Rò rỉ bí mật / dữ liệu chéo user)** | SSRF từ `repo_url` quét mạng nội bộ (`169.254.169.254`, `192.168.167.250`); Lộ prompt/dữ liệu người dùng khác qua AI assistant; lộ private key SSH; `grep` phát hiện secret hardcoded. | 1. `_validate_repo_url` + `NormalizeAndValidateURL` chỉ cho phép `https://github.com` và `https://gitlab.com` không kèm userinfo.<br>2. Nghiên cứu viên chỉ truy cập `/v2/researcher/me`, bị chặn `403` khỏi `/audit-logs`, `/repositories/audit`, `auth/step-up`.<br>3. Quét `git grep` toàn bộ mã nguồn theo dõi phát hiện **0** secret cứng. | `backend/app/api/v1/endpoints/repositories.py`, `backend/app/services/ssh_access_manager.py`, `src/app/api/labops/_lib.ts` |
+| **Denial of Service (Từ chối dịch vụ)** | Brute-force mật khẩu đăng nhập; spam polling từ nhiều tab nền; bão subprocess `get_summary()` (`4.1s/req`); Zalo API vượt quota tháng Basic. | 1. Rate-limit đăng nhập (`_FAILED_ATTEMPTS` -> HTTP `429`).<br>2. Frontend gom polling vào TanStack Query (`refetchIntervalInBackground: false`).<br>3. Snapshot 1 lần + cache adapter `2.0s` giảm p95 summary xuống `12.219 ms`.<br>4. `QuotaLedger` giới hạn ngân sách tháng & ưu tiên cảnh báo critical. | `backend/app/api/v1/endpoints/auth.py`, `src/features/labops/queries.ts`, `backend/app/services/labops_service.py`, `backend/app/services/zalo_assistant/quota_ledger.py` |
+| **Elevation of Privilege (Leo thang đặc quyền)** | Dùng `RESEARCHER` để gọi API admin qua BFF; gắn Docker socket hoặc `--privileged` vào container workspace; gửi SIGKILL vào tiến trình hệ thống (`systemd`, `sshd`, PID 1). | 1. `isAdminRequiredLabOpsPath` tại BFF + `require_admin` tại FastAPI + `proxy.ts` redirect UI.<br>2. `TrustedRegistry` + `ValidateContainerSafety` cấm `docker.sock` và privilege escalation.<br>3. `CheckSafeGuard` + `SendSignalVerified` (`pidfd_open`) bảo vệ tiến trình hệ thống & UID < 1000. | `src/app/api/labops/_lib.ts`, `src/proxy.ts`, `go/internal/docker/{controller,registry}.go`, `go/internal/process/{controller,safeguards}.go` |
+
+---
+
+## 2. CSRF & Ranh giới Trình duyệt
+- Toàn bộ request thay đổi trạng thái (`POST`, `PUT`, `PATCH`, `DELETE`) qua BFF `/api/auth/logout`, `/api/labops/logout`, `/api/labops/[...path]` bắt buộc đi qua `validateSameOriginMutation()` kiểm tra `Origin` / `Referer` trùng với `request.url.origin`.
+- Không tồn tại endpoint `GET /api/auth/logout` gây logout cưỡng bức qua thẻ `<img>`.

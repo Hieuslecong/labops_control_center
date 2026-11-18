@@ -3,8 +3,10 @@ import hmac
 import json
 import os
 import posixpath
+import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
@@ -159,13 +161,40 @@ class DeliverRepoRequest(BaseModel):
     target_directory: str = Field(..., description="Thư mục làm việc đích trong workspace")
 
 
+_REPO_PATH_RE = re.compile(r"^[a-zA-Z0-9_.\-]+/[a-zA-Z0-9_.\-]+$")
+
+
+def _validate_repo_url(raw_url: str) -> str:
+    url_str = (raw_url or "").strip()
+    if not url_str:
+        raise HTTPException(status_code=400, detail="URL kho mã nguồn không được để trống")
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme.lower() != "https":
+        raise HTTPException(status_code=400, detail="Chỉ chấp nhận giao thức https:// cho kho mã bên ngoài")
+    host = (parsed.hostname or "").lower()
+    if host not in ("github.com", "gitlab.com"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Máy chủ '{host or 'unknown'}' không được phép; chỉ hỗ trợ github.com hoặc gitlab.com",
+        )
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="URL không được chứa thông tin xác thực nhúng")
+    trimmed = parsed.path.strip("/")
+    if trimmed.endswith(".git"):
+        trimmed = trimmed[:-4]
+    if not _REPO_PATH_RE.match(trimmed) or ".." in trimmed.split("/"):
+        raise HTTPException(status_code=400, detail="Định dạng kho mã phải là 'owner/repository'")
+    return f"https://{host}/{trimmed}"
+
+
 @router.post("/requests", status_code=status.HTTP_202_ACCEPTED)
 async def submit_repository_request(
     payload: SubmitRepoRequest,
     p: Principal = Depends(require_user),
 ) -> Dict[str, Any]:
+    canonical_url = _validate_repo_url(payload.repo_url)
     data = {
-        "repo_url": payload.repo_url,
+        "repo_url": canonical_url,
         "ref": payload.ref or "HEAD",
         "submitter": p.username,
         "target_workspace": payload.target_workspace or f"ws-{p.username}",

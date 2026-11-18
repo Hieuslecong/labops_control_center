@@ -7,6 +7,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX fallback
     pwd = None  # type: ignore[assignment]
 import time
+import copy
 import json
 import shutil
 import logging
@@ -83,6 +84,7 @@ class ProcessMonitorAdapter:
         self.data_dir = os.path.abspath(os.getenv("LABOPS_DATA_DIR") or default_data_dir)
         os.makedirs(self.data_dir, exist_ok=True)
         self.history_file = os.path.join(self.data_dir, "process_history.json")
+        self._process_cache: Dict[tuple, tuple[float, Dict[str, Any]]] = {}
 
     @property
     def server_name(self) -> str:
@@ -206,6 +208,16 @@ class ProcessMonitorAdapter:
         Prioritizes high-performance Go Node Agent; fallbacks to local /proc parser.
         filter_type: 'all' | 'research' | 'gpu' | 'member' | 'system'
         """
+        cache_key = (self.server_id, self.demo_mode, filter_type)
+        now_mono = time.monotonic()
+        cached = self._process_cache.get(cache_key)
+        if cached and (now_mono - cached[0]) < 2.0:
+            return copy.deepcopy(cached[1])
+        data = self._collect_real_processes(filter_type=filter_type)
+        self._process_cache[cache_key] = (now_mono, copy.deepcopy(data))
+        return data
+
+    def _collect_real_processes(self, filter_type: str = "research") -> Dict[str, Any]:
         now = time.time()
         now_dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -516,9 +528,6 @@ class ProcessMonitorAdapter:
         """
         proc_result = self.get_real_processes(filter_type="workloads")
         observations = proc_result.get("actual_observations", [])
-        if not observations:
-            proc_result_res = self.get_real_processes(filter_type="research")
-            observations = proc_result_res.get("actual_observations", [])
 
         ssh_res = self.get_real_ssh_sessions()
         active_ssh_users = {s.get("username") for s in ssh_res.get("actual_observations", [])}

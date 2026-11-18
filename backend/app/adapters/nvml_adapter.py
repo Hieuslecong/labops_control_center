@@ -1,5 +1,7 @@
 import os
+import copy
 import json
+import time
 import urllib.request
 import subprocess
 from datetime import datetime, timezone
@@ -30,6 +32,7 @@ class NvmlAdapter:
         self.server_id = server_id
         self.demo_mode = demo_mode
         self.has_nvidia_smi = shutil.which("nvidia-smi") is not None
+        self._telemetry_cache: Dict[tuple, tuple[float, List[Dict[str, Any]]]] = {}
 
     def _get_live_compute_processes(self) -> List[Dict[str, Any]]:
         """Query real active CUDA compute processes on the physical GPU and resolve host identity."""
@@ -232,6 +235,16 @@ class NvmlAdapter:
         Synchronously query real nvidia-smi for live physical GPU telemetry.
         Never fabricates metrics in production mode.
         """
+        cache_key = (self.server_id, self.demo_mode, self.has_nvidia_smi)
+        now = time.monotonic()
+        cached = self._telemetry_cache.get(cache_key)
+        if cached and (now - cached[0]) < 2.0:
+            return copy.deepcopy(cached[1])
+        data = self._collect_live_gpu_telemetry_sync()
+        self._telemetry_cache[cache_key] = (now, copy.deepcopy(data))
+        return data
+
+    def _collect_live_gpu_telemetry_sync(self) -> List[Dict[str, Any]]:
         # 1. Thử lấy từ Go Agent trước để không tốn sub-process
         if not self.demo_mode and self.server_id == settings_local_host_id():
             go_gpus = self._fetch_go_agent_gpus()

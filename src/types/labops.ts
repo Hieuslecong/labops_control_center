@@ -107,6 +107,8 @@ export type MemberStatus =
   | 'SUSPENDED'
   | 'PROVISIONING_FAILED'
   | 'ARCHIVED'
+  | 'DELETE_ELIGIBLE'
+  | 'DELETION_IN_PROGRESS'
   | 'DELETED';
 export type SshStatus =
   | 'ONLINE'

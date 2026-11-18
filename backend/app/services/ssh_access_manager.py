@@ -339,22 +339,20 @@ class SshAccessManager:
 
     @contextmanager
     def _locked_accounts(self):
+        from app.db.atomic_json import atomic_write_json, safe_load_json
+
         with open(self.accounts_lock, "a+", encoding="utf-8") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
+            state: Optional[Dict[str, Any]] = None
             try:
-                if os.path.exists(self.accounts_path):
-                    with open(self.accounts_path, "r", encoding="utf-8") as rf:
-                        state = json.load(rf)
-                else:
-                    state = {"accounts": {}}
+                state = safe_load_json(self.accounts_path, lambda: {"accounts": {}})
                 yield state
-                tmp = self.accounts_path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as wf:
-                    json.dump(state, wf, ensure_ascii=False, indent=2)
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, self.accounts_path)
             finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                try:
+                    if state is not None:
+                        atomic_write_json(self.accounts_path, state, mode=0o600, use_lock=False)
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
 
     def get_account_security_state(self, username: str) -> Dict[str, Any]:
         if not os.path.exists(self.accounts_path):
@@ -374,8 +372,12 @@ class SshAccessManager:
 
         # Mặc định ưu tiên tuyệt đối phân bổ không gian lưu trữ người dùng vào ổ đĩa /media/LabOps-Data/users
         from app.core.config import settings
-        default_data_dir = getattr(settings, "DEFAULT_USER_DATA_DIR", "/media/LabOps-Data/users")
-        if (safe_host == "track" or safe_host == getattr(settings, "LOCAL_HOST_ID", "track")) and os.path.exists(default_data_dir):
+        user_data_override = (os.getenv("LABOPS_USER_DATA_DIR") or "").strip()
+        default_data_dir = user_data_override or getattr(settings, "DEFAULT_USER_DATA_DIR", "/media/LabOps-Data/users")
+        default_backend_data = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        using_custom_test_dir = os.path.abspath(self.data_dir) != default_backend_data
+        use_override_root = bool(user_data_override) or not using_custom_test_dir
+        if use_override_root and (safe_host == "track" or safe_host == getattr(settings, "LOCAL_HOST_ID", "track")) and os.path.exists(default_data_dir):
             user_dir = os.path.join(default_data_dir, username)
             os.makedirs(user_dir, mode=0o700, exist_ok=True)
             try:
@@ -1314,6 +1316,26 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             if acc.get("password_status") == "REVOKED":
                 raise PermissionError("ACCOUNT_REVOKED: Quyền truy cập tài khoản đã bị thu hồi")
 
+            now_dt = datetime.now(timezone.utc)
+            locked_until_str = acc.get("locked_until")
+            if locked_until_str:
+                try:
+                    locked_dt = datetime.fromisoformat(str(locked_until_str).replace("Z", "+00:00"))
+                    if locked_dt.tzinfo is None:
+                        locked_dt = locked_dt.replace(tzinfo=timezone.utc)
+                    if now_dt < locked_dt:
+                        raise PermissionError("ACCOUNT_LOCKED: Tài khoản tạm khóa 15 phút do đăng nhập sai quá 5 lần")
+                except PermissionError:
+                    raise
+                except Exception:
+                    pass
+
+            def _record_login_failure() -> None:
+                attempts = int(acc.get("failed_login_attempts", 0)) + 1
+                acc["failed_login_attempts"] = attempts
+                if attempts >= 5:
+                    acc["locked_until"] = (now_dt + timedelta(minutes=15)).isoformat()
+
             # Trường hợp chưa đổi mật khẩu lần đầu
             if acc.get("must_change_password") or acc.get("password_status") == "CHANGE_REQUIRED":
                 if acc.get("temp_password_used"):
@@ -1329,8 +1351,10 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
                             "TEMP_PASSWORD_EXPIRED: Mật khẩu tạm đã hết hạn; quản trị viên phải cấp mật khẩu tạm mới"
                         )
                 if not _verify_password(password, acc.get("temp_password_hash")):
-                    acc["failed_login_attempts"] = int(acc.get("failed_login_attempts", 0)) + 1
+                    _record_login_failure()
                     raise PermissionError("INVALID_CREDENTIALS: Mật khẩu tạm không chính xác")
+                acc["failed_login_attempts"] = 0
+                acc["locked_until"] = None
                 return {
                     "authenticated": True,
                     "username": username,
@@ -1342,11 +1366,14 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
 
             # Trường hợp đã đổi mật khẩu lần đầu (ACTIVE)
             if _verify_password(password, acc.get("temp_password_hash")):
+                _record_login_failure()
                 raise PermissionError("TEMP_PASSWORD_REUSE_FORBIDDEN: Mật khẩu tạm đã hết hiệu lực và không thể dùng lại")
             if not _verify_password(password, acc.get("active_password_hash")):
-                acc["failed_login_attempts"] = int(acc.get("failed_login_attempts", 0)) + 1
+                _record_login_failure()
                 raise PermissionError("INVALID_CREDENTIALS: Mật khẩu không chính xác")
 
+            acc["failed_login_attempts"] = 0
+            acc["locked_until"] = None
             acc["last_successful_login"] = _now_iso()
             return {
                 "authenticated": True,
@@ -1401,6 +1428,8 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             acc["temp_password_used"] = True
             acc["must_change_password"] = False
             acc["password_status"] = "ACTIVE"
+            acc["failed_login_attempts"] = 0
+            acc["locked_until"] = None
             acc["password_changed_at"] = _now_iso()
             acc["last_successful_login"] = _now_iso()
 

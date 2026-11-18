@@ -1,6 +1,7 @@
 from app.core.config import settings
 import os
 import re
+import signal
 try:
     import pwd
 except ImportError:  # pragma: no cover - non-POSIX fallback
@@ -12,6 +13,7 @@ import logging
 import subprocess
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import psutil
@@ -77,7 +79,8 @@ class ProcessMonitorAdapter:
         self.demo_mode = demo_mode
         self.agent_url = f"http://127.0.0.1:{agent_port}"
         self.has_nvidia_smi = shutil.which("nvidia-smi") is not None
-        self.data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        default_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        self.data_dir = os.path.abspath(os.getenv("LABOPS_DATA_DIR") or default_data_dir)
         os.makedirs(self.data_dir, exist_ok=True)
         self.history_file = os.path.join(self.data_dir, "process_history.json")
 
@@ -96,7 +99,7 @@ class ProcessMonitorAdapter:
         """Resolve canonical OS username on local host to prevent stale UID cache drift."""
         if (
             pwd is not None
-            and (self.server_id == settings.LOCAL_HOST_ID or self.server_id == "track")
+            and self.server_id == settings.LOCAL_HOST_ID
             and not container_id
             and uid is not None
         ):
@@ -107,7 +110,11 @@ class ProcessMonitorAdapter:
         return fallback_user or (str(uid) if uid is not None else "unknown")
 
     def _query_go_agent(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-        """Gọi nội bộ sang Go Agent trên port 9150 hoặc 9100."""
+        """Gọi nội bộ sang Go Agent khi LABOPS_AGENT_SECRET được cấu hình."""
+        secret_token = os.getenv("LABOPS_AGENT_SECRET", "").strip()
+        if not secret_token:
+            return None
+
         configured_ports = [int(os.environ.get("LABOPS_AGENT_PORT", 9150)), 9150, 9100]
         ports = []
         for p in configured_ports:
@@ -121,7 +128,6 @@ class ProcessMonitorAdapter:
                 data = json.dumps(payload).encode("utf-8") if payload else None
                 req = urllib.request.Request(url, data=data, method=method)
                 req.add_header("Content-Type", "application/json")
-                secret_token = os.environ.get("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026")
                 req.add_header("X-LabOps-Agent-Secret", secret_token)
                 req.add_header("Authorization", f"Bearer {secret_token}")
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -204,7 +210,7 @@ class ProcessMonitorAdapter:
         now_dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Remote server without configured agent
-        if not self.demo_mode and self.server_id != settings.LOCAL_HOST_ID and self.server_id != "track":
+        if not self.demo_mode and self.server_id != settings.LOCAL_HOST_ID:
             return {
                 "source_host": self.server_id,
                 "collection_timestamp": now_dt_str,
@@ -598,40 +604,231 @@ class ProcessMonitorAdapter:
 
         return jobs
 
+    def _parse_proc_stat(self, pid: int) -> Dict[str, Any]:
+        stat_path = f"/proc/{pid}/stat"
+        if not os.path.exists(stat_path):
+            raise LookupError(f"PROCESS_NOT_FOUND: PID {pid} không tồn tại")
+        with open(stat_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
+        lparen = raw.find("(")
+        rparen = raw.rfind(")")
+        if lparen == -1 or rparen == -1:
+            raise LookupError(f"PROCESS_NOT_FOUND: Không thể đọc /proc/{pid}/stat")
+        name = raw[lparen + 1:rparen]
+        fields = raw[rparen + 2:].split()
+        ppid = int(fields[1]) if len(fields) > 1 else 0
+        start_ticks = int(fields[19]) if len(fields) > 19 else 0
+
+        uid = -1
+        status_path = f"/proc/{pid}/status"
+        if os.path.exists(status_path):
+            with open(status_path, "r", encoding="utf-8", errors="ignore") as sf:
+                for line in sf:
+                    if line.startswith("Uid:"):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            uid = int(parts[1])
+                        break
+
+        cmdline = ""
+        cmd_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmd_path):
+            with open(cmd_path, "rb") as cf:
+                cmdline = cf.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+
+        username = self._resolve_host_username(uid if uid >= 0 else None, None, self._get_container_for_pid(pid))
+        return {
+            "pid": pid,
+            "ppid": ppid,
+            "name": name,
+            "uid": uid,
+            "username": username,
+            "cmdline": cmdline,
+            "start_time_ticks": start_ticks,
+        }
+
+    def _validate_proc_ref(self, ref: str) -> Dict[str, Any]:
+        parts = str(ref or "").split(":", 3)
+        if len(parts) != 4:
+            raise ValueError(f"INVALID_PROCESS_REF: '{ref}' không đúng định dạng server:scope:pid:start_ticks")
+        ref_host, scope, pid_raw, ticks_raw = parts
+        if ref_host != self.server_id:
+            raise ValueError(f"HOST_MISMATCH: ProcessRef thuộc host '{ref_host}', không khớp host hiện tại '{self.server_id}'")
+        try:
+            pid = int(pid_raw)
+            expected_ticks = int(ticks_raw)
+        except ValueError as exc:
+            raise ValueError(f"INVALID_PROCESS_REF: PID hoặc start_ticks không hợp lệ trong '{ref}'") from exc
+        if pid <= 1 or pid == os.getpid():
+            raise PermissionError(f"PROTECTED_PROCESS_DENIED: Tiến trình hệ thống hoặc Control Plane (PID {pid}) được bảo vệ")
+
+        info = self._parse_proc_stat(pid)
+        cmd_lower = info["cmdline"].lower()
+        name_lower = info["name"].lower()
+        if (
+            info["ppid"] == 2
+            or name_lower in PROTECTED_SYSTEM_NAMES
+            or any(k in cmd_lower for k in PROTECTED_CMD_KEYWORDS)
+            or info["uid"] == 0
+        ):
+            raise PermissionError(f"PROTECTED_PROCESS_DENIED: Tiến trình '{info['name']}' (PID {pid}) được bảo vệ")
+
+        if expected_ticks > 0 and info["start_time_ticks"] != expected_ticks:
+            raise RuntimeError(
+                f"PID_RECYCLED: start_time_ticks không khớp cho PID {pid} (expected={expected_ticks}, actual={info['start_time_ticks']})"
+            )
+        return info
+
+    def _collect_safe_descendants(self, root_pid: int) -> List[Dict[str, Any]]:
+        children_by_ppid: Dict[int, List[Dict[str, Any]]] = {}
+        for p in psutil.process_iter(["pid", "ppid", "name", "uids", "cmdline"]):
+            try:
+                inf = p.info
+                cpid = inf["pid"]
+                if cpid <= 1 or cpid == os.getpid():
+                    continue
+                stat_inf = self._parse_proc_stat(cpid)
+                cmd_lower = stat_inf["cmdline"].lower()
+                if (
+                    stat_inf["name"].lower() in PROTECTED_SYSTEM_NAMES
+                    or any(k in cmd_lower for k in PROTECTED_CMD_KEYWORDS)
+                    or stat_inf["uid"] == 0
+                ):
+                    continue
+                children_by_ppid.setdefault(stat_inf["ppid"], []).append(stat_inf)
+            except Exception:
+                continue
+
+        result: List[Dict[str, Any]] = []
+        queue = [root_pid]
+        seen = {root_pid}
+        while queue:
+            curr = queue.pop(0)
+            for child in children_by_ppid.get(curr, []):
+                if child["pid"] not in seen:
+                    seen.add(child["pid"])
+                    result.append(child)
+                    queue.append(child["pid"])
+        result.reverse()
+        return result
+
     def get_process_tree(self, ref: str) -> Dict[str, Any]:
-        """Lấy cây tiến trình từ Go Agent."""
+        """Lấy cây tiến trình từ Go Agent hoặc fallback cục bộ qua /proc."""
         res = self._query_go_agent(f"/api/v1/agent/processes/tree?ref={urllib.parse.quote(ref)}")
         if res and "_error_status" not in res:
             return res
-        raise RuntimeError(res.get("_error_body", {}).get("error") if res else "Không thể kết nối Go Agent")
+        if res and res.get("_error_status") == 404:
+            raise LookupError(f"PROCESS_NOT_FOUND: {res.get('_error_body')}")
+        info = self._validate_proc_ref(ref)
+        descendants = self._collect_safe_descendants(info["pid"])
+        return {
+            "ref": ref,
+            "root": info,
+            "children": descendants,
+            "source": "local_proc",
+        }
 
     def terminate_process(self, ref: str, timeout_seconds: int = 10, terminate_tree: bool = True) -> Dict[str, Any]:
-        """Gửi SIGTERM có ân hạn qua Go Agent."""
+        """Gửi SIGTERM có ân hạn qua Go Agent hoặc /proc fallback (không dùng -pgid)."""
         payload = {
             "ref": ref,
             "timeout_seconds": timeout_seconds,
-            "terminate_tree": terminate_tree
+            "terminate_tree": terminate_tree,
         }
         res = self._query_go_agent("/api/v1/agent/processes/terminate", method="POST", payload=payload, timeout=float(timeout_seconds + 3))
         if res and "_error_status" not in res:
             return res
-        err_msg = res.get("_error_body", {}).get("error") if res else "Go Agent không phản hồi"
-        code = res.get("_error_status", 500) if res else 500
-        raise RuntimeError(f"HTTP_{code}: {err_msg}")
+        if res and "_error_status" in res:
+            code = int(res.get("_error_status") or 500)
+            err_body = res.get("_error_body")
+            err_msg = err_body.get("error") if isinstance(err_body, dict) else str(err_body)
+            if code == 403:
+                raise PermissionError(err_msg)
+            if code == 404:
+                raise LookupError(err_msg)
+            raise RuntimeError(f"HTTP_{code}: {err_msg}")
+
+        info = self._validate_proc_ref(ref)
+        targets = self._collect_safe_descendants(info["pid"]) if terminate_tree else []
+        targets.append(info)
+        for t in targets:
+            try:
+                curr = self._parse_proc_stat(t["pid"])
+                if curr["start_time_ticks"] == t["start_time_ticks"]:
+                    os.kill(t["pid"], signal.SIGTERM)
+            except (LookupError, ProcessLookupError):
+                continue
+
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            if not os.path.exists(f"/proc/{info['pid']}"):
+                break
+            try:
+                curr = self._parse_proc_stat(info["pid"])
+                if curr["start_time_ticks"] != info["start_time_ticks"]:
+                    break
+            except LookupError:
+                break
+            time.sleep(0.05)
+
+        exited = not os.path.exists(f"/proc/{info['pid']}")
+        if not exited:
+            try:
+                p_obj = psutil.Process(info["pid"])
+                exited = p_obj.status() == psutil.STATUS_ZOMBIE
+                if exited:
+                    try:
+                        p_obj.wait(timeout=0.1)
+                    except Exception:
+                        pass
+            except psutil.NoSuchProcess:
+                exited = True
+
+        return {
+            "status": "TERMINATED" if exited else "TIMEOUT_ALIVE",
+            "pid": info["pid"],
+            "ref": ref,
+            "verified_exit": exited,
+        }
 
     def kill_process(self, ref: str, force: bool = True, kill_tree: bool = True) -> Dict[str, Any]:
-        """Gửi SIGKILL cưỡng chế qua Go Agent."""
+        """Gửi SIGKILL cưỡng chế qua Go Agent hoặc /proc fallback (không dùng -pgid)."""
         payload = {
             "ref": ref,
             "force": force,
-            "kill_tree": kill_tree
+            "kill_tree": kill_tree,
         }
         res = self._query_go_agent("/api/v1/agent/processes/kill", method="POST", payload=payload, timeout=5.0)
         if res and "_error_status" not in res:
             return res
-        err_msg = res.get("_error_body", {}).get("error") if res else "Go Agent không phản hồi"
-        code = res.get("_error_status", 500) if res else 500
-        raise RuntimeError(f"HTTP_{code}: {err_msg}")
+        if res and "_error_status" in res:
+            code = int(res.get("_error_status") or 500)
+            err_body = res.get("_error_body")
+            err_msg = err_body.get("error") if isinstance(err_body, dict) else str(err_body)
+            if code == 403:
+                raise PermissionError(err_msg)
+            if code == 404:
+                raise LookupError(err_msg)
+            raise RuntimeError(f"HTTP_{code}: {err_msg}")
 
-import urllib.parse
+        info = self._validate_proc_ref(ref)
+        targets = self._collect_safe_descendants(info["pid"]) if kill_tree else []
+        targets.append(info)
+        for t in targets:
+            try:
+                curr = self._parse_proc_stat(t["pid"])
+                if curr["start_time_ticks"] == t["start_time_ticks"]:
+                    os.kill(t["pid"], signal.SIGKILL)
+            except (LookupError, ProcessLookupError):
+                continue
+
+        time.sleep(0.05)
+        exited = not os.path.exists(f"/proc/{info['pid']}")
+        return {
+            "status": "KILLED" if exited else "SURVIVED",
+            "pid": info["pid"],
+            "ref": ref,
+            "verified_exit": exited,
+        }
+
 process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=False)

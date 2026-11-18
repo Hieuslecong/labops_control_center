@@ -73,6 +73,10 @@ class PhysicalServerResponse(BaseSchema):
     driver_version: str = Field(alias="driverVersion")
     cuda_version: str = Field(alias="cudaVersion")
     last_updated: str = Field(alias="lastUpdated")
+    collected_at: Optional[str] = Field(default=None, alias="collectedAt")
+    age_seconds: Optional[float] = Field(default=None, alias="ageSeconds")
+    telemetry_source: Optional[str] = Field(default=None, alias="telemetrySource")
+    freshness_status: Optional[str] = Field(default=None, alias="freshnessStatus")
 
 class GpuProcessResponse(BaseSchema):
     pid: int
@@ -101,13 +105,18 @@ class PhysicalGpuResponse(BaseSchema):
     active_processes: List[GpuProcessResponse] = Field(alias="activeProcesses")
     active_users: List[str] = Field(alias="activeUsers")
     associated_jobs: List[str] = Field(alias="associatedJobs")
+    collected_at: Optional[str] = Field(default=None, alias="collectedAt")
+    age_seconds: Optional[float] = Field(default=None, alias="ageSeconds")
+    telemetry_source: Optional[str] = Field(default=None, alias="telemetrySource")
+    freshness_status: Optional[str] = Field(default=None, alias="freshnessStatus")
 
 class GpuAllocateRequest(BaseSchema):
     gpu_id: str = Field(alias="gpuId")
-    username: str
+    username: Optional[str] = None
     mode: str = "FULL_GPU_EXCLUSIVE"
-    requested_vram_gb: int = Field(alias="requestedVramGb")
-    job_name: str = Field(alias="jobName")
+    requested_vram_gb: int = Field(0, alias="requestedVramGb", ge=0, le=256)
+    job_name: str = Field("", alias="jobName", max_length=200)
+    ttl_minutes: int = Field(240, alias="ttlMinutes", ge=1, le=2880)
 
 class PrivilegeValidationResponse(BaseSchema):
     unprivileged_container: bool = Field(False, alias="unprivilegedContainer")

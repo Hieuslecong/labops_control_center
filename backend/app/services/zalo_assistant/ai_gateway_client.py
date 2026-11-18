@@ -1,14 +1,16 @@
 """
 9Router AI Gateway Client
-Interfaces with local 9Router (http://127.0.0.1:20128/v1) using model 'model_free'.
-Automatically detects local SQLite credentials and provides robust error handling.
+Interfaces with local 9Router (http://127.0.0.1:20128/v1) using configured ROUTER_MODEL.
+Uses explicit API key or ROUTER_API_KEY env var only (never reads local 9Router SQLite files)
+and strips model reasoning tags before returning user-facing content.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import sqlite3
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -59,6 +61,12 @@ def _get_active_system_prompt() -> str:
     return LABOPS_SYSTEM_PROMPT
 
 
+def _sanitize_ai_content(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
+
 class AIGatewayClient:
     def __init__(
         self,
@@ -70,25 +78,13 @@ class AIGatewayClient:
         self.base_url = (base_url or os.getenv("ROUTER_BASE_URL", DEFAULT_9ROUTER_URL)).rstrip("/")
         self.model = model or os.getenv("ROUTER_MODEL", DEFAULT_MODEL)
         self.timeout = timeout
-        self._explicit_key = api_key or os.getenv("ROUTER_API_KEY")
+        self._explicit_key = api_key if api_key is not None else os.getenv("ROUTER_API_KEY")
 
     def _resolve_api_key(self) -> str:
-        if self._explicit_key:
-            return self._explicit_key
+        return (self._explicit_key or os.getenv("ROUTER_API_KEY") or "").strip()
 
-        # Thử đọc trực tiếp từ SQLite của 9Router
-        db_path = os.path.expanduser("~/.9router/db/data.sqlite")
-        if os.path.exists(db_path):
-            try:
-                conn = sqlite3.connect(db_path, timeout=2.0)
-                row = conn.execute("SELECT key FROM apiKeys ORDER BY rowid ASC LIMIT 1").fetchone()
-                conn.close()
-                if row and row[0]:
-                    return str(row[0])
-            except Exception as exc:
-                logger.debug("Không thể đọc 9router sqlite key: %s", exc)
-
-        return ""
+    async def acheck_health(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.check_health)
 
     def check_health(self) -> Dict[str, Any]:
         """Kiểm tra kết nối và model với 9Router cục bộ."""
@@ -117,6 +113,22 @@ class AIGatewayClient:
                 "model_available": False,
                 "error": str(exc)[:200],
             }
+
+    async def agenerate_chat_response(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.5,
+        max_tokens: int = 1000,
+    ) -> str:
+        return await asyncio.to_thread(
+            self.generate_chat_response,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     def generate_chat_response(
         self,
@@ -161,19 +173,16 @@ class AIGatewayClient:
                     msg = choices[0].get("message", {}) or {}
                     raw_content = msg.get("content")
                     if raw_content and isinstance(raw_content, str):
-                        return raw_content.strip()
-
-                    # Fallback to reasoning_content if content is None
-                    reasoning = msg.get("reasoning_content")
-                    if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                        return reasoning.strip()
+                        sanitized = _sanitize_ai_content(raw_content)
+                        if sanitized:
+                            return sanitized
 
                     # Fallback if tool_calls was emitted by agentic model
                     tool_calls = msg.get("tool_calls")
                     if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
                         return "Hệ thống đã nhận diện yêu cầu tra cứu tài nguyên. Bạn có thể sử dụng trực tiếp lệnh `/status` để xem toàn bộ thông số máy chủ và GPU A30."
 
-                return "Trợ lý không nhận được phản hồi nội dung từ mô hình AI."
+                return "Trợ lý không nhận được phản hồi nội dung hợp lệ từ mô hình AI."
         except urllib.error.HTTPError as http_err:
             body = http_err.read().decode("utf-8", errors="ignore")
             logger.error("Lỗi HTTP từ 9Router (%d): %s", http_err.code, body)

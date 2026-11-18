@@ -1,8 +1,9 @@
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from app.api.dependencies import require_admin, require_agent, require_user
-from app.core.security import Principal
+from app.core.security import AuthError, Principal, verify_step_up_token
 from app.services.labops_service import service
+from app.services.member_lifecycle import LifecyclePreconditionError
 from app.services.workspace_controller import WorkspaceSecurityError
 
 router = APIRouter()
@@ -355,13 +356,85 @@ async def get_member_device_config(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.delete("/members/{member_id}")
-async def delete_member_v2(
+@router.post("/members/{member_id}/suspend")
+async def suspend_member_v2(
+    member_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        reason = str((payload or {}).get("reason") or "")
+        return service.suspend_member_lifecycle(member_id, actor=p.username, reason=reason)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LifecyclePreconditionError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})
+
+
+@router.post("/members/{member_id}/archive")
+async def archive_member_v2(
+    member_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        retain_backup = bool((payload or {}).get("retain_backup", True))
+        return service.archive_member_lifecycle(member_id, actor=p.username, retain_backup=retain_backup)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LifecyclePreconditionError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})
+
+
+@router.get("/members/{member_id}/delete-preview")
+async def preview_delete_member_v2(
     member_id: str,
     p: Principal = Depends(require_admin),
 ) -> Dict[str, Any]:
     try:
-        return service.delete_member_permanently(member_id, actor=p.username)
+        return service.preview_member_deletion(member_id, actor=p.username, dry_run=True)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LifecyclePreconditionError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})
+
+
+@router.delete("/members/{member_id}")
+async def delete_member_v2(
+    member_id: str,
+    dry_run: bool = Query(False),
+    confirm_username: Optional[str] = Query(None),
+    remove_files: bool = Query(False),
+    step_up_token: Optional[str] = Header(default=None, alias="X-LabOps-Step-Up-Token"),
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        member = service._find_member(member_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if dry_run:
+        return service.preview_member_deletion(member["id"], actor=p.username, dry_run=True)
+
+    try:
+        verify_step_up_token(
+            step_up_token or "",
+            expected_username=p.username,
+            expected_action="DELETE_MEMBER",
+            expected_target_id=member["id"],
+        )
+        return service.delete_member_permanently(
+            member["id"],
+            actor=p.username,
+            remove_files=remove_files,
+            confirm_username=confirm_username or "",
+            step_up_verified=True,
+            enforce_lifecycle=True,
+        )
+    except AuthError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    except LifecyclePreconditionError as e:
+        raise HTTPException(status_code=e.http_status, detail={"code": e.code, "message": e.message})
     except (LookupError, ValueError) as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

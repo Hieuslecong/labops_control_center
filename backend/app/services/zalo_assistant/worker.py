@@ -30,15 +30,88 @@ logger = logging.getLogger("zalo_worker")
 
 
 class ZaloPollingWorker:
-    def __init__(self):
-        self.service = zalo_assistant_service
+    def __init__(self, service_instance: Optional[Any] = None):
+        self.service = service_instance or zalo_assistant_service
         self.bot_engine = self.service.bot_engine
         self.quota_ledger = self.service.quota_ledger
         self.report_generator = self.service.report_generator
         self.bot_token = os.getenv("ZALO_BOT_TOKEN") or self.bot_engine.bot_token
         self.is_running = False
         self.pid_file = os.path.join(self.service.data_dir, "zalo_worker.pid")
-        self.last_reported_week = None
+        self.last_reported_week = self.report_generator.get_last_reported_week()
+        self.report_chat_ids = [
+            c.strip()
+            for c in os.getenv("ZALO_REPORT_CHAT_IDS", "").split(",")
+            if c.strip() and c.strip() != "*"
+        ]
+
+    async def process_incoming_message(
+        self,
+        bot: Any,
+        *,
+        raw_text: str,
+        chat_id: str,
+        sender_id: str,
+        sender_name: str = "User",
+        message_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not raw_text.strip() or not str(chat_id or "").strip():
+            return {"dropped": True, "reason": "EMPTY"}
+
+        if not self.bot_engine.is_authorized(sender_id) or not self.bot_engine.is_chat_allowed(
+            chat_id, sender_id=sender_id
+        ):
+            logger.warning(
+                "Bỏ qua im lặng tin nhắn Zalo trái phép từ '%s' (%s) trong chat %s",
+                sender_name,
+                sender_id,
+                chat_id,
+            )
+            return {"dropped": True, "reason": "UNAUTHORIZED"}
+
+        logger.info("📩 Nhận tin nhắn từ '%s' (%s) trong chat %s: %s", sender_name, sender_id, chat_id, raw_text[:50])
+        idemp_key = f"zalo-msg-{message_id}" if message_id else None
+
+        result = await self.bot_engine.ahandle_command(
+            command_text=raw_text,
+            sender_id=sender_id,
+            idempotency_key=idemp_key,
+            chat_id=chat_id,
+            source="zalo",
+            defer_outbox_commit=True,
+        )
+
+        if not result.get("success") or result.get("suppress_outbound"):
+            return result
+
+        reply_text = result.get("reply", "")
+        msg_id = result.get("message_id")
+        if not reply_text:
+            return result
+
+        try:
+            sent = await bot.send_message(chat_id=chat_id, text=reply_text)
+            provider_msg_id = getattr(sent, "message_id", None)
+            if msg_id:
+                self.quota_ledger.confirm_sent(
+                    msg_id,
+                    provider_message_id=str(provider_msg_id) if provider_msg_id is not None else None,
+                )
+            logger.info(
+                "📤 Đã gửi phản hồi (%s) tới chat %s (Dung lượng: %d chars)",
+                result.get("command"),
+                chat_id,
+                len(reply_text),
+            )
+            return result
+        except Exception as send_err:
+            if msg_id:
+                try:
+                    self.quota_ledger.mark_delivery_failed(msg_id, str(send_err))
+                except Exception as ref_err:
+                    logger.error("Không thể hoàn quota cho %s: %s", msg_id, ref_err)
+            logger.error("Lỗi khi gửi tin nhắn Zalo (đã hoàn quota %s): %s", msg_id, send_err)
+            return {"success": False, "error": "DELIVERY_FAILED", "refunded": True, "detail": str(send_err)}
 
     def _acquire_lease(self) -> bool:
         """Single consumer PID lease to prevent multiple instances polling simultaneously."""
@@ -132,28 +205,21 @@ class ZaloPollingWorker:
                     sender_id = str(getattr(from_user, "id", chat_id)) if from_user else chat_id
                     sender_name = str(getattr(from_user, "display_name", "User")) if from_user else "User"
 
-                    if not raw_text.strip() or not chat_id:
-                        continue
-
-                    logger.info(f"📩 Nhận tin nhắn từ '{sender_name}' ({sender_id}) trong chat {chat_id}: {raw_text[:50]}")
-
-                    # Process command or query through Bot Engine
+                    msg_id_val = getattr(message, "message_id", None)
                     try:
-                        result = self.bot_engine.handle_command(
-                            command_text=raw_text,
+                        await self.process_incoming_message(
+                            bot,
+                            raw_text=raw_text,
+                            chat_id=chat_id,
                             sender_id=sender_id,
-                            idempotency_key=f"zalo-msg-{getattr(message, 'message_id', os.urandom(4).hex())}",
+                            sender_name=sender_name,
+                            message_id=str(msg_id_val) if msg_id_val is not None else None,
                         )
-                        reply_text = result.get("reply", "")
-                        if reply_text:
-                            # Send response back to chat/group
-                            await bot.send_message(chat_id=chat_id, text=reply_text)
-                            logger.info(f"📤 Đã gửi phản hồi ({result.get('command')}) tới chat {chat_id} (Dung lượng: {len(reply_text)} chars)")
                     except Exception as handle_err:
-                        logger.error(f"Lỗi khi xử lý phản hồi lệnh: {handle_err}")
+                        logger.error("Lỗi khi xử lý phản hồi lệnh: %s", handle_err)
 
                 # Check scheduled weekly report (Friday 17:00 Asia/Ho_Chi_Minh)
-                self._check_weekly_report_schedule()
+                await self._check_weekly_report_schedule(bot=bot)
 
                 # Yield control briefly
                 await asyncio.sleep(0.5)
@@ -164,13 +230,13 @@ class ZaloPollingWorker:
             except Exception as e:
                 consecutive_errors += 1
                 backoff = min(30, 2 ** consecutive_errors)
-                logger.warning(f"Lỗi polling (lần {consecutive_errors}), thử lại sau {backoff}s: {e}")
+                logger.warning("Lỗi polling (lần %d), thử lại sau %ds: %s", consecutive_errors, backoff, e)
                 await asyncio.sleep(backoff)
 
         self._release_lease()
         logger.info("🛑 Zalo Polling Worker đã dừng an toàn.")
 
-    def _check_weekly_report_schedule(self):
+    async def _check_weekly_report_schedule(self, bot: Optional[Any] = None) -> None:
         """Check if weekly report needs to be generated and broadcasted."""
         now = datetime.now(timezone.utc)
         # GMT+7: weekday 4 is Friday. 17:00 ICT is 10:00 UTC.
@@ -178,11 +244,40 @@ class ZaloPollingWorker:
         if now.weekday() == 4 and now.hour == 10 and self.last_reported_week != current_week_str:
             logger.info("⏰ Đến lịch định kỳ: Tự động tổng hợp báo cáo tuần LabOps...")
             try:
-                rep = self.report_generator.generate_weekly_report(author="Automated Weekly Cron")
+                rep = await asyncio.to_thread(
+                    self.report_generator.generate_weekly_report,
+                    author="Automated Weekly Cron",
+                )
+                self.report_generator.set_last_reported_week(current_week_str)
                 self.last_reported_week = current_week_str
-                logger.info(f"✅ Đã tạo báo cáo tuần: {rep['title']}")
+                logger.info("✅ Đã tạo báo cáo tuần: %s", rep["title"])
+
+                if bot is not None and self.report_chat_ids:
+                    summary_msg = f"📑 {rep['title']}\n━━━━━━━━━━━━━━━━━━━━\n{rep['content'][:1200]}"
+                    for target_chat in self.report_chat_ids:
+                        try:
+                            _, outbox_id, _ = self.quota_ledger.reserve_outbox(
+                                recipient_id=target_chat,
+                                message_text=summary_msg,
+                                is_critical_alert=False,
+                                idempotency_key=f"weekly-report-{current_week_str}",
+                                metadata={"command": "/report", "scheduled": True},
+                            )
+                        except Exception as q_err:
+                            logger.warning("Không thể reserve quota gửi báo cáo tới %s: %s", target_chat, q_err)
+                            continue
+                        try:
+                            sent = await bot.send_message(chat_id=target_chat, text=summary_msg)
+                            prov_id = getattr(sent, "message_id", None)
+                            self.quota_ledger.confirm_sent(
+                                outbox_id,
+                                provider_message_id=str(prov_id) if prov_id is not None else None,
+                            )
+                        except Exception as send_err:
+                            self.quota_ledger.mark_delivery_failed(outbox_id, str(send_err))
+                            logger.error("Lỗi gửi báo cáo tuần tới %s: %s", target_chat, send_err)
             except Exception as e:
-                logger.error(f"Lỗi khi tự động tạo báo cáo tuần: {e}")
+                logger.error("Lỗi khi tự động tạo báo cáo tuần: %s", e)
 
     def stop(self):
         self.is_running = False

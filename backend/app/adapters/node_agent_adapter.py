@@ -208,25 +208,36 @@ class NodeAgentClient:
 
         # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel)
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
-        control_secret = (
-            os.getenv("LABOPS_GATEWAY_CONTROL_SECRET")
-            or os.getenv("LABOPS_SESSION_SECRET")
-            or os.getenv("LABOPS_ADMIN_API_TOKEN", "")
-        )
+        control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "").strip()
+        delegation_secret = os.getenv("LABOPS_DELEGATION_SECRET", "").strip()
         gw_headers = {"Content-Type": "application/json"}
         if control_secret:
             gw_headers["Authorization"] = f"Bearer {control_secret}"
+        str_params = {k: str(v) for k, v in (params or {}).items()}
+        dispatch_body: Dict[str, Any] = {
+            "node_id": host.get("id"),
+            "action": action,
+            "parameters": str_params,
+            "timeout_seconds": 15,
+            "idempotency_key": idempotency_key or "",
+            "actor_id": "fastapi-controller",
+        }
+        if delegation_secret:
+            from app.core.delegation import build_delegation_context
+            dispatch_body["authorization_context"] = build_delegation_context(
+                secret=delegation_secret,
+                command_id=request_id,
+                actor="fastapi-controller",
+                role="ADMIN",
+                node_id=str(host.get("id") or ""),
+                action=action,
+                workspace_id=str(str_params.get("workspace_id") or str_params.get("workspace") or ""),
+                parameters=str_params,
+            )
         try:
             gw_req = urllib.request.Request(
                 f"{gateway_http_url.rstrip('/')}/api/v1/gateway/dispatch",
-                data=json.dumps({
-                    "node_id": host.get("id"),
-                    "action": action,
-                    "parameters": {k: str(v) for k, v in (params or {}).items()},
-                    "timeout_seconds": 15,
-                    "idempotency_key": idempotency_key or "",
-                    "actor_id": "fastapi-controller",
-                }).encode("utf-8"),
+                data=json.dumps(dispatch_body).encode("utf-8"),
                 headers=gw_headers,
                 method="POST",
             )

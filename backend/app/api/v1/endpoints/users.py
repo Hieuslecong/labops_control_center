@@ -1,10 +1,12 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.api.dependencies import require_labops_admin
+from app.core.security import AuthError, verify_step_up_token
 from app.schemas.labops import MemberCreateRequest, MemberResponse, WireGuardDeviceCreateRequest
 from app.services.labops_service import service
+from app.services.member_lifecycle import LifecyclePreconditionError
 from app.services.workspace_controller import WorkspaceSecurityError
 
 router = APIRouter(dependencies=[Depends(require_labops_admin)])
@@ -147,11 +149,40 @@ async def update_member_status(user_id: str, payload: Dict[str, str], actor: str
 @router.delete("/{user_id}")
 async def delete_user(
     user_id: str,
+    dry_run: bool = Query(False),
+    confirm_username: Optional[str] = Query(None),
+    remove_files: bool = Query(False),
+    step_up_token: Optional[str] = Header(default=None, alias="X-LabOps-Step-Up-Token"),
     actor: str = Depends(require_labops_admin),
 ):
     try:
-        result = service.delete_member_permanently(user_id, actor=actor)
+        member = service._find_member(user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if dry_run:
+        return service.preview_member_deletion(member["id"], actor=actor, dry_run=True)
+
+    try:
+        verify_step_up_token(
+            step_up_token or "",
+            expected_username=actor,
+            expected_action="DELETE_MEMBER",
+            expected_target_id=member["id"],
+        )
+        result = service.delete_member_permanently(
+            member["id"],
+            actor=actor,
+            remove_files=remove_files,
+            confirm_username=confirm_username or "",
+            step_up_verified=True,
+            enforce_lifecycle=True,
+        )
         return {"success": True, "id": user_id, "result": result}
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+    except LifecyclePreconditionError as exc:
+        raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message}) from exc
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

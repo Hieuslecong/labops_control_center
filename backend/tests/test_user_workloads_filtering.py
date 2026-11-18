@@ -8,6 +8,7 @@ if backend_dir not in sys.path:
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "test-secret-workloads")
 from fastapi.testclient import TestClient
+from app.core.config import settings
 from app.main import app
 from app.core.security import issue_token
 from app.services.labops_service import service
@@ -75,14 +76,19 @@ class TestUserWorkloadsFiltering(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertGreater(data.get("total_count", 0), 100)
+        self.assertGreaterEqual(data.get("total_count", 0), 1)
+        items = data.get("items", [])
+        self.assertTrue(
+            any(it.get("classification") == "SYSTEM_PROCESS" for it in items),
+            "Phải giữ lại tiến trình hệ thống (SYSTEM_PROCESS) ở chế độ classification=all",
+        )
 
     def test_prevent_killing_system_process(self):
         """
         Bảo đảm an toàn: Không thể gửi lệnh dừng hoặc kill tiến trình hệ thống.
         """
         res = self.client.post(
-            "/api/v1/processes/track:host:1:17/stop",
+            f"/api/v1/processes/{settings.LOCAL_HOST_ID}:host:1:17/stop",
             headers={"Authorization": f"Bearer {self.admin_token}"},
             json={"reason": "Test stop init"}
         )

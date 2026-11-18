@@ -6,11 +6,27 @@ import platform
 import subprocess
 import logging
 import urllib.request
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import psutil
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _telemetry_freshness(collected_at_iso: Optional[str], default_offline: bool = False) -> tuple[str, float, str]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if default_offline or not collected_at_iso:
+        return "OFFLINE", 999999.0, now_iso
+    try:
+        dt = datetime.fromisoformat(collected_at_iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+        status = "ONLINE" if age <= 15.0 else ("STALE" if age <= 60.0 else "OFFLINE")
+        return status, round(age, 2), dt.isoformat()
+    except Exception:
+        return "ONLINE", 0.0, now_iso
 
 
 def get_real_hostname() -> str:
@@ -221,10 +237,13 @@ class HostMonitorAdapter:
 
     def _fetch_go_agent_telemetry(self, server_id: str, display_name: str, location: str) -> Optional[Dict[str, Any]]:
         """Truy vấn Go Agent cục bộ qua 127.0.0.1:9100 nếu đang chạy để đạt tốc độ <2ms mà không tốn CPU/subprocesses."""
+        secret = os.getenv("LABOPS_AGENT_SECRET", "").strip()
+        if not secret:
+            return None
         try:
             req = urllib.request.Request(
                 "http://127.0.0.1:9100/api/v1/agent/host",
-                headers={"X-LabOps-Agent-Secret": "labops-local-agent-verified-token-2026"}
+                headers={"X-LabOps-Agent-Secret": secret}
             )
             with urllib.request.urlopen(req, timeout=0.2) as resp:
                 if resp.status == 200:
@@ -232,6 +251,11 @@ class HostMonitorAdapter:
                     data["name"] = display_name
                     data["location"] = location
                     data["last_updated"] = "Live host telemetry (LabOps Go Agent)"
+                    f_status, age_s, c_at = _telemetry_freshness(data.get("collected_at") or datetime.now(timezone.utc).isoformat())
+                    data["collected_at"] = c_at
+                    data["age_seconds"] = age_s
+                    data["telemetry_source"] = "go_node_agent"
+                    data["freshness_status"] = f_status
                     return data
         except Exception:
             pass
@@ -307,6 +331,10 @@ class HostMonitorAdapter:
             "cuda_version": nv_versions["cuda"],
             "last_updated": "Container telemetry; host not verified" if self.is_containerized else "Live host telemetry",
             "is_real_host": not self.is_containerized,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "age_seconds": 0.0,
+            "telemetry_source": "local_psutil",
+            "freshness_status": "STALE" if self.is_containerized else "ONLINE",
         }
 
     @staticmethod
@@ -341,15 +369,15 @@ class HostMonitorAdapter:
             "cuda_version": "Chưa xác minh",
             "last_updated": "Chưa xác minh kết nối tới máy chủ từ xa",
             "is_real_host": False,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "age_seconds": 999999.0,
+            "telemetry_source": "remote_unverified",
+            "freshness_status": "OFFLINE",
         }
 
     def _query_gateway_node_telemetry(self, node_id: str) -> Optional[Dict[str, Any]]:
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
-        control_secret = (
-            os.getenv("LABOPS_GATEWAY_CONTROL_SECRET")
-            or os.getenv("LABOPS_SESSION_SECRET")
-            or os.getenv("LABOPS_ADMIN_API_TOKEN", "")
-        )
+        control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "").strip()
         headers = {"Accept": "application/json"}
         if control_secret:
             headers["Authorization"] = f"Bearer {control_secret}"
@@ -424,6 +452,10 @@ class HostMonitorAdapter:
                     "cuda_version": "12.4",
                     "last_updated": f"Cập nhật trực tiếp qua LabOps Zero-Trust Gateway mTLS ({data.get('status')})",
                     "is_real_host": True,
+                    "collected_at": _telemetry_freshness(data.get("collected_at") or datetime.now(timezone.utc).isoformat())[2],
+                    "age_seconds": _telemetry_freshness(data.get("collected_at") or datetime.now(timezone.utc).isoformat())[1],
+                    "telemetry_source": "gateway_mtls",
+                    "freshness_status": _telemetry_freshness(data.get("collected_at") or datetime.now(timezone.utc).isoformat())[0],
                     "gpus": gpus_list,
                 }
         except Exception:

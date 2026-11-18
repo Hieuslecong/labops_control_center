@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from app.api.dependencies import require_admin, require_user
 from app.api.v1.endpoints import (
+    auth,
     dashboard,
     servers,
     gpus,
@@ -23,6 +24,7 @@ from app.api.v1.endpoints import (
 
 api_router = APIRouter()
 
+api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(dashboard.router, dependencies=[Depends(require_user)], prefix="/dashboard", tags=["Dashboard"])
 api_router.include_router(ai_assistant.router, prefix="/ai-assistant", tags=["AI Assistant"])
 api_router.include_router(servers.router, dependencies=[Depends(require_user)], prefix="/servers", tags=["Servers"])

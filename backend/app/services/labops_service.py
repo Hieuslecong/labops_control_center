@@ -9,12 +9,18 @@ import subprocess
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
 from app.core.config import settings
+from app.core.security import get_revocation_store
+from app.db.atomic_json import atomic_write_json, safe_load_json
+from app.db.idempotency import IdempotencyStore
+from app.db.models import AuditEventRecord, MemberRecord
+from app.db.session import DatabaseManager
 from app.adapters.host_monitor_adapter import HostMonitorAdapter, get_real_root_mount_info
 from app.adapters.nvml_adapter import NvmlAdapter
 from app.services.gpu_scheduler import GpuScheduler, SchedulerError
+from app.services.member_lifecycle import MemberLifecycleManager
 from app.services.security_scanner import SecurityScanner
 from app.services.host_registry import HostRegistry
-from app.adapters.node_agent_adapter import NodeAgentClient
+from app.adapters.node_agent_adapter import NodeAgentClient, NodeAgentError
 from app.adapters.arcane_adapter import ArcaneAdapter
 from app.adapters.beszel_adapter import BeszelAdapter
 from app.services.workspace_controller import WorkspaceController
@@ -122,8 +128,12 @@ class LabOpsDataService:
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
         self.process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
-        self.data_dir = os.path.abspath(data_dir or os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+        resolved_dir = data_dir or os.getenv("LABOPS_DATA_DIR") or getattr(settings, "LABOPS_DATA_DIR", "") or os.path.join(os.path.dirname(__file__), "..", "..", "data")
+        self.data_dir = os.path.abspath(resolved_dir)
         os.makedirs(self.data_dir, exist_ok=True)
+        self.db = DatabaseManager(self.data_dir)
+        self.idempotency = IdempotencyStore(self.db)
+        get_revocation_store().bind_db(self.db)
         self.wireguard_adapter = WireGuardAdapter(interface="wg0", data_dir=self.data_dir)
         self.vpn_manager = VPNManager()
         self.gpu_scheduler = GpuScheduler(os.path.join(self.data_dir, "gpu_reservations.json"),
@@ -140,6 +150,8 @@ class LabOpsDataService:
         )
         self.teleport_adapter = TeleportAdapter()
         self._init_data()
+        self.lifecycle = MemberLifecycleManager(self)
+        self._sync_initial_db_state()
         for entry in self.audit_logs:
             if isinstance(entry, dict) and not entry.get("correlation_id"):
                 entry["correlation_id"] = entry.get("correlationId") or f"corr-{entry.get('id', 'legacy')}"
@@ -166,18 +178,100 @@ class LabOpsDataService:
                 if isinstance(member.get("privilege_validation"), dict):
                     member["privilege_validation"]["status"] = "NOT_VERIFIED"
 
+    def _sync_initial_db_state(self) -> None:
+        if not hasattr(self, "db") or self.db is None:
+            return
+        try:
+            with self.db.session_scope() as s:
+                for m in self.members:
+                    mid = m.get("id")
+                    uname = m.get("username")
+                    if not mid or not uname or s.get(MemberRecord, mid) is not None:
+                        continue
+                    s.add(
+                        MemberRecord(
+                            id=mid,
+                            username=uname,
+                            email=str(m.get("email") or ""),
+                            full_name=str(m.get("full_name") or ""),
+                            role=str(m.get("role") or "RESEARCHER"),
+                            status=str(m.get("status") or "ACTIVE"),
+                            provisioning_state=str(m.get("provisioning_state") or "PENDING"),
+                            assigned_server=str(m.get("assigned_server") or settings.LOCAL_HOST_ID),
+                            workspace_name=str(m.get("workspace_name") or f"ws-{uname}"),
+                            workspace_dir=m.get("workspace_dir"),
+                            ssh_port=m.get("ssh_port"),
+                            storage_quota_gb=int(m.get("storage_quota_gb") or 100),
+                            cpu_limit_cores=int(m.get("cpu_limit_cores") or 8),
+                            ram_limit_gb=int(m.get("ram_limit_gb") or 16),
+                            vram_quota_gb=int(m.get("vram_quota_gb") or 12),
+                            gpu_permissions_json=list(m.get("gpu_permissions") or []),
+                            archived_at=m.get("archived_at"),
+                            archive_manifest_json=m.get("archive_manifest"),
+                            version=int(m.get("version") or 1),
+                            payload_json=dict(m),
+                            created_at=str(m.get("created_at") or ""),
+                        )
+                    )
+        except Exception as exc:
+            logger.warning("Initial DB sync skipped cleanly: %s", exc)
+
     def _save_persistent_data(self):
         try:
-            with open(os.path.join(self.data_dir, "members.json"), "w", encoding="utf-8") as f:
-                json.dump(self.members, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "ssh_policies.json"), "w", encoding="utf-8") as f:
-                json.dump(self.ssh_policies, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "audit_logs.json"), "w", encoding="utf-8") as f:
-                json.dump(self.audit_logs, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "storage_allocations.json"), "w", encoding="utf-8") as f:
-                json.dump(self.storage_allocations, f, ensure_ascii=False, indent=2)
-            with open(os.path.join(self.data_dir, "ssh_endpoints.json"), "w", encoding="utf-8") as f:
-                json.dump(self.ssh_endpoints, f, ensure_ascii=False, indent=2)
+            atomic_write_json(os.path.join(self.data_dir, "members.json"), self.members, mode=0o600)
+            atomic_write_json(os.path.join(self.data_dir, "ssh_policies.json"), self.ssh_policies, mode=0o600)
+            atomic_write_json(os.path.join(self.data_dir, "audit_logs.json"), self.audit_logs, mode=0o600)
+            atomic_write_json(os.path.join(self.data_dir, "storage_allocations.json"), self.storage_allocations, mode=0o600)
+            atomic_write_json(os.path.join(self.data_dir, "ssh_endpoints.json"), self.ssh_endpoints, mode=0o600)
+
+            if hasattr(self, "db") and self.db is not None:
+                with self.db.session_scope() as s:
+                    for m in self.members:
+                        mid = m.get("id")
+                        uname = m.get("username")
+                        if not mid or not uname:
+                            continue
+                        row = s.get(MemberRecord, mid)
+                        if row is None:
+                            row = MemberRecord(id=mid, username=uname)
+                            s.add(row)
+                        row.email = str(m.get("email") or "")
+                        row.full_name = str(m.get("full_name") or "")
+                        row.role = str(m.get("role") or "RESEARCHER")
+                        row.status = str(m.get("status") or "ACTIVE")
+                        row.provisioning_state = str(m.get("provisioning_state") or "PENDING")
+                        row.assigned_server = str(m.get("assigned_server") or settings.LOCAL_HOST_ID)
+                        row.workspace_name = str(m.get("workspace_name") or f"ws-{uname}")
+                        row.workspace_dir = m.get("workspace_dir")
+                        row.ssh_port = m.get("ssh_port")
+                        row.storage_quota_gb = int(m.get("storage_quota_gb") or 100)
+                        row.cpu_limit_cores = int(m.get("cpu_limit_cores") or 8)
+                        row.ram_limit_gb = int(m.get("ram_limit_gb") or 16)
+                        row.vram_quota_gb = int(m.get("vram_quota_gb") or 12)
+                        row.gpu_permissions_json = list(m.get("gpu_permissions") or [])
+                        row.archived_at = m.get("archived_at")
+                        row.archive_manifest_json = m.get("archive_manifest")
+                        row.version = int(m.get("version") or 1)
+                        row.payload_json = dict(m)
+                        row.created_at = str(m.get("created_at") or "")
+
+                    for entry in self.audit_logs[:25]:
+                        eid = entry.get("id")
+                        if not eid or s.get(AuditEventRecord, eid) is not None:
+                            continue
+                        s.add(
+                            AuditEventRecord(
+                                id=eid,
+                                timestamp=str(entry.get("timestamp") or ""),
+                                actor=str(entry.get("actor") or "system"),
+                                action=str(entry.get("action") or "EVENT"),
+                                target_type=str(entry.get("target_type") or "SYSTEM"),
+                                target_id=str(entry.get("target_id") or ""),
+                                result=str(entry.get("result") or "SUCCESS"),
+                                correlation_id=str(entry.get("correlation_id") or "corr-legacy"),
+                                details=str(entry.get("details") or ""),
+                            )
+                        )
         except Exception as e:
             logger.exception("Failed to persist LabOps data")
             raise RuntimeError("Could not persist LabOps data") from e
@@ -1053,14 +1147,10 @@ class LabOpsDataService:
                 path = os.path.join(self.data_dir, filename)
                 if not os.path.exists(path):
                     continue
-                try:
-                    with open(path, "r", encoding="utf-8") as stream:
-                        value = json.load(stream)
-                    if not isinstance(value, list):
-                        raise ValueError(f"{filename} must contain a JSON array")
-                    setattr(self, attribute, value)
-                except Exception as e:
-                    logger.warning(f"Failed to read {filename}: {e}")
+                value = safe_load_json(path, list)
+                if not isinstance(value, list):
+                    raise ValueError(f"{filename} must contain a JSON array")
+                setattr(self, attribute, value)
 
     def get_summary(self) -> Dict[str, Any]:
         used_vram_gb = round(sum(gpu["vram_used_mb"] for gpu in self.gpus) / 1024, 1)
@@ -1182,7 +1272,17 @@ class LabOpsDataService:
     # ------------------------------------------------------------------
     # GPU scheduling (V2): production đi qua GpuScheduler, không giả lập.
     # ------------------------------------------------------------------
-    def _audit(self, actor: str, action: str, target_type: str, target_id: str, result: str, details: str) -> None:
+    def _audit(
+        self,
+        actor: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        result: str,
+        details: str,
+        *,
+        correlation_id: Optional[str] = None,
+    ) -> None:
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:8]}",
             "actor": actor,
@@ -1191,23 +1291,55 @@ class LabOpsDataService:
             "target_id": target_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "result": result,
-            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+            "correlation_id": correlation_id or f"corr-{uuid.uuid4().hex[:12]}",
             "details": details,
         })
 
-    def allocate_gpu(self, gpu_id: str, username: str, mode: str, requested_vram_gb: int = 0,
-                     job_name: str = "", actor: Optional[str] = None,
-                     idempotency_key: Optional[str] = None) -> Dict[str, Any]:
-        """Giữ độc quyền 1 GPU (theo UUID). Không sinh PID, không giả lập runtime."""
+    def allocate_gpu(
+        self,
+        gpu_id: str,
+        username: str,
+        mode: str,
+        requested_vram_gb: int = 0,
+        job_name: str = "",
+        actor: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        ttl_minutes: int = 240,
+        is_admin: bool = True,
+        enforce_permissions: bool = False,
+    ) -> Dict[str, Any]:
+        """Giữ độc quyền 1 GPU (theo UUID), kiểm tra gpu_permissions & TTL."""
         target = next((g for g in self.gpus if g["id"] == gpu_id or g.get("uuid") == gpu_id), None)
         if not target:
             raise ValueError(f"Không tìm thấy GPU với ID {gpu_id}")
         if not target.get("uuid"):
             raise SchedulerError("GPU_UUID_UNKNOWN", "GPU không có UUID quan sát được; từ chối cấp phát.", 503)
         actor = actor or username
+
+        member = next((m for m in self.members if m.get("username") == username), None)
+        if member is not None:
+            if member.get("status") in {"SUSPENDED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETION_IN_PROGRESS", "DELETED", "REVOKED"}:
+                self._audit(actor, "GPU_RESERVE", "GPU", target["uuid"], "DENIED", f"Member @{username} suspended/deleted")
+                raise SchedulerError("ACCOUNT_SUSPENDED", f"Tài khoản @{username} hiện bị khóa hoặc đang lưu trữ.", 403)
+            allowed_gpus = list(member.get("gpu_permissions") or [])
+            if (not is_admin or enforce_permissions) and target["id"] not in allowed_gpus and target["uuid"] not in allowed_gpus:
+                self._audit(actor, "GPU_RESERVE", "GPU", target["uuid"], "DENIED", f"Missing GPU permission for @{username}")
+                raise SchedulerError("GPU_PERMISSION_DENIED", "Tài khoản chưa được cấp quyền sử dụng thiết bị GPU này.", 403)
+        elif enforce_permissions or not is_admin:
+            self._audit(actor, "GPU_RESERVE", "GPU", target["uuid"], "DENIED", f"Unknown member @{username}")
+            raise SchedulerError("GPU_PERMISSION_DENIED", "Tài khoản chưa được đăng ký quyền sử dụng GPU.", 403)
+
         try:
-            r = self.gpu_scheduler.reserve(gpu_uuid=target["uuid"], owner=username, actor=actor,
-                                           job_name=job_name, mode=mode, idempotency_key=idempotency_key)
+            r = self.gpu_scheduler.reserve(
+                gpu_uuid=target["uuid"],
+                owner=username,
+                actor=actor,
+                job_name=job_name,
+                mode=mode,
+                requested_vram_gb=int(requested_vram_gb or 0),
+                ttl_minutes=int(ttl_minutes or 240),
+                idempotency_key=idempotency_key,
+            )
         except SchedulerError as e:
             self._audit(actor, "GPU_RESERVE", "GPU", target["uuid"], "DENIED", e.message)
             raise
@@ -2068,138 +2200,33 @@ class LabOpsDataService:
     def archive_workspace(self, member_id: str) -> Dict[str, Any]:
         raise RuntimeError("Workspace archival is unavailable until the workspace controller is integrated")
 
+    def suspend_member_lifecycle(self, member_id_or_username: str, actor: str = "admin", reason: str = "") -> Dict[str, Any]:
+        return self.lifecycle.suspend_member(member_id_or_username, actor=actor, reason=reason)
+
+    def archive_member_lifecycle(self, member_id_or_username: str, actor: str = "admin", *, retain_backup: bool = True) -> Dict[str, Any]:
+        return self.lifecycle.archive_member(member_id_or_username, actor=actor, retain_backup=retain_backup)
+
+    def preview_member_deletion(self, member_id_or_username: str, actor: str = "admin", *, dry_run: bool = True) -> Dict[str, Any]:
+        return self.lifecycle.preview_deletion(member_id_or_username, actor=actor, dry_run=dry_run)
+
     def delete_member_permanently(
-        self, member_id_or_username: str, actor: str = "admin", remove_files: bool = True
+        self,
+        member_id_or_username: str,
+        actor: str = "admin",
+        remove_files: bool = False,
+        *,
+        confirm_username: Optional[str] = None,
+        step_up_verified: bool = False,
+        enforce_lifecycle: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Xóa bỏ hoàn toàn tài khoản thành viên khỏi LabOps:
-        1. Dừng và xóa Docker container workspace ws-{username}
-        2. Thu hồi và xóa toàn bộ WireGuard VPN peers trên wg-easy
-        3. Thu hồi toàn bộ SSH keys trong SshKeyRegistry và dọn dẹp RAM Vault
-        4. Xóa workspace controller records
-        5. Dọn dẹp thư mục workspace trên đĩa (nếu remove_files=True)
-        6. Xóa khỏi danh sách members và ssh_endpoints
-        7. Ghi nhận Audit Log chi tiết
-        """
-        member = self._find_member(member_id_or_username)
-        if not member:
-            raise LookupError(f"Không tìm thấy thành viên: {member_id_or_username}")
-
-        member_id = member["id"]
-        username = member["username"]
-        server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
-
-        cleanup_summary = {
-            "docker_container_removed": False,
-            "wireguard_peers_revoked": 0,
-            "ssh_keys_revoked": 0,
-            "vault_purged": False,
-            "workspace_files_removed": False,
-        }
-
-        # 1. Dừng và xóa Docker container ws-{username}
-        if shutil.which("docker"):
-            try:
-                cname = f"ws-{username}"
-                subprocess.run(["docker", "rm", "-f", cname], capture_output=True, timeout=10)
-                cleanup_summary["docker_container_removed"] = True
-            except Exception as e:
-                logger.warning(f"Lỗi khi xóa container {username}: {e}")
-
-        # 2. Thu hồi và xóa toàn bộ VPN WireGuard peers trên wg-easy
-        try:
-            profile = member.get("wireguard") or {}
-            devices = profile.get("devices") or []
-            for d in devices:
-                ext_id = str(d.get("external_id") or d.get("id"))
-                try:
-                    self.vpn_manager.revoke_device(ext_id)
-                    cleanup_summary["wireguard_peers_revoked"] += 1
-                except Exception as ve:
-                    logger.warning(f"Lỗi xóa peer {ext_id}: {ve}")
-
-            # Quét dọn các client còn sót trên wg-easy có tên bắt đầu bằng username
-            if hasattr(self.vpn_manager, "wg_easy"):
-                for client in self.vpn_manager.wg_easy.list_devices():
-                    c_name = client.get("name", "")
-                    if c_name == username or c_name.startswith(f"{username}-"):
-                        try:
-                            self.vpn_manager.wg_easy.revoke_device(str(client["id"]))
-                            cleanup_summary["wireguard_peers_revoked"] += 1
-                        except Exception:
-                            pass
-        except Exception as e:
-            logger.warning(f"Lỗi dọn dẹp WireGuard cho {username}: {e}")
-
-        # 3. Thu hồi SSH keys trong SshKeyRegistry
-        try:
-            keys = self.ssh_key_registry.list_keys(username=username)
-            for k in keys:
-                self.ssh_key_registry.revoke_key(k["id"], actor=actor, is_admin=True)
-                cleanup_summary["ssh_keys_revoked"] += 1
-        except Exception as e:
-            logger.warning(f"Lỗi thu hồi SSH keys cho {username}: {e}")
-
-        # 4. Dọn dẹp RAM Vault
-        try:
-            if hasattr(self.ssh_access_manager, "vault"):
-                self.ssh_access_manager.vault._bundles.pop(member_id, None)
-                self.ssh_access_manager.vault._channel_secrets.pop(member_id, None)
-                cleanup_summary["vault_purged"] = True
-        except Exception:
-            pass
-
-        # 5. Dọn dẹp workspace files trên đĩa
-        if remove_files:
-            try:
-                ws_dir = self.ssh_access_manager.member_workspace_dir(server_id, username)
-                if os.path.exists(ws_dir):
-                    shutil.rmtree(ws_dir, ignore_errors=True)
-                    if os.path.exists(ws_dir) and shutil.which("docker"):
-                        parent_d = os.path.dirname(ws_dir)
-                        base_n = os.path.basename(ws_dir)
-                        subprocess.run(
-                            ["docker", "run", "--rm", "-v", f"{parent_d}:/parent", "alpine", "rm", "-rf", f"/parent/{base_n}"],
-                            capture_output=True,
-                            timeout=10,
-                        )
-                    cleanup_summary["workspace_files_removed"] = not os.path.exists(ws_dir)
-            except Exception as e:
-                logger.warning(f"Lỗi xóa thư mục workspace {username}: {e}")
-
-        # 6. Dọn dẹp workspace controller
-        try:
-            if hasattr(self.workspace_controller, "remove_workspace"):
-                self.workspace_controller.remove_workspace(username)
-        except Exception:
-            pass
-
-        # 7. Xóa khỏi ssh_endpoints và members
-        self.ssh_endpoints = [ep for ep in self.ssh_endpoints if ep.get("member_id") != member_id]
-        self.members = [m for m in self.members if m["id"] != member_id and m.get("username") != username]
-
-        # 8. Ghi Audit Log
-        op_id = f"op-del-{uuid.uuid4().hex[:12]}"
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor,
-            "action": "MEMBER_DELETED_PERMANENTLY",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": "SUCCESS",
-            "correlation_id": op_id,
-            "details": f"Admin '{actor}' đã xóa vĩnh viễn tài khoản @{username} (ID: {member_id}) cùng toàn bộ container, WireGuard peers và SSH access.",
-        })
-
-        self._save_persistent_data()
-        return {
-            "success": True,
-            "member_id": member_id,
-            "username": username,
-            "cleanup": cleanup_summary,
-            "operation_id": op_id,
-        }
+        return self.lifecycle.delete_member_permanently(
+            member_id_or_username,
+            actor=actor,
+            remove_files=remove_files,
+            confirm_username=confirm_username,
+            step_up_verified=step_up_verified,
+            enforce_lifecycle=enforce_lifecycle,
+        )
 
     def get_wireguard_config(self, user_id: str) -> str:
         raise RuntimeError("Client WireGuard private keys and profiles are not generated or stored by LabOps")
@@ -2502,70 +2529,49 @@ class LabOpsDataService:
                 server_id, username, port=int(member.get("ssh_port") or 0)
             )
             member["ssh_port"] = canary["port"]
-        elif server_id == settings.LOCAL_HOST_ID and shutil.which("docker"):
-            try:
-                cname = f"ws-{username}"
-                insp = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", cname], capture_output=True, text=True)
-                if insp.returncode != 0 or insp.stdout.strip() != "true":
-                    subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
-                    work_dir = ws_fs.get("workspace_dir") or ws_fs.get("work_dir")
-                    ssh_port_to_bind = int(member.get("ssh_port") or 22001)
-                    subprocess.run([
-                        "docker", "run", "-d",
-                        "--name", cname,
-                        "--restart", "unless-stopped",
-                        "-p", f"{ssh_port_to_bind}:22",
-                        "-v", f"{work_dir}:/workspace",
-                        "-e", f"USERNAME={username}",
-                        "-e", f"PUBKEY={public_key}",
-                        "-e", f"TEMPPW={temp_password}",
-                        "labops-workspace:latest",
-                        "sh", "-c",
-                        'adduser -D -s /bin/bash -h /workspace "$USERNAME" 2>/dev/null || true;'
-                        'echo "$USERNAME:$TEMPPW" | chpasswd;'
-                        'mkdir -p /workspace/.ssh;'
-                        'echo "$PUBKEY" > /workspace/.ssh/authorized_keys;'
-                        'chmod 700 /workspace;'
-                        'chmod 700 /workspace/.ssh;'
-                        'chmod 600 /workspace/.ssh/authorized_keys;'
-                        'chown -R "$USERNAME:$USERNAME" /workspace;'
-                        'chmod 700 /workspace;'
-                        'cat << "EOF" > /etc/pam.d/sshd\n'
-                        'auth      required   pam_unix.so nullok\n'
-                        'account   required   pam_unix.so\n'
-                        'password  required   pam_unix.so nullok\n'
-                        'session   required   pam_unix.so\n'
-                        'EOF\n'
-                        'cat << "EOF" > /etc/profile.d/first_login.sh\n'
-                        'if [ "$USER" != "root" ] && [ ! -f /workspace/.password_changed ]; then\n'
-                        '  echo "\n==================================================================";\n'
-                        '  echo "🔒 BẢO MẬT: BẮT BUỘC ĐỔI MẬT KHẨU TẠM Ở LẦN ĐĂNG NHẬP ĐẦU TIÊN";\n'
-                        '  echo "==================================================================";\n'
-                        '  echo "Tài khoản của bạn vừa đăng nhập bằng Mật khẩu tạm do Admin cấp.";\n'
-                        '  echo "Để đảm bảo an toàn, bạn PHẢI đổi sang Mật khẩu bí mật mới ngay bây giờ.";\n'
-                        '  echo "------------------------------------------------------------------";\n'
-                        '  for attempt in 1 2 3; do\n'
-                        '    if passwd; then\n'
-                        '      touch /workspace/.password_changed;\n'
-                        '      sed -i "s/PubkeyAuthentication no/PubkeyAuthentication yes/" /etc/ssh/sshd_config 2>/dev/null || true;\n'
-                        '      pkill -HUP sshd 2>/dev/null || true;\n'
-                        '      echo "\n🎉 ĐỔI MẬT KHẨU THÀNH CÔNG! Vui lòng đăng nhập lại bằng Mật khẩu mới hoặc Khóa SSH!\n";\n'
-                        '      sleep 2; exit 0;\n'
-                        '    fi\n'
-                        '    echo "⚠️ Đổi mật khẩu chưa thành công. Vui lòng thử lại...";\n'
-                        '  done\n'
-                        '  echo "❌ Quá số lần thử. Đóng kết nối.";\n'
-                        '  exit 1;\n'
-                        'fi\n'
-                        'EOF\n'
-                        'chmod 755 /etc/profile.d/first_login.sh;'
-                        'cat << "EOF" > /etc/ssh/sshd_config\n'
-                        'Port 22\nListenAddress 0.0.0.0\nPasswordAuthentication yes\nPubkeyAuthentication no\nStrictModes no\nPrintMotd no\nUsePAM yes\nSubsystem sftp /usr/lib/ssh/sftp-server\n'
-                        'EOF\n'
-                        'if [ -x /usr/sbin/sshd.pam ]; then exec /usr/sbin/sshd.pam -D -e; else exec /usr/sbin/sshd -D -e; fi'
-                    ], capture_output=True, text=True, timeout=15)
-            except Exception as e:
-                logger.warning(f"Không thể tự động khởi chạy Docker container cho workspace {username}: {e}")
+        else:
+            # Ủy quyền cấp phát Docker workspace qua Go Node Agent/Gateway; FastAPI không tự chạy docker run trực tiếp.
+            existing_ws = [
+                w for w in self.workspace_controller.list_workspaces(owner=username)
+                if w.get("owner") == username and w.get("runtime_type") == "DOCKER"
+            ]
+            ws_rec = existing_ws[0] if existing_ws else None
+            if ws_rec is None:
+                try:
+                    ws_rec = self.workspace_controller.request_workspace(
+                        owner=username,
+                        host_id=server_id,
+                        ssh_public_key=public_key,
+                        cpu_cores=cpu_limit,
+                        ram_mb=ram_limit * 1024,
+                        storage_quota_gb=storage_quota_gb,
+                        gpu_uuid=(gpu_permissions[0] if gpu_permissions else None),
+                        extra_mounts=payload.get("extra_mounts"),
+                    )
+                except Exception as ws_exc:
+                    logger.warning("Workspace controller validation note for %s: %s", username, ws_exc)
+                    ws_rec = None
+
+            if ws_rec is not None and host_online:
+                try:
+                    agent_res = self.node_agent.dispatch(
+                        server,
+                        "PROVISION_DOCKER_WORKSPACE",
+                        params={
+                            "workspace_id": ws_rec["id"],
+                            "username": username,
+                            "host_dir": ws_fs.get("workspace_dir") or "",
+                            "ssh_port": str(member.get("ssh_port") or ws_rec.get("ssh_host_port") or 22001),
+                        },
+                        idempotency_key=f"ws-prov-{ws_rec['id']}",
+                    )
+                    member["workspace_delegation_status"] = "VERIFIED"
+                    member["workspace_agent_request_id"] = agent_res.get("request_id")
+                except NodeAgentError as na_err:
+                    member["workspace_delegation_status"] = "PENDING_AGENT_PROVISIONING"
+                    member["workspace_delegation_reason"] = na_err.message
+            else:
+                member["workspace_delegation_status"] = "PENDING_AGENT_PROVISIONING"
 
         known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
             g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")

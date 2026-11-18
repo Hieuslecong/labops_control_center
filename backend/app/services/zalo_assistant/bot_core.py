@@ -12,7 +12,9 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -66,24 +68,102 @@ class ZaloBotEngine:
         report_generator: ReportGenerator,
         bot_token: Optional[str] = None,
         authorized_users: Optional[List[str]] = None,
+        allowed_chat_ids: Optional[List[str]] = None,
     ):
         self.quota_ledger = quota_ledger
         self.ai_client = ai_client
         self.report_generator = report_generator
-        self.bot_token = bot_token or os.getenv("ZALO_BOT_TOKEN", "")
-        self.authorized_users = authorized_users or [
-            u.strip() for u in os.getenv("ZALO_AUTHORIZED_USERS", "admin").split(",") if u.strip()
-        ]
+        self.bot_token = bot_token if bot_token is not None else os.getenv("ZALO_BOT_TOKEN", "")
+        if authorized_users is not None:
+            cleaned_users = [str(u).strip() for u in authorized_users if str(u).strip()]
+            if "*" in cleaned_users:
+                raise ValueError("Wildcard '*' bị cấm trong danh sách authorized_users.")
+            self.authorized_users = cleaned_users
+        else:
+            self.authorized_users = [
+                u.strip()
+                for u in os.getenv("ZALO_AUTHORIZED_USERS", "").split(",")
+                if u.strip() and u.strip() != "*"
+            ]
+
+        if allowed_chat_ids is not None:
+            cleaned_chats = [str(c).strip() for c in allowed_chat_ids if str(c).strip()]
+            if "*" in cleaned_chats:
+                raise ValueError("Wildcard '*' bị cấm trong danh sách allowed_chat_ids.")
+            self.allowed_chat_ids = cleaned_chats
+        else:
+            self.allowed_chat_ids = [
+                c.strip()
+                for c in os.getenv("ZALO_ALLOWED_CHAT_IDS", "").split(",")
+                if c.strip() and c.strip() != "*"
+            ]
+
         self.is_polling = False
         self._polling_task: Optional[asyncio.Task] = None
         self.consumer_id = f"consumer-ws-{os.getpid()}"
         self.last_polling_heartbeat = None
         self.message_history: List[Dict[str, Any]] = []
+        self._ask_lock = threading.Lock()
+        self._ask_timestamps: Dict[str, List[float]] = defaultdict(list)
 
     def is_authorized(self, user_id: str) -> bool:
-        if "*" in self.authorized_users:
+        uid = str(user_id or "").strip()
+        if not uid or uid == "*":
+            return False
+        allowed = {
+            str(u).strip()
+            for u in (self.authorized_users or [])
+            if str(u).strip() and str(u).strip() != "*"
+        }
+        return uid in allowed
+
+    def is_chat_allowed(self, chat_id: Optional[str], sender_id: Optional[str] = None) -> bool:
+        cid = str(chat_id or "").strip()
+        if not cid or cid == "*":
+            return False
+        valid_chats = {
+            str(c).strip()
+            for c in (self.allowed_chat_ids or [])
+            if str(c).strip() and str(c).strip() != "*"
+        }
+        if valid_chats:
+            return cid in valid_chats
+        sid = str(sender_id or "").strip()
+        return bool(sid) and cid == sid and self.is_authorized(sid)
+
+    def _check_ask_rate_limit(self, sender_id: str, limit: int = 10, window_sec: float = 60.0) -> bool:
+        key = str(sender_id or "anonymous").strip()
+        now = time.monotonic()
+        with self._ask_lock:
+            recent = [t for t in self._ask_timestamps[key] if now - t < window_sec]
+            if len(recent) >= limit:
+                self._ask_timestamps[key] = recent
+                return False
+            recent.append(now)
+            self._ask_timestamps[key] = recent
             return True
-        return str(user_id) in self.authorized_users
+
+    async def ahandle_command(
+        self,
+        command_text: str,
+        sender_id: str = "web-admin",
+        *,
+        idempotency_key: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        source: str = "zalo",
+        principal_role: Optional[str] = None,
+        defer_outbox_commit: bool = False,
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            self.handle_command,
+            command_text,
+            sender_id,
+            idempotency_key=idempotency_key,
+            chat_id=chat_id,
+            source=source,
+            principal_role=principal_role,
+            defer_outbox_commit=defer_outbox_commit,
+        )
 
     def handle_command(
         self,
@@ -91,20 +171,52 @@ class ZaloBotEngine:
         sender_id: str = "web-admin",
         *,
         idempotency_key: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        source: str = "zalo",
+        principal_role: Optional[str] = None,
+        defer_outbox_commit: bool = False,
     ) -> Dict[str, Any]:
         """
-        Process user message or command synchronously/asynchronously with quota reservation.
+        Process user message or command with RBAC, rate limiting, and quota reservation.
         """
         text = command_text.strip()
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower() if parts else ""
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        if not self.is_authorized(sender_id):
+        src = (source or "zalo").strip().lower()
+        role_upper = str(principal_role or "").strip().upper()
+
+        if src == "dashboard":
+            if role_upper not in ("ADMIN", "RESEARCHER"):
+                return {
+                    "success": False,
+                    "error": "UNAUTHORIZED",
+                    "suppress_outbound": True,
+                    "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant.",
+                    "command": cmd,
+                }
+        else:
+            if not self.is_authorized(sender_id) or (
+                chat_id is not None and not self.is_chat_allowed(chat_id, sender_id=sender_id)
+            ):
+                return {
+                    "success": False,
+                    "error": "UNAUTHORIZED",
+                    "suppress_outbound": True,
+                    "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant. Vui lòng liên hệ quản trị viên.",
+                    "command": cmd,
+                }
+
+        known_cmds = {"/start", "/help", "/status", "/gpu", "/alloc", "/allocations", "/gpus", "/jobs", "/report", "/quota"}
+        is_ask = cmd == "/ask" or cmd not in known_cmds
+        if is_ask and not self._check_ask_rate_limit(sender_id):
             return {
                 "success": False,
-                "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant. Vui lòng liên hệ quản trị viên.",
-                "command": cmd,
+                "error": "RATE_LIMITED",
+                "suppress_outbound": True,
+                "reply": "⏳ Bạn đã gửi quá nhiều yêu cầu AI /ask. Vui lòng thử lại sau 1 phút.",
+                "command": cmd or "/ask",
             }
 
         # 1. Routing commands
@@ -119,6 +231,15 @@ class ZaloBotEngine:
         elif cmd == "/jobs":
             reply = self._cmd_jobs()
         elif cmd == "/report":
+            wants_generate = any(w in arg.lower() for w in ["tạo", "new", "gen", "generate"])
+            if wants_generate and src == "dashboard" and role_upper != "ADMIN":
+                return {
+                    "success": False,
+                    "error": "FORBIDDEN",
+                    "suppress_outbound": True,
+                    "reply": "⛔ Chỉ quản trị viên mới được phép khởi tạo báo cáo tuần mới.",
+                    "command": cmd,
+                }
             reply = self._cmd_report(arg)
         elif cmd == "/quota":
             reply = self._cmd_quota()
@@ -128,27 +249,48 @@ class ZaloBotEngine:
             # Nếu người dùng gửi tin nhắn không có prefix lệnh, chuyển tiếp tới AI Ask
             reply = self._cmd_ask(text)
 
-        # 2. Record in Quota Ledger (atomic reservation)
-        try:
-            success, msg_id, quota_snapshot = self.quota_ledger.reserve_and_send(
-                recipient_id=sender_id,
-                message_text=reply,
-                is_critical_alert=False,
-                idempotency_key=idempotency_key,
-                metadata={"command": cmd, "sender": sender_id},
-            )
-        except QuotaExceededError as q_err:
-            return {
-                "success": False,
-                "reply": f"⚠️ {q_err.message}",
-                "command": cmd,
-                "error": "QUOTA_EXCEEDED",
-            }
+        # 2. Record in Quota Ledger ONLY for external Zalo messages (not internal dashboard API)
+        if src == "dashboard":
+            msg_id = f"dash-{os.urandom(6).hex()}"
+        else:
+            try:
+                if defer_outbox_commit:
+                    success, msg_id, quota_snapshot = self.quota_ledger.reserve_outbox(
+                        recipient_id=sender_id,
+                        message_text=reply,
+                        is_critical_alert=False,
+                        idempotency_key=idempotency_key,
+                        metadata={"command": cmd or "/ask", "sender": sender_id, "chat_id": chat_id or ""},
+                    )
+                else:
+                    success, msg_id, quota_snapshot = self.quota_ledger.reserve_and_send(
+                        recipient_id=sender_id,
+                        message_text=reply,
+                        is_critical_alert=False,
+                        idempotency_key=idempotency_key,
+                        metadata={"command": cmd or "/ask", "sender": sender_id},
+                    )
+            except QuotaExceededError as q_err:
+                return {
+                    "success": False,
+                    "reply": f"⚠️ {q_err.message}",
+                    "command": cmd,
+                    "error": "QUOTA_EXCEEDED",
+                }
+            except ValueError as v_err:
+                return {
+                    "success": False,
+                    "reply": f"⚠️ {v_err}",
+                    "command": cmd,
+                    "error": "IDEMPOTENCY_CONFLICT",
+                    "suppress_outbound": True,
+                }
 
         # Save into in-memory recent message history
         history_item = {
             "id": msg_id,
             "sender_id": sender_id,
+            "source": src,
             "incoming_text": command_text,
             "reply_snippet": reply[:100],
             "command": cmd or "/ask",

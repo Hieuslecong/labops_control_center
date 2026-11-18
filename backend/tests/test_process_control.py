@@ -10,6 +10,7 @@ if backend_dir not in sys.path:
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "test-secret-process-ctrl")
 from fastapi.testclient import TestClient
+from app.core.config import settings
 from app.main import app
 from app.core.security import issue_token
 from app.services.labops_service import service
@@ -66,7 +67,7 @@ class TestProcessControl(unittest.TestCase):
     def test_terminate_protected_process_pid1_rejected(self):
         """Từ chối dừng PID 1 (systemd) với lỗi 403 PROTECTED_PROCESS_DENIED."""
         # Ref của PID 1
-        ref = "track:host:1:17"
+        ref = f"{settings.LOCAL_HOST_ID}:host:1:17"
         payload = {
             "reason": "Test cố tình dừng PID 1",
             "terminate_tree": False,
@@ -82,7 +83,7 @@ class TestProcessControl(unittest.TestCase):
 
     def test_terminate_requires_admin_role(self):
         """Thành viên thường (RESEARCHER) không thể gửi lệnh dừng tiến trình (403)."""
-        ref = "track:host:9999:12345"
+        ref = f"{settings.LOCAL_HOST_ID}:host:9999:12345"
         payload = {"reason": "Non-admin test", "terminate_tree": False}
         res = self.client.post(
             f"/api/v1/processes/{ref}/stop",
@@ -93,7 +94,7 @@ class TestProcessControl(unittest.TestCase):
 
     def test_kill_requires_force_confirmed(self):
         """Buộc dừng SIGKILL bắt buộc phải có force_confirmed: true."""
-        ref = "track:host:9999:12345"
+        ref = f"{settings.LOCAL_HOST_ID}:host:9999:12345"
         payload = {"reason": "Test missing force", "force_confirmed": False}
         res = self.client.post(
             f"/api/v1/processes/{ref}/kill",
@@ -108,7 +109,7 @@ class TestProcessControl(unittest.TestCase):
         Nếu start_time_ticks trong ref không khớp với tiến trình thực trên host -> từ chối 409 Conflict.
         """
         # Giả sử PID 1 có start_time_ticks thật khác với 9999999999
-        ref_fake_ticks = "track:host:1:9999999999"
+        ref_fake_ticks = f"{settings.LOCAL_HOST_ID}:host:1:9999999999"
         payload = {
             "reason": "Test chống PID reuse",
             "force_confirmed": True,
@@ -139,7 +140,7 @@ class TestProcessControl(unittest.TestCase):
                 after = parts[1].split()
                 ticks = int(after[19])
 
-            ref = f"track:host:{pid}:{ticks}"
+            ref = f"{settings.LOCAL_HOST_ID}:host:{pid}:{ticks}"
 
             # Gửi lệnh dừng qua API
             payload = {

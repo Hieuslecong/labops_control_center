@@ -103,12 +103,32 @@ class NvmlAdapter:
             logger.warning(f"Failed to query compute apps: {e}")
             return []
 
+    @staticmethod
+    def _compute_freshness(collected_at_iso: Optional[str]) -> tuple[str, float]:
+        if not collected_at_iso:
+            return "OFFLINE", 999999.0
+        try:
+            dt = datetime.fromisoformat(collected_at_iso.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+            if age <= 15.0:
+                return "ONLINE", round(age, 2)
+            if age <= 60.0:
+                return "STALE", round(age, 2)
+            return "OFFLINE", round(age, 2)
+        except Exception:
+            return "ONLINE", 0.0
+
     def _fetch_go_agent_gpus(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy dữ liệu GPU tức thì từ LabOps Go Agent nếu đang chạy."""
+        secret = os.getenv("LABOPS_AGENT_SECRET", "").strip()
+        if not secret:
+            return None
         try:
             req = urllib.request.Request(
                 "http://127.0.0.1:9100/api/v1/agent/gpus",
-                headers={"X-LabOps-Agent-Secret": "labops-local-agent-verified-token-2026"}
+                headers={"X-LabOps-Agent-Secret": secret}
             )
             with urllib.request.urlopen(req, timeout=0.2) as resp:
                 if resp.status == 200:
@@ -120,41 +140,27 @@ class NvmlAdapter:
                             gpu_procs = []
                             for p in raw_procs:
                                 pname = p.get("name", "")
-                                user = p.get("username", "")
-                                if not user:
-                                    if "/users/" in pname:
-                                        try:
-                                            user = pname.split("/users/")[1].split("/")[0]
-                                        except Exception:
-                                            user = "researcher"
+                                user = str(p.get("username", "") or "").strip()
                                 pid_val = p.get("pid", 0)
-                                user = ""
-                                try:
-                                    import psutil
-                                    if psutil and psutil.pid_exists(pid_val):
-                                        user = psutil.Process(pid_val).username()
-                                except Exception:
-                                    pass
+                                confidence = "VERIFIED_AGENT"
+                                if not user or user in ("unknown", "system"):
+                                    try:
+                                        import psutil
+                                        if psutil and pid_val and psutil.pid_exists(pid_val):
+                                            user = psutil.Process(pid_val).username()
+                                            confidence = "VERIFIED_HOST_PID"
+                                    except Exception:
+                                        user = ""
 
                                 if not user or user in ("unknown", "system"):
-                                    if "/home/" in pname:
-                                        try:
-                                            user = pname.split("/home/")[1].split("/")[0]
-                                        except Exception:
-                                            user = "researcher"
-                                    elif "/mnt/" in pname:
-                                        try:
-                                            parts = pname.split("/mnt/")[1].split("/")
-                                            user = parts[1] if len(parts) >= 2 else "researcher"
-                                        except Exception:
-                                            user = "researcher"
-                                    else:
-                                        user = "researcher"
+                                    user = "unattributed"
+                                    confidence = "UNATTRIBUTED_EXTERNAL"
                                 vram = p.get("vram_mb") or p.get("used_memory_mb") or p.get("vramMb") or 0
                                 gpu_procs.append({
                                     "pid": p.get("pid", 0),
                                     "name": pname or "python",
                                     "username": user,
+                                    "attribution_confidence": confidence,
                                     "workspace": p.get("workspace", "host"),
                                     "vram_mb": vram,
                                     "vramMb": vram,
@@ -162,7 +168,9 @@ class NvmlAdapter:
                                     "cpuPercent": p.get("cpu_percent", 0.0),
                                 })
 
-                            active_users = list(dict.fromkeys(p["username"] for p in gpu_procs if p.get("username"))) or []
+                            active_users = list(dict.fromkeys(
+                                p["username"] for p in gpu_procs if p.get("username") and p["username"] != "unattributed"
+                            )) or []
                             
                             srv_id = self.server_id or settings_local_host_id()
                             is_ws = srv_id == "workstation"
@@ -182,6 +190,9 @@ class NvmlAdapter:
                                 except Exception:
                                     temp = 0
 
+                            collected_at = data.get("collected_at") or datetime.now(timezone.utc).isoformat()
+                            freshness_status, age_sec = self._compute_freshness(collected_at)
+
                             gpus.append({
                                 "index": g.get("index", 0),
                                 "id": f"{srv_id}-gpu-0{gpu_num}",
@@ -189,8 +200,11 @@ class NvmlAdapter:
                                 "server_id": srv_id,
                                 "server_name": srv_name,
                                 "source": "labops-go-agent",
-                                "collected_at": data.get("collected_at", datetime.now(timezone.utc).isoformat()),
-                                "freshness": "ONLINE",
+                                "telemetry_source": "go_node_agent",
+                                "collected_at": collected_at,
+                                "age_seconds": age_sec,
+                                "freshness": freshness_status,
+                                "freshness_status": freshness_status,
                                 "vram_unit": "MiB",
                                 "model": g.get("name", "NVIDIA A30"),
                                 "uuid": g.get("uuid", ""),
@@ -251,6 +265,7 @@ class NvmlAdapter:
                         gpu_procs = [p for p in live_processes if p.get("gpu_uuid") == gpu_uuid]
                         srv_prefix = "WS" if self.server_id == "workstation" else "RACK"
                         srv_full_name = "Server 02 — Workstation (aiot-ws1 • Cục bộ)" if self.server_id == "workstation" else "Server 01 — Server Rack (aiotlab-rack)"
+                        now_iso = datetime.now(timezone.utc).isoformat()
                         gpus.append({
                             "index": idx,
                             "id": f"{self.server_id}-gpu-0{idx + 1}",
@@ -258,8 +273,11 @@ class NvmlAdapter:
                             "server_id": self.server_id,
                             "server_name": srv_full_name,
                             "source": "nvidia-smi",
-                            "collected_at": datetime.now(timezone.utc).isoformat(),
+                            "telemetry_source": "local_nvidia_smi",
+                            "collected_at": now_iso,
+                            "age_seconds": 0.0,
                             "freshness": "ONLINE",
+                            "freshness_status": "ONLINE",
                             "vram_unit": "MiB",
                             "model": parts[1],
                             "uuid": parts[2],

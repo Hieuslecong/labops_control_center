@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import logging
-import secrets
 from typing import Dict, Any
 
 # Ensure backend root is in sys.path
@@ -101,6 +100,10 @@ def _format_server(s: Dict[str, Any]) -> Dict[str, Any]:
     res["driverVersion"] = s.get("driver_version", s.get("driverVersion", ""))
     res["cudaVersion"] = s.get("cuda_version", s.get("cudaVersion", ""))
     res["lastUpdated"] = s.get("last_updated", s.get("lastUpdated", ""))
+    res["collectedAt"] = s.get("collected_at", s.get("collectedAt"))
+    res["ageSeconds"] = s.get("age_seconds", s.get("ageSeconds"))
+    res["telemetrySource"] = s.get("telemetry_source", s.get("telemetrySource"))
+    res["freshnessStatus"] = s.get("freshness_status", s.get("freshnessStatus"))
     return res
 
 def _format_gpu(g: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,6 +120,10 @@ def _format_gpu(g: Dict[str, Any]) -> Dict[str, Any]:
     res["powerLimitWatts"] = g.get("power_limit_watts", g.get("powerLimitWatts", 0))
     res["allocationMode"] = g.get("allocation_mode", g.get("allocationMode", "SHARED"))
     res["enforcementState"] = g.get("enforcement_state", g.get("enforcementState", "MONITOR_ONLY"))
+    res["collectedAt"] = g.get("collected_at", g.get("collectedAt"))
+    res["ageSeconds"] = g.get("age_seconds", g.get("ageSeconds"))
+    res["telemetrySource"] = g.get("telemetry_source", g.get("telemetrySource"))
+    res["freshnessStatus"] = g.get("freshness_status", g.get("freshnessStatus"))
     res["activeProcesses"] = [
         {
             "pid": p.get("pid", 0),
@@ -185,8 +192,21 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 
     PUBLIC_PATHS = ("/api/v1/health", "/health", "/api/v1/monitoring/health")
-    ADMIN_PREFIXES = ("/api/v1/users", "/api/v1/admin", "/api/v1/ssh", "/api/v1/access", "/api/v1/audit-logs",
-                      "/api/v1/events", "/api/v1/security/reviews", "/api/v1/storage-pools", "/api/v1/workspaces")
+    ADMIN_PREFIXES = (
+        "/api/v1/users",
+        "/api/v1/admin",
+        "/api/v1/ssh",
+        "/api/v1/access",
+        "/api/v1/audit-logs",
+        "/api/v1/events",
+        "/api/v1/security/reviews",
+        "/api/v1/storage-pools",
+        "/api/v1/workspaces",
+        "/api/v1/ai-assistant/config",
+        "/api/v1/ai-assistant/tools",
+        "/api/v1/ai-assistant/history",
+        "/api/v1/ai-assistant/reports/generate",
+    )
 
     def _authenticate(self, path: str):
         """Trả về Principal hoặc None (đã gửi lỗi). Fail-closed."""
@@ -200,18 +220,6 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
         except AuthError as e:
             self._send_json(e.status, {"detail": e.detail})
             return None
-
-    def _require_admin_api(self) -> bool:
-        configured = settings.LABOPS_ADMIN_API_TOKEN
-        if not configured:
-            self._send_json(503, {"detail": "Access management authentication is not configured"})
-            return False
-        authorization = self.headers.get("Authorization", "")
-        token = authorization[7:] if authorization.startswith("Bearer ") else ""
-        if not token or not secrets.compare_digest(token, configured):
-            self._send_json(401, {"detail": "Unauthorized"})
-            return False
-        return True
 
     def _send_json(self, status_code: int, data: Any):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -443,7 +451,10 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, service.list_all_vpn_devices())
         elif path.startswith("/api/v1/v2/members/") and path.endswith("/devices"):
             member_id = path.split("/")[5]
-            member = service._find_member(member_id)
+            try:
+                member = service._find_member(member_id)
+            except LookupError:
+                member = None
             if not member:
                 self._send_json(404, {"detail": "Không tìm thấy thành viên"})
                 return
@@ -455,7 +466,10 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             parts = path.split("/")
             member_id = parts[5]
             device_id = parts[7]
-            member = service._find_member(member_id)
+            try:
+                member = service._find_member(member_id)
+            except LookupError:
+                member = None
             if not member:
                 self._send_json(404, {"detail": "Không tìm thấy thành viên"})
                 return
@@ -539,12 +553,16 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             try:
                 owner = (body.get("username") or principal.username) if principal.is_admin else principal.username
                 res = service.allocate_gpu(
-                    gpu_id=body.get("gpu_id"),
+                    gpu_id=body.get("gpu_id") or body.get("gpuId"),
                     username=owner,
                     mode=body.get("mode", "FULL_GPU_EXCLUSIVE"),
-                    job_name=str(body.get("job_name", ""))[:200],
+                    requested_vram_gb=int(body.get("requested_vram_gb") or body.get("requestedVramGb") or 0),
+                    job_name=str(body.get("job_name") or body.get("jobName") or "")[:200],
                     actor=principal.username,
                     idempotency_key=self.headers.get("Idempotency-Key"),
+                    ttl_minutes=int(body.get("ttl_minutes") or body.get("ttlMinutes") or 240),
+                    is_admin=principal.is_admin,
+                    enforce_permissions=not principal.is_admin,
                 )
                 self._send_json(200, res)
             except SchedulerError as e:

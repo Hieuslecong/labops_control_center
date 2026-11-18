@@ -36,7 +36,7 @@ class WgEasyAdapter(VPNProvider):
     ) -> None:
         self.base_url = (base_url or getattr(settings, "WG_EASY_API_URL", "http://127.0.0.1:51821")).rstrip("/")
         self.username = username or getattr(settings, "WG_EASY_ADMIN_USER", "admin")
-        self.password = password or getattr(settings, "WG_EASY_ADMIN_PASSWORD", "LabOpsSecureVPN2026!")
+        self.password = password if password is not None else getattr(settings, "WG_EASY_ADMIN_PASSWORD", "")
         self.public_endpoint = public_endpoint or getattr(settings, "WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
         self.vpn_subnet = vpn_subnet or getattr(settings, "WG_EASY_VPN_SUBNET", "10.88.40.0/24")
         self.timeout = timeout
@@ -59,6 +59,8 @@ class WgEasyAdapter(VPNProvider):
         data: Optional[Dict[str, Any]] = None,
         is_text_response: bool = False,
     ) -> Any:
+        if not self.password:
+            raise VPNProviderError("WG_EASY_ADMIN_PASSWORD chưa được cấu hình")
         now = time.time()
         if now < self._circuit_open_until:
             raise VPNProviderError(f"wg-easy API đang tạm ngưng do lỗi kết nối trước đó (chờ thử lại)")
@@ -128,6 +130,7 @@ class WgEasyAdapter(VPNProvider):
         for c in raw_list:
             if not isinstance(c, dict):
                 continue
+            has_handshake = bool(c.get("latestHandshakeAt")) and bool(c.get("enabled", True))
             devices.append({
                 "id": str(c.get("id")),
                 "provider": self.name,
@@ -137,6 +140,7 @@ class WgEasyAdapter(VPNProvider):
                 "public_key": str(c.get("publicKey") or ""),
                 "enabled": bool(c.get("enabled", True)),
                 "status": "ACTIVE" if c.get("enabled", True) else "DISABLED",
+                "handshake_status": "HANDSHAKE_VERIFIED" if has_handshake else "NO_HANDSHAKE",
                 "last_handshake": c.get("latestHandshakeAt"),
                 "transfer_rx": int(c.get("transferRx") or 0),
                 "transfer_tx": int(c.get("transferTx") or 0),
@@ -222,6 +226,7 @@ class WgEasyAdapter(VPNProvider):
                 "server_public_key": server_pub,
                 "total_clients": len(clients),
                 "active_handshakes": active_handshakes,
+                "tunnel_traffic_verified": active_handshakes > 0,
                 "total_rx_bytes": total_rx,
                 "total_tx_bytes": total_tx,
                 "version": "15.x",

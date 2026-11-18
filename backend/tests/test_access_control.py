@@ -17,29 +17,36 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.api.v1.endpoints import admin_members, ssh_endpoints, users
 from app.api.dependencies import require_labops_admin
-from app.core.config import settings
+from app.core.security import issue_token
 
 
 class TestAccessApiAuthorization(unittest.TestCase):
     def setUp(self):
         self.credential = lambda token: HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
-    def test_access_api_fails_closed_when_admin_token_is_not_configured(self):
-        with patch.object(settings, "LABOPS_ADMIN_API_TOKEN", ""):
+    def test_access_api_fails_closed_when_session_secret_is_not_configured(self):
+        with patch.dict(os.environ, {"LABOPS_SESSION_SECRET": ""}, clear=False):
             with self.assertRaises(HTTPException) as error:
-                require_labops_admin(None, None)
+                require_labops_admin(None)
         self.assertEqual(error.exception.status_code, 503)
 
-    def test_access_api_rejects_missing_and_invalid_admin_token(self):
-        with patch.object(settings, "LABOPS_ADMIN_API_TOKEN", "expected-secret"):
+    def test_access_api_rejects_missing_invalid_and_researcher_tokens(self):
+        secret = "unit-access-control-secret-0123456789"
+        admin_tok = issue_token("admin-real", "ADMIN", secret=secret)
+        researcher_tok = issue_token("alice", "RESEARCHER", secret=secret)
+        with patch.dict(os.environ, {"LABOPS_SESSION_SECRET": secret}, clear=False):
             with self.assertRaises(HTTPException) as missing:
-                require_labops_admin(None, None)
+                require_labops_admin(None)
             with self.assertRaises(HTTPException) as invalid:
-                require_labops_admin(self.credential("wrong"), None)
-            actor = require_labops_admin(self.credential("expected-secret"), "clerk-user-id")
+                require_labops_admin(self.credential("wrong.token"))
+            with self.assertRaises(HTTPException) as non_admin:
+                require_labops_admin(self.credential(researcher_tok))
+            actor = require_labops_admin(self.credential(admin_tok))
+
         self.assertEqual(missing.exception.status_code, 401)
         self.assertEqual(invalid.exception.status_code, 401)
-        self.assertEqual(actor, "clerk-user-id")
+        self.assertEqual(non_admin.exception.status_code, 403)
+        self.assertEqual(actor, "admin-real")
 
     def test_user_and_ssh_management_routers_are_guarded(self):
         self.assertTrue(users.router.dependencies)

@@ -24,6 +24,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from app.db.atomic_json import atomic_write_json, safe_load_json
+
 FORBIDDEN_MOUNT_PREFIXES = (
     "/var/run/docker.sock",
     "/run/docker.sock",
@@ -69,27 +71,17 @@ class WorkspaceController:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
     def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.state_path):
-            return {"workspaces": [], "idempotency": {}}
-        with open(self.state_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return safe_load_json(self.state_path, lambda: {"workspaces": [], "idempotency": {}})
 
     def _save(self, state: Dict[str, Any]) -> None:
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.state_path)
+        atomic_write_json(self.state_path, state, use_lock=False)
 
     def remove_workspace(self, owner: str) -> bool:
-        with self._locked():
-            state = self._load()
+        with self._locked() as state:
             workspaces = state.get("workspaces", [])
             initial_count = len(workspaces)
             state["workspaces"] = [w for w in workspaces if w.get("owner") != owner]
-            if len(state["workspaces"]) != initial_count:
-                self._save(state)
-                return True
-            return False
+            return len(state["workspaces"]) != initial_count
 
     def list_workspaces(self, owner: Optional[str] = None, legacy_endpoints: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         state = self._load()

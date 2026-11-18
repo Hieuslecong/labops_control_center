@@ -9,12 +9,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from typing import Any, Dict, Optional
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -30,6 +30,7 @@ from app.adapters.wg_easy_adapter import WgEasyAdapter
 from app.core.security import issue_token
 from app.main import LabOpsRequestHandler
 from app.services.labops_service import LabOpsDataService
+from app.services.member_lifecycle import LifecyclePreconditionError
 from app.services.vpn_manager import VPNManager
 
 
@@ -107,18 +108,21 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
             cls.has_wgeasy = False
 
     def _clean_dirs(self) -> None:
+        base_dir = os.environ.get("LABOPS_USER_DATA_DIR") or getattr(self, "_users_dir", "")
+        if not base_dir or not os.path.isdir(base_dir):
+            return
         for u in ("multidev_user", "api_dev_user", "delete_u"):
-            p = f"/media/LabOps-Data/users/{u}"
+            p = os.path.join(base_dir, u)
             if os.path.exists(p):
                 shutil.rmtree(p, ignore_errors=True)
-                if os.path.exists(p) and shutil.which("docker"):
-                    subprocess.run(["docker", "run", "--rm", "-v", "/media/LabOps-Data/users:/u", "alpine", "rm", "-rf", f"/u/{u}"], capture_output=True, timeout=10)
-            if shutil.which("docker"):
-                subprocess.run(["docker", "rm", "-f", f"ws-{u}"], capture_output=True, timeout=5)
 
     def setUp(self) -> None:
-        self._clean_dirs()
         self.tmpdir = tempfile.TemporaryDirectory(prefix="labops-vpn-test-")
+        self._prev_user_dir = os.environ.get("LABOPS_USER_DATA_DIR")
+        self._users_dir = os.path.join(self.tmpdir.name, "users")
+        os.makedirs(self._users_dir, exist_ok=True)
+        os.environ["LABOPS_USER_DATA_DIR"] = self._users_dir
+        self._clean_dirs()
         self.svc = LabOpsDataService(demo_mode=False, data_dir=self.tmpdir.name)
         if not self.has_wgeasy:
             mock_backend = _MockWgEasyBackend()
@@ -127,8 +131,12 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
         self.researcher_token = issue_token("res_vpn", "RESEARCHER")
 
     def tearDown(self) -> None:
-        self.tmpdir.cleanup()
         self._clean_dirs()
+        if self._prev_user_dir is None:
+            os.environ.pop("LABOPS_USER_DATA_DIR", None)
+        else:
+            os.environ["LABOPS_USER_DATA_DIR"] = self._prev_user_dir
+        self.tmpdir.cleanup()
 
     def test_01_vpn_manager_overview_and_provider_resolution(self) -> None:
         """Kiểm tra tổng quan hệ thống VPN và độ phân giải provider."""
@@ -297,20 +305,42 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
             main_mod.service = original_service
 
     def test_04_delete_member_permanently_lifecycle(self) -> None:
-        """Kiểm tra xóa vĩnh viễn tài khoản: dọn dẹp container, VPN peers, keys và files."""
+        """Kiểm tra xóa vĩnh viễn tài khoản theo vòng đời an toàn: Suspend -> Archive -> Delete."""
         # 1. Tạo thành viên cần xóa
         member = self.svc.provision_member_ssh_access({
             "full_name": "Delete Target User",
             "username": "delete_u",
-            "assigned_server": "track",
+            "assigned_server": "workstation",
             "require_passphrase": False,
             "_actor_id": "admin_vpn",
         })
         member_id = member["id"]
         self.svc.add_member_device(member_id, "Target Phone", actor="admin_vpn")
 
-        # 2. Xóa vĩnh viễn
-        del_res = self.svc.delete_member_permanently(member_id, actor="admin_vpn", remove_files=True)
+        # Không được phép xóa thẳng khi tài khoản chưa SUSPEND -> ARCHIVE
+        with self.assertRaises(LifecyclePreconditionError):
+            self.svc.delete_member_permanently(
+                member_id,
+                actor="admin_vpn",
+                remove_files=True,
+                confirm_username="delete_u",
+                step_up_verified=True,
+            )
+
+        # 2. Thực hiện Suspend -> Archive -> Delete với xác nhận step-up
+        susp = self.svc.suspend_member_lifecycle(member_id, actor="admin_vpn", reason="Offboarding test")
+        self.assertEqual(susp["status"], "SUSPENDED")
+
+        arch = self.svc.archive_member_lifecycle(member_id, actor="admin_vpn")
+        self.assertEqual(arch["status"], "DELETE_ELIGIBLE")
+
+        del_res = self.svc.delete_member_permanently(
+            member_id,
+            actor="admin_vpn",
+            remove_files=True,
+            confirm_username="delete_u",
+            step_up_verified=True,
+        )
         self.assertTrue(del_res["success"])
         self.assertEqual(del_res["username"], "delete_u")
         self.assertGreaterEqual(del_res["cleanup"]["wireguard_peers_revoked"], 1)

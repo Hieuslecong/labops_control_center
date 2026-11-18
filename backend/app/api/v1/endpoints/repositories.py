@@ -1,8 +1,13 @@
+import hashlib
+import hmac
 import json
 import os
+import posixpath
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
@@ -12,7 +17,21 @@ from app.services.labops_service import service
 
 router = APIRouter()
 
-AGENT_TOKEN = os.getenv("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026")
+_FORBIDDEN_DELIVER_PREFIXES = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/root",
+    "/var/run",
+    "/run",
+    "/dev",
+    "/boot",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+)
 
 
 def _get_agent_urls() -> List[str]:
@@ -21,16 +40,79 @@ def _get_agent_urls() -> List[str]:
         return [custom.rstrip("/")]
     return [
         "http://127.0.0.1:9150/api/v1/agent/repositoryguard",
-        "http://127.0.0.1:9100/api/v1/agent/repositoryguard"
+        "http://127.0.0.1:9100/api/v1/agent/repositoryguard",
     ]
 
 
-def _agent_call(path: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Any:
-    urls = _get_agent_urls()
+def _sign_broker_headers(method: str, path: str, principal: Optional[Principal]) -> Dict[str, str]:
+    if principal is None:
+        return {}
+    role = principal.role.upper()
     headers = {
-        "X-LabOps-Agent-Secret": AGENT_TOKEN,
-        "Content-Type": "application/json"
+        "X-LabOps-Verified-Actor": principal.username,
+        "X-LabOps-Verified-Role": role,
     }
+    broker_secret = (os.getenv("LABOPS_BROKER_VERIFY_SECRET") or "").strip()
+    if broker_secret:
+        ts = str(int(time.time()))
+        url_path = "/api/v1/agent/repositoryguard/" + path.split("?", 1)[0].lstrip("/")
+        signing_payload = f"{ts}:{principal.username}:{role}:{method.upper()}:{url_path}"
+        sig = hmac.new(broker_secret.encode("utf-8"), signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        headers["X-LabOps-Verified-Timestamp"] = ts
+        headers["X-LabOps-Verified-Signature"] = sig
+    return headers
+
+
+def _validate_target_directory(target_directory: str, principal: Principal) -> str:
+    raw = (target_directory or "").strip()
+    if not raw or "\x00" in raw or "\\" in raw:
+        raise HTTPException(status_code=400, detail="Đường dẫn thư mục đích không hợp lệ")
+    if not raw.startswith("/"):
+        raise HTTPException(status_code=400, detail="Đường dẫn đích phải là đường dẫn tuyệt đối")
+    if ".." in raw.split("/"):
+        raise HTTPException(status_code=400, detail="Đường dẫn đích không được chứa path traversal ('..')")
+    clean = posixpath.normpath(raw)
+    if clean == "/" or any(clean == p or clean.startswith(p + "/") for p in _FORBIDDEN_DELIVER_PREFIXES):
+        raise HTTPException(status_code=403, detail=f"Thư mục đích '{clean}' bị cấm bởi chính sách bảo mật")
+    if clean == "/home" or "/.ssh" in clean or clean.endswith("/.ssh"):
+        raise HTTPException(status_code=403, detail="Không được phép phân phối mã nguồn vào thư mục .ssh hoặc /home")
+    if not principal.is_admin:
+        allowed_user_roots = (
+            f"/workspaces/{principal.username}",
+            f"/mnt/{principal.username}",
+            f"/var/lib/labops/workspaces/{principal.username}",
+            f"/home/{principal.username}",
+            f"/media/LabOps-Data/users/{principal.username}",
+            f"/tank/workspaces/{principal.username}",
+        )
+        if any(clean.startswith(prefix.rsplit("/", 1)[0] + "/") for prefix in allowed_user_roots):
+            if not any(clean == root or clean.startswith(root + "/") for root in allowed_user_roots):
+                raise HTTPException(status_code=403, detail="Không được phép phân phối mã vào workspace của thành viên khác")
+    return clean
+
+
+def _agent_call(
+    path: str,
+    method: str = "GET",
+    data: Optional[Dict[str, Any]] = None,
+    *,
+    principal: Optional[Principal] = None,
+    timeout: float = 10.0,
+) -> Any:
+    agent_token = (os.getenv("LABOPS_AGENT_SECRET") or "").strip()
+    if not agent_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LABOPS_AGENT_SECRET chưa được cấu hình (fail-closed)",
+        )
+
+    urls = _get_agent_urls()
+    headers: Dict[str, str] = {
+        "X-LabOps-Agent-Secret": agent_token,
+        "Content-Type": "application/json",
+    }
+    headers.update(_sign_broker_headers(method, path, principal))
+
     body = json.dumps(data).encode("utf-8") if data is not None else None
     last_err = None
 
@@ -44,7 +126,7 @@ def _agent_call(path: str, method: str = "GET", data: Optional[Dict[str, Any]] =
                     return json.loads(content)
                 return {}
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8")
+            err_body = e.read().decode("utf-8", errors="replace")
             try:
                 parsed = json.loads(err_body)
                 detail = parsed.get("error") or parsed.get("detail") or err_body
@@ -57,7 +139,7 @@ def _agent_call(path: str, method: str = "GET", data: Optional[Dict[str, Any]] =
 
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=f"Không thể kết nối đến LabOps Repository Guard Agent: {str(last_err)}"
+        detail=f"Không thể kết nối đến LabOps Repository Guard Agent: {str(last_err)}",
     )
 
 
@@ -80,57 +162,37 @@ class DeliverRepoRequest(BaseModel):
 @router.post("/requests", status_code=status.HTTP_202_ACCEPTED)
 async def submit_repository_request(
     payload: SubmitRepoRequest,
-    p: Principal = Depends(require_user)
+    p: Principal = Depends(require_user),
 ) -> Dict[str, Any]:
-    """
-    Tiếp nhận yêu cầu tải mã nguồn từ GitHub.
-    Tự động phân giải commit SHA, kiểm tra cache và đưa vào hàng đợi kiểm duyệt an toàn.
-    """
     data = {
         "repo_url": payload.repo_url,
         "ref": payload.ref or "HEAD",
         "submitter": p.username,
-        "target_workspace": payload.target_workspace or f"ws-{p.username}"
+        "target_workspace": payload.target_workspace or f"ws-{p.username}",
     }
-    res = _agent_call("requests", method="POST", data=data)
-    
-    # Audit log in backend
-    service.audit_logs.insert(0, {
-        "id": f"aud-req-{res.get('id', 'new')}",
-        "actor": p.username,
-        "action": "REPOSITORY_GUARD_SUBMIT",
-        "target_type": "REPOSITORY",
-        "target_id": payload.repo_url,
-        "timestamp": "Vừa xong",
-        "result": "SUCCESS",
-        "correlation_id": res.get("id"),
-        "details": f"Người dùng {p.username} yêu cầu kiểm duyệt repo {payload.repo_url} (ref: {payload.ref})"
-    })
+    res = _agent_call("requests", method="POST", data=data, principal=p)
+    service._audit(
+        p.username,
+        "REPOSITORY_GUARD_SUBMIT",
+        "REPOSITORY",
+        payload.repo_url,
+        "SUCCESS",
+        f"Người dùng {p.username} yêu cầu kiểm duyệt repo {payload.repo_url} (ref: {payload.ref})",
+    )
+    service._save_persistent_data()
     return res
 
 
 @router.get("/requests")
-async def list_repository_requests(
-    p: Principal = Depends(require_user)
-) -> List[Dict[str, Any]]:
-    """
-    Lấy danh sách các yêu cầu kiểm duyệt kho mã.
-    Admin xem toàn bộ; Researcher chỉ xem các yêu cầu của chính mình.
-    """
-    is_admin = p.is_admin
-    path = f"requests?submitter={p.username}&is_admin={'true' if is_admin else 'false'}"
-    res = _agent_call(path, method="GET")
+async def list_repository_requests(p: Principal = Depends(require_user)) -> List[Dict[str, Any]]:
+    path = f"requests?submitter={p.username}"
+    res = _agent_call(path, method="GET", principal=p)
     return res if isinstance(res, list) else []
 
 
 @router.get("/requests/{request_id}")
-async def get_repository_request(
-    request_id: str,
-    p: Principal = Depends(require_user)
-) -> Dict[str, Any]:
-    """Lấy chi tiết một yêu cầu kiểm duyệt và kết quả quét bảo mật."""
-    res = _agent_call(f"requests/{request_id}", method="GET")
-    # Kiểm tra quyền: nếu không phải admin và không phải người gửi -> 403
+async def get_repository_request(request_id: str, p: Principal = Depends(require_user)) -> Dict[str, Any]:
+    res = _agent_call(f"requests/{request_id}", method="GET", principal=p)
     if not p.is_admin and res.get("submitted_by") != p.username:
         raise HTTPException(status_code=403, detail="Bạn không có quyền xem yêu cầu của thành viên khác")
     return res
@@ -140,70 +202,61 @@ async def get_repository_request(
 async def decide_repository_request(
     request_id: str,
     payload: AdminDecisionRequest,
-    p: Principal = Depends(require_admin)
+    p: Principal = Depends(require_admin),
 ) -> Dict[str, Any]:
-    """Admin phê duyệt ngoại lệ hoặc từ chối kho mã bị cảnh báo rủi ro."""
     if payload.decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(status_code=400, detail="Quyết định phải là APPROVED hoặc REJECTED")
 
     data = {
         "decision": payload.decision,
         "reviewer": p.username,
-        "reason": payload.reason
+        "reason": payload.reason,
     }
-    res = _agent_call(f"requests/{request_id}/decision", method="POST", data=data)
-
-    service.audit_logs.insert(0, {
-        "id": f"aud-dec-{request_id}",
-        "actor": p.username,
-        "action": f"REPOSITORY_ADMIN_{payload.decision}",
-        "target_type": "REPOSITORY_REQUEST",
-        "target_id": request_id,
-        "timestamp": "Vừa xong",
-        "result": "SUCCESS",
-        "correlation_id": request_id,
-        "details": f"Admin {p.username} đã {payload.decision} yêu cầu {request_id}. Lý do: {payload.reason}"
-    })
+    res = _agent_call(f"requests/{request_id}/decision", method="POST", data=data, principal=p)
+    service._audit(
+        p.username,
+        f"REPOSITORY_ADMIN_{payload.decision}",
+        "REPOSITORY_REQUEST",
+        request_id,
+        "SUCCESS",
+        f"Admin {p.username} đã {payload.decision} yêu cầu {request_id}. Lý do: {payload.reason}",
+    )
+    service._save_persistent_data()
     return res
 
 
 @router.post("/deliver")
 async def deliver_repository_artifact(
     payload: DeliverRepoRequest,
-    p: Principal = Depends(require_user)
+    p: Principal = Depends(require_user),
 ) -> Dict[str, Any]:
-    """Phân phối gói mã nguồn đã được xác thực an toàn vào workspace của thành viên."""
-    # Kiểm tra request trước
-    req_info = _agent_call(f"requests/{payload.request_id}", method="GET")
+    clean_dir = _validate_target_directory(payload.target_directory, p)
+    req_info = _agent_call(f"requests/{payload.request_id}", method="GET", principal=p)
     if not p.is_admin and req_info.get("submitted_by") != p.username:
         raise HTTPException(status_code=403, detail="Không có quyền phân phối yêu cầu của người khác")
 
     data = {
         "request_id": payload.request_id,
-        "target_directory": payload.target_directory,
-        "deliver_as_user": p.username
+        "target_directory": clean_dir,
+        "deliver_as_user": p.username,
     }
-    res = _agent_call("deliver", method="POST", data=data)
-
-    service.audit_logs.insert(0, {
-        "id": f"aud-del-{payload.request_id}",
-        "actor": p.username,
-        "action": "REPOSITORY_ARTIFACT_DELIVERED",
-        "target_type": "WORKSPACE",
-        "target_id": payload.target_directory,
-        "timestamp": "Vừa xong",
-        "result": "SUCCESS",
-        "correlation_id": payload.request_id,
-        "details": f"Đã phân phối artifact được phê duyệt vào thư mục {payload.target_directory}"
-    })
+    res = _agent_call("deliver", method="POST", data=data, principal=p)
+    service._audit(
+        p.username,
+        "REPOSITORY_ARTIFACT_DELIVERED",
+        "WORKSPACE",
+        clean_dir,
+        "SUCCESS",
+        f"Đã phân phối artifact được phê duyệt vào thư mục {clean_dir}",
+    )
+    service._save_persistent_data()
     return res
 
 
 @router.get("/audit")
 async def get_repository_audit_logs(
     limit: int = Query(50, ge=1, le=200),
-    p: Principal = Depends(require_admin)
+    p: Principal = Depends(require_admin),
 ) -> List[Dict[str, Any]]:
-    """Lấy danh sách nhật ký kiểm toán (Audit Logs) của Repository Guard."""
-    res = _agent_call(f"audit?limit={limit}", method="GET")
+    res = _agent_call(f"audit?limit={limit}", method="GET", principal=p)
     return res if isinstance(res, list) else []

@@ -149,9 +149,16 @@ class TestMemberProvisioningSecurity(unittest.TestCase):
         member = self.svc.provision_member(self.payload())
         restored = self.svc.restore_member(member["id"])
         self.assertEqual(restored["status"], "PENDING_PROVISIONING")
-        res = self.svc.delete_member_permanently(member["id"])
+        self.svc.suspend_member_lifecycle(member["id"], actor="admin_test")
+        self.svc.archive_member_lifecycle(member["id"], actor="admin_test")
+        res = self.svc.delete_member_permanently(
+            member["id"],
+            actor="admin_test",
+            confirm_username=member["username"],
+            step_up_verified=True,
+        )
         self.assertTrue(res.get("success", False))
-        self.assertNotIn(member, self.svc.members)
+        self.assertFalse(any(m.get("id") == member["id"] for m in self.svc.members))
 
 
 if __name__ == "__main__":

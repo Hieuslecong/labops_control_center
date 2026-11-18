@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import List
+from pydantic import ConfigDict
 
 # Load backend/.env if not in a test session
 if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
@@ -42,6 +43,8 @@ def _detect_local_host_id() -> str:
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(case_sensitive=True, env_file=".env", extra="allow")
+
     PROJECT_NAME: str = "LabOps Control Center API"
     VERSION: str = "2.0.0"
     API_V1_STR: str = "/api/v1"
@@ -56,20 +59,28 @@ class Settings(BaseSettings):
     LABOPS_MODE: str = os.getenv("LABOPS_MODE", "production")
     LABOPS_ALLOW_MOCK_DATA: bool = os.getenv("LABOPS_ALLOW_MOCK_DATA", "false").lower() == "true"
 
-    # Local Machine Identification (auto-detects aiotlab-rack -> "track")
+    # Local Machine Identification & Fail-Closed Auth Secrets (never hardcoded)
     LOCAL_HOST_ID: str = _detect_local_host_id()
+    LABOPS_DATA_DIR: str = os.getenv("LABOPS_DATA_DIR", "")
     LABOPS_SESSION_SECRET: str = os.getenv("LABOPS_SESSION_SECRET", "")
     LABOPS_ADMIN_API_TOKEN: str = os.getenv("LABOPS_ADMIN_API_TOKEN", "")
     LABOPS_NODE_AGENT_TOKEN: str = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
+    LABOPS_AGENT_SECRET: str = os.getenv("LABOPS_AGENT_SECRET", "")
+    LABOPS_BROKER_VERIFY_SECRET: str = os.getenv("LABOPS_BROKER_VERIFY_SECRET", "")
+    LABOPS_GATEWAY_HTTP_URL: str = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
+    LABOPS_GATEWAY_CONTROL_SECRET: str = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "")
+    LABOPS_DELEGATION_SECRET: str = os.getenv("LABOPS_DELEGATION_SECRET", "")
+    LABOPS_ADMIN_USERNAME: str = os.getenv("LABOPS_ADMIN_USERNAME", "admin")
+    LABOPS_ADMIN_PASSWORD: str = os.getenv("LABOPS_ADMIN_PASSWORD", "")
 
     # Storage Configuration (Default 37TB Data Drive)
     DEFAULT_USER_DATA_DIR: str = os.getenv("LABOPS_USER_DATA_DIR", "/media/LabOps-Data/users")
     STORAGE_POOL_DATA_PATH: str = os.getenv("LABOPS_STORAGE_DATA_PATH", "/media/LabOps-Data")
 
-    # WireGuard & wg-easy v15 Configuration
+    # WireGuard & wg-easy v15 Configuration (no hardcoded admin password)
     WG_EASY_API_URL: str = os.getenv("WG_EASY_API_URL", "http://127.0.0.1:51821")
     WG_EASY_ADMIN_USER: str = os.getenv("WG_EASY_ADMIN_USER", "admin")
-    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "LabOpsSecureVPN2026!")
+    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "")
     WG_EASY_PUBLIC_ENDPOINT: str = os.getenv("WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
     WG_EASY_VPN_SUBNET: str = os.getenv("WG_EASY_VPN_SUBNET", "10.88.40.0/24")
     WG_EASY_ENABLED: bool = os.getenv("WG_EASY_ENABLED", "true").lower() == "true"
@@ -78,11 +89,8 @@ class Settings(BaseSettings):
     def DEMO_MODE(self) -> bool:
         return self.LABOPS_MODE.lower() == "demo" and self.LABOPS_ALLOW_MOCK_DATA
 
-    # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://labops:labops_secret@localhost:5432/labops_db"
-    )
+    # Database (defaults to isolated local SQLite in LABOPS_DATA_DIR when unset)
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
@@ -91,11 +99,6 @@ class Settings(BaseSettings):
             "http://localhost:3000,http://127.0.0.1:3000"
         ).split(",") if o.strip()
     ]
-
-    class Config:
-        case_sensitive = True
-        env_file = ".env"
-        extra = "allow"
 
 
 settings = Settings()

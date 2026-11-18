@@ -120,17 +120,21 @@ class TestSystemHealthRegressions(unittest.TestCase):
             def __exit__(self, *args): pass
             def read(self): return fake_agent_payload
 
-        with patch("urllib.request.urlopen", return_value=_FakeResp()):
-            with patch("subprocess.check_output", return_value="89.50\n"):
-                gpus = adapter._fetch_go_agent_gpus()
-        self.assertIsNotNone(gpus)
-        self.assertEqual(gpus[0]["temp_celsius"], 90)
+        with patch.dict(os.environ, {"LABOPS_AGENT_SECRET": ""}, clear=False):
+            self.assertIsNone(adapter._fetch_go_agent_gpus())
 
-        with patch("urllib.request.urlopen", return_value=_FakeResp()):
-            with patch("subprocess.check_output", side_effect=RuntimeError("nvidia-smi failed")):
-                gpus_err = adapter._fetch_go_agent_gpus()
-        self.assertIsNotNone(gpus_err)
-        self.assertEqual(gpus_err[0]["temp_celsius"], 0)
+        with patch.dict(os.environ, {"LABOPS_AGENT_SECRET": "unit-test-agent-secret"}, clear=False):
+            with patch("urllib.request.urlopen", return_value=_FakeResp()):
+                with patch("subprocess.check_output", return_value="89.50\n"):
+                    gpus = adapter._fetch_go_agent_gpus()
+            self.assertIsNotNone(gpus)
+            self.assertEqual(gpus[0]["temp_celsius"], 90)
+
+            with patch("urllib.request.urlopen", return_value=_FakeResp()):
+                with patch("subprocess.check_output", side_effect=RuntimeError("nvidia-smi failed")):
+                    gpus_err = adapter._fetch_go_agent_gpus()
+            self.assertIsNotNone(gpus_err)
+            self.assertEqual(gpus_err[0]["temp_celsius"], 0)
 
     def test_host_registry_marks_offline_server_without_agent_url_offline(self):
         reg = HostRegistry(self.tmp.name, local_host_id="workstation")

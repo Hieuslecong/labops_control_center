@@ -39,6 +39,20 @@ class TestHttpEndpoints(unittest.TestCase):
             data = resp.read().decode("utf-8")
             return resp.status, json.loads(data)
 
+    def _post(self, path, body, role="ADMIN"):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        req = Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        if role:
+            req.add_header("Authorization", "Bearer " + issue_token("tester", role))
+        with urlopen(req, timeout=15) as resp:
+            data = resp.read().decode("utf-8")
+            return resp.status, json.loads(data)
+
     def test_healthz(self):
         status, data = self._get("/healthz")
         self.assertEqual(status, 200)
@@ -131,6 +145,26 @@ class TestHttpEndpoints(unittest.TestCase):
         status, users = self._get("/api/v1/users")
         self.assertEqual(status, 200)
         self.assertIsInstance(users, list)
+        if len(users) == 0:
+            c_status, created = self._post(
+                "/api/v1/users",
+                {
+                    "full_name": "HTTP Endpoint User",
+                    "username": "http_ep_user",
+                    "email": "http_ep@example.org",
+                    "role": "RESEARCHER",
+                    "assigned_server": "workstation",
+                    "workspace_name": "ws-http_ep_user",
+                    "storage_quota_gb": 10,
+                    "mount_path": "/workspace",
+                    "cpu_limit_cores": 4,
+                    "ram_limit_gb": 16,
+                },
+            )
+            self.assertEqual(c_status, 200)
+            self.assertEqual(created["username"], "http_ep_user")
+            status, users = self._get("/api/v1/users")
+            self.assertEqual(status, 200)
         self.assertGreaterEqual(len(users), 1)
         self.assertIn("fullName", users[0])
         self.assertIn("sshKeyStatus", users[0])

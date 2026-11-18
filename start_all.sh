@@ -36,9 +36,14 @@ if [ ! -f .env.local ] && [ ! -f .env ]; then
     echo -e "${YELLOW}⚙️  Chưa tìm thấy .env.local. Đang tự động tạo từ .env.workstation.example...${NC}"
     if [ -f .env.workstation.example ]; then
         cp .env.workstation.example .env.local
-        # Tự sinh chuỗi bảo mật ngẫu nhiên nếu có openssl / python
-        RAND_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || openssl rand -hex 32 2>/dev/null || echo "labops-local-session-secret-2026-secure")
-        sed -i "s/REPLACE_WITH_OPENSSL_RAND_HEX_32/$RAND_SECRET/g" .env.local 2>/dev/null || true
+        # Tự sinh chuỗi bảo mật ngẫu nhiên bằng openssl hoặc python3 (fail-closed)
+        RAND_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || openssl rand -hex 32 2>/dev/null || true)
+        if [ -z "$RAND_SECRET" ]; then
+            echo -e "${RED}❌ Không thể sinh LABOPS_SESSION_SECRET ngẫu nhiên; vui lòng cài python3 hoặc openssl.${NC}"
+            rm -f .env.local
+            exit 1
+        fi
+        sed -i "s/REPLACE_WITH_OPENSSL_RAND_HEX_32/$RAND_SECRET/g" .env.local
         echo -e "${GREEN}✅ Đã tạo tệp cấu hình an toàn: .env.local${NC}"
     fi
 fi
@@ -53,12 +58,17 @@ STARTED_ROUTER_PID=""
 STARTED_AGENT_PID=""
 STARTED_BACKEND_PID=""
 STARTED_ZALO_PID=""
+STARTED_FRONTEND_PID=""
 
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
     echo ""
     echo -e "${YELLOW}🛑 Đang dừng an toàn các tiến trình do script này khởi động...${NC}"
+    if [ -n "$STARTED_FRONTEND_PID" ]; then
+        echo -e "   • Dừng Frontend Next.js (PID: $STARTED_FRONTEND_PID)"
+        kill "$STARTED_FRONTEND_PID" 2>/dev/null || true
+    fi
     if [ -n "$STARTED_ZALO_PID" ]; then
         echo -e "   • Dừng Zalo Assistant Worker (PID: $STARTED_ZALO_PID)"
         kill "$STARTED_ZALO_PID" 2>/dev/null || true
@@ -195,19 +205,21 @@ echo -e "   • 9Router Gateway:     ${BOLD}http://127.0.0.1:20128/v1 (Model: mo
 echo -e "${CYAN}------------------------------------------------------------------------------${NC}"
 echo -e "${YELLOW}Nhấn Ctrl+C để dừng toàn bộ hệ thống bất kỳ lúc nào.${NC}\n"
 
-# Kiểm tra cờ tham số --prod để chạy chế độ production hoặc dev
+# Kiểm tra cờ tham số --prod để chạy chế độ production hoặc dev (không dùng exec để giữ EXIT trap cleanup)
 if [ "$1" == "--prod" ]; then
     echo -e "${GREEN}Chạy chế độ Production (bun start)...${NC}"
     if command -v bun &>/dev/null; then
-        exec bun start -p 3000
+        bun start -p 3000 &
     else
-        exec node ./node_modules/next/dist/bin/next start -p 3000
+        node ./node_modules/next/dist/bin/next start -p 3000 &
     fi
 else
     echo -e "${GREEN}Chạy chế độ Phát triển (bun dev)...${NC}"
     if command -v bun &>/dev/null; then
-        exec bun dev
+        bun dev &
     else
-        exec node ./node_modules/next/dist/bin/next dev
+        node ./node_modules/next/dist/bin/next dev &
     fi
 fi
+STARTED_FRONTEND_PID=$!
+wait "$STARTED_FRONTEND_PID"

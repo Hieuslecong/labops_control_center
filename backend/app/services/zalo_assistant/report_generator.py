@@ -13,14 +13,15 @@ Default schedule: Friday 17:00 (Asia/Ho_Chi_Minh).
 from __future__ import annotations
 
 import fcntl
-import json
 import logging
 import os
 import subprocess
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+from app.db.atomic_json import PersistenceCorruptionError, atomic_write_json, safe_load_json
 
 logger = logging.getLogger(__name__)
 
@@ -48,48 +49,88 @@ class ReportGenerator:
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
+    def _default_state(self) -> Dict[str, Any]:
+        return {
+            "reports": [],
+            "schedule": {"day": "Friday", "time": "17:00", "timezone": "Asia/Ho_Chi_Minh"},
+            "last_reported_week": None,
+        }
+
     def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.reports_path):
-            return {"reports": [], "schedule": {"day": "Friday", "time": "17:00", "timezone": "Asia/Ho_Chi_Minh"}}
-        try:
-            with open(self.reports_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"reports": [], "schedule": {"day": "Friday", "time": "17:00", "timezone": "Asia/Ho_Chi_Minh"}}
+        state = safe_load_json(self.reports_path, self._default_state)
+        if not isinstance(state, dict):
+            raise PersistenceCorruptionError(
+                f"Invalid reports state structure in '{self.reports_path}': expected object"
+            )
+        state.setdefault("reports", [])
+        state.setdefault("schedule", {"day": "Friday", "time": "17:00", "timezone": "Asia/Ho_Chi_Minh"})
+        state.setdefault("last_reported_week", None)
+        return state
 
     def _save(self, state: Dict[str, Any]) -> None:
-        tmp = self.reports_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.reports_path)
+        atomic_write_json(self.reports_path, state, mode=0o600, use_lock=False)
 
     def _ensure_bootstrap(self) -> None:
         with self._locked():
             pass
 
-    def _get_git_activity(self) -> List[Dict[str, str]]:
-        repo_dir = os.path.abspath(os.path.join(self.data_dir, "..", ".."))
-        commits = []
+    def get_last_reported_week(self) -> Optional[str]:
+        with self._locked() as state:
+            val = state.get("last_reported_week")
+            return str(val) if val else None
+
+    def set_last_reported_week(self, week_str: str) -> None:
+        with self._locked() as state:
+            state["last_reported_week"] = week_str
+
+    def _repo_dir(self) -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+    def _get_git_branch(self) -> str:
         try:
             res = subprocess.run(
-                ["git", "log", "-n", "5", "--pretty=format:%h|%an|%ar|%s"],
-                cwd=repo_dir,
+                ["git", "-c", "core.hooksPath=/dev/null", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self._repo_dir(),
                 capture_output=True,
                 text=True,
                 timeout=3,
             )
             if res.returncode == 0 and res.stdout.strip():
-                for line in res.stdout.strip().splitlines():
-                    parts = line.split("|", 3)
-                    if len(parts) == 4:
-                        commits.append({
-                            "hash": parts[0],
-                            "author": parts[1],
-                            "time": parts[2],
-                            "message": parts[3],
-                        })
-        except Exception as exc:
-            logger.debug("Lỗi đọc git activity: %s", exc)
+                return res.stdout.strip()
+        except Exception:
+            pass
+        return "unknown"
+
+    def _get_git_activity(self) -> List[Dict[str, str]]:
+        repo_dir = self._repo_dir()
+        commits: List[Dict[str, str]] = []
+        cmds = [
+            ["git", "-c", "core.hooksPath=/dev/null", "log", "--since=7.days", "-n", "15", "--pretty=format:%h|%an|%ar|%s"],
+            ["git", "-c", "core.hooksPath=/dev/null", "log", "-n", "5", "--pretty=format:%h|%an|%ar|%s"],
+        ]
+        for cmd in cmds:
+            try:
+                res = subprocess.run(
+                    cmd,
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    for line in res.stdout.strip().splitlines():
+                        parts = line.split("|", 3)
+                        if len(parts) == 4:
+                            commits.append({
+                                "hash": parts[0],
+                                "author": parts[1],
+                                "time": parts[2],
+                                "message": parts[3],
+                            })
+                    if commits:
+                        break
+            except Exception as exc:
+                logger.debug("Lỗi đọc git activity: %s", exc)
         return commits
 
     def _get_active_jobs_summary(self) -> Dict[str, Any]:
@@ -202,6 +243,56 @@ class ReportGenerator:
             "jobs": jobs,
         }
 
+    def _collect_runtime_snapshot(self, system_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {
+            "servers": [],
+            "gpus": [],
+            "audit_logs_7d": [],
+            "events": [],
+            "quota": {},
+        }
+        if isinstance(system_status, dict):
+            snapshot["servers"] = list(system_status.get("servers") or [])
+            snapshot["gpus"] = list(system_status.get("gpus") or [])
+            snapshot["events"] = list(system_status.get("events") or [])
+            snapshot["audit_logs_7d"] = list(system_status.get("audit_logs") or [])
+
+        if not snapshot["servers"] or not snapshot["gpus"]:
+            try:
+                from app.services.labops_service import service as core_svc
+
+                if not snapshot["servers"]:
+                    snapshot["servers"] = list(getattr(core_svc, "servers", []) or [])
+                if not snapshot["gpus"]:
+                    snapshot["gpus"] = list(getattr(core_svc, "gpus", []) or [])
+                if not snapshot["events"]:
+                    snapshot["events"] = list(getattr(core_svc, "events", []) or [])
+
+                cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                raw_logs = list(getattr(core_svc, "audit_logs", []) or [])
+                recent_logs = []
+                for entry in raw_logs:
+                    ts = str(entry.get("timestamp") or "")
+                    try:
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt >= cutoff:
+                            recent_logs.append(entry)
+                    except Exception:
+                        continue
+                snapshot["audit_logs_7d"] = recent_logs
+            except Exception as exc:
+                logger.debug("Không thể đọc dữ liệu từ labops_service: %s", exc)
+
+        try:
+            from app.services.zalo_assistant.quota_ledger import QuotaLedger
+            snapshot["quota"] = QuotaLedger(self.data_dir).get_status()
+        except Exception as exc:
+            logger.debug("Không thể đọc trạng thái QuotaLedger: %s", exc)
+
+        return snapshot
+
     def generate_weekly_report(
         self,
         *,
@@ -210,36 +301,85 @@ class ReportGenerator:
     ) -> Dict[str, Any]:
         report_id = f"rpt-{uuid.uuid4().hex[:8]}"
         created_at = _now()
+        branch = self._get_git_branch()
         git_commits = self._get_git_activity()
         jobs_summary = self._get_active_jobs_summary()
+        snap = self._collect_runtime_snapshot(system_status=system_status)
 
-        # Tổng hợp nội dung báo cáo dạng Markdown
         date_str = datetime.now().strftime("%d/%m/%Y")
-        
+        servers = snap["servers"]
+        gpus = snap["gpus"]
+        audit_7d = snap["audit_logs_7d"]
+        quota = snap["quota"]
+
         md_lines = [
             f"# BÁO CÁO TUẦN HOẠT ĐỘNG LABOPS — {date_str}",
             f"*Được tạo tự động bởi {author} lúc {datetime.now().strftime('%H:%M %d/%m/%Y')}*",
             "",
             "## 1. TÌNH TRẠNG HẠ TẦNG VÀ HỆ THỐNG",
-            "- **Workstation aiot-ws1 (Primary)**: ONLINE — CPU/RAM ổn định, 1x NVIDIA A30 24GB đang hoạt động phục vụ nghiên cứu.",
-            "- **Server Rack aiotlab-rack**: OFFLINE — Hiện không thể truy cập mạng từ workstation. Toàn bộ dịch vụ điều khiển đã được chuyển đổi an toàn sang Workstation Primary. *(Dữ liệu telemetry của rack tạm thời đánh dấu thiếu/không cập nhật)*.",
+        ]
+
+        online_hosts: List[str] = []
+        offline_hosts: List[str] = []
+        if servers:
+            for s in servers:
+                srv_id = str(s.get("id") or "")
+                raw_host = str(s.get("hostname") or "").strip()
+                if not raw_host or raw_host.lower() in {"unknown", "chưa xác minh", "not_verified"}:
+                    hostname = "aiotlab-rack" if srv_id == "track" else ("aiot-ws1" if srv_id == "workstation" else (srv_id or "unknown"))
+                else:
+                    hostname = raw_host
+                name = s.get("name") or hostname
+                raw_st = str(s.get("status") or "").strip().upper()
+                cpu = s.get("cpu_usage_percent", s.get("cpuUsagePercent", 0))
+                ram_used = s.get("ram_used_gb", s.get("ramUsedGb", 0))
+                ram_total = s.get("ram_total_gb", s.get("ramTotalGb", 0))
+                if raw_st == "ONLINE":
+                    online_hosts.append(hostname)
+                    md_lines.append(
+                        f"- **{name} ({hostname})**: ONLINE — CPU {cpu}%, RAM {ram_used}/{ram_total} GiB."
+                    )
+                else:
+                    offline_hosts.append(hostname)
+                    md_lines.append(
+                        f"- **{name} ({hostname})**: OFFLINE — Telemetry hiện không khả dụng / gián đoạn kết nối."
+                    )
+        else:
+            online_hosts.append("aiot-ws1")
+            offline_hosts.append("aiotlab-rack")
+            md_lines.append("- **Workstation (aiot-ws1)**: ONLINE — Máy chủ điều hành cục bộ.")
+            md_lines.append("- **Server Rack (aiotlab-rack)**: OFFLINE — Hiện không có telemetry từ node này.")
+
+        if gpus:
+            for g in gpus:
+                lbl = g.get("display_label") or g.get("id")
+                model = g.get("name") or g.get("model") or "GPU"
+                v_used = g.get("vram_used_mb", 0)
+                v_tot = g.get("vram_total_mb", 0)
+                temp = g.get("temp_celsius", 0)
+                srv_id = g.get("server_id", "")
+                md_lines.append(
+                    f"- **GPU `{lbl}` ({model}, host `{srv_id}`)**: VRAM {v_used:,}/{v_tot:,} MiB, nhiệt độ {temp}°C."
+                )
+
+        md_lines.extend([
             "",
             "## 2. DỰ ÁN & TIẾN TRÌNH TÁC VỤ (JOBS)",
-            f"- Số lượng tác vụ GPU đang vận hành: **{jobs_summary['running_count']} tác vụ**.",
-        ]
+            f"- Số lượng tác vụ người dùng đang vận hành: **{jobs_summary['running_count']} tác vụ**.",
+        ])
 
         if jobs_summary["jobs"]:
             for j in jobs_summary["jobs"]:
                 name_str = j.get("display") or j.get("name") or j.get("script") or "python"
                 md_lines.append(f"  • PID `{j['pid']}` — {name_str}")
         else:
-            md_lines.append("  • Không có tác vụ độc lập chiếm dụng GPU lớn.")
+            md_lines.append("  • Hiện không có tác vụ nghiên cứu độc lập đang chạy.")
 
         md_lines.extend([
             "",
             "## 3. HOẠT ĐỘNG PHÁT TRIỂN & GITHUB",
-            "- **Nhánh nguồn**: `feature/labops-control-center` -> Nhánh khôi phục: `feature/workstation-recovery`.",
-            "- Các cập nhật commit gần nhất:",
+            f"- **Nhánh hiện tại**: `{branch}`",
+            "- Các cập nhật commit gần nhất (7 ngày qua):",
         ])
 
         if git_commits:
@@ -248,26 +388,64 @@ class ReportGenerator:
         else:
             md_lines.append("  • Chưa phát hiện commit mới trong 7 ngày qua.")
 
-        md_lines.extend([
-            "",
-            "## 4. SỰ CỐ & CẢNH BÁO",
-            "- [CẢNH BÁO MỨC CAO] Mất kết nối rack server `aiotlab-rack`. Đã cô lập mTLS tunnel cũ để tránh nghẽn socket.",
-            "- [THÔNG BÁO] Chuyển đổi thành công Control Plane sang `aiot-ws1`, khôi phục 9Router AI Gateway (model `model_free`).",
-            "",
-            "## 5. CÔNG VIỆC HOÀN THÀNH",
-            "- [x] Khảo sát toàn diện hệ thống workstation aiot-ws1 (Debian 13, A30 24GB).",
-            "- [x] Bootstrap môi trường Python venv `backend/.venv` và cài đầy đủ FastAPI dependencies.",
-            "- [x] Cài đặt Bun 1.4.4 và hoàn tất `bun install` cho Next.js 16 Dashboard.",
-            "- [x] Cấu hình 9Router và xác thực kiểm thử model `model_free` thành công.",
-            "- [x] Tích hợp Zalo AI Assistant với bộ hạn ngạch 3.000 tin/tháng an toàn.",
-            "",
-            "## 6. KẾ HOẠCH TIẾP THEO & TỒN ĐỌNG",
-            "- [ ] Phối hợp kiểm tra vật lý cổng mạng và nguồn của rack `aiotlab-rack` khi có nhân sự tại chỗ.",
-            "- [ ] Cấu hình mTLS enrollment tự động nối lại rack sau khi rack hoạt động trở lại.",
-            "- [ ] Giám sát liên tục tài nguyên VRAM của A30 trong các phiên training của nghiên cứu viên.",
-        ])
+        # Section 4: Dynamic alerts & incidents
+        md_lines.extend(["", "## 4. SỰ CỐ & CẢNH BÁO"])
+        alerts_added = 0
+        for host in offline_hosts:
+            md_lines.append(f"- [CẢNH BÁO] Node `{host}` đang ngoại tuyến (`OFFLINE`); dữ liệu từ node này không được nội suy.")
+            alerts_added += 1
+        for g in gpus:
+            temp = float(g.get("temp_celsius") or 0)
+            v_used = float(g.get("vram_used_mb") or 0)
+            v_tot = float(g.get("vram_total_mb") or 0)
+            if temp >= 85:
+                md_lines.append(f"- [NHIỆT ĐỘ] GPU `{g.get('id')}` đạt {temp}°C.")
+                alerts_added += 1
+            if v_tot > 0 and (v_used / v_tot) >= 0.9:
+                md_lines.append(f"- [VRAM] GPU `{g.get('id')}` đang dùng {round(v_used / v_tot * 100, 1)}% VRAM.")
+                alerts_added += 1
+        for ev in snap["events"][:5]:
+            ev_msg = str(ev.get("message") or ev.get("title") or ev.get("description") or "").strip()
+            if ev_msg:
+                md_lines.append(f"- [{str(ev.get('severity') or 'INFO').upper()}] {ev_msg}")
+                alerts_added += 1
+        if alerts_added == 0:
+            md_lines.append("- Không ghi nhận cảnh báo hạ tầng nghiêm trọng trong kỳ báo cáo.")
+
+        # Section 5: 7-day operational audit summary & Zalo quota status
+        md_lines.extend(["", "## 5. HOẠT ĐỘNG QUẢN TRỊ & HẠN MỨC VẬN HÀNH (7 NGÀY)"])
+        if audit_7d:
+            action_counts: Dict[str, int] = {}
+            failed_count = 0
+            for a in audit_7d:
+                act = str(a.get("action") or "EVENT")
+                action_counts[act] = action_counts.get(act, 0) + 1
+                if str(a.get("result") or "").upper() in {"DENIED", "FAILED", "ERROR", "PARTIAL_FAILURE"}:
+                    failed_count += 1
+            md_lines.append(f"- Tổng sự kiện audit 7 ngày qua: **{len(audit_7d)}** (thất bại/từ chối: {failed_count}).")
+            top_actions = sorted(action_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            for act, cnt in top_actions:
+                md_lines.append(f"  • `{act}`: {cnt} lượt")
+        else:
+            md_lines.append("- Chưa có sự kiện audit mới được ghi nhận trong 7 ngày qua.")
+
+        if quota:
+            md_lines.append(
+                f"- Hạn mức Zalo tháng `{quota.get('current_month')}`: "
+                f"**{quota.get('total_sent', 0)}/{quota.get('total_limit', 3000)}** tin "
+                f"(thông thường còn {quota.get('standard_remaining', 0)}, khẩn cấp còn {quota.get('critical_remaining', 0)})."
+            )
+
+        # Section 6: Dynamic backlog based on live status
+        md_lines.extend(["", "## 6. KẾ HOẠCH TIẾP THEO & HÀNH ĐỘNG ĐỀ XUẤT"])
+        if offline_hosts:
+            md_lines.append(f"- [ ] Kiểm tra kết nối vật lý và mTLS/SSH cho node đang ngoại tuyến: {', '.join(offline_hosts)}.")
+        else:
+            md_lines.append("- [ ] Tiếp tục duy trì giám sát nhiệt độ GPU và phân bổ tài nguyên nghiên cứu.")
+        md_lines.append("- [ ] Rà soát hàng đợi phê duyệt Repository Guard và nhật ký bảo mật định kỳ.")
 
         full_content = "\n".join(md_lines)
+        infra_summary = f"Online: {', '.join(online_hosts) or 'none'} / Offline: {', '.join(offline_hosts) or 'none'}"
 
         report_entry = {
             "id": report_id,
@@ -277,9 +455,10 @@ class ReportGenerator:
             "status": "GENERATED",
             "content": full_content,
             "summary": {
-                "infrastructure": "Workstation Online / Rack Offline",
+                "infrastructure": infra_summary,
                 "running_jobs": jobs_summary["running_count"],
                 "git_commits_count": len(git_commits),
+                "audit_events_7d": len(audit_7d),
             },
         }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -80,6 +81,14 @@ func (c *Collector) initStaticDriverVersions() {
 	c.cudaVersion = "12.4"
 }
 
+func parseNvidiaIntMetric(raw string) int {
+	val, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return int(math.Round(val))
+}
+
 // queryNvidiaMetrics thực thi một lệnh truy vấn tổng hợp duy nhất tới nvidia-smi
 func (c *Collector) queryNvidiaMetrics() *SystemGPUReport {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -124,9 +133,9 @@ func (c *Collector) queryNvidiaMetrics() *SystemGPUReport {
 		memTot, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
 		memUsed, _ := strconv.ParseUint(strings.TrimSpace(parts[5]), 10, 64)
 		memFree, _ := strconv.ParseUint(strings.TrimSpace(parts[6]), 10, 64)
-		utilGpu, _ := strconv.Atoi(strings.TrimSpace(parts[7]))
-		utilMem, _ := strconv.Atoi(strings.TrimSpace(parts[8]))
-		temp, _ := strconv.Atoi(strings.TrimSpace(parts[9]))
+		utilGpu := parseNvidiaIntMetric(parts[7])
+		utilMem := parseNvidiaIntMetric(parts[8])
+		temp := parseNvidiaIntMetric(parts[9])
 		pwrDrawFloat, _ := strconv.ParseFloat(strings.TrimSpace(parts[10]), 64)
 		pwrLimitFloat, _ := strconv.ParseFloat(strings.TrimSpace(parts[11]), 64)
 

@@ -7,14 +7,13 @@ import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { GpuAllocationDialog } from '@/features/overview/components/gpu-allocation-dialog';
-import { toast } from 'sonner';
+import { GpuAccountAllocationMatrix } from './gpu-account-allocation-matrix';
 import { labopsCall, toastVerification } from '@/features/labops/api';
 
 export function ResourcesManagementView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
   const storagePools = useLabOpsStore((state) => state.storagePools);
-  const gpuAllocations = useLabOpsStore((state) => state.gpuAllocations);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
@@ -354,135 +353,13 @@ export function ResourcesManagementView() {
         </div>
       </div>
 
-      {/* GPU Account Allocations Table */}
-      <Card className='border bg-card'>
-        <CardHeader className='pb-2 pt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2'>
-          <div>
-            <CardTitle className='text-sm font-bold flex items-center gap-2'>
-              <Icons.users className='size-4 text-primary' />
-              Bảng Thống Kê Phân Bổ Quyền GPU Cho Tài Khoản
-            </CardTitle>
-            <CardDescription className='text-xs'>
-              Thống kê tài khoản thành viên nào đang được cấp cho GPU nào, hạn ngạch VRAM và tác vụ
-              đang chiếm dụng thực tế
-            </CardDescription>
-          </div>
-          <Badge variant='outline' className='font-mono text-[11px] self-start sm:self-auto'>
-            {gpuAllocations.length} Tài khoản được cấu hình
-          </Badge>
-        </CardHeader>
-        <CardContent className='p-0'>
-          <div className='overflow-x-auto'>
-            <table className='w-full text-left text-xs'>
-              <thead>
-                <tr className='border-b text-muted-foreground font-semibold bg-muted/20'>
-                  <th className='py-2.5 px-3'>Thành viên / Tài khoản</th>
-                  <th className='py-2.5 px-3'>Thiết bị GPU Được Cấp</th>
-                  <th className='py-2.5 px-3'>Chế độ</th>
-                  <th className='py-2.5 px-3'>Hạn ngạch VRAM</th>
-                  <th className='py-2.5 px-3'>VRAM Thực Tế</th>
-                  <th className='py-2.5 px-3'>Tác vụ & Workers</th>
-                  <th className='py-2.5 px-3'>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody className='divide-y divide-border/60'>
-                {gpuAllocations.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className='py-8 text-center text-xs text-muted-foreground'>
-                      Chưa có dữ liệu phân bổ quyền GPU cho tài khoản.
-                    </td>
-                  </tr>
-                ) : (
-                  gpuAllocations.map((alloc) => (
-                    <tr
-                      key={`${alloc.username}-${alloc.gpuId}`}
-                      className='hover:bg-muted/30 transition-colors'
-                    >
-                      <td className='py-2.5 px-3'>
-                        <div className='font-bold text-foreground'>{alloc.fullName}</div>
-                        <div className='text-[11px] text-muted-foreground font-mono flex items-center gap-1.5'>
-                          <span>@{alloc.username}</span>
-                          <span className='size-1 rounded-full bg-border' />
-                          <span className='text-[10px] uppercase font-semibold text-primary'>
-                            {alloc.role}
-                          </span>
-                        </div>
-                      </td>
-                      <td className='py-2.5 px-3'>
-                        <Badge variant='default' className='font-mono text-[10px]'>
-                          {alloc.gpuLabel || alloc.gpuId}
-                        </Badge>
-                        <div className='text-[10px] text-muted-foreground font-mono mt-0.5 truncate max-w-[160px]'>
-                          {alloc.serverName}
-                        </div>
-                      </td>
-                      <td className='py-2.5 px-3'>
-                        <Badge
-                          variant={alloc.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'}
-                          className='text-[10px] font-mono'
-                        >
-                          {alloc.allocationMode}
-                        </Badge>
-                      </td>
-                      <td className='py-2.5 px-3 font-mono text-foreground font-semibold'>
-                        {alloc.vramQuotaGb} GB
-                      </td>
-                      <td className='py-2.5 px-3'>
-                        {alloc.vramUsedGb > 0 ? (
-                          <div className='space-y-0.5'>
-                            <span className='font-mono font-bold text-indigo-600 dark:text-indigo-400'>
-                              {alloc.vramUsedGb} GB
-                            </span>
-                            <div className='text-[10px] text-muted-foreground font-mono'>
-                              {alloc.vramUsedMb} MiB
-                            </div>
-                          </div>
-                        ) : (
-                          <span className='text-muted-foreground font-mono text-[11px]'>
-                            0 GB (Trống)
-                          </span>
-                        )}
-                      </td>
-                      <td className='py-2.5 px-3 max-w-xs'>
-                        <div
-                          className='font-mono font-medium text-[11px] text-foreground truncate max-w-[260px]'
-                          title={alloc.primaryScript}
-                        >
-                          {alloc.primaryScript}
-                        </div>
-                        {alloc.processCount > 0 && (
-                          <div className='text-[10px] text-muted-foreground font-mono'>
-                            {alloc.processCount} tiến trình worker con
-                          </div>
-                        )}
-                      </td>
-                      <td className='py-2.5 px-3'>
-                        {alloc.status === 'IN_USE' ? (
-                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
-                            <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
-                            ĐANG SỬ DỤNG
-                          </Badge>
-                        ) : alloc.status === 'IDLE' ? (
-                          <Badge
-                            variant='outline'
-                            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
-                          >
-                            SẴN SÀNG
-                          </Badge>
-                        ) : (
-                          <Badge variant='outline' className='text-muted-foreground text-[10px]'>
-                            HOST NGOẠI TUYẾN
-                          </Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+      {/* GPU-Grouped Account Allocations Matrix */}
+      <GpuAccountAllocationMatrix
+        onAllocateGpu={(gpuId) => {
+          setSelectedGpuId(gpuId);
+          setAllocateOpen(true);
+        }}
+      />
 
       {/* Physical Storage Disks & Pools Overview */}
       <div className='space-y-3'>

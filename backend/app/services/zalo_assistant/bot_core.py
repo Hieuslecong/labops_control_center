@@ -195,7 +195,7 @@ class ZaloBotEngine:
         ram_total = 0.0
         try:
             import psutil
-            cpu_pct = psutil.cpu_percent(interval=None)
+            cpu_pct = round(psutil.cpu_percent(interval=0.1), 1)
             vm = psutil.virtual_memory()
             ram_used = round(vm.used / (1024**3), 1)
             ram_total = round(vm.total / (1024**3), 1)
@@ -313,27 +313,50 @@ class ZaloBotEngine:
         return "\n".join(lines)
 
     def _cmd_allocations(self) -> str:
-        """Thống kê chi tiết tài khoản nào đang được cấp quyền cho GPU nào."""
+        """Thống kê chi tiết tài khoản nào đang được cấp quyền theo từng thiết bị GPU."""
         try:
             from app.services.labops_service import service
-            allocs = service.get_gpu_account_allocations()
+            groups = service.get_gpu_allocations_by_device()
             lines = [
-                "📋 PHÂN BỔ QUYỀN GPU CHO TÀI KHOẢN:",
+                "📋 THỐNG KÊ TÀI KHOẢN THEO TỪNG GPU:",
                 "━━━━━━━━━━━━━━━━━━━━"
             ]
-            if allocs:
-                for idx, a in enumerate(allocs, 1):
-                    icon = "🟢" if a["status"] == "IN_USE" else ("🔵" if a["status"] == "IDLE" else "⚪")
-                    vram_txt = f"{a['current_vram_gb']}GB VRAM" if a['current_vram_gb'] > 0 else "0GB"
-                    lines.append(
-                        f"{idx}. {icon} @{a['username']} ({a['full_name']})\n"
-                        f"   • GPU: {a['gpu_label']} [{a['allocation_mode']}] (Hạn mức: {a['vram_quota_gb']}GB)\n"
-                        f"   • Thực tế: {vram_txt} | Trạng thái: {a['status_label']}\n"
-                        f"   • Tác vụ: {a['workload_description']}"
-                    )
+            if groups:
+                for g in groups:
+                    if g.get("is_online"):
+                        header_status = f"ONLINE | {g.get('vram_used_gb', 0)}/{g.get('vram_total_gb', 24.0)} GB VRAM"
+                    else:
+                        header_status = "HOST NGOẠI TUYẾN"
+                    lines.append(f"\n🖥️ {g.get('gpu_label')} • {g.get('gpu_model')} ({header_status})")
+                    accounts = g.get("accounts") or []
+                    if not accounts:
+                        lines.append("  • Chưa cấp phát tài khoản")
+                        continue
+                    lines.append(f"  Có {len(accounts)} tài khoản được cấp:")
+                    for a in accounts:
+                        st = a.get("status", "IDLE")
+                        icon = (
+                            "🟢" if st == "IN_USE"
+                            else "🟣" if st == "RESERVED"
+                            else "🔵" if st == "IDLE"
+                            else "⚪"
+                        )
+                        vram_gb = a.get("vram_used_gb", 0)
+                        if st == "IN_USE":
+                            detail = f"Đang dùng {vram_gb}GB [{a.get('primary_script')}]"
+                        elif st == "RESERVED":
+                            detail = f"Đang giữ chỗ [{a.get('primary_script')}]"
+                        elif st == "OFFLINE_HOST":
+                            detail = a.get("status_label") or "Máy chủ Ngoại tuyến"
+                        else:
+                            detail = f"{a.get('status_label') or 'Sẵn sàng'} (0GB)"
+                        lines.append(
+                            f"  • {icon} @{a.get('username')} ({a.get('full_name')}) — "
+                            f"{a.get('allocation_mode')} | Quota {a.get('vram_quota_gb')}GB | {detail}"
+                        )
             else:
-                lines.append("• Chưa có tài khoản nào được cấp quyền GPU.")
-            lines.append("━━━━━━━━━━━━━━━━━━━━\nGợi ý: Dùng `/jobs` để xem chi tiết tiến trình.")
+                lines.append("• Chưa có thiết bị GPU nào được cấu hình.")
+            lines.append("\n━━━━━━━━━━━━━━━━━━━━\nGợi ý: Dùng `/jobs` để xem chi tiết tiến trình.")
             return "\n".join(lines)
         except Exception as e:
             return f"❌ Lỗi truy vấn bảng phân bổ GPU: {e}"
@@ -385,10 +408,12 @@ class ZaloBotEngine:
         # Cung cấp ngữ cảnh thực tế của hệ thống để AI trả lời chính xác mà không cần gọi tool
         live_telemetry = self._cmd_status()
         live_jobs = self._cmd_jobs()
+        live_allocs = self._cmd_allocations()
         context_msg = (
             f"DỮ LIỆU THỜI GIAN THỰC TỪ MÁY CHỦ WORKSTATION AIOT-WS1:\n\n"
             f"{live_telemetry}\n\n"
             f"{live_jobs}\n\n"
+            f"{live_allocs}\n\n"
             f"QUY TẮC PHẢN HỒI:\n"
             f"1. Trả lời trực tiếp, tự nhiên bằng tiếng Việt dựa trên dữ liệu thực tế ở trên.\n"
             f"2. Tuyệt đối không sinh tool_calls hoặc lệnh shell vì dữ liệu phần cứng và tác vụ đã có đủ."

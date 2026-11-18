@@ -126,9 +126,17 @@ class HostRegistry:
             item = dict(h)
             live = live_map.get(h["id"])
             if live:
-                is_local_live = h["id"] == self.local_host_id and live.get("status") == "ONLINE"
-                collected_at = _now() if is_local_live else item.get("last_heartbeat_at")
-                freshness = "ONLINE" if is_local_live else compute_freshness(collected_at)
+                live_status = str(live.get("status", "")).upper()
+                is_local_live = h["id"] == self.local_host_id and live_status == "ONLINE"
+                if is_local_live:
+                    collected_at = _now()
+                    freshness = "ONLINE"
+                elif live_status == "OFFLINE" and not item.get("agent_url"):
+                    collected_at = item.get("last_heartbeat_at")
+                    freshness = "OFFLINE"
+                else:
+                    collected_at = item.get("last_heartbeat_at")
+                    freshness = compute_freshness(collected_at)
                 item.update({
                     "observed_state": freshness,
                     "freshness": freshness,

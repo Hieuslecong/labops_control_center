@@ -64,8 +64,6 @@ func NewCollector(serverID string, gpuCol *gpu.Collector) *Collector {
 
 func (c *Collector) initUserCache() {
 	c.uidToUser[0] = "root"
-	c.uidToUser[1000] = "aiot-1"
-	c.uidToUser[1001] = "nhannv"
 }
 
 func (c *Collector) resolveUserLocked(uid int) string {
@@ -522,6 +520,11 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 					} else {
 						classification = ClassResearchJob
 					}
+				} else if attr == AttributionSystemProcess {
+					classification = ClassSystemProcess
+					attribution = AttributionSystemProcess
+					isProtected = true
+					isUserWorkload = false
 				} else {
 					// Tiến trình thông thường của member nhưng chưa rõ mục đích
 					classification = ClassMemberProcess

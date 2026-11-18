@@ -575,8 +575,34 @@ export interface GpuAccountAllocation {
   vramUsedMb: number;
   vramUsedGb: number;
   isActive: boolean;
-  status: 'IN_USE' | 'IDLE' | 'OFFLINE_HOST';
+  status: 'IN_USE' | 'RESERVED' | 'IDLE' | 'OFFLINE_HOST';
+  statusLabel?: string;
   activeProcesses: GpuAllocationProcess[];
   processCount: number;
+  primaryPid?: number | null;
   primaryScript: string;
+}
+
+export interface GpuDeviceAllocationGroup {
+  gpuId: string;
+  gpuLabel: string;
+  gpuModel: string;
+  pciBusId: string;
+  uuid: string;
+  serverId: ServerId;
+  serverName: string;
+  serverStatus: ServerStatus;
+  isOnline: boolean;
+  allocationMode: GpuAllocationMode | string;
+  vramTotalMb: number;
+  vramTotalGb: number;
+  vramUsedMb: number;
+  vramUsedGb: number;
+  vramUsagePercent: number;
+  gpuUtilPercent: number;
+  tempCelsius: number;
+  totalQuotaAllocatedGb: number;
+  accountsCount: number;
+  activeAccountsCount: number;
+  accounts: GpuAccountAllocation[];
 }

@@ -18,7 +18,8 @@ import {
   ServerStatus,
   JobStatus,
   GpuAllocationMode,
-  GpuAccountAllocation
+  GpuAccountAllocation,
+  GpuDeviceAllocationGroup
 } from '@/types/labops';
 
 interface LabOpsState {
@@ -36,6 +37,7 @@ interface LabOpsState {
   auditLogs: AuditLog[];
   storagePools: StoragePool[];
   gpuAllocations: GpuAccountAllocation[];
+  gpuAllocationGroups: GpuDeviceAllocationGroup[];
   sshEndpoints: SshEndpoint[];
   storageAllocations: StorageAllocation[];
   sshPolicies: SshAccountPolicy[];
@@ -48,6 +50,8 @@ interface LabOpsState {
   fetchAccessMembers: () => Promise<void>;
   fetchStoragePools: () => Promise<void>;
   fetchGpuAllocations: () => Promise<void>;
+  fetchGpuAllocationGroups: () => Promise<void>;
+  fetchAuditLogs: () => Promise<void>;
 
   // Computed summary
 
@@ -396,20 +400,117 @@ const INITIAL_GPU_ALLOCATIONS: GpuAccountAllocation[] = [
     fullName: 'Tài khoản Kiểm thử',
     role: 'STUDENT',
     gpuId: 'track-gpu-01',
-    gpuLabel: 'TRACK-GPU-01',
+    gpuLabel: 'RACK-GPU-01',
     gpuModel: 'NVIDIA A30 24GB HBM2',
     serverId: 'track',
     serverName: 'Server 01 — Server Rack (aiotlab-rack)',
     serverStatus: 'offline',
-    allocationMode: 'SHARED',
-    vramQuotaGb: 12,
+    allocationMode: 'EXCLUSIVE',
+    vramQuotaGb: 2,
     vramUsedMb: 0,
     vramUsedGb: 0,
     isActive: false,
     status: 'OFFLINE_HOST',
+    statusLabel: 'Máy chủ Ngoại tuyến',
     activeProcesses: [],
     processCount: 0,
-    primaryScript: 'Host ngoại tuyến (Rack offline)'
+    primaryPid: null,
+    primaryScript: 'Chưa có tiến trình'
+  }
+];
+
+const INITIAL_GPU_ALLOCATION_GROUPS: GpuDeviceAllocationGroup[] = [
+  {
+    gpuId: 'workstation-gpu-01',
+    gpuLabel: 'WS-GPU-01',
+    gpuModel: 'NVIDIA A30 (24GB HBM2)',
+    pciBusId: '00000000:D8:00.0',
+    uuid: '',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    serverStatus: 'online',
+    isOnline: true,
+    allocationMode: 'SHARED',
+    vramTotalMb: 24576,
+    vramTotalGb: 24.0,
+    vramUsedMb: 5734,
+    vramUsedGb: 5.6,
+    vramUsagePercent: 23,
+    gpuUtilPercent: 0,
+    tempCelsius: 0,
+    totalQuotaAllocatedGb: 72,
+    accountsCount: 3,
+    activeAccountsCount: 1,
+    accounts: INITIAL_GPU_ALLOCATIONS.filter((a) => a.gpuId === 'workstation-gpu-01')
+  },
+  {
+    gpuId: 'track-gpu-01',
+    gpuLabel: 'RACK-GPU-01',
+    gpuModel: 'NVIDIA A30 (24GB HBM2)',
+    pciBusId: '0000:3b:00.0',
+    uuid: '',
+    serverId: 'track',
+    serverName: 'Server 01 — Server Rack (aiotlab-rack)',
+    serverStatus: 'offline',
+    isOnline: false,
+    allocationMode: 'SHARED',
+    vramTotalMb: 24576,
+    vramTotalGb: 24.0,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    vramUsagePercent: 0,
+    gpuUtilPercent: 0,
+    tempCelsius: 0,
+    totalQuotaAllocatedGb: 2,
+    accountsCount: 1,
+    activeAccountsCount: 0,
+    accounts: INITIAL_GPU_ALLOCATIONS.filter((a) => a.gpuId === 'track-gpu-01')
+  },
+  {
+    gpuId: 'track-gpu-02',
+    gpuLabel: 'RACK-GPU-02',
+    gpuModel: 'NVIDIA A30 (24GB HBM2)',
+    pciBusId: '0000:5e:00.0',
+    uuid: '',
+    serverId: 'track',
+    serverName: 'Server 01 — Server Rack (aiotlab-rack)',
+    serverStatus: 'offline',
+    isOnline: false,
+    allocationMode: 'SHARED',
+    vramTotalMb: 24576,
+    vramTotalGb: 24.0,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    vramUsagePercent: 0,
+    gpuUtilPercent: 0,
+    tempCelsius: 0,
+    totalQuotaAllocatedGb: 0,
+    accountsCount: 0,
+    activeAccountsCount: 0,
+    accounts: []
+  },
+  {
+    gpuId: 'track-gpu-03',
+    gpuLabel: 'RACK-GPU-03',
+    gpuModel: 'NVIDIA A30 (24GB HBM2)',
+    pciBusId: '0000:86:00.0',
+    uuid: '',
+    serverId: 'track',
+    serverName: 'Server 01 — Server Rack (aiotlab-rack)',
+    serverStatus: 'offline',
+    isOnline: false,
+    allocationMode: 'SHARED',
+    vramTotalMb: 24576,
+    vramTotalGb: 24.0,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    vramUsagePercent: 0,
+    gpuUtilPercent: 0,
+    tempCelsius: 0,
+    totalQuotaAllocatedGb: 0,
+    accountsCount: 0,
+    activeAccountsCount: 0,
+    accounts: []
   }
 ];
 
@@ -1717,6 +1818,21 @@ function mapRawGpu(raw: Record<string, unknown>): PhysicalGpu {
   };
 }
 
+function mapRawAuditLog(raw: Record<string, unknown>): AuditLog {
+  const l = raw as Record<string, any>;
+  return {
+    id: String(l.id || ''),
+    actor: String(l.actor || ''),
+    action: String(l.action || ''),
+    targetType: String(l.targetType ?? l.target_type ?? 'SYSTEM'),
+    targetId: String(l.targetId ?? l.target_id ?? ''),
+    timestamp: String(l.timestamp || ''),
+    result: (l.result || 'SUCCESS') as AuditLog['result'],
+    correlationId: String(l.correlationId ?? l.correlation_id ?? ''),
+    details: String(l.details || '')
+  };
+}
+
 function mapRawStoragePool(raw: Record<string, unknown>): StoragePool {
   const p = raw as Record<string, any>;
   return {
@@ -1753,10 +1869,12 @@ function mapRawGpuAllocation(raw: Record<string, unknown>): GpuAccountAllocation
     serverStatus: (a.server_status ?? a.serverStatus ?? 'online') as ServerStatus,
     allocationMode: (a.allocation_mode ?? a.allocationMode ?? 'SHARED') as GpuAllocationMode,
     vramQuotaGb: Number(a.vram_quota_gb ?? a.vramQuotaGb ?? 24),
-    vramUsedMb: Number(a.vram_used_mb ?? a.vramUsedMb ?? 0),
-    vramUsedGb: Number(a.vram_used_gb ?? a.vramUsedGb ?? 0),
+    vramUsedMb: Number(a.vram_used_mb ?? a.current_vram_mb ?? a.vramUsedMb ?? 0),
+    vramUsedGb: Number(a.vram_used_gb ?? a.current_vram_gb ?? a.vramUsedGb ?? 0),
     isActive: Boolean(a.is_active ?? a.isActive ?? false),
-    status: (a.status || 'IDLE') as 'IN_USE' | 'IDLE' | 'OFFLINE_HOST',
+    status: (a.status || 'IDLE') as GpuAccountAllocation['status'],
+    statusLabel:
+      (a.status_label ?? a.statusLabel) ? String(a.status_label ?? a.statusLabel) : undefined,
     activeProcesses: Array.isArray(a.active_processes ?? a.activeProcesses)
       ? (a.active_processes ?? a.activeProcesses).map((proc: any) => ({
           pid: Number(proc.pid),
@@ -1765,8 +1883,45 @@ function mapRawGpuAllocation(raw: Record<string, unknown>): GpuAccountAllocation
           cpuPercent: Number(proc.cpu_percent ?? proc.cpuPercent ?? 0)
         }))
       : [],
-    processCount: Number(a.process_count ?? a.processCount ?? 0),
-    primaryScript: String(a.primary_script ?? a.primaryScript ?? 'Chưa chạy tác vụ')
+    processCount: Number(a.process_count ?? a.active_processes_count ?? a.processCount ?? 0),
+    primaryPid: a.primary_pid ?? a.primaryPid ?? null,
+    primaryScript: String(
+      a.primary_script ?? a.workload_description ?? a.primaryScript ?? 'Chưa chạy tác vụ'
+    )
+  };
+}
+
+function mapRawGpuAllocationGroup(raw: Record<string, unknown>): GpuDeviceAllocationGroup {
+  const g = raw as Record<string, any>;
+  const rawAccounts = Array.isArray(g.accounts) ? g.accounts : [];
+  const vramTotalMb = Number(g.vram_total_mb ?? g.vramTotalMb ?? 24576);
+  const vramUsedMb = Number(g.vram_used_mb ?? g.vramUsedMb ?? 0);
+  return {
+    gpuId: String(g.gpu_id ?? g.gpuId ?? ''),
+    gpuLabel: String(g.gpu_label ?? g.gpuLabel ?? ''),
+    gpuModel: String(g.gpu_model ?? g.gpuModel ?? 'NVIDIA A30 (24GB HBM2)'),
+    pciBusId: String(g.pci_bus_id ?? g.pciBusId ?? ''),
+    uuid: String(g.uuid ?? ''),
+    serverId: (g.server_id ?? g.serverId ?? 'workstation') as ServerId,
+    serverName: String(g.server_name ?? g.serverName ?? ''),
+    serverStatus: (g.server_status ?? g.serverStatus ?? 'offline') as ServerStatus,
+    isOnline: Boolean(g.is_online ?? g.isOnline ?? false),
+    allocationMode: String(g.allocation_mode ?? g.allocationMode ?? 'SHARED'),
+    vramTotalMb,
+    vramTotalGb: Number(g.vram_total_gb ?? g.vramTotalGb ?? (vramTotalMb / 1024).toFixed(1)),
+    vramUsedMb,
+    vramUsedGb: Number(g.vram_used_gb ?? g.vramUsedGb ?? (vramUsedMb / 1024).toFixed(1)),
+    vramUsagePercent: Number(
+      g.vram_usage_percent ??
+        g.vramUsagePercent ??
+        (vramTotalMb > 0 ? Math.round((vramUsedMb / vramTotalMb) * 100) : 0)
+    ),
+    gpuUtilPercent: Number(g.gpu_util_percent ?? g.gpuUtilPercent ?? 0),
+    tempCelsius: Number(g.temp_celsius ?? g.tempCelsius ?? 0),
+    totalQuotaAllocatedGb: Number(g.total_quota_allocated_gb ?? g.totalQuotaAllocatedGb ?? 0),
+    accountsCount: Number(g.accounts_count ?? g.accountsCount ?? rawAccounts.length),
+    activeAccountsCount: Number(g.active_accounts_count ?? g.activeAccountsCount ?? 0),
+    accounts: rawAccounts.map((item: Record<string, unknown>) => mapRawGpuAllocation(item))
   };
 }
 
@@ -1785,6 +1940,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   auditLogs: isDemoMode ? INITIAL_AUDIT_LOGS : [],
   storagePools: INITIAL_STORAGE_POOLS,
   gpuAllocations: INITIAL_GPU_ALLOCATIONS,
+  gpuAllocationGroups: INITIAL_GPU_ALLOCATION_GROUPS,
   sshEndpoints: isDemoMode ? INITIAL_SSH_ENDPOINTS : [],
   storageAllocations: isDemoMode ? INITIAL_STORAGE_ALLOCATIONS : [],
   sshPolicies: isDemoMode ? INITIAL_SSH_POLICIES : [],
@@ -1847,11 +2003,22 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   fetchLiveSshSessions: async () => {
     try {
-      const res = await fetch('/api/labops/servers/track/ssh-sessions').catch(() => null);
-      if (res && res.ok) {
-        const data = await res.json();
-        const obs = data.actual_observations || [];
-        set({ activeSshSessions: obs.map(mapRawSshSession) });
+      const [resWs, resTrack] = await Promise.all([
+        fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null),
+        fetch('/api/labops/servers/track/ssh-sessions').catch(() => null)
+      ]);
+      const combined: RealSshSession[] = [];
+      let anyOk = false;
+      for (const res of [resWs, resTrack]) {
+        if (res && res.ok) {
+          anyOk = true;
+          const data = await res.json();
+          const obs = data.actual_observations || [];
+          combined.push(...obs.map(mapRawSshSession));
+        }
+      }
+      if (anyOk) {
+        set({ activeSshSessions: combined });
       }
     } catch {
       // In offline or static environments, retain current verified state
@@ -1880,16 +2047,49 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
     } catch {}
   },
 
+  fetchGpuAllocationGroups: async () => {
+    if (isDemoMode) return;
+    try {
+      const res = await fetch('/api/labops/gpus/allocations/by-gpu').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) set({ gpuAllocationGroups: data.map(mapRawGpuAllocationGroup) });
+      }
+    } catch {}
+  },
+
+  fetchAuditLogs: async () => {
+    if (isDemoMode) return;
+    try {
+      const res = await fetch('/api/labops/audit-logs').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) set({ auditLogs: data.map(mapRawAuditLog) });
+      }
+    } catch {}
+  },
+
   fetchLiveState: async () => {
     if (isDemoMode) return;
     try {
-      const [resServers, resGpus, resJobs, resSsh, resStorage, resAllocations] = await Promise.all([
+      const [
+        resServers,
+        resGpus,
+        resJobs,
+        resSshWs,
+        resSshTrack,
+        resStorage,
+        resAllocations,
+        resAllocationGroups
+      ] = await Promise.all([
         fetch('/api/labops/servers').catch(() => null),
         fetch('/api/labops/gpus').catch(() => null),
         fetch('/api/labops/jobs/active').catch(() => null),
+        fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null),
         fetch('/api/labops/servers/track/ssh-sessions').catch(() => null),
         fetch('/api/labops/storage-pools').catch(() => null),
-        fetch('/api/labops/gpus/allocations').catch(() => null)
+        fetch('/api/labops/gpus/allocations').catch(() => null),
+        fetch('/api/labops/gpus/allocations/by-gpu').catch(() => null)
       ]);
       const updates: Partial<LabOpsState> = {
         lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
@@ -1922,13 +2122,18 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       } else {
         failures.push('jobs');
       }
-      if (resSsh && resSsh.ok) {
-        const data = await resSsh.json();
-        const obs = data.actual_observations || [];
-        updates.activeSshSessions = obs.map(mapRawSshSession);
+      const sshCombined: RealSshSession[] = [];
+      if (resSshWs && resSshWs.ok) {
+        const dataWs = await resSshWs.json();
+        sshCombined.push(...(dataWs.actual_observations || []).map(mapRawSshSession));
       } else {
         failures.push('SSH sessions');
       }
+      if (resSshTrack && resSshTrack.ok) {
+        const dataTrack = await resSshTrack.json();
+        sshCombined.push(...(dataTrack.actual_observations || []).map(mapRawSshSession));
+      }
+      updates.activeSshSessions = sshCombined;
       if (resStorage && resStorage.ok) {
         const data = await resStorage.json();
         if (Array.isArray(data)) updates.storagePools = data.map(mapRawStoragePool);
@@ -1936,6 +2141,10 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       if (resAllocations && resAllocations.ok) {
         const data = await resAllocations.json();
         if (Array.isArray(data)) updates.gpuAllocations = data.map(mapRawGpuAllocation);
+      }
+      if (resAllocationGroups && resAllocationGroups.ok) {
+        const data = await resAllocationGroups.json();
+        if (Array.isArray(data)) updates.gpuAllocationGroups = data.map(mapRawGpuAllocationGroup);
       }
       if (failures.length) updates.syncError = `Không thể xác minh dữ liệu: ${failures.join(', ')}`;
       set(updates);

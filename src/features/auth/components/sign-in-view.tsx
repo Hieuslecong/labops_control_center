@@ -23,7 +23,7 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
   const [error, setError] = useState<string | null>(initialError || null);
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
     setLoading(true);

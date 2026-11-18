@@ -1,3 +1,4 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
 import React, { useState, useEffect, useMemo, useTransition } from 'react';
@@ -467,7 +468,9 @@ export function MemberRepoHistoryPanel() {
                     <td colSpan={6} className='py-8 text-center text-muted-foreground'>
                       <div className='flex flex-col items-center justify-center gap-1.5'>
                         <Icons.shield className='size-6 text-muted-foreground/50' />
-                        <span className='font-medium'>Không tìm thấy yêu cầu clone nào phù hợp bộ lọc</span>
+                        <span className='font-medium'>
+                          Không tìm thấy yêu cầu clone nào phù hợp bộ lọc
+                        </span>
                         <span className='text-[11px] text-muted-foreground/80'>
                           Các lệnh thực thi qua{' '}
                           <code className='bg-muted px-1 rounded text-foreground font-mono'>
@@ -496,7 +499,7 @@ export function MemberRepoHistoryPanel() {
                         }`}
                       >
                         {/* 1. Thời gian */}
-                        <td className='py-2.5 px-3 whitespace-nowrap'>
+                        <td aria-label='Thời gian' className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex flex-col'>
                             <span className='font-mono font-medium text-foreground text-[11px] flex items-center gap-1'>
                               <Icons.clock className='size-3 text-muted-foreground shrink-0' />
@@ -509,7 +512,7 @@ export function MemberRepoHistoryPanel() {
                         </td>
 
                         {/* 2. Thành viên */}
-                        <td className='py-2.5 px-3 whitespace-nowrap'>
+                        <td aria-label='Thành viên' className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex items-center gap-1.5'>
                             <div className='size-6 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-[10px] uppercase shrink-0'>
                               {(r.submitted_by || 'U')[0]}
@@ -528,7 +531,7 @@ export function MemberRepoHistoryPanel() {
                         </td>
 
                         {/* 3. Kho lưu trữ & Nhánh */}
-                        <td className='py-2.5 px-3'>
+                        <td aria-label='Kho lưu trữ và nhánh' className='py-2.5 px-3'>
                           <div className='flex flex-col gap-0.5 min-w-0'>
                             <div className='flex items-center gap-1.5 min-w-0'>
                               <Icons.github className='size-3.5 text-muted-foreground shrink-0' />
@@ -687,8 +690,12 @@ export function MemberRepoHistoryPanel() {
                 <Icons.shield className='size-5 text-primary' /> Chi tiết Kiểm duyệt Repository
               </DialogTitle>
               <DialogDescription className='text-xs'>
-                Mã yêu cầu: <span className='font-mono text-foreground font-semibold'>{selectedReq.id}</span> •
-                Gửi bởi: <span className='font-mono font-semibold text-foreground'>@{selectedReq.submitted_by}</span>
+                Mã yêu cầu:{' '}
+                <span className='font-mono text-foreground font-semibold'>{selectedReq.id}</span> •
+                Gửi bởi:{' '}
+                <span className='font-mono font-semibold text-foreground'>
+                  @{selectedReq.submitted_by}
+                </span>
               </DialogDescription>
             </DialogHeader>
 
@@ -696,7 +703,9 @@ export function MemberRepoHistoryPanel() {
               {/* Summary metadata box */}
               <div className='grid grid-cols-2 gap-2 p-2.5 rounded-lg border bg-muted/20'>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Kho lưu trữ GitHub</span>
+                  <span className='text-[10px] text-muted-foreground block'>
+                    Kho lưu trữ GitHub
+                  </span>
                   <a
                     href={selectedReq.canonical_repo || selectedReq.repo_url}
                     target='_blank'
@@ -712,21 +721,32 @@ export function MemberRepoHistoryPanel() {
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Nhánh / Tag</span>
-                  <span className='font-mono font-semibold'>{selectedReq.requested_ref || 'HEAD'}</span>
+                  <span className='font-mono font-semibold'>
+                    {selectedReq.requested_ref || 'HEAD'}
+                  </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Commit SHA (40-hex)</span>
-                  <span className='font-mono font-semibold truncate block' title={selectedReq.commit_sha}>
+                  <span className='text-[10px] text-muted-foreground block'>
+                    Commit SHA (40-hex)
+                  </span>
+                  <span
+                    className='font-mono font-semibold truncate block'
+                    title={selectedReq.commit_sha}
+                  >
                     {selectedReq.commit_sha || 'Chưa phân giải'}
                   </span>
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Thời gian gửi</span>
-                  <span className='text-foreground'>{formatDateTime(selectedReq.submitted_at).formatted}</span>
+                  <span className='text-foreground'>
+                    {formatDateTime(selectedReq.submitted_at).formatted}
+                  </span>
                 </div>
                 <div>
                   <span className='text-[10px] text-muted-foreground block'>Cập nhật lần cuối</span>
-                  <span className='text-foreground'>{formatDateTime(selectedReq.updated_at).formatted}</span>
+                  <span className='text-foreground'>
+                    {formatDateTime(selectedReq.updated_at).formatted}
+                  </span>
                 </div>
               </div>
 
@@ -817,9 +837,18 @@ export function MemberRepoHistoryPanel() {
                     Biên bản quyết định của Quản trị viên
                   </span>
                   <div className='text-[11px] text-muted-foreground mt-1'>
-                    <div>Người duyệt: <span className='font-mono text-foreground font-semibold'>@{selectedReq.decision.reviewer}</span></div>
-                    <div>Thời điểm: {formatDateTime(selectedReq.decision.reviewed_at).formatted}</div>
-                    <div className='mt-1 text-foreground italic'>&ldquo;{selectedReq.decision.reason}&rdquo;</div>
+                    <div>
+                      Người duyệt:{' '}
+                      <span className='font-mono text-foreground font-semibold'>
+                        @{selectedReq.decision.reviewer}
+                      </span>
+                    </div>
+                    <div>
+                      Thời điểm: {formatDateTime(selectedReq.decision.reviewed_at).formatted}
+                    </div>
+                    <div className='mt-1 text-foreground italic'>
+                      &ldquo;{selectedReq.decision.reason}&rdquo;
+                    </div>
                   </div>
                 </div>
               )}
@@ -830,4 +859,3 @@ export function MemberRepoHistoryPanel() {
     </Card>
   );
 }
-

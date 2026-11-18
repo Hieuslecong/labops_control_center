@@ -1,3 +1,4 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -21,7 +22,14 @@ import {
   IconTerminal2
 } from '@tabler/icons-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  CardFooter
+} from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -180,13 +188,16 @@ export default function AIAssistantView() {
     }
   };
 
-  const handleSaveConfig = async (e: React.FormEvent) => {
+  const handleSaveConfig = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSaveConfigSuccess(false);
     try {
       const payload: any = {
         ai_model: editModel,
-        authorized_users: editUsers.split(',').map((u) => u.trim()).filter(Boolean)
+        authorized_users: editUsers
+          .split(',')
+          .map((u) => u.trim())
+          .filter(Boolean)
       };
       if (editToken.trim()) {
         payload.bot_token = editToken.trim();
@@ -227,10 +238,16 @@ export default function AIAssistantView() {
             <IconRefresh className={`h-4 w-4 mr-1 ${loading ? 'animate-spin' : ''}`} />
             Làm mới
           </Button>
-          <Badge variant='outline' className='bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono text-xs'>
+          <Badge
+            variant='outline'
+            className='bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono text-xs'
+          >
             9Router: ONLINE
           </Badge>
-          <Badge variant='outline' className='bg-primary/10 text-primary border-primary/20 font-mono text-xs'>
+          <Badge
+            variant='outline'
+            className='bg-primary/10 text-primary border-primary/20 font-mono text-xs'
+          >
             Model: {overview?.active_model || 'model_free'}
           </Badge>
         </div>
@@ -291,12 +308,20 @@ export default function AIAssistantView() {
                 </div>
                 <div className='grid grid-cols-2 gap-2 text-xs pt-1 border-t'>
                   <div>
-                    <span className='text-muted-foreground block text-[11px]'>Tin thông thường:</span>
-                    <span className='font-mono font-bold'>{overview?.quota?.standard_remaining} / 2.800</span>
+                    <span className='text-muted-foreground block text-[11px]'>
+                      Tin thông thường:
+                    </span>
+                    <span className='font-mono font-bold'>
+                      {overview?.quota?.standard_remaining} / 2.800
+                    </span>
                   </div>
                   <div>
-                    <span className='text-muted-foreground block text-[11px]'>Dự phòng khẩn cấp:</span>
-                    <span className='font-mono font-bold text-amber-600'>{overview?.quota?.critical_remaining} / 200</span>
+                    <span className='text-muted-foreground block text-[11px]'>
+                      Dự phòng khẩn cấp:
+                    </span>
+                    <span className='font-mono font-bold text-amber-600'>
+                      {overview?.quota?.critical_remaining} / 200
+                    </span>
                   </div>
                 </div>
               </CardContent>
@@ -307,7 +332,10 @@ export default function AIAssistantView() {
               <CardHeader className='pb-2'>
                 <div className='flex justify-between items-center'>
                   <CardTitle className='text-sm font-semibold'>9Router AI Gateway</CardTitle>
-                  <Badge variant='outline' className='bg-emerald-500/10 text-emerald-600 font-mono text-[10px]'>
+                  <Badge
+                    variant='outline'
+                    className='bg-emerald-500/10 text-emerald-600 font-mono text-[10px]'
+                  >
                     {overview?.ai_gateway?.status || 'ONLINE'}
                   </Badge>
                 </div>
@@ -326,7 +354,9 @@ export default function AIAssistantView() {
                 </div>
                 <div className='flex justify-between py-1'>
                   <span className='text-muted-foreground'>Lượt gọi AI tháng này:</span>
-                  <span className='font-mono font-bold'>{overview?.quota?.ai_requests || 0} lượt</span>
+                  <span className='font-mono font-bold'>
+                    {overview?.quota?.ai_requests || 0} lượt
+                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -338,7 +368,11 @@ export default function AIAssistantView() {
                   <CardTitle className='text-sm font-semibold'>Zalo Polling Consumer</CardTitle>
                   <Badge
                     variant='outline'
-                    className={overview?.consumer?.has_token ? 'bg-emerald-500/10 text-emerald-600 font-mono text-[10px]' : 'bg-amber-500/10 text-amber-600 font-mono text-[10px]'}
+                    className={
+                      overview?.consumer?.has_token
+                        ? 'bg-emerald-500/10 text-emerald-600 font-mono text-[10px]'
+                        : 'bg-amber-500/10 text-amber-600 font-mono text-[10px]'
+                    }
                   >
                     {overview?.consumer?.has_token ? 'ACTIVE' : 'STANDBY (Chưa token)'}
                   </Badge>
@@ -369,9 +403,12 @@ export default function AIAssistantView() {
             <CardHeader className='pb-2'>
               <div className='flex flex-wrap items-center justify-between gap-2'>
                 <div>
-                  <CardTitle className='text-sm font-semibold'>Thử nghiệm Lệnh & Hỏi đáp AI Trực tiếp</CardTitle>
+                  <CardTitle className='text-sm font-semibold'>
+                    Thử nghiệm Lệnh & Hỏi đáp AI Trực tiếp
+                  </CardTitle>
                   <CardDescription className='text-xs'>
-                    Tương tác kiểm thử bot theo đúng 7 lệnh chuẩn: /status, /jobs, /report, /quota, /ask
+                    Tương tác kiểm thử bot theo đúng 7 lệnh chuẩn: /status, /jobs, /report, /quota,
+                    /ask
                   </CardDescription>
                 </div>
                 <div className='flex flex-wrap gap-1'>
@@ -452,7 +489,9 @@ export default function AIAssistantView() {
                 <div
                   key={alt.id}
                   className={`flex items-start gap-2.5 p-2.5 rounded-lg border ${
-                    alt.level === 'CRITICAL' ? 'bg-destructive/10 border-destructive/20 text-destructive' : 'bg-muted/40 border-muted'
+                    alt.level === 'CRITICAL'
+                      ? 'bg-destructive/10 border-destructive/20 text-destructive'
+                      : 'bg-muted/40 border-muted'
                   }`}
                 >
                   {alt.level === 'CRITICAL' ? (
@@ -476,7 +515,8 @@ export default function AIAssistantView() {
             <CardHeader>
               <CardTitle className='text-base font-semibold'>Cấu hình Bot & AI Gateway</CardTitle>
               <CardDescription className='text-xs'>
-                Toàn bộ cấu hình được lưu qua API có xác thực quyền Admin. Tuyệt đối không phơi token trong trình duyệt.
+                Toàn bộ cấu hình được lưu qua API có xác thực quyền Admin. Tuyệt đối không phơi
+                token trong trình duyệt.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -489,13 +529,17 @@ export default function AIAssistantView() {
                 )}
 
                 <div className='space-y-1.5'>
-                  <label className='font-semibold flex items-center justify-between'>
+                  <label
+                    htmlFor='zalo-bot-token'
+                    className='font-semibold flex items-center justify-between'
+                  >
                     <span>Zalo Bot Token (Cập nhật token mới an toàn):</span>
                     <span className='text-muted-foreground font-mono text-[11px]'>
                       Hiện tại: {config?.zalo_token_masked}
                     </span>
                   </label>
                   <Input
+                    id='zalo-bot-token'
                     type='password'
                     value={editToken}
                     onChange={(e) => setEditToken(e.target.value)}
@@ -503,13 +547,17 @@ export default function AIAssistantView() {
                     className='text-xs font-mono'
                   />
                   <p className='text-[11px] text-muted-foreground'>
-                    Để trống nếu giữ nguyên token hiện tại. Không bao giờ commit token vào kho mã nguồn.
+                    Để trống nếu giữ nguyên token hiện tại. Không bao giờ commit token vào kho mã
+                    nguồn.
                   </p>
                 </div>
 
                 <div className='space-y-1.5'>
-                  <label className='font-semibold'>Người dùng được phân quyền (Authorized User IDs):</label>
+                  <label htmlFor='zalo-auth-users' className='font-semibold'>
+                    Người dùng được phân quyền (Authorized User IDs):
+                  </label>
                   <Input
+                    id='zalo-auth-users'
                     value={editUsers}
                     onChange={(e) => setEditUsers(e.target.value)}
                     placeholder='admin, user1, user2...'
@@ -521,8 +569,11 @@ export default function AIAssistantView() {
                 </div>
 
                 <div className='space-y-1.5'>
-                  <label className='font-semibold'>Mô hình AI trên 9Router (Model Name):</label>
+                  <label htmlFor='zalo-ai-model' className='font-semibold'>
+                    Mô hình AI trên 9Router (Model Name):
+                  </label>
                   <Input
+                    id='zalo-ai-model'
                     value={editModel}
                     onChange={(e) => setEditModel(e.target.value)}
                     placeholder='model_free'
@@ -534,8 +585,11 @@ export default function AIAssistantView() {
                 </div>
 
                 <div className='space-y-1.5'>
-                  <label className='font-semibold'>AI Gateway URL:</label>
+                  <label htmlFor='zalo-ai-gateway-url' className='font-semibold'>
+                    AI Gateway URL:
+                  </label>
                   <Input
+                    id='zalo-ai-gateway-url'
                     value='http://127.0.0.1:20128/v1'
                     disabled
                     className='text-xs font-mono bg-muted'
@@ -564,11 +618,7 @@ export default function AIAssistantView() {
                 Mặc định phát hành: <strong>Thứ Sáu, 17:00 (Asia/Ho_Chi_Minh)</strong>
               </p>
             </div>
-            <Button
-              size='sm'
-              onClick={handleGenerateReport}
-              disabled={reportGenLoading}
-            >
+            <Button size='sm' onClick={handleGenerateReport} disabled={reportGenLoading}>
               <IconFileText className='h-4 w-4 mr-1' />
               {reportGenLoading ? 'Đang tổng hợp...' : 'Tạo báo cáo tuần ngay'}
             </Button>
@@ -589,7 +639,9 @@ export default function AIAssistantView() {
                     <div className='flex items-center justify-between'>
                       <CardTitle className='text-sm font-bold'>{rpt.title}</CardTitle>
                       <div className='flex items-center gap-2'>
-                        <span className='text-[11px] text-muted-foreground font-mono'>{rpt.created_at}</span>
+                        <span className='text-[11px] text-muted-foreground font-mono'>
+                          {rpt.created_at}
+                        </span>
                         <a
                           href={`/api/labops/ai-assistant/reports/${rpt.id}/download`}
                           target='_blank'
@@ -628,7 +680,9 @@ export default function AIAssistantView() {
                     <IconCheck className='h-4 w-4' />
                   </div>
                   <div>
-                    <CardTitle className='text-sm font-semibold'>Công cụ Đọc được Kích hoạt (Read-Only)</CardTitle>
+                    <CardTitle className='text-sm font-semibold'>
+                      Công cụ Đọc được Kích hoạt (Read-Only)
+                    </CardTitle>
                     <CardDescription className='text-xs'>
                       An toàn tuyệt đối, không gây tác động hay thay đổi trạng thái máy chủ
                     </CardDescription>
@@ -655,7 +709,9 @@ export default function AIAssistantView() {
                     <IconBan className='h-4 w-4' />
                   </div>
                   <div>
-                    <CardTitle className='text-sm font-semibold'>Công cụ Ghi bị Khóa Chặt (Disabled)</CardTitle>
+                    <CardTitle className='text-sm font-semibold'>
+                      Công cụ Ghi bị Khóa Chặt (Disabled)
+                    </CardTitle>
                     <CardDescription className='text-xs'>
                       Bảo vệ môi trường theo đúng chính sách Non-Disruptive
                     </CardDescription>
@@ -665,7 +721,10 @@ export default function AIAssistantView() {
               <CardContent className='pt-2'>
                 <ul className='space-y-2 text-xs font-mono'>
                   {tools?.disabled_write_tools?.map((t: string) => (
-                    <li key={t} className='flex items-center gap-2 p-2 rounded border bg-card text-muted-foreground'>
+                    <li
+                      key={t}
+                      className='flex items-center gap-2 p-2 rounded border bg-card text-muted-foreground'
+                    >
                       <IconBan className='h-3.5 w-3.5 text-destructive shrink-0' />
                       <span className='line-through'>{t}</span>
                     </li>
@@ -680,29 +739,41 @@ export default function AIAssistantView() {
         <TabsContent value='history' className='space-y-4 pt-3'>
           <Card>
             <CardHeader className='pb-2'>
-              <CardTitle className='text-sm font-semibold'>Nhật ký Hộp thư Outbox & Quota Ledger</CardTitle>
+              <CardTitle className='text-sm font-semibold'>
+                Nhật ký Hộp thư Outbox & Quota Ledger
+              </CardTitle>
               <CardDescription className='text-xs'>
-                Ghi nhận chi tiết từng thông điệp outbound, đảm bảo tính bất biến (idempotency) và không vượt 3.000 tin/tháng
+                Ghi nhận chi tiết từng thông điệp outbound, đảm bảo tính bất biến (idempotency) và
+                không vượt 3.000 tin/tháng
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className='space-y-2 text-xs font-mono'>
                 {history?.outbox?.length === 0 ? (
-                  <p className='text-muted-foreground p-4 text-center'>Chưa có tin nhắn outbound trong tháng.</p>
+                  <p className='text-muted-foreground p-4 text-center'>
+                    Chưa có tin nhắn outbound trong tháng.
+                  </p>
                 ) : (
                   history?.outbox?.map((m: any) => (
-                    <div key={m.id} className='flex items-center justify-between p-2.5 rounded border bg-card'>
+                    <div
+                      key={m.id}
+                      className='flex items-center justify-between p-2.5 rounded border bg-card'
+                    >
                       <div className='space-y-0.5'>
                         <div className='flex items-center gap-2'>
                           <span className='font-bold text-primary'>{m.id}</span>
                           <Badge variant='outline' className='text-[10px]'>
                             {m.is_critical ? 'CRITICAL ALERT' : 'STANDARD'}
                           </Badge>
-                          <span className='text-muted-foreground text-[10px]'>Tới: {m.recipient_id}</span>
+                          <span className='text-muted-foreground text-[10px]'>
+                            Tới: {m.recipient_id}
+                          </span>
                         </div>
                         <p className='text-muted-foreground text-[11px]'>{m.message_snippet}...</p>
                       </div>
-                      <span className='text-[10px] text-muted-foreground shrink-0'>{m.created_at}</span>
+                      <span className='text-[10px] text-muted-foreground shrink-0'>
+                        {m.created_at}
+                      </span>
                     </div>
                   ))
                 )}

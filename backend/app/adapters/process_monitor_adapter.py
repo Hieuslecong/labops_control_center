@@ -1,6 +1,10 @@
 from app.core.config import settings
 import os
 import re
+try:
+    import pwd
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    pwd = None  # type: ignore[assignment]
 import time
 import json
 import shutil
@@ -37,8 +41,9 @@ PROTECTED_SYSTEM_NAMES = {
 }
 
 PROTECTED_CMD_KEYWORDS = {
-    'labops-agent', 'app.main:app', 'uvicorn app.main', 'next-server',
-    'next dev', 'next start', 'wg-easy', '/usr/sbin/dockerd', '/usr/bin/containerd'
+    'labops-agent', 'app.main:app', 'app.main', 'uvicorn app.main', 'uvicorn',
+    'next-server', 'next dev', 'next start', 'wg-easy',
+    '/usr/sbin/dockerd', '/usr/bin/containerd'
 }
 
 def sanitize_cmdline(cmdline_parts: List[str]) -> str:
@@ -81,6 +86,25 @@ class ProcessMonitorAdapter:
         if self.server_id == "workstation":
             return "Server 02 — Workstation (aiot-ws1 • Cục bộ)"
         return "Server 01 — Server Rack (aiotlab-rack)"
+
+    def _resolve_host_username(
+        self,
+        uid: Optional[int],
+        fallback_user: Optional[str],
+        container_id: Optional[str] = None,
+    ) -> str:
+        """Resolve canonical OS username on local host to prevent stale UID cache drift."""
+        if (
+            pwd is not None
+            and (self.server_id == settings.LOCAL_HOST_ID or self.server_id == "track")
+            and not container_id
+            and uid is not None
+        ):
+            try:
+                return pwd.getpwuid(int(uid)).pw_name
+            except (KeyError, ValueError, TypeError):
+                pass
+        return fallback_user or (str(uid) if uid is not None else "unknown")
 
     def _query_go_agent(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
         """Gọi nội bộ sang Go Agent trên port 9150 hoặc 9100."""
@@ -192,23 +216,58 @@ class ProcessMonitorAdapter:
             }
 
         # 1. Try Go Node Agent first
-        agent_res = self._query_go_agent(f"/api/v1/agent/processes?filter={filter_type}")
+        agent_filter = "all" if filter_type in ("system", "member") else filter_type
+        agent_res = self._query_go_agent(f"/api/v1/agent/processes?filter={agent_filter}")
         if agent_res and "processes" in agent_res:
             procs = []
             for p in agent_res.get("processes", []):
                 gpu_idx = p.get('gpu_index')
+                proc_name = p.get("name") or ""
+                cmdline = p.get("command_line", "")
+                container_id = p.get("container_id")
+                uid = p.get("uid")
+                username = self._resolve_host_username(uid, p.get("user"), container_id)
+
+                is_protected_override = (
+                    proc_name.lower() in PROTECTED_SYSTEM_NAMES
+                    or any(k in cmdline.lower() for k in PROTECTED_CMD_KEYWORDS)
+                )
+                if is_protected_override:
+                    classification = "SYSTEM_PROCESS"
+                    attribution = "SYSTEM_PROCESS"
+                    is_protected = True
+                    is_user_workload = False
+                    is_research_workload = False
+                else:
+                    classification = p.get("classification")
+                    attribution = p.get("attribution", "UNKNOWN")
+                    is_protected = p.get("is_protected", False)
+                    is_user_workload = p.get("is_user_workload", False)
+                    is_research_workload = (classification == "RESEARCH_JOB")
+
+                if filter_type == "system" and classification != "SYSTEM_PROCESS":
+                    continue
+                if filter_type == "member" and not (
+                    classification in ("MEMBER_PROCESS", "RESEARCH_JOB") or is_user_workload
+                ):
+                    continue
+                if filter_type in ("research", "workloads", "workload") and (
+                    is_protected or not (is_user_workload or classification == "RESEARCH_JOB")
+                ):
+                    continue
+
                 procs.append({
                     "host_id": self.server_id,
                     "server_name": self.server_name,
-                    "ref": p.get("ref", f"{self.server_id}:{p.get('container_id') or 'host'}:{p.get('pid')}:{p.get('start_time_ticks', 0)}"),
+                    "ref": p.get("ref", f"{self.server_id}:{container_id or 'host'}:{p.get('pid')}:{p.get('start_time_ticks', 0)}"),
                     "pid": p.get("pid"),
                     "ppid": p.get("ppid"),
                     "pgid": p.get("pgid"),
-                    "username": p.get("user"),
-                    "uid": p.get("uid"),
-                    "name": p.get("name"),
-                    "script_display": p.get("name"),
-                    "cmdline": p.get("command_line", ""),
+                    "username": username,
+                    "uid": uid,
+                    "name": proc_name,
+                    "script_display": proc_name,
+                    "cmdline": cmdline,
                     "start_time": p.get("start_time"),
                     "start_time_ticks": p.get("start_time_ticks", 0),
                     "elapsed_time": p.get("elapsed_time", "00h 00m 00s"),
@@ -216,17 +275,17 @@ class ProcessMonitorAdapter:
                     "memory_rss_mb": p.get("memory_rss_mb", 0.0),
                     "memory_percent": p.get("memory_percent", 0.0),
                     "status": p.get("state", "RUNNING"),
-                    "classification": p.get("classification"),
+                    "classification": classification,
                     "is_gpu_process": p.get("is_gpu", False),
                     "gpu_id": f"{self.server_id}-gpu-0{int(gpu_idx) + 1}" if gpu_idx is not None else None,
-                    "gpu_index": p.get("gpu_index"),
+                    "gpu_index": gpu_idx,
                     "vram_mb": p.get("vram_mb", 0),
-                    "container_id": p.get("container_id"),
-                    "workspace": p.get("workspace") or (f"docker-{p.get('container_id')}" if p.get("container_id") else None),
-                    "is_protected": p.get("is_protected", False),
-                    "is_research_workload": p.get("classification") == "RESEARCH_JOB",
-                    "attribution": p.get("attribution", "UNKNOWN"),
-                    "is_user_workload": p.get("is_user_workload", False),
+                    "container_id": container_id,
+                    "workspace": p.get("workspace") or (f"docker-{container_id}" if container_id else None),
+                    "is_protected": is_protected,
+                    "is_research_workload": is_research_workload,
+                    "attribution": attribution,
+                    "is_user_workload": is_user_workload,
                     "is_root_workload": p.get("is_root_workload", True),
                     "children_count": p.get("children_count", 0),
                     "total_cpu_percent": p.get("total_cpu_percent", p.get("cpu_percent", 0.0)),
@@ -476,8 +535,8 @@ class ProcessMonitorAdapter:
                 continue
 
             uname = p["username"]
-            # 2. Loại bỏ các process hệ thống root không phải container workload
-            if uname == "root" and not p.get("container_id"):
+            # 2. Loại bỏ các process hệ thống (root, service host account aiot-ws1, systemd, daemon) không phải container workload
+            if uname in ("root", "aiot-ws1", "systemd", "daemon") and not p.get("container_id"):
                 continue
 
             # 3. Lấy thông tin thành viên

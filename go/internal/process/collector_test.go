@@ -102,5 +102,15 @@ func TestProcessClassification_Rules(t *testing.T) {
 	if !isWorkload || attr != AttributionVerifiedWorkload {
 		t.Errorf("Kỳ vọng 'jupyter-lab' là Verified Workload, nhận được: %v, %s", isWorkload, attr)
 	}
+
+	// Control plane imports / uvicorn phải luôn bị gắn AttributionSystemProcess
+	isWorkload, attr = IsWorkloadCandidate("python3", "python3 -c 'from app.main import app'", false, 0)
+	if isWorkload || attr != AttributionSystemProcess {
+		t.Errorf("Kỳ vọng python3 import app.main là (false, AttributionSystemProcess), nhận được: %v, %s", isWorkload, attr)
+	}
+
+	if err := CheckSafeGuard(ProcessInfo{PID: 12345, PPID: 100, Name: "python3", CommandLine: "uvicorn server:app"}); err == nil {
+		t.Errorf("Kỳ vọng CheckSafeGuard từ chối tiến trình uvicorn")
+	}
 }
 

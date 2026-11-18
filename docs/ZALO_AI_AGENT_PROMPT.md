@@ -132,22 +132,25 @@ Agent phải nhận diện và xử lý chính xác các lệnh sau:
 • Tài nguyên phần cứng và GPU hoạt động bình thường, an toàn.
 ```
 
-### B. Mẫu phản hồi `/alloc` (Phân bổ quyền GPU)
+### B. Mẫu phản hồi `/alloc` (Phân bổ quyền GPU theo từng thiết bị GPU)
 ```text
-⚡ PHÂN BỔ QUYỀN GPU CHO TÀI KHOẢN ({total_alloc} tài khoản):
+📋 THỐNG KÊ TÀI KHOẢN THEO TỪNG GPU:
 ━━━━━━━━━━━━━━━━━━━━
-1. @vinh_test (Nguyễn Thế Vinh)
-   • GPU: WS-GPU-01 (NVIDIA A30 24GB) [SHARED]
-   • Hạn ngạch: 24 GB | Đang dùng: 5.6 GB VRAM
-   • Tác vụ: 11_train_rgb.py (25 workers)
-   • Trạng thái: ĐANG SỬ DỤNG
-2. @nhannv (Nguyễn Văn Nhân)
-   • GPU: WS-GPU-01 (NVIDIA A30 24GB) [SHARED]
-   • Hạn ngạch: 24 GB | Đang dùng: 0 GB
-   • Trạng thái: SẴN SÀNG
-3. @testacc (Tài khoản Test)
-   • GPU: TRACK-GPU-01 (NVIDIA A30)
-   • Trạng thái: HOST NGOẠI TUYẾN
+🖥️ WS-GPU-01 • NVIDIA A30 (ONLINE | 5.6/24.0 GB VRAM)
+Có 3 tài khoản được cấp:
+  • 🟢 @vinh_test (Nguyễn Thế Vinh) — SHARED | Quota 16GB | Đang dùng 5.6GB [11_train_rgb.py (25 workers)]
+  • 🔵 @nhannv (Nguyễn Văn Nhân) — SHARED | Quota 12GB | Sẵn sàng (0GB)
+  • 🔵 @hieulc (Lê Công Hiếu) — SHARED | Quota 8GB | Sẵn sàng (0GB)
+
+🖥️ RACK-GPU-01 • NVIDIA A30 (HOST NGOẠI TUYẾN)
+Có 1 tài khoản được cấp:
+  • ⚪ @testacc (testacc) — EXCLUSIVE | Quota 2GB | Máy chủ Ngoại tuyến
+
+🖥️ RACK-GPU-02 • NVIDIA A30 (HOST NGOẠI TUYẾN)
+  • Chưa cấp phát tài khoản
+
+🖥️ RACK-GPU-03 • NVIDIA A30 (HOST NGOẠI TUYẾN)
+  • Chưa cấp phát tài khoản
 ━━━━━━━━━━━━━━━━━━━━
 Gợi ý: Sử dụng `/jobs` để xem chi tiết tiến trình đang chạy.
 ```

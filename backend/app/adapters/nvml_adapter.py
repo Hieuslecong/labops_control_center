@@ -178,9 +178,9 @@ class NvmlAdapter:
                                         ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
                                         text=True, timeout=1
                                     )
-                                    temp = int(res_t.strip().splitlines()[0])
+                                    temp = round(float(res_t.strip().splitlines()[0]))
                                 except Exception:
-                                    temp = 64
+                                    temp = 0
 
                             gpus.append({
                                 "index": g.get("index", 0),

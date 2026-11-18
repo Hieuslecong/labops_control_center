@@ -56,9 +56,12 @@ export function JobsMonitoringView() {
             ref: p.ref ? String(p.ref) : undefined,
             username: String(p.username || 'unknown'),
             fullName: String(p.full_name || `@${String(p.username || 'unknown')}`),
-            serverId: ((p.host_id || p.server_id || 'track') as ComputeJob['serverId']),
-            serverName: String(p.server_name || 'Server 01 — Server Rack'),
-            workspace: String(p.workspace || (p.container_id ? `docker-${String(p.container_id)}` : 'Trực tiếp trên Host')),
+            serverId: (p.host_id || p.server_id || 'workstation') as ComputeJob['serverId'],
+            serverName: String(p.server_name || 'Server 02 — Workstation'),
+            workspace: String(
+              p.workspace ||
+                (p.container_id ? `docker-${String(p.container_id)}` : 'Trực tiếp trên Host')
+            ),
             pid: Number(p.pid),
             ppid: p.ppid ? Number(p.ppid) : undefined,
             script: String(p.script_display || p.name || 'cmd'),
@@ -162,7 +165,8 @@ export function JobsMonitoringView() {
         if (classificationFilter === 'RESEARCH_JOB') {
           if (j.classification !== 'RESEARCH_JOB') return false;
         } else if (classificationFilter === 'MEMBER_PROCESS') {
-          if (j.classification !== 'MEMBER_PROCESS' && j.classification !== 'RESEARCH_JOB') return false;
+          if (j.classification !== 'MEMBER_PROCESS' && j.classification !== 'RESEARCH_JOB')
+            return false;
         } else if (classificationFilter === 'GPU_PROCESS') {
           if (!j.isGpu && j.vramUsedMb <= 0) return false;
         } else if (classificationFilter === 'SYSTEM_PROCESS') {
@@ -232,7 +236,9 @@ export function JobsMonitoringView() {
             onClick={() => setIsAutoRefresh(!isAutoRefresh)}
             className={`h-7 text-xs px-2.5 ${isAutoRefresh ? 'border-emerald-500 text-emerald-600' : ''}`}
           >
-            <span className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`} />
+            <span
+              className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`}
+            />
             {isAutoRefresh ? 'Tự cập nhật 4s' : 'Đã tạm dừng'}
           </Button>
 
@@ -254,7 +260,10 @@ export function JobsMonitoringView() {
         <div className='p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-800 dark:text-blue-200 text-xs flex items-center gap-2'>
           <Icons.info className='size-4 text-blue-500 shrink-0' />
           <span>
-            <strong>Chế độ Chẩn đoán Quản trị:</strong> Đang hiển thị toàn bộ <strong>{allProcesses.length}</strong> tiến trình cấp hệ điều hành (bao gồm system daemons, desktop services và IDE tooling phụ trợ). Không khuyến nghị can thiệp vào các tiến trình hệ thống.
+            <strong>Chế độ Chẩn đoán Quản trị:</strong> Đang hiển thị toàn bộ{' '}
+            <strong>{allProcesses.length}</strong> tiến trình cấp hệ điều hành (bao gồm system
+            daemons, desktop services và IDE tooling phụ trợ). Không khuyến nghị can thiệp vào các
+            tiến trình hệ thống.
           </span>
         </div>
       )}
@@ -292,10 +301,17 @@ export function JobsMonitoringView() {
             {viewMode === 'workloads' ? 'Tác vụ CPU thuần' : 'Tiến trình Thành viên'}
           </span>
           <div className='text-2xl font-bold mt-1 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
-            {viewMode === 'workloads' ? <Icons.cpu className='size-5' /> : <Icons.users className='size-5' />}
+            {viewMode === 'workloads' ? (
+              <Icons.cpu className='size-5' />
+            ) : (
+              <Icons.users className='size-5' />
+            )}
             {viewMode === 'workloads'
               ? cpuWorkloadsCount
-              : allProcesses.filter((p) => p.classification === 'MEMBER_PROCESS' || p.classification === 'RESEARCH_JOB').length}
+              : allProcesses.filter(
+                  (p) =>
+                    p.classification === 'MEMBER_PROCESS' || p.classification === 'RESEARCH_JOB'
+                ).length}
           </div>
           <span className='text-[10px] text-muted-foreground'>
             {viewMode === 'workloads' ? 'Xử lý trên đa luồng CPU' : 'Tiến trình user space'}
@@ -312,7 +328,10 @@ export function JobsMonitoringView() {
           </div>
           <span className='text-[10px] text-muted-foreground truncate'>
             {userCounts.length > 0
-              ? userCounts.slice(0, 3).map(([u]) => `@${u}`).join(', ')
+              ? userCounts
+                  .slice(0, 3)
+                  .map(([u]) => `@${u}`)
+                  .join(', ')
               : 'Chưa có hoạt động'}
             {userCounts.length > 3 ? '...' : ''}
           </span>
@@ -335,7 +354,9 @@ export function JobsMonitoringView() {
         {viewMode === 'diagnostics' && (
           <div className='flex flex-wrap items-center justify-between gap-2 pb-2 border-b'>
             <div className='flex items-center gap-1.5 flex-wrap'>
-              <span className='text-[11px] font-semibold text-muted-foreground mr-1'>Phân loại:</span>
+              <span className='text-[11px] font-semibold text-muted-foreground mr-1'>
+                Phân loại:
+              </span>
               <Button
                 size='sm'
                 variant={classificationFilter === 'all' ? 'default' : 'outline'}
@@ -483,7 +504,9 @@ export function JobsMonitoringView() {
                 ) : (
                   filteredItems.map((item) => {
                     const isGpu = Boolean(item.isGpu || item.vramUsedMb > 0);
-                    const isProtected = Boolean(item.isProtected || item.classification === 'SYSTEM_PROCESS');
+                    const isProtected = Boolean(
+                      item.isProtected || item.classification === 'SYSTEM_PROCESS'
+                    );
 
                     return (
                       <tr
@@ -511,7 +534,10 @@ export function JobsMonitoringView() {
                           <Badge variant='outline' className='font-mono text-[10px] uppercase'>
                             {item.serverId === 'track' ? 'Server 01 — Rack' : item.serverId}
                           </Badge>
-                          <div className='text-[11px] text-muted-foreground font-mono mt-0.5 truncate max-w-[150px]' title={item.workspace}>
+                          <div
+                            className='text-[11px] text-muted-foreground font-mono mt-0.5 truncate max-w-[150px]'
+                            title={item.workspace}
+                          >
                             {item.workspace}
                           </div>
                         </td>
@@ -523,7 +549,10 @@ export function JobsMonitoringView() {
                               PID: {item.pid}
                             </span>
                             {item.childrenCount && item.childrenCount > 0 ? (
-                              <Badge variant='secondary' className='text-[10px] px-1.5 py-0 h-4 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium'>
+                              <Badge
+                                variant='secondary'
+                                className='text-[10px] px-1.5 py-0 h-4 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium'
+                              >
                                 +{item.childrenCount} tiến trình con
                               </Badge>
                             ) : null}
@@ -544,22 +573,34 @@ export function JobsMonitoringView() {
                         {/* Cột 4: Phân loại */}
                         <td className='py-3 px-3'>
                           {item.classification === 'RESEARCH_JOB' && (
-                            <Badge variant='outline' className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-medium'>
+                            <Badge
+                              variant='outline'
+                              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-medium'
+                            >
                               Tác vụ AI
                             </Badge>
                           )}
                           {item.classification === 'GPU_PROCESS' && (
-                            <Badge variant='outline' className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+                            <Badge
+                              variant='outline'
+                              className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'
+                            >
                               Chiếm GPU
                             </Badge>
                           )}
                           {item.classification === 'MEMBER_PROCESS' && (
-                            <Badge variant='outline' className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-medium'>
+                            <Badge
+                              variant='outline'
+                              className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-medium'
+                            >
                               Thành viên
                             </Badge>
                           )}
                           {item.classification === 'SYSTEM_PROCESS' && (
-                            <Badge variant='secondary' className='text-zinc-600 dark:text-zinc-400 text-[10px] font-medium'>
+                            <Badge
+                              variant='secondary'
+                              className='text-zinc-600 dark:text-zinc-400 text-[10px] font-medium'
+                            >
                               Hệ thống
                             </Badge>
                           )}
@@ -572,9 +613,13 @@ export function JobsMonitoringView() {
 
                         {/* Cột 5: Tải CPU / RAM */}
                         <td className='py-3 px-3 font-mono text-[11px]'>
-                          <div className='font-semibold text-foreground'>{item.cpuPercent > 0 ? `${item.cpuPercent}% CPU` : '-'}</div>
+                          <div className='font-semibold text-foreground'>
+                            {item.cpuPercent > 0 ? `${item.cpuPercent}% CPU` : '-'}
+                          </div>
                           <div className='text-muted-foreground'>
-                            {item.ramUsedMb > 0 ? `${(item.ramUsedMb / 1024).toFixed(1)} GB RAM` : '-'}
+                            {item.ramUsedMb > 0
+                              ? `${(item.ramUsedMb / 1024).toFixed(1)} GB RAM`
+                              : '-'}
                           </div>
                         </td>
 
@@ -585,7 +630,9 @@ export function JobsMonitoringView() {
                               <span className='font-bold text-indigo-600 dark:text-indigo-400'>
                                 {(item.vramUsedMb / 1024).toFixed(1)} GB
                               </span>
-                              <span className='text-[10px] text-muted-foreground'>{item.gpuId || 'GPU 0'}</span>
+                              <span className='text-[10px] text-muted-foreground'>
+                                {item.gpuId || 'GPU 0'}
+                              </span>
                             </div>
                           ) : (
                             <span className='text-muted-foreground'>-</span>
@@ -594,7 +641,9 @@ export function JobsMonitoringView() {
 
                         {/* Cột 7: Thời gian */}
                         <td className='py-3 px-3'>
-                          <div className='font-medium text-foreground'>{item.elapsedTime || '-'}</div>
+                          <div className='font-medium text-foreground'>
+                            {item.elapsedTime || '-'}
+                          </div>
                           <div className='text-[10px] text-muted-foreground'>{item.startTime}</div>
                         </td>
 
@@ -626,7 +675,11 @@ export function JobsMonitoringView() {
                                 setStopOpen(true);
                               }}
                               className='h-7 text-xs px-2 text-amber-600 hover:bg-amber-50 hover:text-amber-700 border-amber-200 dark:border-amber-900 disabled:opacity-40'
-                              title={isProtected ? 'Tiến trình hệ thống được bảo vệ — Không thể dừng' : 'Dừng an toàn (SIGTERM)'}
+                              title={
+                                isProtected
+                                  ? 'Tiến trình hệ thống được bảo vệ — Không thể dừng'
+                                  : 'Dừng an toàn (SIGTERM)'
+                              }
                             >
                               Dừng
                             </Button>
@@ -641,7 +694,11 @@ export function JobsMonitoringView() {
                                 setKillOpen(true);
                               }}
                               className='h-7 text-xs px-2 text-rose-600 hover:bg-rose-50 hover:text-rose-700 border-rose-200 dark:border-rose-900 disabled:opacity-40'
-                              title={isProtected ? 'Tiến trình hệ thống được bảo vệ — Không thể buộc dừng' : 'Buộc dừng cưỡng chế (SIGKILL)'}
+                              title={
+                                isProtected
+                                  ? 'Tiến trình hệ thống được bảo vệ — Không thể buộc dừng'
+                                  : 'Buộc dừng cưỡng chế (SIGKILL)'
+                              }
                             >
                               Buộc dừng
                             </Button>
@@ -679,11 +736,7 @@ export function JobsMonitoringView() {
         onSuccess={refreshAll}
       />
 
-      <ProcessTreeDialog
-        job={selectedProcess}
-        open={treeOpen}
-        onOpenChange={setTreeOpen}
-      />
+      <ProcessTreeDialog job={selectedProcess} open={treeOpen} onOpenChange={setTreeOpen} />
     </div>
   );
 }

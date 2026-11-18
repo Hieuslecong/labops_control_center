@@ -1,3 +1,4 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
 import React, { useEffect, useState, useTransition } from 'react';
@@ -323,8 +324,8 @@ export function SecurityManagementView() {
                 {requests.length === 0 ? (
                   <tr>
                     <td colSpan={7} className='py-8 text-center text-muted-foreground'>
-                      Chưa có yêu cầu kiểm duyệt kho mã nào. Bấm &quot;Gửi Repo Kiểm duyệt&quot; hoặc
-                      sử dụng CLI `labops clone` trong terminal.
+                      Chưa có yêu cầu kiểm duyệt kho mã nào. Bấm &quot;Gửi Repo Kiểm duyệt&quot;
+                      hoặc sử dụng CLI `labops clone` trong terminal.
                     </td>
                   </tr>
                 ) : (
@@ -667,8 +668,8 @@ export function SecurityManagementView() {
 
               <div className='p-2.5 rounded-lg border bg-muted/20 text-[11px] text-muted-foreground'>
                 Hệ thống sẽ tải snapshot về vùng Quarantine cô lập (No-Exec, giới hạn 500MB), phân
-                tích tĩnh các lỗ hổng CVE và phát hiện rò rỉ khóa bí mật. Nếu đạt chính sách an ninh,
-                mã nguồn sẽ được tự động phân phối vào workspace.
+                tích tĩnh các lỗ hổng CVE và phát hiện rò rỉ khóa bí mật. Nếu đạt chính sách an
+                ninh, mã nguồn sẽ được tự động phân phối vào workspace.
               </div>
             </div>
 

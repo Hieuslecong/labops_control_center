@@ -36,6 +36,67 @@ RESERVED_USERNAMES = {
 }
 APPROVED_MOUNT_PATHS = {"/workspace", "/home", "/data"}
 
+_GPU_ID_ALIASES = {
+    "ws-gpu-01": "workstation-gpu-01",
+    "workstation-gpu-01": "workstation-gpu-01",
+    "rack-gpu-01": "track-gpu-01",
+    "track-gpu-01": "track-gpu-01",
+    "rack-gpu-02": "track-gpu-02",
+    "track-gpu-02": "track-gpu-02",
+    "rack-gpu-03": "track-gpu-03",
+    "track-gpu-03": "track-gpu-03",
+}
+
+CLUSTER_GPU_CATALOG: Dict[str, Dict[str, Any]] = {
+    "workstation-gpu-01": {
+        "gpu_label": "WS-GPU-01",
+        "gpu_model": "NVIDIA A30 (24GB HBM2)",
+        "server_id": "workstation",
+        "server_name": "Server 02 — Workstation (aiot-ws1 • Cục bộ)",
+        "pci_bus_id": "00000000:D8:00.0",
+        "vram_total_mb": 24576,
+    },
+    "track-gpu-01": {
+        "gpu_label": "RACK-GPU-01",
+        "gpu_model": "NVIDIA A30 (24GB HBM2)",
+        "server_id": "track",
+        "server_name": "Server 01 — Server Rack (aiotlab-rack)",
+        "pci_bus_id": "0000:3b:00.0",
+        "vram_total_mb": 24576,
+    },
+    "track-gpu-02": {
+        "gpu_label": "RACK-GPU-02",
+        "gpu_model": "NVIDIA A30 (24GB HBM2)",
+        "server_id": "track",
+        "server_name": "Server 01 — Server Rack (aiotlab-rack)",
+        "pci_bus_id": "0000:5e:00.0",
+        "vram_total_mb": 24576,
+    },
+    "track-gpu-03": {
+        "gpu_label": "RACK-GPU-03",
+        "gpu_model": "NVIDIA A30 (24GB HBM2)",
+        "server_id": "track",
+        "server_name": "Server 01 — Server Rack (aiotlab-rack)",
+        "pci_bus_id": "0000:86:00.0",
+        "vram_total_mb": 24576,
+    },
+}
+
+_USER_DISPLAY_NAMES = {
+    "vinh_test": "Nguyễn Thế Vinh",
+    "nhannv": "Nguyễn Văn Nhân",
+    "hieulc": "Lê Công Hiếu",
+}
+
+
+def canonicalize_gpu_id(raw_gpu_id: Optional[str]) -> str:
+    """Chuẩn hóa định danh GPU (VD: WS-GPU-01 / RACK-GPU-01 -> ID vật lý chuẩn)."""
+    if not raw_gpu_id:
+        return ""
+    cleaned = str(raw_gpu_id).strip()
+    return _GPU_ID_ALIASES.get(cleaned.lower(), cleaned)
+
+
 def validate_linux_username(username: str) -> None:
     if not SAFE_USERNAME_REGEX.match(username):
         raise ValueError(
@@ -79,6 +140,9 @@ class LabOpsDataService:
         )
         self.teleport_adapter = TeleportAdapter()
         self._init_data()
+        for entry in self.audit_logs:
+            if isinstance(entry, dict) and not entry.get("correlation_id"):
+                entry["correlation_id"] = entry.get("correlationId") or f"corr-{entry.get('id', 'legacy')}"
         for member in self.members:
             profile = member.get("wireguard") or {}
             profile.pop("config_content", None)
@@ -1162,20 +1226,198 @@ class LabOpsDataService:
         return {"success": r["state"] in {"RELEASED", "STOP_REQUESTED"}, "state": r["state"],
                 "verification": verification, "reservation": r}
 
+    def _resolve_gpu_metadata(
+        self,
+        gpu_id: str,
+        gpu_obj: Optional[Dict[str, Any]],
+        fallback_server: str = "workstation",
+    ) -> Dict[str, Any]:
+        """Trích xuất metadata chuẩn cho GPU (ưu tiên telemetry trực tiếp, fallback danh mục cụm)."""
+        canonical_id = canonicalize_gpu_id(gpu_id)
+        catalog = CLUSTER_GPU_CATALOG.get(canonical_id, {})
+        if gpu_obj:
+            raw_label = gpu_obj.get("displayLabel") or gpu_obj.get("display_label") or ""
+            if canonical_id.startswith("track-gpu-") and raw_label.upper().startswith("TRACK-GPU-"):
+                gpu_label = catalog.get("gpu_label") or raw_label.replace("TRACK-", "RACK-")
+            else:
+                gpu_label = raw_label or catalog.get("gpu_label") or canonical_id
+            return {
+                "gpu_id": canonical_id,
+                "gpu_label": gpu_label,
+                "gpu_model": gpu_obj.get("model") or catalog.get("gpu_model") or "NVIDIA A30",
+                "server_id": gpu_obj.get("serverId") or gpu_obj.get("server_id") or catalog.get("server_id") or fallback_server,
+                "server_name": gpu_obj.get("serverName") or gpu_obj.get("server_name") or catalog.get("server_name") or "Workstation",
+                "pci_bus_id": gpu_obj.get("pciBusId") or gpu_obj.get("pci_bus_id") or catalog.get("pci_bus_id") or "",
+                "uuid": gpu_obj.get("uuid") or "",
+                "vram_total_mb": int(gpu_obj.get("vramTotalMb") or gpu_obj.get("vram_total_mb") or catalog.get("vram_total_mb") or 24576),
+                "vram_used_mb": int(gpu_obj.get("vramUsedMb") or gpu_obj.get("vram_used_mb") or 0),
+                "gpu_util_percent": int(gpu_obj.get("gpuUtilPercent") or gpu_obj.get("gpu_util_percent") or 0),
+                "temp_celsius": int(round(float(gpu_obj.get("tempCelsius") or gpu_obj.get("temp_celsius") or 0))),
+                "allocation_mode": gpu_obj.get("allocationMode") or gpu_obj.get("allocation_mode") or "SHARED",
+                "is_online": True,
+            }
+        srv_id = catalog.get("server_id") or ("track" if ("rack" in canonical_id or "track" in canonical_id) else fallback_server)
+        return {
+            "gpu_id": canonical_id,
+            "gpu_label": catalog.get("gpu_label") or canonical_id.upper(),
+            "gpu_model": catalog.get("gpu_model") or "NVIDIA A30 (24GB HBM2)",
+            "server_id": srv_id,
+            "server_name": catalog.get("server_name") or (
+                "Server 01 — Server Rack (aiotlab-rack)" if srv_id == "track" else "Server 02 — Workstation (aiot-ws1 • Cục bộ)"
+            ),
+            "pci_bus_id": catalog.get("pci_bus_id") or "",
+            "uuid": "",
+            "vram_total_mb": int(catalog.get("vram_total_mb") or 24576),
+            "vram_used_mb": 0,
+            "gpu_util_percent": 0,
+            "temp_celsius": 0,
+            "allocation_mode": "SHARED",
+            "is_online": False,
+        }
+
+    def _summarize_gpu_workload(
+        self,
+        live_work: Optional[Dict[str, Any]],
+        fallback_empty: str = "Chưa có tiến trình",
+    ) -> Dict[str, Any]:
+        """Tổng hợp tên script chính và tổng số worker DataLoader cho các PID GPU của một tài khoản."""
+        if not live_work:
+            return {
+                "worker_count": 0,
+                "script_summary": fallback_empty,
+                "primary_pid": None,
+                "active_processes": [],
+            }
+        import psutil
+
+        pids = [int(p) for p in live_work.get("pids", []) if p]
+        scripts = live_work.get("scripts", [])
+        procs_count = int(live_work.get("processes_count") or len(pids))
+        unique_worker_pids = set(pids)
+        script_name = ""
+
+        for pid in pids:
+            try:
+                proc = psutil.Process(pid)
+                cmd = proc.cmdline()
+                if not script_name:
+                    for arg in cmd:
+                        if arg.endswith(".py") and not arg.startswith("-"):
+                            script_name = os.path.basename(arg)
+                            break
+                for child in proc.children(recursive=True):
+                    unique_worker_pids.add(child.pid)
+            except Exception:
+                continue
+
+        if not script_name and scripts:
+            raw_script = str(scripts[0])
+            # Extract filename inside parentheses if format is "python (11_train_rgb.py)"
+            if "(" in raw_script and raw_script.endswith(")"):
+                inner = raw_script.split("(", 1)[1][:-1].strip()
+                script_name = os.path.basename(inner) if inner else raw_script
+            else:
+                script_name = os.path.basename(raw_script)
+
+        worker_count = max(procs_count, len(unique_worker_pids))
+        if worker_count > 1:
+            script_summary = f"{script_name} ({worker_count} workers)" if script_name else f"{worker_count} workers"
+        else:
+            script_summary = script_name or fallback_empty
+
+        return {
+            "worker_count": worker_count,
+            "script_summary": script_summary,
+            "primary_pid": pids[0] if pids else None,
+            "active_processes": live_work.get("active_processes", []),
+        }
+
+    def _build_gpu_allocation_entry(
+        self,
+        *,
+        member_id: Optional[str],
+        username: str,
+        full_name: str,
+        role: str,
+        gpu_meta: Dict[str, Any],
+        allocation_mode: str,
+        vram_quota_gb: int,
+        live_work: Optional[Dict[str, Any]],
+        reservation: Optional[Dict[str, Any]] = None,
+        fallback_script: str = "Chưa có tiến trình",
+    ) -> Dict[str, Any]:
+        cur_vram = int(live_work["vram_mb"]) if live_work else 0
+        workload = self._summarize_gpu_workload(live_work, fallback_empty=fallback_script)
+        is_gpu_online = bool(gpu_meta.get("is_online"))
+        effective_mode = "EXCLUSIVE" if str(allocation_mode).upper() in ("EXCLUSIVE", "FULL_GPU_EXCLUSIVE") else str(allocation_mode or "SHARED").upper()
+
+        if reservation and reservation.get("job_name") and workload["worker_count"] == 0:
+            workload["script_summary"] = f"[Giữ chỗ] {reservation['job_name']}"
+
+        if cur_vram > 0:
+            status = "IN_USE"
+            status_label = "Đang huấn luyện"
+        elif reservation and is_gpu_online:
+            status = "RESERVED"
+            status_label = "Đang giữ chỗ độc quyền"
+        elif not is_gpu_online:
+            status = "OFFLINE_HOST"
+            status_label = "Máy chủ Ngoại tuyến"
+        else:
+            status = "IDLE"
+            status_label = "Sẵn sàng (Rảnh)"
+
+        vram_gb = round(cur_vram / 1024, 1)
+        return {
+            "id": f"alloc-{username}-{gpu_meta['gpu_id']}",
+            "member_id": member_id,
+            "username": username,
+            "full_name": full_name,
+            "role": role,
+            "gpu_id": gpu_meta["gpu_id"],
+            "gpu_label": gpu_meta["gpu_label"],
+            "gpu_model": gpu_meta["gpu_model"],
+            "server_id": gpu_meta["server_id"],
+            "server_name": gpu_meta["server_name"],
+            "server_status": "online" if is_gpu_online else "offline",
+            "allocation_mode": effective_mode,
+            "vram_quota_gb": int(vram_quota_gb),
+            "vram_used_mb": cur_vram,
+            "current_vram_mb": cur_vram,
+            "vram_used_gb": vram_gb,
+            "current_vram_gb": vram_gb,
+            "process_count": workload["worker_count"],
+            "active_processes_count": workload["worker_count"],
+            "primary_pid": workload["primary_pid"],
+            "primary_script": workload["script_summary"],
+            "workload_description": workload["script_summary"],
+            "active_processes": workload["active_processes"],
+            "status": status,
+            "status_label": status_label,
+            "is_active": status in ("IN_USE", "RESERVED"),
+        }
+
     def get_gpu_account_allocations(self) -> List[Dict[str, Any]]:
         """
         Thống kê chi tiết tài khoản nào đang được cấp quyền cho GPU nào:
-        Kết hợp cấu hình quyền thành viên (gpu_permissions, vram_quota, allocation_mode)
-        với tiến trình và VRAM chiếm dụng thực tế thời gian thực trên từng GPU.
+        Kết hợp cấu hình quyền thành viên (gpu_permissions, vram_quota, allocation_mode),
+        reservation từ GPU Scheduler và tiến trình / VRAM chiếm dụng thực tế thời gian thực.
         """
         allocations: List[Dict[str, Any]] = []
         gpus = self.gpus
-        gpu_map = {g["id"]: g for g in gpus}
+        gpu_map: Dict[str, Dict[str, Any]] = {}
+        uuid_to_gpu_id: Dict[str, str] = {}
+        for g in gpus:
+            canon_id = canonicalize_gpu_id(g.get("id"))
+            if canon_id:
+                gpu_map[canon_id] = g
+                if g.get("uuid"):
+                    uuid_to_gpu_id[g["uuid"]] = canon_id
 
         # Danh sách người dùng hệ thống đang chiếm VRAM thực tế
-        active_gpu_workloads: Dict[Any, Dict[str, Any]] = {}
+        active_gpu_workloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for g in gpus:
-            g_id = g["id"]
+            g_id = canonicalize_gpu_id(g.get("id"))
             for proc in g.get("active_processes", []):
                 u = proc.get("username", "unknown")
                 key = (u, g_id)
@@ -1186,167 +1428,201 @@ class LabOpsDataService:
                         "vram_mb": 0,
                         "processes_count": 0,
                         "scripts": [],
-                        "pids": []
+                        "pids": [],
+                        "active_processes": [],
                     }
-                active_gpu_workloads[key]["vram_mb"] += proc.get("vramMb") or proc.get("vram_mb", 0)
+                proc_vram = int(proc.get("vramMb") or proc.get("vram_mb") or 0)
+                active_gpu_workloads[key]["vram_mb"] += proc_vram
                 active_gpu_workloads[key]["processes_count"] += 1
                 if proc.get("pid"):
                     active_gpu_workloads[key]["pids"].append(proc.get("pid"))
                 s_name = proc.get("name", "")
                 if s_name and s_name not in active_gpu_workloads[key]["scripts"]:
                     active_gpu_workloads[key]["scripts"].append(s_name)
+                active_gpu_workloads[key]["active_processes"].append({
+                    "pid": proc.get("pid", 0),
+                    "name": s_name,
+                    "vramMb": proc_vram,
+                    "cpuPercent": float(proc.get("cpuPercent") or proc.get("cpu_percent") or 0.0),
+                })
 
+        # Reservations đang hoạt động từ GpuScheduler
+        active_reservations_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        try:
+            for r in self.gpu_scheduler.list_reservations():
+                if r.get("state") in ("RESERVED", "STARTING", "RUNNING", "STOP_REQUESTED"):
+                    r_gpu_id = canonicalize_gpu_id(r.get("gpu_id") or uuid_to_gpu_id.get(r.get("gpu_uuid", ""), ""))
+                    owner = r.get("owner") or ""
+                    if owner and r_gpu_id:
+                        active_reservations_by_key[(owner, r_gpu_id)] = r
+        except Exception:
+            pass
+
+        member_by_username = {m.get("username", ""): m for m in self.members if m.get("username")}
         allocated_keys = set()
+
         for m in self.members:
             username = m.get("username", "")
+            if not username:
+                continue
             full_name = m.get("full_name") or username
             role = m.get("role", "RESEARCHER")
             assigned_server = m.get("assigned_server", "workstation")
             perms = m.get("gpu_permissions") or []
-            vram_quota = m.get("vram_quota_gb") or 12
+            vram_quota = int(m.get("vram_quota_gb") or 12)
             mode = m.get("gpu_allocation_mode") or "SHARED"
 
-            for gpu_id in perms:
+            for raw_gpu_id in perms:
+                gpu_id = canonicalize_gpu_id(raw_gpu_id)
+                if not gpu_id or (username, gpu_id) in allocated_keys:
+                    continue
                 allocated_keys.add((username, gpu_id))
-                gpu_obj = gpu_map.get(gpu_id)
+                gpu_meta = self._resolve_gpu_metadata(gpu_id, gpu_map.get(gpu_id), fallback_server=assigned_server)
                 live_work = active_gpu_workloads.get((username, gpu_id))
+                reservation = active_reservations_by_key.get((username, gpu_id))
+                effective_mode = reservation.get("mode", mode) if reservation else mode
 
-                if gpu_obj:
-                    gpu_label = gpu_obj.get("displayLabel") or gpu_obj.get("display_label", gpu_id)
-                    gpu_model = gpu_obj.get("model", "NVIDIA A30")
-                    server_name = gpu_obj.get("serverName") or gpu_obj.get("server_name", "Workstation")
-                    server_id = gpu_obj.get("serverId") or gpu_obj.get("server_id", assigned_server)
-                    is_gpu_online = True
-                else:
-                    srv_prefix = "RACK" if "rack" in gpu_id or "track" in gpu_id else "WS"
-                    gpu_label = f"{srv_prefix}-GPU-01"
-                    gpu_model = "NVIDIA A30 (24GB)"
-                    server_name = "Server 01 — Server Rack (Ngoại tuyến)" if srv_prefix == "RACK" else "Server 02 — Workstation"
-                    server_id = "track" if srv_prefix == "RACK" else "workstation"
-                    is_gpu_online = False
+                allocations.append(self._build_gpu_allocation_entry(
+                    member_id=m.get("id"),
+                    username=username,
+                    full_name=full_name,
+                    role=role,
+                    gpu_meta=gpu_meta,
+                    allocation_mode=effective_mode,
+                    vram_quota_gb=vram_quota,
+                    live_work=live_work,
+                    reservation=reservation,
+                    fallback_script="Chưa có tiến trình",
+                ))
 
-                cur_vram = live_work["vram_mb"] if live_work else 0
-                procs_count = live_work["processes_count"] if live_work else 0
-                scripts = live_work["scripts"] if live_work else []
+        # Bổ sung tài khoản có reservation trên GpuScheduler nhưng chưa có trong gpu_permissions
+        for (owner, res_gpu_id), res_obj in active_reservations_by_key.items():
+            if (owner, res_gpu_id) in allocated_keys:
+                continue
+            allocated_keys.add((owner, res_gpu_id))
+            m = member_by_username.get(owner, {})
+            full_name = m.get("full_name") or _USER_DISPLAY_NAMES.get(owner, f"Nghiên cứu viên @{owner}")
+            gpu_meta = self._resolve_gpu_metadata(res_gpu_id, gpu_map.get(res_gpu_id), fallback_server=m.get("assigned_server", "workstation"))
+            live_work = active_gpu_workloads.get((owner, res_gpu_id))
 
-                if not is_gpu_online:
-                    status = "OFFLINE_HOST"
-                    status_label = "Máy chủ Ngoại tuyến"
-                elif cur_vram > 0:
-                    status = "IN_USE"
-                    status_label = "Đang huấn luyện"
-                else:
-                    status = "IDLE"
-                    status_label = "Sẵn sàng (Rảnh)"
-
-                import psutil
-                pids = live_work.get("pids", []) if live_work else []
-                script_name = ""
-                for pid in pids:
-                    try:
-                        cmd = psutil.Process(pid).cmdline()
-                        for arg in cmd:
-                            if arg.endswith(".py") and not arg.startswith("-"):
-                                script_name = os.path.basename(arg)
-                                break
-                        if script_name:
-                            break
-                    except Exception:
-                        continue
-                if not script_name and scripts:
-                    script_name = os.path.basename(scripts[0])
-                if procs_count > 1:
-                    script_summary = f"{script_name} ({procs_count} workers)" if script_name else f"{procs_count} workers"
-                else:
-                    script_summary = script_name or "Chưa có tiến trình"
-
-                allocations.append({
-                    "id": f"alloc-{username}-{gpu_id}",
-                    "member_id": m.get("id"),
-                    "username": username,
-                    "full_name": full_name,
-                    "role": role,
-                    "gpu_id": gpu_id,
-                    "gpu_label": gpu_label,
-                    "gpu_model": gpu_model,
-                    "server_id": server_id,
-                    "server_name": server_name,
-                    "allocation_mode": mode,
-                    "vram_quota_gb": vram_quota,
-                    "current_vram_mb": cur_vram,
-                    "current_vram_gb": round(cur_vram / 1024, 1),
-                    "active_processes_count": procs_count,
-                    "workload_description": script_summary,
-                    "status": status,
-                    "status_label": status_label,
-                    "is_active": cur_vram > 0
-                })
+            allocations.append(self._build_gpu_allocation_entry(
+                member_id=m.get("id") or f"user-{owner}",
+                username=owner,
+                full_name=full_name,
+                role=m.get("role", "RESEARCHER"),
+                gpu_meta=gpu_meta,
+                allocation_mode=res_obj.get("mode", "EXCLUSIVE"),
+                vram_quota_gb=int(m.get("vram_quota_gb") or 24),
+                live_work=live_work,
+                reservation=res_obj,
+                fallback_script="Đang chờ khởi chạy tác vụ",
+            ))
 
         # Bổ sung các tài khoản hệ thống đang chạy GPU thực tế nhưng chưa có trong danh sách phân quyền tĩnh
         for (u, g_id), live_work in active_gpu_workloads.items():
+            if not u or u.lower() in {"root", "systemd", "daemon", "aiot-ws1", "nobody", "unknown", "chưa xác định"}:
+                continue
             if (u, g_id) in allocated_keys:
                 continue
-            gpu_obj = gpu_map.get(g_id)
-            gpu_label = gpu_obj.get("displayLabel") or gpu_obj.get("display_label", g_id) if gpu_obj else g_id
-            gpu_model = gpu_obj.get("model", "NVIDIA A30") if gpu_obj else "NVIDIA A30"
-            server_name = gpu_obj.get("serverName") or gpu_obj.get("server_name", "Workstation") if gpu_obj else "Workstation"
-            server_id = gpu_obj.get("serverId") or gpu_obj.get("server_id", "workstation") if gpu_obj else "workstation"
+            allocated_keys.add((u, g_id))
+            m = member_by_username.get(u, {})
+            full_name = m.get("full_name") or _USER_DISPLAY_NAMES.get(u, f"Nghiên cứu viên @{u}")
+            gpu_meta = self._resolve_gpu_metadata(g_id, gpu_map.get(g_id))
+            cur_vram = int(live_work["vram_mb"])
 
-            cur_vram = live_work["vram_mb"]
-            procs_count = live_work["processes_count"]
-            scripts = live_work["scripts"]
-            import psutil
-            pids = live_work.get("pids", []) if live_work else []
-            script_name = ""
-            for pid in pids:
-                try:
-                    cmd = psutil.Process(pid).cmdline()
-                    for arg in cmd:
-                        if arg.endswith(".py") and not arg.startswith("-"):
-                            script_name = os.path.basename(arg)
-                            break
-                    if script_name:
-                        break
-                except Exception:
-                    continue
-            if not script_name and scripts:
-                script_name = os.path.basename(scripts[0])
-            if procs_count > 1:
-                script_summary = f"{script_name} ({procs_count} workers)" if script_name else f"{procs_count} workers"
-            else:
-                script_summary = script_name or "Python Workload"
-
-            user_display_names = {
-                "vinh_test": "Nguyễn Thế Vinh",
-                "nhannv": "Nguyễn Văn Nhân",
-                "hieulc": "Lê Công Hiếu"
-            }
-            full_name = user_display_names.get(u, f"Nghiên cứu viên @{u}")
-
-            allocations.append({
-                "id": f"alloc-{u}-{g_id}",
-                "member_id": f"user-{u}",
-                "username": u,
-                "full_name": full_name,
-                "role": "RESEARCHER",
-                "gpu_id": g_id,
-                "gpu_label": gpu_label,
-                "gpu_model": gpu_model,
-                "server_id": server_id,
-                "server_name": server_name,
-                "allocation_mode": "SHARED",
-                "vram_quota_gb": 16 if cur_vram > 10000 else 12,
-                "current_vram_mb": cur_vram,
-                "current_vram_gb": round(cur_vram / 1024, 1),
-                "active_processes_count": procs_count,
-                "workload_description": script_summary,
-                "status": "IN_USE",
-                "status_label": "Đang huấn luyện",
-                "is_active": True
-            })
+            allocations.append(self._build_gpu_allocation_entry(
+                member_id=m.get("id") or f"user-{u}",
+                username=u,
+                full_name=full_name,
+                role=m.get("role", "RESEARCHER"),
+                gpu_meta=gpu_meta,
+                allocation_mode="SHARED",
+                vram_quota_gb=int(m.get("vram_quota_gb") or (16 if cur_vram > 10000 else 12)),
+                live_work=live_work,
+                reservation=None,
+                fallback_script="Python Workload",
+            ))
 
         allocations.sort(key=lambda x: (not x["is_active"], x["status"] == "OFFLINE_HOST", x["gpu_label"], x["username"]))
         return allocations
+
+    def get_gpu_allocations_by_device(self) -> List[Dict[str, Any]]:
+        """
+        Nhóm danh sách phân bổ quyền tài khoản theo từng thiết bị GPU vật lý:
+        "GPU này đang có những tài khoản này, GPU kia đang có các tài khoản kia".
+        """
+        live_gpus = self.gpus
+        flat_allocs = self.get_gpu_account_allocations()
+        groups_by_id: Dict[str, Dict[str, Any]] = {}
+
+        def _ensure_group(gpu_meta: Dict[str, Any]) -> Dict[str, Any]:
+            gid = gpu_meta["gpu_id"]
+            if gid not in groups_by_id:
+                vram_total_mb = int(gpu_meta.get("vram_total_mb") or 24576)
+                vram_used_mb = int(gpu_meta.get("vram_used_mb") or 0)
+                groups_by_id[gid] = {
+                    "gpu_id": gid,
+                    "gpu_label": gpu_meta["gpu_label"],
+                    "gpu_model": gpu_meta["gpu_model"],
+                    "pci_bus_id": gpu_meta.get("pci_bus_id", ""),
+                    "uuid": gpu_meta.get("uuid", ""),
+                    "server_id": gpu_meta["server_id"],
+                    "server_name": gpu_meta["server_name"],
+                    "server_status": "online" if gpu_meta["is_online"] else "offline",
+                    "is_online": bool(gpu_meta["is_online"]),
+                    "allocation_mode": gpu_meta.get("allocation_mode", "SHARED"),
+                    "vram_total_mb": vram_total_mb,
+                    "vram_total_gb": round(vram_total_mb / 1024, 1),
+                    "vram_used_mb": vram_used_mb,
+                    "vram_used_gb": round(vram_used_mb / 1024, 1),
+                    "vram_usage_percent": round((vram_used_mb / vram_total_mb) * 100) if vram_total_mb > 0 else 0,
+                    "gpu_util_percent": int(gpu_meta.get("gpu_util_percent") or 0),
+                    "temp_celsius": int(gpu_meta.get("temp_celsius") or 0),
+                    "total_quota_allocated_gb": 0,
+                    "accounts_count": 0,
+                    "active_accounts_count": 0,
+                    "accounts": [],
+                }
+            return groups_by_id[gid]
+
+        for g in live_gpus:
+            gid = canonicalize_gpu_id(g.get("id"))
+            if gid:
+                meta = self._resolve_gpu_metadata(gid, g)
+                _ensure_group(meta)
+
+        include_cluster_catalog = (
+            not live_gpus
+            or any((g.get("serverId") or g.get("server_id")) in ("workstation", "track") for g in live_gpus)
+            or any(m.get("assigned_server") in ("workstation", "track") for m in self.members)
+        )
+        if include_cluster_catalog:
+            for cat_gid in CLUSTER_GPU_CATALOG:
+                if cat_gid not in groups_by_id:
+                    _ensure_group(self._resolve_gpu_metadata(cat_gid, None))
+
+        for alloc in flat_allocs:
+            gid = canonicalize_gpu_id(alloc.get("gpu_id"))
+            if not gid:
+                continue
+            if gid not in groups_by_id:
+                meta = self._resolve_gpu_metadata(gid, None, fallback_server=alloc.get("server_id", "workstation"))
+                _ensure_group(meta)
+            groups_by_id[gid]["accounts"].append(alloc)
+
+        status_rank = {"IN_USE": 0, "RESERVED": 1, "IDLE": 2, "OFFLINE_HOST": 3}
+        result: List[Dict[str, Any]] = []
+        for grp in groups_by_id.values():
+            grp["accounts"].sort(key=lambda a: (status_rank.get(a.get("status", "IDLE"), 4), a.get("username", "")))
+            grp["accounts_count"] = len(grp["accounts"])
+            grp["active_accounts_count"] = sum(
+                1 for a in grp["accounts"] if a.get("status") in ("IN_USE", "RESERVED")
+            )
+            grp["total_quota_allocated_gb"] = sum(int(a.get("vram_quota_gb") or 0) for a in grp["accounts"])
+            result.append(grp)
+
+        result.sort(key=lambda g: (not g["is_online"], g["accounts_count"] == 0, g["gpu_id"]))
+        return result
 
     def list_processes(
         self,
@@ -2810,7 +3086,19 @@ class LabOpsDataService:
         return self.vpn_manager.get_vpn_system_overview()
 
     def list_all_vpn_devices(self) -> List[Dict[str, Any]]:
-        return self.vpn_manager.primary_provider.list_devices()
+        try:
+            return self.vpn_manager.primary_provider.list_devices()
+        except Exception as e:
+            logger.debug(f"wg-easy offline khi liệt kê thiết bị VPN, dùng danh sách lưu trữ: {e}")
+            cached: List[Dict[str, Any]] = []
+            for m in self.members:
+                wg = m.get("wireguard") or {}
+                for d in wg.get("devices") or []:
+                    item = dict(d)
+                    item.setdefault("owner", m.get("username"))
+                    item["sync_state"] = "CACHED_GATEWAY_OFFLINE"
+                    cached.append(item)
+            return cached
 
     def get_member_devices_synced(self, member_id: str) -> List[Dict[str, Any]]:
         member = self._find_member(member_id)
@@ -2868,6 +3156,7 @@ class LabOpsDataService:
             "target_id": username,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã đăng ký thiết bị mới '{device_name}' (IP VPN: {dev.get('vpn_ip')}) cho @{username} qua wg-easy.",
         })
         self._save_persistent_data()
@@ -2907,6 +3196,7 @@ class LabOpsDataService:
             "target_id": member["username"],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"Đã thu hồi thiết bị '{dev.get('name')}' của @{member['username']} khỏi WireGuard VPN.",
         })
         self._save_persistent_data()
@@ -2938,6 +3228,7 @@ class LabOpsDataService:
             "target_id": member["username"],
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "result": "SUCCESS",
+            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
             "details": f"{'Kích hoạt' if enable else 'Tạm ngưng'} thiết bị '{dev.get('name')}' của @{member['username']}.",
         })
         self._save_persistent_data()

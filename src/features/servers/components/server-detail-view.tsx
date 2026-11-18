@@ -1,3 +1,4 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
 import React, { useState } from 'react';
@@ -9,6 +10,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
 import { CircularGauge } from '@/features/overview/components/circular-gauge';
+import { GpuAccountAllocationMatrix } from '@/features/resources/components/gpu-account-allocation-matrix';
 import { ServerId } from '@/types/labops';
 import { ChartConfig, ChartContainer } from '@/components/ui/chart';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
@@ -53,10 +55,17 @@ export function ServerDetailView() {
     return () => clearInterval(interval);
   }, [fetchLiveState, fetchLiveJobs]);
 
-  const [selectedServerId, setSelectedServerId] = useState<ServerId>('track');
+  const [selectedServerId, setSelectedServerId] = useState<ServerId>('workstation');
   const [jobSearchTerm, setJobSearchTerm] = useState('');
   const [jobResourceFilter, setJobResourceFilter] = useState<'all' | 'gpu' | 'cpu'>('all');
   const [jobUserFilter, setJobUserFilter] = useState('all');
+
+  React.useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get('id');
+    if (q === 'track' || q === 'workstation') {
+      setSelectedServerId(q);
+    }
+  }, []);
 
   const server = servers.find((s) => s.id === selectedServerId) || servers[0];
   const serverGpus = gpus.filter((g) => g.serverId === selectedServerId);
@@ -468,6 +477,9 @@ export function ServerDetailView() {
               })}
             </div>
           )}
+
+          {/* Thống kê tài khoản được cấp cho từng GPU trên máy chủ này */}
+          <GpuAccountAllocationMatrix serverIdFilter={server.id} />
         </TabsContent>
 
         {/* TAB 3: CPU & RAM CHART */}

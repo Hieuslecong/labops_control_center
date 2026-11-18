@@ -25,7 +25,9 @@ var ProtectedProcessNames = map[string]bool{
 var ProtectedCmdKeywords = []string{
 	"labops-agent",
 	"app.main:app",
+	"app.main",
 	"uvicorn app.main",
+	"uvicorn",
 	"backend/app/main.py",
 	"backend/app/main",
 	"app/main.py",

@@ -1,6 +1,7 @@
+/* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -10,6 +11,11 @@ import { useLabOpsStore } from '@/features/labops/store';
 
 export function AuditLogsView() {
   const auditLogs = useLabOpsStore((state) => state.auditLogs);
+  const fetchAuditLogs = useLabOpsStore((state) => state.fetchAuditLogs);
+
+  useEffect(() => {
+    void fetchAuditLogs();
+  }, [fetchAuditLogs]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [resultFilter, setResultFilter] = useState<string>('all');

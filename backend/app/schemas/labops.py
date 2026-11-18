@@ -406,5 +406,5 @@ class AuditLogResponse(BaseSchema):
     target_id: str = Field(alias="targetId")
     timestamp: str
     result: str
-    correlation_id: str = Field(alias="correlationId")
+    correlation_id: str = Field(default="corr-legacy", alias="correlationId")
     details: str

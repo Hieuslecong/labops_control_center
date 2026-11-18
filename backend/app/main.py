@@ -349,6 +349,10 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"detail": "Server not found"})
         elif path == "/api/v1/gpus":
             self._send_json(200, [_format_gpu(g) for g in service.gpus])
+        elif path == "/api/v1/gpus/allocations/by-gpu":
+            self._send_json(200, service.get_gpu_allocations_by_device())
+        elif path == "/api/v1/gpus/allocations":
+            self._send_json(200, service.get_gpu_account_allocations())
         elif path.startswith("/api/v1/gpus/"):
             gpu_id = path.split("/")[4]
             gpu = next((g for g in service.gpus if g["id"] == gpu_id), None)

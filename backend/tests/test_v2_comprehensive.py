@@ -31,7 +31,7 @@ from app.adapters.node_agent_adapter import LocalNodeAgentExecutor, NodeAgentErr
 from app.core.security import issue_token
 from app.main import LabOpsRequestHandler
 from app.services.host_registry import HostRegistry
-from app.services.labops_service import LabOpsDataService
+from app.services.labops_service import LabOpsDataService, service as main_service
 from app.services.vpn_ssh_service import SshKeyRegistry, compute_ssh_fingerprint, validate_wg_public_key
 from app.services.workspace_controller import WorkspaceController, WorkspaceSecurityError
 
@@ -212,9 +212,17 @@ class TestV2ModulesAndSecurity(unittest.TestCase):
 class TestV2HttpNegativeSecurity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._orig_host_registry = main_service.host_registry
+        cls._tmp_dir = tempfile.TemporaryDirectory()
+        main_service.host_registry = HostRegistry(
+            cls._tmp_dir.name,
+            local_host_id=cls._orig_host_registry.local_host_id,
+        )
         try:
             cls.server = ThreadingHTTPServer(("127.0.0.1", 0), LabOpsRequestHandler)
         except PermissionError as exc:
+            main_service.host_registry = cls._orig_host_registry
+            cls._tmp_dir.cleanup()
             raise unittest.SkipTest("sandbox does not permit loopback listeners") from exc
         cls.port = cls.server.server_port
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -224,6 +232,8 @@ class TestV2HttpNegativeSecurity(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.server.server_close()
+        main_service.host_registry = cls._orig_host_registry
+        cls._tmp_dir.cleanup()
 
     def _call(self, method: str, path: str, role=None, username="alice", body=None, origin=None):
         req = Request(f"http://127.0.0.1:{self.port}{path}", method=method)

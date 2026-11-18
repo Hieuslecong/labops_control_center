@@ -11,6 +11,7 @@ import { LabEventsPanel } from './lab-events-panel';
 import { SecuritySummaryPanel } from './security-summary-panel';
 import { MemberRepoHistoryPanel } from './member-repo-history-panel';
 import { GpuAllocationDialog } from './gpu-allocation-dialog';
+import { GpuAccountAllocationMatrix } from '@/features/resources/components/gpu-account-allocation-matrix';
 import { useLabOpsStore } from '@/features/labops/store';
 
 export function OverviewContent() {
@@ -45,6 +46,9 @@ export function OverviewContent() {
 
       {/* SECTION C — 4 Physical GPU Management Cards */}
       <GpuManagementPanel onOpenAllocateDialog={handleOpenAllocate} />
+
+      {/* SECTION C.2 — GPU-Grouped Account Allocation Matrix */}
+      <GpuAccountAllocationMatrix onAllocateGpu={handleOpenAllocate} />
 
       {/* SECTION D — Running Jobs & Process Monitoring Table */}
       <RunningJobsTable />

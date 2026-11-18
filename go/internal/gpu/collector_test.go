@@ -35,3 +35,15 @@ func TestGPUCollector_Collect(t *testing.T) {
 	}
 }
 
+func TestParseNvidiaIntMetric_DecimalValues(t *testing.T) {
+	if got := parseNvidiaIntMetric("89.50"); got != 90 {
+		t.Errorf("Kỳ vọng '89.50' làm tròn thành 90, nhận được: %d", got)
+	}
+	if got := parseNvidiaIntMetric("88.25"); got != 88 {
+		t.Errorf("Kỳ vọng '88.25' làm tròn thành 88, nhận được: %d", got)
+	}
+	if got := parseNvidiaIntMetric("100"); got != 100 {
+		t.Errorf("Kỳ vọng '100' thành 100, nhận được: %d", got)
+	}
+}
+

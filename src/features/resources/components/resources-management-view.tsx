@@ -13,6 +13,8 @@ import { labopsCall, toastVerification } from '@/features/labops/api';
 export function ResourcesManagementView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
+  const storagePools = useLabOpsStore((state) => state.storagePools);
+  const gpuAllocations = useLabOpsStore((state) => state.gpuAllocations);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
@@ -35,19 +37,26 @@ export function ResourcesManagementView() {
   const reportedVramPercent =
     reportedVramMb > 0 ? Math.round((totalUsedVramMb / reportedVramMb) * 100) : 0;
 
+  const totalDiskCapacityGb = storagePools.reduce((acc, p) => acc + (p.capacityGb || 0), 0);
+  const totalDiskUsedGb = storagePools.reduce((acc, p) => acc + (p.usedGb || 0), 0);
+  const totalDiskFreeGb = storagePools.reduce((acc, p) => acc + (p.freeGb || 0), 0);
+  const totalDiskCapacityTb = (totalDiskCapacityGb / 1024).toFixed(2);
+  const totalDiskUsedTb = (totalDiskUsedGb / 1024).toFixed(2);
+  const totalDiskFreeTb = (totalDiskFreeGb / 1024).toFixed(2);
+  const totalDiskUsedPercent =
+    totalDiskCapacityGb > 0 ? Math.round((totalDiskUsedGb / totalDiskCapacityGb) * 100) : 0;
+
   return (
     <div className='flex flex-col gap-5 min-w-0 w-full'>
       {/* Overview Statistics Banner */}
-      <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
+      <div className='grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3'>
         <Card className='p-3.5 bg-card min-w-0'>
           <span className='text-[11px] text-muted-foreground font-medium'>GPU được báo cáo</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.gpu className='size-5 text-primary' />
             {gpus.length} GPU
           </div>
-          <span className='text-[10px] text-muted-foreground'>
-            Số lượng từ telemetry backend
-          </span>
+          <span className='text-[10px] text-muted-foreground'>NVIDIA A30 (aiot-ws1)</span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
@@ -57,9 +66,7 @@ export function ResourcesManagementView() {
           <div className='text-xl font-bold mt-0.5 font-mono text-primary'>
             {Math.round(reportedVramMb / 1024)} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>
-            Dung lượng chưa được xác minh nếu collector không có dữ liệu
-          </span>
+          <span className='text-[10px] text-muted-foreground'>HBM2 24GB Bus D8:00.0</span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
@@ -78,6 +85,29 @@ export function ResourcesManagementView() {
             {reportedFreeVramGb} GB
           </div>
           <span className='text-[10px] text-muted-foreground'>Phần VRAM trống quan sát được</span>
+        </Card>
+
+        <Card className='p-3.5 bg-card min-w-0'>
+          <span className='text-[11px] text-muted-foreground font-medium'>
+            Tổng ổ đĩa nhận diện
+          </span>
+          <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
+            <Icons.database className='size-5 text-primary' />
+            {totalDiskCapacityTb} TB
+          </div>
+          <span className='text-[10px] text-muted-foreground font-mono'>
+            {storagePools.length} Ổ đĩa vật lý (aiot-ws1)
+          </span>
+        </Card>
+
+        <Card className='p-3.5 bg-card min-w-0'>
+          <span className='text-[11px] text-muted-foreground font-medium'>Lưu trữ đã dùng</span>
+          <div className='text-xl font-bold mt-0.5 font-mono text-indigo-600 dark:text-indigo-400'>
+            {totalDiskUsedTb} TB
+          </div>
+          <span className='text-[10px] text-muted-foreground font-mono'>
+            {totalDiskUsedPercent}% dùng • Trống {totalDiskFreeTb} TB
+          </span>
         </Card>
       </div>
 
@@ -318,6 +348,259 @@ export function ResourcesManagementView() {
                     </Button>
                   </div>
                 </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* GPU Account Allocations Table */}
+      <Card className='border bg-card'>
+        <CardHeader className='pb-2 pt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2'>
+          <div>
+            <CardTitle className='text-sm font-bold flex items-center gap-2'>
+              <Icons.users className='size-4 text-primary' />
+              Bảng Thống Kê Phân Bổ Quyền GPU Cho Tài Khoản
+            </CardTitle>
+            <CardDescription className='text-xs'>
+              Thống kê tài khoản thành viên nào đang được cấp cho GPU nào, hạn ngạch VRAM và tác vụ
+              đang chiếm dụng thực tế
+            </CardDescription>
+          </div>
+          <Badge variant='outline' className='font-mono text-[11px] self-start sm:self-auto'>
+            {gpuAllocations.length} Tài khoản được cấu hình
+          </Badge>
+        </CardHeader>
+        <CardContent className='p-0'>
+          <div className='overflow-x-auto'>
+            <table className='w-full text-left text-xs'>
+              <thead>
+                <tr className='border-b text-muted-foreground font-semibold bg-muted/20'>
+                  <th className='py-2.5 px-3'>Thành viên / Tài khoản</th>
+                  <th className='py-2.5 px-3'>Thiết bị GPU Được Cấp</th>
+                  <th className='py-2.5 px-3'>Chế độ</th>
+                  <th className='py-2.5 px-3'>Hạn ngạch VRAM</th>
+                  <th className='py-2.5 px-3'>VRAM Thực Tế</th>
+                  <th className='py-2.5 px-3'>Tác vụ & Workers</th>
+                  <th className='py-2.5 px-3'>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody className='divide-y divide-border/60'>
+                {gpuAllocations.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className='py-8 text-center text-xs text-muted-foreground'>
+                      Chưa có dữ liệu phân bổ quyền GPU cho tài khoản.
+                    </td>
+                  </tr>
+                ) : (
+                  gpuAllocations.map((alloc) => (
+                    <tr
+                      key={`${alloc.username}-${alloc.gpuId}`}
+                      className='hover:bg-muted/30 transition-colors'
+                    >
+                      <td className='py-2.5 px-3'>
+                        <div className='font-bold text-foreground'>{alloc.fullName}</div>
+                        <div className='text-[11px] text-muted-foreground font-mono flex items-center gap-1.5'>
+                          <span>@{alloc.username}</span>
+                          <span className='size-1 rounded-full bg-border' />
+                          <span className='text-[10px] uppercase font-semibold text-primary'>
+                            {alloc.role}
+                          </span>
+                        </div>
+                      </td>
+                      <td className='py-2.5 px-3'>
+                        <Badge variant='default' className='font-mono text-[10px]'>
+                          {alloc.gpuLabel || alloc.gpuId}
+                        </Badge>
+                        <div className='text-[10px] text-muted-foreground font-mono mt-0.5 truncate max-w-[160px]'>
+                          {alloc.serverName}
+                        </div>
+                      </td>
+                      <td className='py-2.5 px-3'>
+                        <Badge
+                          variant={alloc.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'}
+                          className='text-[10px] font-mono'
+                        >
+                          {alloc.allocationMode}
+                        </Badge>
+                      </td>
+                      <td className='py-2.5 px-3 font-mono text-foreground font-semibold'>
+                        {alloc.vramQuotaGb} GB
+                      </td>
+                      <td className='py-2.5 px-3'>
+                        {alloc.vramUsedGb > 0 ? (
+                          <div className='space-y-0.5'>
+                            <span className='font-mono font-bold text-indigo-600 dark:text-indigo-400'>
+                              {alloc.vramUsedGb} GB
+                            </span>
+                            <div className='text-[10px] text-muted-foreground font-mono'>
+                              {alloc.vramUsedMb} MiB
+                            </div>
+                          </div>
+                        ) : (
+                          <span className='text-muted-foreground font-mono text-[11px]'>
+                            0 GB (Trống)
+                          </span>
+                        )}
+                      </td>
+                      <td className='py-2.5 px-3 max-w-xs'>
+                        <div
+                          className='font-mono font-medium text-[11px] text-foreground truncate max-w-[260px]'
+                          title={alloc.primaryScript}
+                        >
+                          {alloc.primaryScript}
+                        </div>
+                        {alloc.processCount > 0 && (
+                          <div className='text-[10px] text-muted-foreground font-mono'>
+                            {alloc.processCount} tiến trình worker con
+                          </div>
+                        )}
+                      </td>
+                      <td className='py-2.5 px-3'>
+                        {alloc.status === 'IN_USE' ? (
+                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+                            <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
+                            ĐANG SỬ DỤNG
+                          </Badge>
+                        ) : alloc.status === 'IDLE' ? (
+                          <Badge
+                            variant='outline'
+                            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                          >
+                            SẴN SÀNG
+                          </Badge>
+                        ) : (
+                          <Badge variant='outline' className='text-muted-foreground text-[10px]'>
+                            HOST NGOẠI TUYẾN
+                          </Badge>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Physical Storage Disks & Pools Overview */}
+      <div className='space-y-3'>
+        <div className='flex items-center justify-between'>
+          <div>
+            <h3 className='text-base font-bold tracking-tight flex items-center gap-2'>
+              <Icons.database className='size-5 text-primary' />
+              Bảng Giám Sát Toàn Bộ Ổ Đĩa Vật Lý ({storagePools.length} Ổ đĩa Nhận diện)
+            </h3>
+            <p className='text-xs text-muted-foreground'>
+              Hệ thống đã nhận diện đầy đủ tất cả các ổ cứng và mảng lưu trữ vật lý trên Workstation
+              (aiot-ws1)
+            </p>
+          </div>
+          <div className='text-right'>
+            <span className='text-xs font-mono font-bold text-foreground'>
+              {totalDiskUsedTb} TB / {totalDiskCapacityTb} TB
+            </span>
+            <span className='text-[11px] text-muted-foreground block font-mono'>
+              {totalDiskUsedPercent}% dùng • Trống {totalDiskFreeTb} TB
+            </span>
+          </div>
+        </div>
+
+        {/* 4 Physical Disk Cards Grid */}
+        <div className='grid grid-cols-1 md:grid-cols-2 gap-3.5'>
+          {storagePools.map((pool) => {
+            const percent =
+              pool.capacityGb > 0 ? Math.round((pool.usedGb / pool.capacityGb) * 100) : 0;
+            const isRoot = pool.id === 'pool-root' || pool.mountPoint === '/';
+            const isMain = pool.isDefault;
+
+            return (
+              <Card
+                key={pool.id}
+                className='p-4 bg-card border relative overflow-hidden flex flex-col justify-between'
+              >
+                {/* Top indicator color */}
+                <div
+                  className={`absolute top-0 left-0 right-0 h-1 ${
+                    percent > 85 ? 'bg-rose-500' : percent > 70 ? 'bg-amber-500' : 'bg-primary'
+                  }`}
+                />
+
+                <div className='space-y-2'>
+                  <div className='flex items-start justify-between gap-2'>
+                    <div>
+                      <div className='flex items-center gap-1.5 flex-wrap'>
+                        <span className='font-bold text-sm text-foreground'>{pool.label}</span>
+                        {isMain && (
+                          <Badge className='bg-primary/10 text-primary border-primary/20 text-[9px] font-semibold'>
+                            MẶC ĐỊNH LƯU TRỮ AI
+                          </Badge>
+                        )}
+                        {isRoot && (
+                          <Badge variant='outline' className='text-[9px] font-mono'>
+                            HỆ THỐNG OS
+                          </Badge>
+                        )}
+                      </div>
+                      <p className='text-xs text-muted-foreground font-mono mt-0.5'>
+                        Mount:{' '}
+                        <span className='text-foreground font-semibold'>{pool.mountPoint}</span> •
+                        Thiết bị: <span className='text-foreground'>{pool.diskIdentifier}</span> •
+                        Định dạng: <span className='uppercase font-semibold'>{pool.driver}</span>
+                      </p>
+                    </div>
+
+                    <div className='text-right shrink-0'>
+                      <span className='font-mono font-bold text-sm text-primary'>
+                        {pool.capacityGb >= 1024
+                          ? `${(pool.capacityGb / 1024).toFixed(2)} TB`
+                          : `${pool.capacityGb} GB`}
+                      </span>
+                      <div className='text-[10px] text-muted-foreground font-mono'>
+                        {percent}% dung lượng
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className='space-y-1 pt-1'>
+                    <div className='w-full bg-muted rounded-full h-2.5 overflow-hidden'>
+                      <div
+                        className={`h-full transition-all ${
+                          percent > 85
+                            ? 'bg-rose-500'
+                            : percent > 70
+                              ? 'bg-amber-500'
+                              : 'bg-primary'
+                        }`}
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
+                    <div className='flex justify-between text-[10px] text-muted-foreground font-mono'>
+                      <span>
+                        Đã dùng:{' '}
+                        {pool.usedGb >= 1024
+                          ? `${(pool.usedGb / 1024).toFixed(2)} TB`
+                          : `${pool.usedGb} GB`}
+                      </span>
+                      <span>
+                        Còn trống:{' '}
+                        {pool.freeGb >= 1024
+                          ? `${(pool.freeGb / 1024).toFixed(2)} TB`
+                          : `${pool.freeGb} GB`}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className='pt-3 mt-2 border-t flex items-center justify-between text-[11px] text-muted-foreground'>
+                  <span className='flex items-center gap-1'>
+                    <span className='size-1.5 rounded-full bg-emerald-500' />
+                    {pool.healthStatus || 'HEALTHY'}
+                  </span>
+                  <span className='font-mono text-[10px]'>{pool.serverName}</span>
+                </div>
               </Card>
             );
           })}

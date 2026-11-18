@@ -97,6 +97,9 @@ class ProcessMonitorAdapter:
                 data = json.dumps(payload).encode("utf-8") if payload else None
                 req = urllib.request.Request(url, data=data, method=method)
                 req.add_header("Content-Type", "application/json")
+                secret_token = os.environ.get("LABOPS_AGENT_SECRET", "labops-local-agent-verified-token-2026")
+                req.add_header("X-LabOps-Agent-Secret", secret_token)
+                req.add_header("Authorization", f"Bearer {secret_token}")
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     if resp.status in (200, 201):
                         return json.loads(resp.read().decode("utf-8"))

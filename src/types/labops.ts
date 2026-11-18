@@ -75,7 +75,13 @@ export interface PhysicalGpu {
   associatedJobs: string[];
 }
 
-export type MemberRole = 'SUPER_ADMIN' | 'LAB_MANAGER' | 'RESEARCHER' | 'STUDENT' | 'GUEST' | 'ADMIN';
+export type MemberRole =
+  | 'SUPER_ADMIN'
+  | 'LAB_MANAGER'
+  | 'RESEARCHER'
+  | 'STUDENT'
+  | 'GUEST'
+  | 'ADMIN';
 export type MemberStatus =
   | 'CREATED'
   | 'PROVISIONING'
@@ -126,7 +132,7 @@ export interface StoragePool {
   label: string;
   diskIdentifier: string; // e.g. "wwn-0x5002538f411b4101"
   mountPoint: string;
-  driver: 'zfs' | 'btrfs' | 'lvm' | 'dir';
+  driver: 'zfs' | 'btrfs' | 'lvm' | 'dir' | 'ext4' | 'xfs';
   capacityGb: number;
   usedGb: number;
   freeGb: number;
@@ -174,7 +180,10 @@ export interface SshCredential {
   expiresAt?: string;
 }
 
-export type SshAuthMode = 'PUBLIC_KEY_AND_PASSWORD' | 'OPENSSH_PUBLIC_KEY' | 'TELEPORT_CERTIFICATE_PENDING';
+export type SshAuthMode =
+  | 'PUBLIC_KEY_AND_PASSWORD'
+  | 'OPENSSH_PUBLIC_KEY'
+  | 'TELEPORT_CERTIFICATE_PENDING';
 export type SshPasswordStatus =
   | 'ACTIVE'
   | 'CHANGE_REQUIRED'
@@ -282,7 +291,14 @@ export interface WireGuardProfile {
   serverPublicKey?: string;
   serverEndpoint?: string;
   allowedSubnets?: string;
-  status: 'ACTIVE' | 'PENDING' | 'PENDING_HANDSHAKE' | 'NOT_CONFIGURED' | 'NOT_VERIFIED' | 'REVOKED' | 'PARTIAL_FAILURE';
+  status:
+    | 'ACTIVE'
+    | 'PENDING'
+    | 'PENDING_HANDSHAKE'
+    | 'NOT_CONFIGURED'
+    | 'NOT_VERIFIED'
+    | 'REVOKED'
+    | 'PARTIAL_FAILURE';
   lastHandshake?: string;
   transferRxBytes?: number;
   transferTxBytes?: number;
@@ -535,4 +551,32 @@ export interface AuditLog {
   result: 'SUCCESS' | 'FAILED' | 'WARNING';
   correlationId: string;
   details: string;
+}
+
+export interface GpuAllocationProcess {
+  pid: number;
+  name: string;
+  vramMb: number;
+  cpuPercent?: number;
+}
+
+export interface GpuAccountAllocation {
+  username: string;
+  fullName: string;
+  role: string;
+  gpuId: string;
+  gpuLabel: string;
+  gpuModel: string;
+  serverId: ServerId;
+  serverName: string;
+  serverStatus: ServerStatus;
+  allocationMode: GpuAllocationMode;
+  vramQuotaGb: number;
+  vramUsedMb: number;
+  vramUsedGb: number;
+  isActive: boolean;
+  status: 'IN_USE' | 'IDLE' | 'OFFLINE_HOST';
+  activeProcesses: GpuAllocationProcess[];
+  processCount: number;
+  primaryScript: string;
 }

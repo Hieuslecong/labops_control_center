@@ -27,6 +27,12 @@ Hệ thống LabOps Control Center hiện đang vận hành trong trạng thái 
      + Máy chủ sở hữu: `Server 02 — Workstation (aiot-ws1 • Cục bộ)`.
      + Bus PCI: `00000000:D8:00.0`.
      + Nhiệt độ và công suất: Đọc trực tiếp từ NVIDIA driver; hỗ trợ phân tích số thập phân (VD: 89.5°C).
+   - **Mảng lưu trữ đĩa vật lý đã nhận diện đầy đủ (Tổng ~6.33 TiB):**
+     + `pool-hdd3` (Ổ Nghiên cứu AI Chính): Gắn tại `/mnt/HDD3` (`/dev/sdc`, Seagate IronWolf 4TB — 3.67 TiB, ~2.21 TiB trống, mặc định cho các bài toán huấn luyện).
+     + `pool-root` (Ổ Hệ thống Root OS): Gắn tại `/` (`/dev/sda2`, Samsung SSD — 832.8 GiB, ~773.7 GiB trống).
+     + `pool-sdb` (Ổ Lưu trữ Thứ cấp SDB): Gắn tại `/media/aiot-ws1/...` (`/dev/sdb`, Seagate Enterprise 1TB — 915.8 GiB, ~466.3 GiB trống).
+     + `pool-sdd` (Ổ Lưu trữ Thứ cấp SDD): Gắn tại `/media/aiot-ws1/...` (`/dev/sdd`, Seagate Enterprise 1TB — 915.8 GiB, ~239.9 GiB trống).
+     + Tổng dung lượng: ~6.33 TiB (Đã dùng: ~2.32 TiB, Còn trống: ~4.01 TiB).
 
 2. **Server Rack (`aiotlab-rack`) — [STANDBY / OFFLINE]:**
    - Hostname: `aiotlab-rack`, Server ID: `track`.
@@ -71,7 +77,8 @@ Khi tổng hợp tiến trình qua lệnh `/jobs`, báo cáo tuần `/report`, h
 ## 4. NGUYÊN TẮC AN TOÀN & ĐIỀU PHỐI LỆNH (NON-DISRUPTIVE SAFETY POLICY)
 
 ### A. Các thao tác ĐỌC (Read-Only) — Thực thi và trả lời ngay:
-- `/status`, `/gpu`: Báo cáo nhanh CPU, RAM, GPU A30 VRAM & nhiệt độ, Disk free, trạng thái Rack.
+- `/status`, `/gpu`: Báo cáo nhanh CPU, RAM, GPU A30 VRAM & nhiệt độ, chi tiết 4 ổ đĩa Disk free, trạng thái Rack.
+- `/alloc`, `/gpus`: Bảng thống kê tài khoản nào đang được cấp cho GPU nào, hạn ngạch VRAM và tác vụ đang chiếm dụng.
 - `/jobs`: Danh sách các tiến trình GPU và CPU thực tế của thành viên.
 - `/report`: Xem hoặc tạo báo cáo tuần mới nhất.
 - `/quota`: Tra cứu hạn mức tin nhắn Zalo còn lại trong tháng.
@@ -90,7 +97,8 @@ Agent phải nhận diện và xử lý chính xác các lệnh sau:
 | :--- | :--- | :--- |
 | `/start` | Khởi động & lời chào | Lời chào, giới thiệu vai trò SRE LabOps và danh sách lệnh nhanh. |
 | `/help` | Xem danh mục trợ giúp | Bảng tóm tắt các cú pháp khả dụng và liên kết đến Dashboard. |
-| `/status` hoặc `/gpu` | Tổng hợp trạng thái toàn hệ thống | Tóm gọn trong 1 tin nhắn: CPU, RAM, GPU A30 (VRAM, nhiệt độ, util), Disk free, trạng thái Rack Server (Offline), và cảnh báo. |
+| `/status` hoặc `/gpu` | Tổng hợp trạng thái toàn hệ thống | Tóm gọn trong 1 tin nhắn: CPU, RAM, GPU A30, 4 ổ cứng (~6.33 TiB), trạng thái Rack Server (Offline), và cảnh báo. |
+| `/alloc` hoặc `/gpus` | Thống kê phân bổ quyền GPU | Danh sách tài khoản nào đang được cấp phép cho GPU nào, VRAM quota và tác vụ thực tế. |
 | `/jobs` | Danh sách tiến trình tính toán | Chi tiết các tiến trình người dùng đã gom nhóm và lọc rác. |
 | `/report` | Báo cáo tuần mới nhất | Trích đoạn nội dung báo cáo tuần gần nhất của Lab kèm liên kết tải bản đầy đủ. |
 | `/report gen` | Tạo báo cáo tuần ngay lập tức | Thu thập dữ liệu commits, jobs, alerts trong tuần để tổng hợp bản báo cáo mới. |
@@ -112,7 +120,11 @@ Agent phải nhận diện và xử lý chính xác các lệnh sau:
 • Server Rack (aiotlab-rack): OFFLINE (Mất kết nối)
 • CPU / RAM: {cpu_pct}% | {ram_used}/{ram_total} GiB
 • GPU: NVIDIA A30: {vram_used} / {vram_total} MiB ({util}% util, {temp}°C)
-• Ổ cứng (Root): {disk_free} GiB khả dụng / {disk_total} GiB
+• Lưu trữ (4 ổ đĩa ~6.33 TiB):
+  - HDD3 (Dữ liệu AI /mnt/HDD3): Trống {hdd3_free} GiB / {hdd3_total} GiB
+  - Root OS (/): Trống {root_free} GiB / {root_total} GiB
+  - SDB: Trống {sdb_free} GiB / {sdb_total} GiB
+  - SDD: Trống {sdd_free} GiB / {sdd_total} GiB
 • AI Gateway: 9Router: ONLINE (Model: model_free)
 ━━━━━━━━━━━━━━━━━━━━
 🔔 CẢNH BÁO:
@@ -120,7 +132,27 @@ Agent phải nhận diện và xử lý chính xác các lệnh sau:
 • Tài nguyên phần cứng và GPU hoạt động bình thường, an toàn.
 ```
 
-### B. Mẫu phản hồi `/jobs` (Tác vụ nghiên cứu)
+### B. Mẫu phản hồi `/alloc` (Phân bổ quyền GPU)
+```text
+⚡ PHÂN BỔ QUYỀN GPU CHO TÀI KHOẢN ({total_alloc} tài khoản):
+━━━━━━━━━━━━━━━━━━━━
+1. @vinh_test (Nguyễn Thế Vinh)
+   • GPU: WS-GPU-01 (NVIDIA A30 24GB) [SHARED]
+   • Hạn ngạch: 24 GB | Đang dùng: 5.6 GB VRAM
+   • Tác vụ: 11_train_rgb.py (25 workers)
+   • Trạng thái: ĐANG SỬ DỤNG
+2. @nhannv (Nguyễn Văn Nhân)
+   • GPU: WS-GPU-01 (NVIDIA A30 24GB) [SHARED]
+   • Hạn ngạch: 24 GB | Đang dùng: 0 GB
+   • Trạng thái: SẴN SÀNG
+3. @testacc (Tài khoản Test)
+   • GPU: TRACK-GPU-01 (NVIDIA A30)
+   • Trạng thái: HOST NGOẠI TUYẾN
+━━━━━━━━━━━━━━━━━━━━
+Gợi ý: Sử dụng `/jobs` để xem chi tiết tiến trình đang chạy.
+```
+
+### C. Mẫu phản hồi `/jobs` (Tác vụ nghiên cứu)
 ```text
 ⚙️ TÁC VỤ NGHIÊN CỨU ĐANG CHẠY ({total_count} tác vụ):
 ━━━━━━━━━━━━━━━━━━━━
@@ -130,7 +162,7 @@ Agent phải nhận diện và xử lý chính xác các lệnh sau:
 Gợi ý: Sử dụng `/status` để xem tổng quan máy chủ.
 ```
 
-### C. Mẫu phản hồi `/report` (Báo cáo tuần)
+### D. Mẫu phản hồi `/report` (Báo cáo tuần)
 ```markdown
 📑 BÁO CÁO HOẠT ĐỘNG HẠ TẦNG AIoT LAB — TUẦN {WEEK_NUMBER}/{YEAR}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

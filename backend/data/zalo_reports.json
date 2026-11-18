@@ -1,5 +1,19 @@
 {
-  "reports": [],
+  "reports": [
+    {
+      "id": "rpt-d08eafea",
+      "title": "Báo cáo tuần LabOps (17/11/2026)",
+      "created_at": "2026-11-17T12:45:22.662606+00:00",
+      "author": "LabOps AI Assistant",
+      "status": "GENERATED",
+      "content": "# BÁO CÁO TUẦN HOẠT ĐỘNG LABOPS — 17/11/2026\n*Được tạo tự động bởi LabOps AI Assistant lúc 19:45 17/11/2026*\n\n## 1. TÌNH TRẠNG HẠ TẦNG VÀ HỆ THỐNG\n- **Workstation aiot-ws1 (Primary)**: ONLINE — CPU/RAM ổn định, 1x NVIDIA A30 24GB đang hoạt động phục vụ nghiên cứu.\n- **Server Rack aiotlab-rack**: OFFLINE — Hiện không thể truy cập mạng từ workstation. Toàn bộ dịch vụ điều khiển đã được chuyển đổi an toàn sang Workstation Primary. *(Dữ liệu telemetry của rack tạm thời đánh dấu thiếu/không cập nhật)*.\n\n## 2. DỰ ÁN & TIẾN TRÌNH TÁC VỤ (JOBS)\n- Số lượng tác vụ GPU đang vận hành: **4 tác vụ**.\n  • PID `3343095` — python (Chiếm dụng: 3504 MiB)\n  • PID `172562` — python (Chiếm dụng: 4958 MiB)\n  • PID `172558` — python (Chiếm dụng: 5078 MiB)\n  • PID `172561` — python (Chiếm dụng: 3340 MiB)\n\n## 3. HOẠT ĐỘNG PHÁT TRIỂN & GITHUB\n- **Nhánh nguồn**: `feature/labops-control-center` -> Nhánh khôi phục: `feature/workstation-recovery`.\n- Các cập nhật commit gần nhất:\n  • [`cab4326`] feat(ai): dynamically load Master Prompt from docs/ZALO_AI_AGENT_PROMPT.md *(aiot-ws1, 19 minutes ago)*\n  • [`0ece7af`] feat(zalo): integrate live polling worker with quota guard and start_all.sh service *(aiot-ws1, 28 minutes ago)*\n  • [`4b5e3b7`] feat(startup): add start_all.sh unified startup script and lock next@16.4.6 *(aiot-ws1, 3 hours ago)*\n  • [`6bc91f9`] fix(deps): upgrade next from 16.4.2 to 16.4.6 to resolve published security advisory *(aiot-ws1, 3 hours ago)*\n  • [`9fde1ad`] feat(recovery): restore workstation primary, add 9router & zalo ai assistant *(aiot-ws1, 4 hours ago)*\n\n## 4. SỰ CỐ & CẢNH BÁO\n- [CẢNH BÁO MỨC CAO] Mất kết nối rack server `aiotlab-rack`. Đã cô lập mTLS tunnel cũ để tránh nghẽn socket.\n- [THÔNG BÁO] Chuyển đổi thành công Control Plane sang `aiot-ws1`, khôi phục 9Router AI Gateway (model `model_free`).\n\n## 5. CÔNG VIỆC HOÀN THÀNH\n- [x] Khảo sát toàn diện hệ thống workstation aiot-ws1 (Debian 13, A30 24GB).\n- [x] Bootstrap môi trường Python venv `backend/.venv` và cài đầy đủ FastAPI dependencies.\n- [x] Cài đặt Bun 1.4.4 và hoàn tất `bun install` cho Next.js 16 Dashboard.\n- [x] Cấu hình 9Router và xác thực kiểm thử model `model_free` thành công.\n- [x] Tích hợp Zalo AI Assistant với bộ hạn ngạch 3.000 tin/tháng an toàn.\n\n## 6. KẾ HOẠCH TIẾP THEO & TỒN ĐỌNG\n- [ ] Phối hợp kiểm tra vật lý cổng mạng và nguồn của rack `aiotlab-rack` khi có nhân sự tại chỗ.\n- [ ] Cấu hình mTLS enrollment tự động nối lại rack sau khi rack hoạt động trở lại.\n- [ ] Giám sát liên tục tài nguyên VRAM của A30 trong các phiên training của nghiên cứu viên.",
+      "summary": {
+        "infrastructure": "Workstation Online / Rack Offline",
+        "running_jobs": 4,
+        "git_commits_count": 5
+      }
+    }
+  ],
   "schedule": {
     "day": "Friday",
     "time": "17:00",

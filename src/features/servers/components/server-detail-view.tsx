@@ -40,6 +40,7 @@ export function ServerDetailView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
   const members = useLabOpsStore((state) => state.members);
+  const storagePools = useLabOpsStore((state) => state.storagePools);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
 
@@ -108,23 +109,36 @@ export function ServerDetailView() {
             <h2 className='text-xl font-bold tracking-tight'>{server.name}</h2>
             <Badge
               variant='outline'
-              className={server.status === 'online'
-                ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
-                : server.status === 'offline'
-                  ? 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
-                  : 'bg-amber-500/10 text-amber-800 border-amber-500/30 font-mono text-[11px]'}
+              className={
+                server.status === 'online'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
+                  : server.status === 'offline'
+                    ? 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
+                    : 'bg-amber-500/10 text-amber-800 border-amber-500/30 font-mono text-[11px]'
+              }
             >
               <span
                 className={`size-2 rounded-full mr-1 ${
-                  server.status === 'online' ? 'bg-emerald-500 animate-pulse' : server.status === 'offline' ? 'bg-destructive' : 'bg-amber-500'
+                  server.status === 'online'
+                    ? 'bg-emerald-500 animate-pulse'
+                    : server.status === 'offline'
+                      ? 'bg-destructive'
+                      : 'bg-amber-500'
                 }`}
               ></span>
-              {server.status === 'online' ? 'TRỰC TUYẾN' : server.status === 'offline' ? 'MẤT KẾT NỐI' : 'CHƯA XÁC MINH'}
+              {server.status === 'online'
+                ? 'TRỰC TUYẾN'
+                : server.status === 'offline'
+                  ? 'MẤT KẾT NỐI'
+                  : 'CHƯA XÁC MINH'}
             </Badge>
             <Badge variant='secondary' className='font-mono text-xs'>
               {server.hostname}
             </Badge>
-            <Badge variant='outline' className='bg-primary/5 text-primary border-primary/20 font-mono text-[11px] flex items-center gap-1'>
+            <Badge
+              variant='outline'
+              className='bg-primary/5 text-primary border-primary/20 font-mono text-[11px] flex items-center gap-1'
+            >
               <Icons.shield className='size-3 text-emerald-500' />
               Zero-Trust mTLS Mesh
             </Badge>
@@ -136,10 +150,15 @@ export function ServerDetailView() {
             • Uptime: {server.uptime}
           </p>
           {server.status !== 'online' && (
-            <div className={`mt-2.5 p-2 rounded-md border text-xs flex items-center gap-2 ${server.status === 'offline' ? 'bg-destructive/10 border-destructive/20 text-destructive' : 'bg-amber-500/10 border-amber-500/20 text-amber-800'}`}>
+            <div
+              className={`mt-2.5 p-2 rounded-md border text-xs flex items-center gap-2 ${server.status === 'offline' ? 'bg-destructive/10 border-destructive/20 text-destructive' : 'bg-amber-500/10 border-amber-500/20 text-amber-800'}`}
+            >
               <Icons.warning className='size-4 shrink-0' />
               <span>
-                <strong>Trạng thái:</strong> {server.status === 'offline' ? 'Backend xác nhận máy chủ không phản hồi.' : 'Chưa có telemetry xác minh cho máy chủ này.'}
+                <strong>Trạng thái:</strong>{' '}
+                {server.status === 'offline'
+                  ? 'Backend xác nhận máy chủ không phản hồi.'
+                  : 'Chưa có telemetry xác minh cho máy chủ này.'}
               </span>
             </div>
           )}
@@ -309,10 +328,14 @@ export function ServerDetailView() {
             <div className='p-8 rounded-lg border border-dashed text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-2 bg-muted/20'>
               <Icons.warning className='size-6 text-amber-500' />
               <span className='font-semibold text-foreground text-sm'>
-                {server.status === 'offline' ? 'Máy chủ không phản hồi' : 'Chưa có GPU được xác minh'}
+                {server.status === 'offline'
+                  ? 'Máy chủ không phản hồi'
+                  : 'Chưa có GPU được xác minh'}
               </span>
               <span className='max-w-md text-[11px]'>
-                {server.status === 'offline' ? 'Kiểm tra kết nối backend tới máy chủ.' : 'Số liệu GPU chưa được xác minh từ agent giám sát.'}
+                {server.status === 'offline'
+                  ? 'Kiểm tra kết nối backend tới máy chủ.'
+                  : 'Số liệu GPU chưa được xác minh từ agent giám sát.'}
               </span>
             </div>
           ) : (
@@ -322,7 +345,9 @@ export function ServerDetailView() {
                   gpu.vramUsedMb > 512 ||
                   gpu.gpuUtilPercent > 0 ||
                   (gpu.activeProcesses && gpu.activeProcesses.length > 0);
-                const vramPercent = gpu.vramTotalMb ? Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100) : 0;
+                const vramPercent = gpu.vramTotalMb
+                  ? Math.round((gpu.vramUsedMb / gpu.vramTotalMb) * 100)
+                  : 0;
 
                 return (
                   <Card
@@ -360,7 +385,8 @@ export function ServerDetailView() {
                       <div className='flex justify-between text-xs mb-1'>
                         <span className='text-muted-foreground font-medium'>Bộ nhớ VRAM:</span>
                         <span className='font-mono font-bold text-foreground'>
-                          {(gpu.vramUsedMb / 1024).toFixed(1)} / {(gpu.vramTotalMb / 1024).toFixed(1)} GB{' '}
+                          {(gpu.vramUsedMb / 1024).toFixed(1)} /{' '}
+                          {(gpu.vramTotalMb / 1024).toFixed(1)} GB{' '}
                           <span className='font-normal text-[11px] text-muted-foreground'>
                             ({vramPercent}%)
                           </span>
@@ -453,66 +479,128 @@ export function ServerDetailView() {
             <CardDescription className='text-xs mb-4'>
               Dữ liệu giám sát thời gian thực từ Netdata Agent
             </CardDescription>
-            {isDemoMode ? <div className='h-[260px] w-full'>
-              <ChartContainer config={cpuRamChartConfig} className='aspect-auto h-[260px] w-full'>
-                <AreaChart data={TIME_SERIES_CPU_RAM}>
-                  <CartesianGrid strokeDasharray='3 3' opacity={0.2} />
-                  <XAxis dataKey='time' tickLine={false} tick={{ fontSize: 11 }} />
-                  <YAxis tickLine={false} tick={{ fontSize: 11 }} unit='%' />
-                  <Tooltip />
-                  <Area
-                    type='monotone'
-                    dataKey='cpu'
-                    stroke='oklch(0.55 0.22 260)'
-                    fill='oklch(0.55 0.22 260 / 0.2)'
-                    name='CPU Util %'
-                    isAnimationActive={false}
-                  />
-                  <Area
-                    type='monotone'
-                    dataKey='ram'
-                    stroke='oklch(0.58 0.22 295)'
-                    fill='oklch(0.58 0.22 295 / 0.2)'
-                    name='RAM Util %'
-                    isAnimationActive={false}
-                  />
-                </AreaChart>
-              </ChartContainer>
-            </div> : <p className='rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground'>Chưa có bộ thu thập lịch sử CPU/RAM đã xác minh.</p>}
+            {isDemoMode ? (
+              <div className='h-[260px] w-full'>
+                <ChartContainer config={cpuRamChartConfig} className='aspect-auto h-[260px] w-full'>
+                  <AreaChart data={TIME_SERIES_CPU_RAM}>
+                    <CartesianGrid strokeDasharray='3 3' opacity={0.2} />
+                    <XAxis dataKey='time' tickLine={false} tick={{ fontSize: 11 }} />
+                    <YAxis tickLine={false} tick={{ fontSize: 11 }} unit='%' />
+                    <Tooltip />
+                    <Area
+                      type='monotone'
+                      dataKey='cpu'
+                      stroke='oklch(0.55 0.22 260)'
+                      fill='oklch(0.55 0.22 260 / 0.2)'
+                      name='CPU Util %'
+                      isAnimationActive={false}
+                    />
+                    <Area
+                      type='monotone'
+                      dataKey='ram'
+                      stroke='oklch(0.58 0.22 295)'
+                      fill='oklch(0.58 0.22 295 / 0.2)'
+                      name='RAM Util %'
+                      isAnimationActive={false}
+                    />
+                  </AreaChart>
+                </ChartContainer>
+              </div>
+            ) : (
+              <p className='rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground'>
+                Chưa có bộ thu thập lịch sử CPU/RAM đã xác minh.
+              </p>
+            )}
           </Card>
         </TabsContent>
 
         {/* TAB 4: STORAGE */}
         <TabsContent value='storage' className='mt-4 space-y-3'>
-          {isDemoMode ? <Card className='p-4 bg-card'>
-            <CardTitle className='text-sm font-bold mb-2'>Trạng thái ZFS Storage Pool</CardTitle>
-            <div className='space-y-2 text-xs'>
-              <div className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'>
-                <div>
-                  <span className='font-bold font-mono text-sm'>pool-nvme-fast</span>
-                  <p className='text-muted-foreground text-[11px]'>
-                    Dung lượng: {server.diskUsedTb} TB / {server.diskTotalTb} TB • RAID-Z2 • Trạng
-                    thái: HEALTHY
+          {(() => {
+            const serverStoragePools = storagePools.filter((p) => p.serverId === server.id);
+            if (serverStoragePools.length === 0) {
+              return (
+                <Card className='p-6 bg-card text-center border-dashed'>
+                  <p className='text-sm text-muted-foreground'>
+                    {server.status === 'offline'
+                      ? 'Máy chủ hiện đang ngoại tuyến (Offline). Thông tin phân vùng đĩa sẽ được tải khi máy chủ hòa mạng lại.'
+                      : 'Chưa phát hiện phân vùng lưu trữ nào được đăng ký cho máy chủ này.'}
                   </p>
+                </Card>
+              );
+            }
+            return (
+              <Card className='p-4 bg-card'>
+                <div className='flex items-center justify-between mb-3'>
+                  <CardTitle className='text-sm font-bold'>
+                    Phân Vùng & Mảng Đĩa Lưu Trữ ({serverStoragePools.length} Ổ đĩa)
+                  </CardTitle>
+                  <span className='text-xs text-muted-foreground font-mono'>
+                    Tổng:{' '}
+                    {(
+                      serverStoragePools.reduce((acc, p) => acc + (p.capacityGb || 0), 0) / 1024
+                    ).toFixed(2)}{' '}
+                    TB
+                  </span>
                 </div>
-                <Badge
-                  variant='outline'
-                  className='text-emerald-600 border-emerald-500/30 text-xs font-mono'
-                >
-                  ONLINE
-                </Badge>
-              </div>
-              <div className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'>
-                <div>
-                  <span className='font-bold font-mono text-sm'>tank/datasets/shared</span>
-                  <p className='text-muted-foreground text-[11px]'>
-                    Tập dữ liệu nghiên cứu dùng chung (ImageNet, C4 Vietnamese, OpenHermes)
-                  </p>
+                <div className='space-y-3 text-xs'>
+                  {serverStoragePools.map((pool) => {
+                    const percent =
+                      pool.capacityGb > 0 ? Math.round((pool.usedGb / pool.capacityGb) * 100) : 0;
+                    return (
+                      <div
+                        key={pool.id}
+                        className='p-3 rounded-lg border bg-muted/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2'
+                      >
+                        <div className='space-y-1 min-w-0'>
+                          <div className='flex items-center gap-2 flex-wrap'>
+                            <span className='font-bold font-mono text-sm text-foreground'>
+                              {pool.label}
+                            </span>
+                            {pool.isDefault && (
+                              <Badge className='bg-primary/10 text-primary border-primary/20 text-[10px]'>
+                                MẶC ĐỊNH LƯU TRỮ
+                              </Badge>
+                            )}
+                            <Badge variant='outline' className='text-[10px] font-mono'>
+                              {pool.driver.toUpperCase()}
+                            </Badge>
+                          </div>
+                          <p className='text-muted-foreground text-[11px] font-mono'>
+                            Gắn tại:{' '}
+                            <span className='text-foreground font-semibold'>{pool.mountPoint}</span>{' '}
+                            • Thiết bị: {pool.diskIdentifier}
+                          </p>
+                          <div className='w-full max-w-md bg-muted rounded-full h-2 overflow-hidden mt-1.5'>
+                            <div
+                              className={`h-full transition-all ${
+                                percent > 85
+                                  ? 'bg-rose-500'
+                                  : percent > 70
+                                    ? 'bg-amber-500'
+                                    : 'bg-primary'
+                              }`}
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className='text-right shrink-0'>
+                          <span className='font-mono font-bold text-sm text-primary'>
+                            {pool.usedGb.toLocaleString('vi-VN')} /{' '}
+                            {pool.capacityGb.toLocaleString('vi-VN')} GB
+                          </span>
+                          <div className='text-[10px] text-muted-foreground font-mono'>
+                            {percent}% đã dùng • Trống {pool.freeGb.toLocaleString('vi-VN')} GB
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <span className='font-mono font-bold text-xs'>1.8 TB</span>
-              </div>
-            </div>
-          </Card> : <Card className='p-4 bg-card text-sm text-muted-foreground'>Thông tin storage pool chưa được xác minh bởi workspace controller.</Card>}
+              </Card>
+            );
+          })()}
         </TabsContent>
 
         {/* TAB 5: WORKSPACES */}
@@ -541,7 +629,11 @@ export function ServerDetailView() {
                   </div>
                   <Badge
                     variant='outline'
-                    className={m.workspaceStatus === 'VERIFIED' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]' : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px]'}
+                    className={
+                      m.workspaceStatus === 'VERIFIED'
+                        ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                        : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px]'
+                    }
                   >
                     {m.workspaceStatus || 'NOT_VERIFIED'}
                   </Badge>
@@ -553,41 +645,48 @@ export function ServerDetailView() {
 
         {/* TAB 6: SSH */}
         <TabsContent value='ssh' className='mt-4 space-y-3'>
-          {!isDemoMode ? <Card className='p-4 bg-card text-sm text-muted-foreground'>Chưa có collector phiên Teleport đã xác minh. Các phiên SSH host cũ không được hiển thị như phiên Teleport.</Card> : <Card className='p-4 bg-card'>
-            <CardTitle className='text-sm font-bold mb-3'>Phiên SSH Đang Kết Nối</CardTitle>
-            <div className='space-y-2 text-xs'>
-              {serverMembers.filter((m) => m.sshSessionsCount > 0).length === 0 ? (
-                <div className='py-6 text-center text-xs text-muted-foreground border border-dashed rounded-lg'>
-                  Không có phiên SSH nào đang kết nối tới máy chủ này.
-                </div>
-              ) : (
-                serverMembers
-                  .filter((m) => m.sshSessionsCount > 0)
-                  .map((m) => (
-                    <div
-                      key={m.id}
-                      className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
-                    >
-                      <div>
-                        <span className='font-mono font-bold text-foreground'>
-                          ssh {m.username}@{server.vpnIp}
-                        </span>
-                        <div className='text-[11px] text-muted-foreground mt-0.5'>
-                          Người dùng: {m.fullName} • {m.sshSessionsCount} phiên hoạt động • Khóa:{' '}
-                          {m.sshPublicKeyPreview.slice(0, 32)}...
-                        </div>
-                      </div>
-                      <Badge
-                        variant='outline'
-                        className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+          {!isDemoMode ? (
+            <Card className='p-4 bg-card text-sm text-muted-foreground'>
+              Chưa có collector phiên Teleport đã xác minh. Các phiên SSH host cũ không được hiển
+              thị như phiên Teleport.
+            </Card>
+          ) : (
+            <Card className='p-4 bg-card'>
+              <CardTitle className='text-sm font-bold mb-3'>Phiên SSH Đang Kết Nối</CardTitle>
+              <div className='space-y-2 text-xs'>
+                {serverMembers.filter((m) => m.sshSessionsCount > 0).length === 0 ? (
+                  <div className='py-6 text-center text-xs text-muted-foreground border border-dashed rounded-lg'>
+                    Không có phiên SSH nào đang kết nối tới máy chủ này.
+                  </div>
+                ) : (
+                  serverMembers
+                    .filter((m) => m.sshSessionsCount > 0)
+                    .map((m) => (
+                      <div
+                        key={m.id}
+                        className='p-3 rounded-lg border bg-muted/20 flex items-center justify-between'
                       >
-                        ACTIVE
-                      </Badge>
-                    </div>
-                  ))
-              )}
-            </div>
-          </Card>}
+                        <div>
+                          <span className='font-mono font-bold text-foreground'>
+                            ssh {m.username}@{server.vpnIp}
+                          </span>
+                          <div className='text-[11px] text-muted-foreground mt-0.5'>
+                            Người dùng: {m.fullName} • {m.sshSessionsCount} phiên hoạt động • Khóa:{' '}
+                            {m.sshPublicKeyPreview.slice(0, 32)}...
+                          </div>
+                        </div>
+                        <Badge
+                          variant='outline'
+                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                        >
+                          ACTIVE
+                        </Badge>
+                      </div>
+                    ))
+                )}
+              </div>
+            </Card>
+          )}
         </TabsContent>
 
         {/* TAB 7: JOBS */}

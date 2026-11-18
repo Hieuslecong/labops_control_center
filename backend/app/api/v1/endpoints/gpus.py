@@ -14,6 +14,11 @@ async def list_gpus(p: Principal = Depends(require_user)):
     """Danh sách GPU quan sát được động qua NVML trên mọi host đã đăng ký"""
     return service.gpus
 
+@router.get("/allocations", response_model=List[Dict[str, Any]])
+async def list_gpu_allocations(p: Principal = Depends(require_user)):
+    """Danh sách thống kê tài khoản nào đang được cấp quyền cho GPU nào (GPU Permissions & Active Allocations)"""
+    return service.get_gpu_account_allocations()
+
 @router.get("/{gpu_id}", response_model=PhysicalGpuResponse)
 async def get_gpu(gpu_id: str, p: Principal = Depends(require_user)):
     """Get real-time telemetry, temperature, power, and processes for a specific GPU"""

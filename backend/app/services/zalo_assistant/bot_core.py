@@ -36,6 +36,7 @@ class ZaloBotEngine:
         "/jobs": "Danh sách các tác vụ tính toán và tiến trình GPU đang chạy",
         "/report": "Xem hoặc tạo báo cáo tuần tổng hợp hoạt động của Lab",
         "/quota": "Kiểm tra hạn mức tin nhắn Zalo Basic (3.000 tin/tháng) và AI requests",
+        "/alloc": "Bảng thống kê tài khoản nào đang được cấp cho GPU nào (/allocations)",
         "/gpu": "Truy vấn nhanh thông tin GPU (Alias của /status)",
     }
 
@@ -113,6 +114,8 @@ class ZaloBotEngine:
             reply = self._cmd_help()
         elif cmd in ("/status", "/gpu"):
             reply = self._cmd_status()
+        elif cmd in ("/alloc", "/allocations", "/gpus"):
+            reply = self._cmd_allocations()
         elif cmd == "/jobs":
             reply = self._cmd_jobs()
         elif cmd == "/report":
@@ -222,13 +225,48 @@ class ZaloBotEngine:
         except Exception:
             pass
 
-        # 3. Disk Space
+        # 3. Disk Space (Tất cả 4 ổ đĩa vật lý)
         disk_info = "Khả dụng"
         try:
-            total, used, free = shutil.disk_usage("/")
-            disk_info = f"{round(free / (1024**3), 1)} GiB khả dụng / {round(total / (1024**3), 1)} GiB"
+            import psutil
+            total_disk_bytes = 0
+            free_disk_bytes = 0
+            seen_devs = set()
+            disk_breakdown = []
+            parts = psutil.disk_partitions(all=False)
+            for p in parts:
+                dev = p.device
+                mnt = p.mountpoint
+                fstype = p.fstype
+                if not dev or not mnt or not fstype:
+                    continue
+                if dev.startswith("/dev/loop") or fstype in ("vfat", "iso9660", "squashfs", "tmpfs", "devtmpfs", "swap"):
+                    continue
+                if not os.path.exists(mnt) or dev in seen_devs:
+                    continue
+                seen_devs.add(dev)
+                try:
+                    u = psutil.disk_usage(mnt)
+                    total_disk_bytes += u.total
+                    free_disk_bytes += u.free
+                    if "HDD3" in mnt or os.path.basename(dev) == "sdc":
+                        lbl = "/mnt/HDD3 (AI Data)"
+                    elif mnt == "/":
+                        lbl = "/ (Root SSD)"
+                    else:
+                        lbl = os.path.basename(dev).upper()
+                    disk_breakdown.append(f"  • {lbl}: {round(u.free / (1024**3), 1)} GiB trống / {round(u.total / (1024**3), 1)} GiB")
+                except Exception:
+                    continue
+            total_tb = round(total_disk_bytes / (1024**4), 2)
+            free_tb = round(free_disk_bytes / (1024**4), 2)
+            disk_info = f"{free_tb} TiB trống / {total_tb} TiB ({len(disk_breakdown)} ổ đĩa):\n" + "\n".join(disk_breakdown)
         except Exception:
-            pass
+            try:
+                total, used, free = shutil.disk_usage("/")
+                disk_info = f"{round(free / (1024**3), 1)} GiB khả dụng / {round(total / (1024**3), 1)} GiB"
+            except Exception:
+                pass
 
         # 4. 9Router status
         r_health = self.ai_client.check_health()
@@ -255,7 +293,7 @@ class ZaloBotEngine:
             "• Server Rack (aiotlab-rack): OFFLINE (Mất kết nối)\n"
             f"• CPU / RAM: {cpu_pct}% | {ram_used}/{ram_total} GiB\n"
             f"• GPU: {gpu_info}\n"
-            f"• Ổ cứng (Root): {disk_info}\n"
+            f"• Ổ cứng (Toàn bộ):\n{disk_info}\n"
             f"• AI Gateway: {r_str}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "🔔 CẢNH BÁO:\n"
@@ -273,6 +311,32 @@ class ZaloBotEngine:
             lines.append("• Hiện không có tác vụ tính toán của người dùng.")
         lines.append("━━━━━━━━━━━━━━━━━━━━\nGợi ý: Sử dụng `/status` để xem tổng quan máy chủ.")
         return "\n".join(lines)
+
+    def _cmd_allocations(self) -> str:
+        """Thống kê chi tiết tài khoản nào đang được cấp quyền cho GPU nào."""
+        try:
+            from app.services.labops_service import service
+            allocs = service.get_gpu_account_allocations()
+            lines = [
+                "📋 PHÂN BỔ QUYỀN GPU CHO TÀI KHOẢN:",
+                "━━━━━━━━━━━━━━━━━━━━"
+            ]
+            if allocs:
+                for idx, a in enumerate(allocs, 1):
+                    icon = "🟢" if a["status"] == "IN_USE" else ("🔵" if a["status"] == "IDLE" else "⚪")
+                    vram_txt = f"{a['current_vram_gb']}GB VRAM" if a['current_vram_gb'] > 0 else "0GB"
+                    lines.append(
+                        f"{idx}. {icon} @{a['username']} ({a['full_name']})\n"
+                        f"   • GPU: {a['gpu_label']} [{a['allocation_mode']}] (Hạn mức: {a['vram_quota_gb']}GB)\n"
+                        f"   • Thực tế: {vram_txt} | Trạng thái: {a['status_label']}\n"
+                        f"   • Tác vụ: {a['workload_description']}"
+                    )
+            else:
+                lines.append("• Chưa có tài khoản nào được cấp quyền GPU.")
+            lines.append("━━━━━━━━━━━━━━━━━━━━\nGợi ý: Dùng `/jobs` để xem chi tiết tiến trình.")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ Lỗi truy vấn bảng phân bổ GPU: {e}"
 
     def _cmd_report(self, arg: str) -> str:
         # Nếu có chữ "tạo" hoặc "generate" thì tạo mới, ngược lại lấy báo cáo gần nhất

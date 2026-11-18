@@ -114,28 +114,87 @@ class HostMonitorAdapter:
             return {"driver": "Unavailable", "cuda": "Unavailable"}
 
     def _get_disk_telemetry(self) -> Dict[str, Any]:
-        """Inspect real host disk partition containing the workspace/system."""
+        """Inspect all real host disk partitions and physical storage arrays."""
         try:
-            mnt_info = get_real_root_mount_info()
-            probe_path = mnt_info["mount_point"] if os.path.exists(mnt_info["mount_point"]) else "/"
-            usage = psutil.disk_usage(probe_path)
-            # If "/" is tmpfs in a sandbox namespace, fallback to /etc or current directory
-            if mnt_info["device"] != "unknown" and usage.total < 100 * (1024**3) and os.path.exists("/etc"):
-                etc_usage = psutil.disk_usage("/etc")
-                if etc_usage.total > usage.total:
-                    usage = etc_usage
+            total_bytes = 0
+            used_bytes = 0
+            seen_devices = set()
+            partition_summaries = []
 
-            total_bytes = usage.total
-            used_bytes = usage.used
+            # 1. Quét tất cả các phân vùng vật lý qua psutil
+            try:
+                partitions = psutil.disk_partitions(all=False)
+            except Exception:
+                partitions = []
+
+            for p in partitions:
+                dev = p.device
+                mnt = p.mountpoint
+                fstype = p.fstype
+
+                # Bỏ qua loop, swap, vfat (EFI boot), cdrom, ảo
+                if not dev or not mnt or not fstype:
+                    continue
+                if dev.startswith("/dev/loop") or fstype in ("vfat", "iso9660", "squashfs", "tmpfs", "devtmpfs", "swap"):
+                    continue
+                if not os.path.exists(mnt):
+                    continue
+                if dev in seen_devices:
+                    continue
+                seen_devices.add(dev)
+
+                try:
+                    usage = psutil.disk_usage(mnt)
+                    total_bytes += usage.total
+                    used_bytes += usage.used
+                    
+                    if "HDD3" in mnt or os.path.basename(dev) == "sdc":
+                        label = "HDD3 (Dữ liệu AI)"
+                        if os.path.ismount("/mnt/HDD3"):
+                            mnt = "/mnt/HDD3"
+                    elif mnt == "/" or os.path.basename(dev) == "sda2":
+                        label = "Root SSD"
+                    else:
+                        label = os.path.basename(dev).upper()
+
+                    partition_summaries.append({
+                        "device": dev,
+                        "mount_point": mnt,
+                        "label": label,
+                        "fstype": fstype.upper(),
+                        "total_gb": round(usage.total / (1024**3), 1),
+                        "used_gb": round(usage.used / (1024**3), 1),
+                        "free_gb": round(usage.free / (1024**3), 1),
+                        "percent": usage.percent
+                    })
+                except Exception:
+                    continue
+
+            # Fallback nếu không quét được phân vùng nào
+            if total_bytes == 0:
+                mnt_info = get_real_root_mount_info()
+                probe_path = mnt_info["mount_point"] if os.path.exists(mnt_info["mount_point"]) else "/"
+                usage = psutil.disk_usage(probe_path)
+                if mnt_info["device"] != "unknown" and usage.total < 100 * (1024**3) and os.path.exists("/etc"):
+                    etc_usage = psutil.disk_usage("/etc")
+                    if etc_usage.total > usage.total:
+                        usage = etc_usage
+                total_bytes = usage.total
+                used_bytes = usage.used
+
             total_tb = round(total_bytes / (1024**4), 2)
             used_tb = round(used_bytes / (1024**4), 2)
             pct = round((used_bytes / total_bytes) * 100, 1) if total_bytes > 0 else 0.0
+
+            drive_names = [f"{p['label']} ({p['total_gb']}GB)" for p in partition_summaries]
+            disk_type_str = f"{len(partition_summaries)} Ổ đĩa: {', '.join(drive_names)}" if partition_summaries else "EXT4"
 
             return {
                 "disk_total_tb": total_tb,
                 "disk_used_tb": used_tb,
                 "disk_usage_percent": pct,
-                "disk_type": f"{mnt_info['fstype'].upper()} ({mnt_info['device']})"
+                "disk_type": disk_type_str,
+                "partitions": partition_summaries
             }
         except Exception as e:
             logger.warning(f"Failed to query disk telemetry: {e}")
@@ -143,7 +202,8 @@ class HostMonitorAdapter:
                 "disk_total_tb": 0.0,
                 "disk_used_tb": 0.0,
                 "disk_usage_percent": 0.0,
-                "disk_type": "Unavailable"
+                "disk_type": "Unavailable",
+                "partitions": []
             }
 
     def _get_gpu_count(self) -> int:
@@ -236,6 +296,7 @@ class HostMonitorAdapter:
             "disk_used_tb": disk_info["disk_used_tb"],
             "disk_usage_percent": disk_info["disk_usage_percent"],
             "disk_type": disk_info["disk_type"],
+            "partitions": disk_info.get("partitions", []),
             "network_in_mbps": 0,
             "network_out_mbps": 0,
             "gpu_count": self._get_gpu_count(),
@@ -269,6 +330,7 @@ class HostMonitorAdapter:
             "disk_used_tb": 0.0,
             "disk_usage_percent": 0.0,
             "disk_type": "Chưa xác minh",
+            "partitions": [],
             "network_in_mbps": 0,
             "network_out_mbps": 0,
             "gpu_count": 0,

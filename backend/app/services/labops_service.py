@@ -162,65 +162,96 @@ class LabOpsDataService:
                 return []
             import psutil
             try:
-                mnt_info = get_real_root_mount_info()
-                root_u = psutil.disk_usage("/etc" if psutil.disk_usage("/").total < 100 * (1024**3) and os.path.exists("/etc") else "/")
                 local_id = settings.LOCAL_HOST_ID
-                local_name = "Server 01 — Server Rack (aiotlab-rack)" if local_id == "track" else "Server 02 — Workstation (Cục bộ)"
+                local_name = "Server 02 — Workstation (aiot-ws1 • Cục bộ)" if local_id == "workstation" else "Server 01 — Server Rack (aiotlab-rack)"
                 pools = []
-                labops_data_path = getattr(settings, "STORAGE_POOL_DATA_PATH", "/media/LabOps-Data")
-                has_labops_data = os.path.exists(labops_data_path)
+                seen_devices = set()
 
-                if has_labops_data:
-                    data_u = psutil.disk_usage(labops_data_path)
+                # Quét tất cả phân vùng đĩa vật lý thực tế trên máy chủ
+                try:
+                    parts = psutil.disk_partitions(all=False)
+                except Exception:
+                    parts = []
+
+                for p in parts:
+                    dev = p.device
+                    mnt = p.mountpoint
+                    fstype = p.fstype
+                    if not dev or not mnt or not fstype:
+                        continue
+                    if dev.startswith("/dev/loop") or fstype in ("vfat", "iso9660", "squashfs", "tmpfs", "devtmpfs", "swap"):
+                        continue
+                    if not os.path.exists(mnt):
+                        continue
+                    if dev in seen_devices:
+                        continue
+                    seen_devices.add(dev)
+
+                    try:
+                        u = psutil.disk_usage(mnt)
+                        cap = round(u.total / (1024**3), 1)
+                        used = round(u.used / (1024**3), 1)
+                        free = round(u.free / (1024**3), 1)
+
+                        dev_base = os.path.basename(dev)
+                        if mnt == "/" or dev_base == "sda2":
+                            pool_id = "pool-root"
+                            pool_label = f"Ổ đĩa Hệ thống Root ({fstype.upper()} {dev} — {cap} GB)"
+                            is_def = False
+                            health = "ONLINE_LOCAL_ROOT"
+                        elif "HDD3" in mnt or dev_base == "sdc":
+                            pool_id = "pool-hdd3"
+                            if os.path.ismount("/mnt/HDD3"):
+                                mnt = "/mnt/HDD3"
+                            pool_label = f"Ổ đĩa Nghiên cứu AI HDD3 (/mnt/HDD3 — {cap} GB)"
+                            is_def = True
+                            health = "ONLINE_PRIMARY_DATA_ARRAY"
+                        else:
+                            pool_id = f"pool-{dev_base}"
+                            pool_label = f"Ổ đĩa Lưu trữ Thứ cấp {dev_base.upper()} ({dev} — {cap} GB)"
+                            is_def = False
+                            health = "ONLINE_SECONDARY_ARRAY"
+
+                        pools.append({
+                            "id": pool_id,
+                            "server_id": local_id,
+                            "server_name": local_name,
+                            "name": pool_id,
+                            "label": pool_label,
+                            "disk_identifier": dev,
+                            "mount_point": mnt,
+                            "driver": fstype,
+                            "capacity_gb": cap,
+                            "used_gb": used,
+                            "free_gb": free,
+                            "health_status": health,
+                            "is_default": is_def
+                        })
+                    except Exception:
+                        continue
+
+                # Đảm bảo luôn có ít nhất pool-root nếu môi trường sandbox không cho quét disk_partitions
+                if not any(p["id"] == "pool-root" for p in pools):
+                    mnt_info = get_real_root_mount_info()
+                    root_u = psutil.disk_usage("/etc" if psutil.disk_usage("/").total < 100 * (1024**3) and os.path.exists("/etc") else "/")
                     pools.append({
-                        "id": "pool-labops-data",
+                        "id": "pool-root",
                         "server_id": local_id,
                         "server_name": local_name,
-                        "name": "pool-labops-data",
-                        "label": f"Ổ đĩa Dữ liệu Nghiên cứu (/media/LabOps-Data — 37TB)",
-                        "disk_identifier": "/dev/sdb",
-                        "mount_point": labops_data_path,
+                        "name": "pool-root",
+                        "label": f"Ổ đĩa Hệ thống Root ({mnt_info['fstype'].upper()} {mnt_info['device']})",
+                        "disk_identifier": mnt_info["device"],
+                        "mount_point": "/",
                         "driver": "dir",
-                        "capacity_gb": round(data_u.total / (1024**3), 1),
-                        "used_gb": round(data_u.used / (1024**3), 1),
-                        "free_gb": round(data_u.free / (1024**3), 1),
-                        "health_status": "ONLINE_PRIMARY_DATA_ARRAY",
-                        "is_default": True
+                        "capacity_gb": round(root_u.total / (1024**3), 1),
+                        "used_gb": round(root_u.used / (1024**3), 1),
+                        "free_gb": round(root_u.free / (1024**3), 1),
+                        "health_status": "ONLINE_LOCAL_ROOT",
+                        "is_default": not any(p.get("is_default") for p in pools)
                     })
 
-                pools.append({
-                    "id": "pool-root",
-                    "server_id": local_id,
-                    "server_name": local_name,
-                    "name": "pool-root",
-                    "label": f"Ổ đĩa Hệ thống ({mnt_info['fstype'].upper()} {mnt_info['device']})",
-                    "disk_identifier": mnt_info["device"],
-                    "mount_point": "/",
-                    "driver": "dir",
-                    "capacity_gb": round(root_u.total / (1024**3), 1),
-                    "used_gb": round(root_u.used / (1024**3), 1),
-                    "free_gb": round(root_u.free / (1024**3), 1),
-                    "health_status": "ONLINE_LOCAL_FS",
-                    "is_default": not has_labops_data
-                })
-                sdb_path = "/hdd1/hieulc/tmp"
-                if os.path.exists(sdb_path):
-                    sdb_u = psutil.disk_usage(sdb_path)
-                    pools.append({
-                        "id": "pool-data-sdb",
-                        "server_id": "workstation",
-                        "server_name": "Server 02 — Workstation (Cục bộ)",
-                        "name": "pool-data-sdb",
-                        "label": "Ổ cứng Lưu trữ Thứ cấp (/hdd1/hieulc/tmp)",
-                        "disk_identifier": "/dev/sdb",
-                        "mount_point": sdb_path,
-                        "driver": "dir",
-                        "capacity_gb": round(sdb_u.total / (1024**3), 1),
-                        "used_gb": round(sdb_u.used / (1024**3), 1),
-                        "free_gb": round(sdb_u.free / (1024**3), 1),
-                        "health_status": "HEALTHY",
-                        "is_default": False
-                    })
+                # Sắp xếp ưu tiên pool mặc định (HDD3) lên đầu, tiếp đến pool-root, rồi các ổ khác
+                pools.sort(key=lambda x: (not x.get("is_default", False), x["id"] != "pool-root", x["id"]))
                 return pools
             except Exception:
                 return []
@@ -1130,6 +1161,192 @@ class LabOpsDataService:
         self._audit(actor, "JOB_STOP", "JOB", job_id, r["state"], f"Yêu cầu dừng {job_id}; trạng thái {r['state']}")
         return {"success": r["state"] in {"RELEASED", "STOP_REQUESTED"}, "state": r["state"],
                 "verification": verification, "reservation": r}
+
+    def get_gpu_account_allocations(self) -> List[Dict[str, Any]]:
+        """
+        Thống kê chi tiết tài khoản nào đang được cấp quyền cho GPU nào:
+        Kết hợp cấu hình quyền thành viên (gpu_permissions, vram_quota, allocation_mode)
+        với tiến trình và VRAM chiếm dụng thực tế thời gian thực trên từng GPU.
+        """
+        allocations: List[Dict[str, Any]] = []
+        gpus = self.gpus
+        gpu_map = {g["id"]: g for g in gpus}
+
+        # Danh sách người dùng hệ thống đang chiếm VRAM thực tế
+        active_gpu_workloads: Dict[Any, Dict[str, Any]] = {}
+        for g in gpus:
+            g_id = g["id"]
+            for proc in g.get("active_processes", []):
+                u = proc.get("username", "unknown")
+                key = (u, g_id)
+                if key not in active_gpu_workloads:
+                    active_gpu_workloads[key] = {
+                        "username": u,
+                        "gpu_id": g_id,
+                        "vram_mb": 0,
+                        "processes_count": 0,
+                        "scripts": [],
+                        "pids": []
+                    }
+                active_gpu_workloads[key]["vram_mb"] += proc.get("vramMb") or proc.get("vram_mb", 0)
+                active_gpu_workloads[key]["processes_count"] += 1
+                if proc.get("pid"):
+                    active_gpu_workloads[key]["pids"].append(proc.get("pid"))
+                s_name = proc.get("name", "")
+                if s_name and s_name not in active_gpu_workloads[key]["scripts"]:
+                    active_gpu_workloads[key]["scripts"].append(s_name)
+
+        allocated_keys = set()
+        for m in self.members:
+            username = m.get("username", "")
+            full_name = m.get("full_name") or username
+            role = m.get("role", "RESEARCHER")
+            assigned_server = m.get("assigned_server", "workstation")
+            perms = m.get("gpu_permissions") or []
+            vram_quota = m.get("vram_quota_gb") or 12
+            mode = m.get("gpu_allocation_mode") or "SHARED"
+
+            for gpu_id in perms:
+                allocated_keys.add((username, gpu_id))
+                gpu_obj = gpu_map.get(gpu_id)
+                live_work = active_gpu_workloads.get((username, gpu_id))
+
+                if gpu_obj:
+                    gpu_label = gpu_obj.get("displayLabel") or gpu_obj.get("display_label", gpu_id)
+                    gpu_model = gpu_obj.get("model", "NVIDIA A30")
+                    server_name = gpu_obj.get("serverName") or gpu_obj.get("server_name", "Workstation")
+                    server_id = gpu_obj.get("serverId") or gpu_obj.get("server_id", assigned_server)
+                    is_gpu_online = True
+                else:
+                    srv_prefix = "RACK" if "rack" in gpu_id or "track" in gpu_id else "WS"
+                    gpu_label = f"{srv_prefix}-GPU-01"
+                    gpu_model = "NVIDIA A30 (24GB)"
+                    server_name = "Server 01 — Server Rack (Ngoại tuyến)" if srv_prefix == "RACK" else "Server 02 — Workstation"
+                    server_id = "track" if srv_prefix == "RACK" else "workstation"
+                    is_gpu_online = False
+
+                cur_vram = live_work["vram_mb"] if live_work else 0
+                procs_count = live_work["processes_count"] if live_work else 0
+                scripts = live_work["scripts"] if live_work else []
+
+                if not is_gpu_online:
+                    status = "OFFLINE_HOST"
+                    status_label = "Máy chủ Ngoại tuyến"
+                elif cur_vram > 0:
+                    status = "IN_USE"
+                    status_label = "Đang huấn luyện"
+                else:
+                    status = "IDLE"
+                    status_label = "Sẵn sàng (Rảnh)"
+
+                import psutil
+                pids = live_work.get("pids", []) if live_work else []
+                script_name = ""
+                for pid in pids:
+                    try:
+                        cmd = psutil.Process(pid).cmdline()
+                        for arg in cmd:
+                            if arg.endswith(".py") and not arg.startswith("-"):
+                                script_name = os.path.basename(arg)
+                                break
+                        if script_name:
+                            break
+                    except Exception:
+                        continue
+                if not script_name and scripts:
+                    script_name = os.path.basename(scripts[0])
+                if procs_count > 1:
+                    script_summary = f"{script_name} ({procs_count} workers)" if script_name else f"{procs_count} workers"
+                else:
+                    script_summary = script_name or "Chưa có tiến trình"
+
+                allocations.append({
+                    "id": f"alloc-{username}-{gpu_id}",
+                    "member_id": m.get("id"),
+                    "username": username,
+                    "full_name": full_name,
+                    "role": role,
+                    "gpu_id": gpu_id,
+                    "gpu_label": gpu_label,
+                    "gpu_model": gpu_model,
+                    "server_id": server_id,
+                    "server_name": server_name,
+                    "allocation_mode": mode,
+                    "vram_quota_gb": vram_quota,
+                    "current_vram_mb": cur_vram,
+                    "current_vram_gb": round(cur_vram / 1024, 1),
+                    "active_processes_count": procs_count,
+                    "workload_description": script_summary,
+                    "status": status,
+                    "status_label": status_label,
+                    "is_active": cur_vram > 0
+                })
+
+        # Bổ sung các tài khoản hệ thống đang chạy GPU thực tế nhưng chưa có trong danh sách phân quyền tĩnh
+        for (u, g_id), live_work in active_gpu_workloads.items():
+            if (u, g_id) in allocated_keys:
+                continue
+            gpu_obj = gpu_map.get(g_id)
+            gpu_label = gpu_obj.get("displayLabel") or gpu_obj.get("display_label", g_id) if gpu_obj else g_id
+            gpu_model = gpu_obj.get("model", "NVIDIA A30") if gpu_obj else "NVIDIA A30"
+            server_name = gpu_obj.get("serverName") or gpu_obj.get("server_name", "Workstation") if gpu_obj else "Workstation"
+            server_id = gpu_obj.get("serverId") or gpu_obj.get("server_id", "workstation") if gpu_obj else "workstation"
+
+            cur_vram = live_work["vram_mb"]
+            procs_count = live_work["processes_count"]
+            scripts = live_work["scripts"]
+            import psutil
+            pids = live_work.get("pids", []) if live_work else []
+            script_name = ""
+            for pid in pids:
+                try:
+                    cmd = psutil.Process(pid).cmdline()
+                    for arg in cmd:
+                        if arg.endswith(".py") and not arg.startswith("-"):
+                            script_name = os.path.basename(arg)
+                            break
+                    if script_name:
+                        break
+                except Exception:
+                    continue
+            if not script_name and scripts:
+                script_name = os.path.basename(scripts[0])
+            if procs_count > 1:
+                script_summary = f"{script_name} ({procs_count} workers)" if script_name else f"{procs_count} workers"
+            else:
+                script_summary = script_name or "Python Workload"
+
+            user_display_names = {
+                "vinh_test": "Nguyễn Thế Vinh",
+                "nhannv": "Nguyễn Văn Nhân",
+                "hieulc": "Lê Công Hiếu"
+            }
+            full_name = user_display_names.get(u, f"Nghiên cứu viên @{u}")
+
+            allocations.append({
+                "id": f"alloc-{u}-{g_id}",
+                "member_id": f"user-{u}",
+                "username": u,
+                "full_name": full_name,
+                "role": "RESEARCHER",
+                "gpu_id": g_id,
+                "gpu_label": gpu_label,
+                "gpu_model": gpu_model,
+                "server_id": server_id,
+                "server_name": server_name,
+                "allocation_mode": "SHARED",
+                "vram_quota_gb": 16 if cur_vram > 10000 else 12,
+                "current_vram_mb": cur_vram,
+                "current_vram_gb": round(cur_vram / 1024, 1),
+                "active_processes_count": procs_count,
+                "workload_description": script_summary,
+                "status": "IN_USE",
+                "status_label": "Đang huấn luyện",
+                "is_active": True
+            })
+
+        allocations.sort(key=lambda x: (not x["is_active"], x["status"] == "OFFLINE_HOST", x["gpu_label"], x["username"]))
+        return allocations
 
     def list_processes(
         self,

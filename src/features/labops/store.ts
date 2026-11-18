@@ -15,7 +15,10 @@ import {
   SshLoginEvent,
   RealSshSession,
   ServerId,
-  JobStatus
+  ServerStatus,
+  JobStatus,
+  GpuAllocationMode,
+  GpuAccountAllocation
 } from '@/types/labops';
 
 interface LabOpsState {
@@ -32,6 +35,7 @@ interface LabOpsState {
   events: LabEvent[];
   auditLogs: AuditLog[];
   storagePools: StoragePool[];
+  gpuAllocations: GpuAccountAllocation[];
   sshEndpoints: SshEndpoint[];
   storageAllocations: StorageAllocation[];
   sshPolicies: SshAccountPolicy[];
@@ -42,6 +46,8 @@ interface LabOpsState {
   fetchLiveJobs: () => Promise<void>;
   fetchLiveSshSessions: () => Promise<void>;
   fetchAccessMembers: () => Promise<void>;
+  fetchStoragePools: () => Promise<void>;
+  fetchGpuAllocations: () => Promise<void>;
 
   // Computed summary
 
@@ -54,8 +60,16 @@ interface LabOpsState {
   }) => void;
 
   stopJob: (jobId: string) => void;
-  stopProcess: (ref: string, reason?: string, terminateTree?: boolean) => Promise<{ success: boolean; message: string }>;
-  killProcess: (ref: string, reason?: string, killTree?: boolean) => Promise<{ success: boolean; message: string }>;
+  stopProcess: (
+    ref: string,
+    reason?: string,
+    terminateTree?: boolean
+  ) => Promise<{ success: boolean; message: string }>;
+  killProcess: (
+    ref: string,
+    reason?: string,
+    killTree?: boolean
+  ) => Promise<{ success: boolean; message: string }>;
 
   updateSecurityReview: (id: string, status: SecurityReview['status'], reviewer: string) => void;
   addSecurityReview: (repoUrl: string, submitter: string) => void;
@@ -248,49 +262,154 @@ const INITIAL_GPUS: PhysicalGpu[] = [
 
 const INITIAL_STORAGE_POOLS: StoragePool[] = [
   {
-    id: 'pool-nvme-fast',
-    serverId: 'track',
-    serverName: 'Server 01 — Track',
-    name: 'pool-nvme-fast',
-    label: 'SSD NVMe Siêu tốc — Storage Pool A',
-    diskIdentifier: 'wwn-0x5002538f411b4101',
-    mountPoint: '/var/lib/incus/storage-pools/pool-nvme-fast',
-    driver: 'zfs',
-    capacityGb: 8000,
-    usedGb: 4320,
-    freeGb: 3680,
+    id: 'pool-hdd3',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    name: 'pool-hdd3',
+    label: 'Ổ đĩa Nghiên cứu AI HDD3 (/mnt/HDD3 — 3666.5 GB)',
+    diskIdentifier: '/dev/sdc',
+    mountPoint: '/mnt/HDD3',
+    driver: 'ext4',
+    capacityGb: 3666.5,
+    usedGb: 1266.0,
+    freeGb: 2214.2,
     healthStatus: 'HEALTHY',
     isDefault: true
   },
   {
-    id: 'pool-zfs-bulk',
-    serverId: 'track',
-    serverName: 'Server 01 — Track',
-    name: 'pool-zfs-bulk',
-    label: 'HDD Lưu trữ Lớn — Storage Pool B',
-    diskIdentifier: 'wwn-0x5000cca268e31249',
-    mountPoint: '/var/lib/incus/storage-pools/pool-zfs-bulk',
-    driver: 'zfs',
-    capacityGb: 16000,
-    usedGb: 4600,
-    freeGb: 11400,
+    id: 'pool-root',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    name: 'pool-root',
+    label: 'Ổ đĩa Hệ thống Root (EXT4 /dev/sda2 — 832.8 GB)',
+    diskIdentifier: '/dev/sda2',
+    mountPoint: '/',
+    driver: 'ext4',
+    capacityGb: 832.8,
+    usedGb: 16.8,
+    freeGb: 773.7,
     healthStatus: 'HEALTHY',
     isDefault: false
   },
   {
-    id: 'pool-workstation-ssd',
+    id: 'pool-sdb',
     serverId: 'workstation',
-    serverName: 'Server 02 — Workstation',
-    name: 'pool-workstation-ssd',
-    label: 'SSD Doanh nghiệp — Storage Pool A',
-    diskIdentifier: 'wwn-0x5002538f411b5202',
-    mountPoint: '/var/lib/incus/storage-pools/pool-workstation-ssd',
-    driver: 'zfs',
-    capacityGb: 4000,
-    usedGb: 1520,
-    freeGb: 2480,
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    name: 'pool-sdb',
+    label: 'Ổ đĩa Lưu trữ Thứ cấp SDB (/dev/sdb — 915.8 GB)',
+    diskIdentifier: '/dev/sdb',
+    mountPoint: '/media/aiot-ws1/159bacc4-38ae-4adb-bf25-7a5091c308ca',
+    driver: 'ext4',
+    capacityGb: 915.8,
+    usedGb: 403.0,
+    freeGb: 466.3,
     healthStatus: 'HEALTHY',
-    isDefault: true
+    isDefault: false
+  },
+  {
+    id: 'pool-sdd',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    name: 'pool-sdd',
+    label: 'Ổ đĩa Lưu trữ Thứ cấp SDD (/dev/sdd — 915.8 GB)',
+    diskIdentifier: '/dev/sdd',
+    mountPoint: '/media/aiot-ws1/5ce32377-6072-4c07-a066-807e89a5d48b',
+    driver: 'ext4',
+    capacityGb: 915.8,
+    usedGb: 629.3,
+    freeGb: 239.9,
+    healthStatus: 'HEALTHY',
+    isDefault: false
+  }
+];
+
+const INITIAL_GPU_ALLOCATIONS: GpuAccountAllocation[] = [
+  {
+    username: 'vinh_test',
+    fullName: 'Nguyễn Thế Vinh',
+    role: 'RESEARCHER',
+    gpuId: 'workstation-gpu-01',
+    gpuLabel: 'WS-GPU-01',
+    gpuModel: 'NVIDIA A30 (24GB)',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    serverStatus: 'online',
+    allocationMode: 'SHARED',
+    vramQuotaGb: 24,
+    vramUsedMb: 5734,
+    vramUsedGb: 5.6,
+    isActive: true,
+    status: 'IN_USE',
+    activeProcesses: [
+      {
+        pid: 940706,
+        name: '11_train_rgb.py (25 workers)',
+        vramMb: 5734,
+        cpuPercent: 115.0
+      }
+    ],
+    processCount: 25,
+    primaryScript: '11_train_rgb.py (25 workers)'
+  },
+  {
+    username: 'nhannv',
+    fullName: 'Nguyễn Văn Nhân',
+    role: 'RESEARCHER',
+    gpuId: 'workstation-gpu-01',
+    gpuLabel: 'WS-GPU-01',
+    gpuModel: 'NVIDIA A30 (24GB)',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    serverStatus: 'online',
+    allocationMode: 'SHARED',
+    vramQuotaGb: 24,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    isActive: false,
+    status: 'IDLE',
+    activeProcesses: [],
+    processCount: 0,
+    primaryScript: 'Chưa chạy tác vụ'
+  },
+  {
+    username: 'hieulc',
+    fullName: 'Lê Công Hiếu',
+    role: 'SUPER_ADMIN',
+    gpuId: 'workstation-gpu-01',
+    gpuLabel: 'WS-GPU-01',
+    gpuModel: 'NVIDIA A30 (24GB)',
+    serverId: 'workstation',
+    serverName: 'Server 02 — Workstation (aiot-ws1 • Cục bộ)',
+    serverStatus: 'online',
+    allocationMode: 'SHARED',
+    vramQuotaGb: 24,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    isActive: false,
+    status: 'IDLE',
+    activeProcesses: [],
+    processCount: 0,
+    primaryScript: 'Chưa chạy tác vụ'
+  },
+  {
+    username: 'testacc',
+    fullName: 'Tài khoản Kiểm thử',
+    role: 'STUDENT',
+    gpuId: 'track-gpu-01',
+    gpuLabel: 'TRACK-GPU-01',
+    gpuModel: 'NVIDIA A30 24GB HBM2',
+    serverId: 'track',
+    serverName: 'Server 01 — Server Rack (aiotlab-rack)',
+    serverStatus: 'offline',
+    allocationMode: 'SHARED',
+    vramQuotaGb: 12,
+    vramUsedMb: 0,
+    vramUsedGb: 0,
+    isActive: false,
+    status: 'OFFLINE_HOST',
+    activeProcesses: [],
+    processCount: 0,
+    primaryScript: 'Host ngoại tuyến (Rack offline)'
   }
 ];
 
@@ -1598,6 +1717,59 @@ function mapRawGpu(raw: Record<string, unknown>): PhysicalGpu {
   };
 }
 
+function mapRawStoragePool(raw: Record<string, unknown>): StoragePool {
+  const p = raw as Record<string, any>;
+  return {
+    id: String(p.id || ''),
+    serverId: (p.server_id ?? p.serverId ?? 'workstation') as ServerId,
+    serverName: String(p.server_name ?? p.serverName ?? ''),
+    name: String(p.name ?? p.id ?? ''),
+    label: String(p.label ?? p.name ?? ''),
+    diskIdentifier: String(p.disk_identifier ?? p.diskIdentifier ?? ''),
+    mountPoint: String(p.mount_point ?? p.mountPoint ?? ''),
+    driver: (p.driver ?? 'dir') as 'zfs' | 'btrfs' | 'lvm' | 'dir',
+    capacityGb: Number(p.capacity_gb ?? p.capacityGb ?? 0),
+    usedGb: Number(p.used_gb ?? p.usedGb ?? 0),
+    freeGb: Number(p.free_gb ?? p.freeGb ?? 0),
+    healthStatus: (p.health_status ?? p.healthStatus ?? 'HEALTHY') as
+      | 'HEALTHY'
+      | 'DEGRADED'
+      | 'FAULTED',
+    isDefault: Boolean(p.is_default ?? p.isDefault ?? false)
+  };
+}
+
+function mapRawGpuAllocation(raw: Record<string, unknown>): GpuAccountAllocation {
+  const a = raw as Record<string, any>;
+  return {
+    username: String(a.username || ''),
+    fullName: String(a.full_name ?? a.fullName ?? a.username ?? ''),
+    role: String(a.role || 'RESEARCHER'),
+    gpuId: String(a.gpu_id ?? a.gpuId ?? ''),
+    gpuLabel: String(a.gpu_label ?? a.gpuLabel ?? ''),
+    gpuModel: String(a.gpu_model ?? a.gpuModel ?? ''),
+    serverId: (a.server_id ?? a.serverId ?? 'workstation') as ServerId,
+    serverName: String(a.server_name ?? a.serverName ?? ''),
+    serverStatus: (a.server_status ?? a.serverStatus ?? 'online') as ServerStatus,
+    allocationMode: (a.allocation_mode ?? a.allocationMode ?? 'SHARED') as GpuAllocationMode,
+    vramQuotaGb: Number(a.vram_quota_gb ?? a.vramQuotaGb ?? 24),
+    vramUsedMb: Number(a.vram_used_mb ?? a.vramUsedMb ?? 0),
+    vramUsedGb: Number(a.vram_used_gb ?? a.vramUsedGb ?? 0),
+    isActive: Boolean(a.is_active ?? a.isActive ?? false),
+    status: (a.status || 'IDLE') as 'IN_USE' | 'IDLE' | 'OFFLINE_HOST',
+    activeProcesses: Array.isArray(a.active_processes ?? a.activeProcesses)
+      ? (a.active_processes ?? a.activeProcesses).map((proc: any) => ({
+          pid: Number(proc.pid),
+          name: String(proc.name || ''),
+          vramMb: Number(proc.vram_mb ?? proc.vramMb ?? 0),
+          cpuPercent: Number(proc.cpu_percent ?? proc.cpuPercent ?? 0)
+        }))
+      : [],
+    processCount: Number(a.process_count ?? a.processCount ?? 0),
+    primaryScript: String(a.primary_script ?? a.primaryScript ?? 'Chưa chạy tác vụ')
+  };
+}
+
 export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   servers: isDemoMode ? INITIAL_SERVERS : PROD_SERVERS,
   gpus: isDemoMode ? INITIAL_GPUS : [],
@@ -1611,7 +1783,8 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   securityReviews: isDemoMode ? INITIAL_SECURITY_REVIEWS : [],
   events: isDemoMode ? INITIAL_EVENTS : [],
   auditLogs: isDemoMode ? INITIAL_AUDIT_LOGS : [],
-  storagePools: isDemoMode ? INITIAL_STORAGE_POOLS : [],
+  storagePools: INITIAL_STORAGE_POOLS,
+  gpuAllocations: INITIAL_GPU_ALLOCATIONS,
   sshEndpoints: isDemoMode ? INITIAL_SSH_ENDPOINTS : [],
   storageAllocations: isDemoMode ? INITIAL_STORAGE_ALLOCATIONS : [],
   sshPolicies: isDemoMode ? INITIAL_SSH_POLICIES : [],
@@ -1621,23 +1794,33 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
 
   fetchAccessMembers: async () => {
     if (isDemoMode) {
-      set({ memberSyncError: 'Dữ liệu thành viên đang ở chế độ DEMO, không phải trạng thái hệ thống thật.' });
+      set({
+        memberSyncError:
+          'Dữ liệu thành viên đang ở chế độ DEMO, không phải trạng thái hệ thống thật.'
+      });
       return;
     }
     try {
       const response = await fetch('/api/access/users', { cache: 'no-store' });
       if (response.status === 401 || response.status === 403) {
-        throw new Error('Quản lý truy cập cần phiên quản trị viên Clerk; dashboard hiện không yêu cầu đăng nhập.');
+        throw new Error(
+          'Quản lý truy cập cần phiên quản trị viên Clerk; dashboard hiện không yêu cầu đăng nhập.'
+        );
       }
       if (response.status === 503) {
         throw new Error('Xác thực hoặc kết nối backend quản lý truy cập chưa được cấu hình.');
       }
-      if (!response.ok) throw new Error(`Không thể tải danh sách thành viên (HTTP ${response.status}).`);
+      if (!response.ok)
+        throw new Error(`Không thể tải danh sách thành viên (HTTP ${response.status}).`);
       const data = await response.json();
       if (!Array.isArray(data)) throw new Error('Invalid member response');
       set({ members: data as LabMember[], memberSyncError: null });
     } catch (error) {
-      set({ members: [], memberSyncError: error instanceof Error ? error.message : 'Không thể kết nối backend quản lý truy cập.' });
+      set({
+        members: [],
+        memberSyncError:
+          error instanceof Error ? error.message : 'Không thể kết nối backend quản lý truy cập.'
+      });
     }
   },
 
@@ -1675,14 +1858,38 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
     }
   },
 
+  fetchStoragePools: async () => {
+    if (isDemoMode) return;
+    try {
+      const res = await fetch('/api/labops/storage-pools').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) set({ storagePools: data.map(mapRawStoragePool) });
+      }
+    } catch {}
+  },
+
+  fetchGpuAllocations: async () => {
+    if (isDemoMode) return;
+    try {
+      const res = await fetch('/api/labops/gpus/allocations').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) set({ gpuAllocations: data.map(mapRawGpuAllocation) });
+      }
+    } catch {}
+  },
+
   fetchLiveState: async () => {
     if (isDemoMode) return;
     try {
-      const [resServers, resGpus, resJobs, resSsh] = await Promise.all([
+      const [resServers, resGpus, resJobs, resSsh, resStorage, resAllocations] = await Promise.all([
         fetch('/api/labops/servers').catch(() => null),
         fetch('/api/labops/gpus').catch(() => null),
         fetch('/api/labops/jobs/active').catch(() => null),
-        fetch('/api/labops/servers/track/ssh-sessions').catch(() => null)
+        fetch('/api/labops/servers/track/ssh-sessions').catch(() => null),
+        fetch('/api/labops/storage-pools').catch(() => null),
+        fetch('/api/labops/gpus/allocations').catch(() => null)
       ]);
       const updates: Partial<LabOpsState> = {
         lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
@@ -1722,12 +1929,23 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       } else {
         failures.push('SSH sessions');
       }
+      if (resStorage && resStorage.ok) {
+        const data = await resStorage.json();
+        if (Array.isArray(data)) updates.storagePools = data.map(mapRawStoragePool);
+      }
+      if (resAllocations && resAllocations.ok) {
+        const data = await resAllocations.json();
+        if (Array.isArray(data)) updates.gpuAllocations = data.map(mapRawGpuAllocation);
+      }
       if (failures.length) updates.syncError = `Không thể xác minh dữ liệu: ${failures.join(', ')}`;
       set(updates);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       set({
-        servers: PROD_SERVERS, gpus: [], jobs: [], activeSshSessions: [],
+        servers: PROD_SERVERS,
+        gpus: [],
+        jobs: [],
+        activeSshSessions: [],
         syncError: errorMsg || 'Mất kết nối tới máy chủ giám sát'
       });
     }
@@ -1863,7 +2081,11 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       .catch(() => {});
   },
 
-  stopProcess: async (ref: string, reason = 'Admin yêu cầu dừng tiến trình', terminateTree = true) => {
+  stopProcess: async (
+    ref: string,
+    reason = 'Admin yêu cầu dừng tiến trình',
+    terminateTree = true
+  ) => {
     try {
       const res = await fetch(`/api/labops/processes/${encodeURIComponent(ref)}/stop`, {
         method: 'POST',
@@ -1875,14 +2097,21 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         return { success: false, message: data.detail || 'Không thể dừng tiến trình' };
       }
       get().fetchLiveJobs();
-      return { success: true, message: data.message || 'Đã gửi tín hiệu dừng tiến trình thành công' };
+      return {
+        success: true,
+        message: data.message || 'Đã gửi tín hiệu dừng tiến trình thành công'
+      };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       return { success: false, message: errorMsg || 'Lỗi mạng khi kết nối tới máy chủ' };
     }
   },
 
-  killProcess: async (ref: string, reason = 'Admin yêu cầu buộc dừng tiến trình', killTree = true) => {
+  killProcess: async (
+    ref: string,
+    reason = 'Admin yêu cầu buộc dừng tiến trình',
+    killTree = true
+  ) => {
     try {
       const res = await fetch(`/api/labops/processes/${encodeURIComponent(ref)}/kill`, {
         method: 'POST',

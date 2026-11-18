@@ -18,7 +18,6 @@ interface SignInViewPageProps {
 }
 
 export default function SignInViewPage({ error: initialError }: SignInViewPageProps) {
-  const router = useRouter();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(initialError || null);
@@ -74,7 +73,8 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
           </h1>
 
           <p className='text-slate-300 text-sm leading-relaxed'>
-            Quản trị tập trung Server Rack (3× A30 24GB) và Server Workstation (1× A30 24GB) qua mạng WireGuard mã hóa, kết hợp Go Node Agent và kiểm duyệt mã nguồn Repository Guard.
+            Quản trị tập trung Server Rack (3× A30 24GB) và Server Workstation (1× A30 24GB) qua
+            mạng WireGuard mã hóa, kết hợp Go Node Agent và kiểm duyệt mã nguồn Repository Guard.
           </p>
 
           <div className='grid grid-cols-2 gap-3 pt-2 text-xs text-slate-300'>
@@ -118,11 +118,15 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
 
           <form onSubmit={handleSubmit} className='w-full space-y-4'>
             <div className='space-y-1.5'>
-              <label className='text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5'>
+              <label
+                htmlFor='admin-username'
+                className='text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5'
+              >
                 <IconUser className='size-3.5' />
                 Tài khoản Quản trị
               </label>
               <input
+                id='admin-username'
                 type='text'
                 required
                 value={username}
@@ -134,11 +138,15 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
             </div>
 
             <div className='space-y-1.5'>
-              <label className='text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5'>
+              <label
+                htmlFor='admin-password'
+                className='text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5'
+              >
                 <IconLock className='size-3.5' />
                 Mật khẩu
               </label>
               <input
+                id='admin-password'
                 type='password'
                 required
                 value={password}

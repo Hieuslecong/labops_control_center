@@ -1,31 +1,45 @@
 """
-VPNManager: Bộ điều phối dịch vụ VPN WireGuard cho LabOps Control Center.
-Quản lý các VPN Provider (wg-easy v15 và legacy wg0), hỗ trợ multi-device cho từng thành viên.
+VPNManager: Bộ điều phối dịch vụ VPN WireGuard duy nhất cho LabOps Control Center.
+
+Tuân thủ nghiêm ngặt Yêu cầu 1 và Yêu cầu 2 của Master Prompt V2:
+- CHỈ GIỮ DUY NHẤT DOCKER WG-EASY làm VPN Gateway và Single Source of Truth cho peer management.
+- Loại bỏ hoàn toàn cơ chế quản lý legacy wg0 host và LegacyWireGuardProvider khỏi runtime path.
+- Tích hợp VPNRouteResolver và WireGuardConfigBuilder để tạo cấu hình động chính xác theo máy chủ được cấp.
+- Không fallback sang legacy khi wg-easy offline; trả VPNProviderError("VPN_PROVIDER_UNAVAILABLE").
+- Không trả về public key hoặc endpoint mặc định dạng hardcode khi API lỗi.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
 
-from app.adapters.legacy_wireguard_provider import LegacyWireGuardProvider
 from app.adapters.vpn_provider import VPNProvider, VPNProviderError
 from app.adapters.wg_easy_adapter import WgEasyAdapter
 from app.core.config import settings
+from app.services.vpn_route_resolver import HostRegistry, VPNRouteResolver
+from app.services.wireguard_config_builder import WireGuardConfigBuilder
 
 logger = logging.getLogger(__name__)
 
 
 class VPNManager:
+    """Quản trị viên VPN duy nhất của LabOps dựa trên wg-easy v15."""
+
     def __init__(
         self,
         wg_easy: Optional[WgEasyAdapter] = None,
-        legacy: Optional[LegacyWireGuardProvider] = None,
+        host_registry: Optional[HostRegistry] = None,
     ) -> None:
         self.wg_easy = wg_easy or WgEasyAdapter()
-        self.legacy = legacy or LegacyWireGuardProvider()
+        self.host_registry = host_registry or HostRegistry()
+        self.route_resolver = VPNRouteResolver(host_registry=self.host_registry)
+        self.config_builder = WireGuardConfigBuilder(
+            wg_easy=self.wg_easy,
+            route_resolver=self.route_resolver,
+            host_registry=self.host_registry,
+        )
         self.providers: Dict[str, VPNProvider] = {
             self.wg_easy.name: self.wg_easy,
-            self.legacy.name: self.legacy,
         }
 
     @property
@@ -35,23 +49,40 @@ class VPNManager:
 
     def get_provider(self, name: Optional[str] = None) -> VPNProvider:
         if name and name == "legacy-wg0":
-            return self.legacy
+            raise VPNProviderError(
+                "LEGACY_PROVIDER_REMOVED: Cơ chế quản lý legacy wg0 trên host đã bị loại bỏ hoàn toàn khỏi LabOps. "
+                "Hệ thống hiện chỉ hỗ trợ duy nhất Docker wg-easy VPN Gateway."
+            )
         return self.wg_easy
 
     def get_vpn_system_overview(self) -> Dict[str, Any]:
-        """Tổng hợp trạng thái toàn bộ hệ sinh thái VPN (wg-easy và legacy wg0)."""
+        """Tổng hợp trạng thái của hệ thống VPN wg-easy duy nhất."""
         wg_easy_status = self.wg_easy.get_connection_status()
-        legacy_status = self.legacy.get_connection_status()
         active_provider = self.primary_provider.name
+        is_healthy = wg_easy_status.get("status") == "ACTIVE" and wg_easy_status.get("service_health") == "HEALTHY"
+
         return {
             "primary_provider": active_provider,
+            "active_provider": active_provider,
+            "status": "HEALTHY" if is_healthy else "UNAVAILABLE",
+            "service_health": "HEALTHY" if is_healthy else "UNAVAILABLE",
+            "public_endpoint": wg_easy_status.get("public_endpoint") or self.wg_easy.public_endpoint,
+            "cidr": wg_easy_status.get("vpn_subnet") or self.wg_easy.vpn_subnet,
+            "vpn_subnet": wg_easy_status.get("vpn_subnet") or self.wg_easy.vpn_subnet,
             "wg_easy": wg_easy_status,
-            "legacy_wg0": legacy_status,
-            "total_devices": wg_easy_status.get("total_clients", 0) + legacy_status.get("total_clients", 0),
+            "total_clients": wg_easy_status.get("total_clients", 0),
+            "total_devices": wg_easy_status.get("total_clients", 0),
+            "active_clients": wg_easy_status.get("active_handshakes", 0),
             "active_handshakes": wg_easy_status.get("active_handshakes", 0),
             "total_rx_bytes": wg_easy_status.get("total_rx_bytes", 0),
             "total_tx_bytes": wg_easy_status.get("total_tx_bytes", 0),
+            "server_public_key": wg_easy_status.get("server_public_key") or "",
+            "route_policy": "PER_HOST_DYNAMIC",
         }
+
+    def list_devices(self) -> List[Dict[str, Any]]:
+        """Liệt kê toàn bộ thiết bị WireGuard từ wg-easy."""
+        return self.wg_easy.list_devices()
 
     def create_member_device(
         self,
@@ -60,7 +91,7 @@ class VPNManager:
         expires_at: Optional[str] = None,
         provider_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Tạo một thiết bị WireGuard cho thành viên qua VPN provider."""
+        """Tạo một thiết bị WireGuard cho thành viên qua wg-easy."""
         provider = self.get_provider(provider_name)
         full_name = f"{username}-{device_name}".strip("-")
         device = provider.create_device(name=full_name, expires_at=expires_at)
@@ -69,7 +100,7 @@ class VPNManager:
         return device
 
     def get_device_configuration(self, device_id: str, provider_name: Optional[str] = None) -> str:
-        """Lấy nội dung tệp .conf của thiết bị."""
+        """Lấy nội dung tệp .conf của thiết bị từ wg-easy."""
         provider = self.get_provider(provider_name)
         return provider.get_client_configuration(device_id)
 
@@ -86,13 +117,34 @@ class VPNManager:
         return provider.revoke_device(device_id)
 
     def get_server_public_key(self, provider_name: Optional[str] = None) -> str:
+        """
+        Lấy khóa công khai của máy chủ wg-easy Gateway thực tế.
+        Tuyệt đối không fallback về khóa mặc định giả lập khi gateway lỗi.
+        """
         provider = self.get_provider(provider_name)
-        try:
-            status = provider.get_connection_status()
-            if status.get("server_public_key"):
-                return status["server_public_key"]
-        except Exception:
-            pass
-        return getattr(settings, "LABOPS_WG_SERVER_PUBLIC_KEY", "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=")
+        status = provider.get_connection_status()
+        server_key = status.get("server_public_key")
+        if server_key:
+            return server_key
+        raise VPNProviderError(
+            "VPN_PROVIDER_UNAVAILABLE: Không thể lấy khóa công khai từ wg-easy Gateway đang chạy. "
+            "Kiểm tra kết nối hoặc khởi động container labops-wg-easy."
+        )
 
-
+    def build_dynamic_client_profile(
+        self,
+        *,
+        actor: Dict[str, Any],
+        member: Dict[str, Any],
+        device: Dict[str, Any],
+        workspaces: Optional[List[Dict[str, Any]]] = None,
+        target_host_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Sinh cấu hình WireGuard & SSH hoàn chỉnh theo đúng máy chủ được cấp."""
+        return self.config_builder.build_client_profile(
+            actor=actor,
+            member=member,
+            device=device,
+            workspaces=workspaces,
+            target_host_id=target_host_id,
+        )

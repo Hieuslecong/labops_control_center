@@ -48,7 +48,7 @@ class _MockWgEasyBackend:
     ) -> Any:
         p = path.lstrip("/")
         if p == "api/admin/interface":
-            return {"ipv4Cidr": "10.88.40.0/24"}
+            return {"ipv4Cidr": "10.88.40.0/24", "publicKey": "mockserverpub=="}
         if p == "api/admin/interface/cidr":
             return {"success": True}
         if p == "api/client" and method == "GET":
@@ -139,13 +139,18 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_01_vpn_manager_overview_and_provider_resolution(self) -> None:
-        """Kiểm tra tổng quan hệ thống VPN và độ phân giải provider."""
+        """Kiểm tra tổng quan hệ thống VPN và độ phân giải provider (chỉ duy nhất wg-easy)."""
         mgr = self.svc.vpn_manager
         overview = mgr.get_vpn_system_overview()
-        self.assertIn("primary_provider", overview)
+        self.assertEqual(overview.get("primary_provider"), "wg-easy")
+        self.assertEqual(overview.get("active_provider"), "wg-easy")
         self.assertIn("wg_easy", overview)
-        self.assertIn("legacy_wg0", overview)
+        self.assertNotIn("legacy_wg0", overview)
         self.assertIn("total_devices", overview)
+        from app.adapters.vpn_provider import VPNProviderError
+        with self.assertRaises(VPNProviderError) as ctx:
+            mgr.get_provider("legacy-wg0")
+        self.assertIn("LEGACY_PROVIDER_REMOVED", str(ctx.exception))
 
     def test_02_member_multi_device_management_lifecycle(self) -> None:
         """Kiểm tra chu trình quản lý nhiều thiết bị cho cùng một thành viên."""

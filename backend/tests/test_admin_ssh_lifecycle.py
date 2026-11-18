@@ -23,6 +23,7 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 os.environ.setdefault("LABOPS_SESSION_SECRET", "test-secret-admin-ssh-lifecycle-32chars!")
+os.environ.setdefault("LABOPS_WG_SERVER_PUBLIC_KEY", "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ=")
 
 from app.core.config import settings
 from app.core.security import issue_token

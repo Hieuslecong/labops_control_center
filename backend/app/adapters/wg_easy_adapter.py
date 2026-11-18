@@ -136,7 +136,7 @@ class WgEasyAdapter(VPNProvider):
                 "provider": self.name,
                 "external_id": c.get("id"),
                 "name": str(c.get("name") or "Device"),
-                "vpn_ip": str(c.get("ipv4Address") or "").split("/")[0],
+                "vpn_ip": str(c.get("ipv4Address") or c.get("address") or "").split("/")[0],
                 "public_key": str(c.get("publicKey") or ""),
                 "enabled": bool(c.get("enabled", True)),
                 "status": "ACTIVE" if c.get("enabled", True) else "DISABLED",
@@ -172,6 +172,7 @@ class WgEasyAdapter(VPNProvider):
                 "provider": self.name,
                 "external_id": client_id,
                 "name": name,
+                "vpn_ip": str(res.get("ipv4Address") or res.get("address") or "").split("/")[0],
                 "status": "ACTIVE",
                 "enabled": True,
             }

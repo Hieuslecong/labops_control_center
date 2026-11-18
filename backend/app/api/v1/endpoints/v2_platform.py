@@ -342,7 +342,11 @@ async def get_member_device_config(
     if not p.is_admin and member.get("username") != p.username:
         raise HTTPException(status_code=403, detail="Chỉ admin hoặc chủ sở hữu mới có quyền lấy cấu hình")
     try:
-        conf_text = service.get_member_device_config(member["id"], device_id)
+        conf_text = service.get_member_device_config(
+            member["id"],
+            device_id,
+            actor={"username": p.username, "role": p.role, "is_admin": p.is_admin},
+        )
         filename = f"{member['username']}-{device_id}.conf"
         return Response(
             content=conf_text,

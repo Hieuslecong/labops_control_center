@@ -533,7 +533,7 @@ class SshAccessManager:
         client_ip: str,
         server_endpoint: str,
         server_public_key: str,
-        allowed_ips: str = "10.200.0.0/24, 192.168.167.250/32",
+        allowed_ips: str = "10.88.40.0/24",
         dns: str = "1.1.1.1",
     ) -> Dict[str, str]:
         """
@@ -571,8 +571,8 @@ class SshAccessManager:
             if len(raw_spk) != 32:
                 raise ValueError("invalid length")
             valid_server_pubkey = server_public_key
-        except Exception:
-            valid_server_pubkey = SshAccessManager._get_or_create_server_wg_public_key("/tmp")
+        except Exception as e:
+            raise ValueError(f"Khóa công khai máy chủ WireGuard không hợp lệ ({server_public_key}): {e}") from e
 
         conf_text = (
             f"# Cấu hình WireGuard VPN cho @{username} — LabOps Control Center V2\n"
@@ -644,8 +644,8 @@ class SshAccessManager:
         buf = io.BytesIO()
         host_alias = f"labops-{username}"
         has_priv = bool(private_key and private_key.strip())
-        wg_ip = wireguard_client_ip or "10.88.30.x"
-        wg_ep = wireguard_endpoint or "118.70.169.236:2204"
+        wg_ip = wireguard_client_ip or "10.88.40.x"
+        wg_ep = wireguard_endpoint or "118.70.169.236:2205"
 
         ssh_config_content = (
             f"# Cấu hình OpenSSH LabOps Control Center cho @{username}\n"

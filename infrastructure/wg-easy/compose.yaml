@@ -9,19 +9,17 @@ services:
       - INIT_USERNAME=${WG_EASY_ADMIN_USER:-admin}
       - INIT_PASSWORD=${WG_EASY_ADMIN_PASSWORD:-LabOpsSecureVPN2026!}
       - INIT_HOST=${WG_EASY_PUBLIC_ENDPOINT:-118.70.169.236}
-      - INIT_PORT=2205
+      - INIT_PORT=${WG_EASY_UDP_PORT:-2205}
       - INIT_DNS=1.1.1.1
-      - INIT_IPV4_CIDR=10.88.40.0/24
+      - INIT_IPV4_CIDR=${WG_EASY_VPN_SUBNET:-10.88.40.0/24}
     volumes:
       - wg_easy_data:/etc/wireguard
       - /lib/modules:/lib/modules:ro
     ports:
-      # Port UDP WireGuard: Trong giai đoạn test dual-run, map host 2205 -> container 2204 (tránh xung đột với host wg0 trên 2204)
-      # Khi cutover chính thức (sau khi dừng host wg0), đổi thành "2204:2204/udp"
-      - "2204:2204/udp"
-      - "2205:2204/udp"
+      # Port UDP WireGuard duy nhất: Cấu hình qua WG_EASY_UDP_PORT (mặc định 2205; chuyển sang 2204 sau cutover)
+      - "${WG_EASY_UDP_PORT:-2205}:${WG_EASY_UDP_PORT:-2205}/udp"
       # Port Web API quản trị - CHỈ bind vào loopback 127.0.0.1 để LabOps Backend gọi nội bộ, KHÔNG mở ra Internet
-      -  "127.0.0.1:51821:51821/tcp"
+      - "127.0.0.1:51821:51821/tcp"
     restart: unless-stopped
     cap_add:
       - NET_ADMIN

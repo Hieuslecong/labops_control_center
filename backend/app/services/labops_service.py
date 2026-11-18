@@ -27,7 +27,6 @@ from app.services.workspace_controller import WorkspaceController
 from app.services.vpn_ssh_service import SshKeyRegistry
 from app.services.ssh_access_manager import SshAccessManager
 from app.adapters.process_monitor_adapter import ProcessMonitorAdapter
-from app.adapters.wireguard_adapter import WireGuardAdapter
 from app.adapters.teleport_adapter import TeleportAdapter
 from app.services.vpn_manager import VPNManager
 
@@ -134,7 +133,6 @@ class LabOpsDataService:
         self.db = DatabaseManager(self.data_dir)
         self.idempotency = IdempotencyStore(self.db)
         get_revocation_store().bind_db(self.db)
-        self.wireguard_adapter = WireGuardAdapter(interface="wg0", data_dir=self.data_dir)
         self.vpn_manager = VPNManager()
         self.gpu_scheduler = GpuScheduler(os.path.join(self.data_dir, "gpu_reservations.json"),
                                           self.nvml_adapter.get_live_gpu_telemetry_sync)
@@ -275,6 +273,13 @@ class LabOpsDataService:
         except Exception as e:
             logger.exception("Failed to persist LabOps data")
             raise RuntimeError("Could not persist LabOps data") from e
+
+    @property
+    def workspaces(self) -> List[Dict[str, Any]]:
+        """Danh sách workspaces động từ WorkspaceController kết hợp legacy SSH endpoints."""
+        if hasattr(self, "workspace_controller") and self.workspace_controller is not None:
+            return self.workspace_controller.list_workspaces(legacy_endpoints=getattr(self, "ssh_endpoints", []))
+        return []
 
     def _collect_servers(self, jobs_snapshot: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         if not self.demo_mode:
@@ -2306,7 +2311,7 @@ class LabOpsDataService:
 
     async def get_access_health(self) -> Dict[str, Any]:
         return {
-            "wireguard": await self.wireguard_adapter.get_peer_status(),
+            "wireguard": self.vpn_manager.get_vpn_system_overview(),
             "teleport": self.teleport_adapter.health(),
             "workspace_agents": "NOT_CONFIGURED",
             "network_policy": self._network_policy_status(),
@@ -2622,55 +2627,84 @@ class LabOpsDataService:
 
         # Sinh cấu hình WireGuard (.conf) theo đúng subnet hạ tầng Rack: 10.88.30.0/24
         # Quy hoạch IP: 10.88.30.1 (Server), 10.88.30.2 (Admin MacBook), từ 10.88.30.3 trở đi cấp động cho thành viên
-        # WireGuard VPN Configuration: Ưu tiên tích hợp tự động qua wg-easy v15
+        # WireGuard VPN Configuration: Tích hợp tự động qua wg-easy v15 & Dynamic Route Resolver
         wg_profile = None
+        assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or "workstation"
+        resolved_route = self.vpn_manager.route_resolver.resolve_routes_for_member(
+            member=member,
+            actor_role="ADMIN",
+            workspaces=self.workspaces,
+            requested_host_id=assigned_host,
+        )
+        target_server_id = resolved_route.target_hosts[0].id if resolved_route.target_hosts else assigned_host
+        dynamic_allowed_ips = resolved_route.allowed_ips
+
         if getattr(settings, "WG_EASY_ENABLED", True):
             try:
-                if self.vpn_manager.primary_provider.name == "wg-easy":
-                    wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính", provider_name="wg-easy")
-                    wg_conf = self.vpn_manager.get_device_configuration(str(wg_dev.get("external_id") or wg_dev["id"]), "wg-easy")
-                    if wg_conf and "[Interface]" in wg_conf:
-                        wg_client_ip = wg_dev.get("vpn_ip") or "10.88.40.2"
-                        wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
-                        wg_profile = {
-                            "wireguard_conf": wg_conf,
-                            "client_ip": wg_client_ip,
-                            "wg_public_key": wg_dev.get("public_key") or "",
-                            "server_endpoint": wg_server_endpoint,
-                            "allowed_ips": "10.88.40.0/24, 192.168.167.250/32",
-                        }
-                        wg_profile_data = member.setdefault("wireguard", {"status": "ACTIVE", "devices": []})
-                        wg_profile_data.setdefault("devices", []).append({
-                            "device_id": f"dev-{wg_dev.get('external_id') or wg_dev['id']}",
-                            "external_id": wg_dev.get("external_id") or wg_dev["id"],
-                            "provider": "wg-easy",
-                            "name": "Thiết bị chính",
-                            "client_ip": wg_client_ip,
-                            "vpn_ip": wg_client_ip,
-                            "public_key": wg_dev.get("public_key"),
-                            "server_id": "track",
-                            "server_public_key": wg_dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
-                            "server_endpoint": wg_server_endpoint,
-                            "allowed_subnets": "10.88.40.0/24",
-                            "status": "ACTIVE",
-                            "enabled": True,
-                            "enrolled_at": datetime.now(timezone.utc).isoformat(),
-                        })
+                wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính")
+                raw_conf = self.vpn_manager.get_device_configuration(str(wg_dev.get("external_id") or wg_dev["id"]))
+                if raw_conf and "[Interface]" in raw_conf:
+                    wg_client_ip = wg_dev.get("vpn_ip") or "10.88.40.2"
+                    wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
+                    # Thay thế AllowedIPs động theo đúng máy chủ được cấp
+                    if re.search(r"AllowedIPs\s*=", raw_conf):
+                        custom_conf = re.sub(r"AllowedIPs\s*=\s*[^\r\n]+", f"AllowedIPs = {dynamic_allowed_ips}", raw_conf)
+                    else:
+                        custom_conf = raw_conf.replace("[Peer]\n", f"[Peer]\nAllowedIPs = {dynamic_allowed_ips}\n")
+
+                    wg_profile = {
+                        "wireguard_conf": custom_conf,
+                        "client_ip": wg_client_ip,
+                        "wg_public_key": wg_dev.get("public_key") or "",
+                        "server_endpoint": wg_server_endpoint,
+                        "allowed_ips": dynamic_allowed_ips,
+                    }
+                    wg_profile_data = member.setdefault("wireguard", {"status": "ACTIVE", "devices": []})
+                    wg_profile_data.setdefault("devices", []).append({
+                        "device_id": f"dev-{wg_dev.get('external_id') or wg_dev['id']}",
+                        "external_id": wg_dev.get("external_id") or wg_dev["id"],
+                        "provider": "wg-easy",
+                        "name": "Thiết bị chính",
+                        "client_ip": wg_client_ip,
+                        "vpn_ip": wg_client_ip,
+                        "public_key": wg_dev.get("public_key"),
+                        "server_id": target_server_id,
+                        "server_public_key": wg_dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
+                        "server_endpoint": wg_server_endpoint,
+                        "allowed_subnets": dynamic_allowed_ips,
+                        "status": "ACTIVE",
+                        "enabled": True,
+                        "enrolled_at": datetime.now(timezone.utc).isoformat(),
+                    })
             except Exception as e:
                 logger.error(f"Lỗi tạo peer wg-easy tự động: {e}")
 
         if wg_profile is None or not (wg_profile.get("wireguard_conf") and "[Interface]" in wg_profile["wireguard_conf"]):
-            # Dự phòng an toàn theo chuẩn wg-easy subnet 10.88.40.0/24 & port 2205
-            wg_client_ip = (member.get("wireguard") or {}).get("client_ip") or "10.88.40.50"
-            wg_server_endpoint = getattr(self.vpn_manager.wg_easy, "public_endpoint", "118.70.169.236:2204")
-            wg_server_pubkey = self.vpn_manager.get_server_public_key()
-            wg_profile = self.ssh_access_manager.generate_wireguard_client_profile(
-                username=username,
-                client_ip=str(wg_client_ip).split("/")[0],
-                server_endpoint=wg_server_endpoint,
-                server_public_key=wg_server_pubkey,
-                allowed_ips="10.88.40.0/24, 192.168.167.250/32",
-            )
+            try:
+                wg_client_ip = (member.get("wireguard") or {}).get("client_ip") or "10.88.40.50"
+                wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
+                wg_server_pubkey = (
+                    os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY")
+                    or (member.get("wireguard") or {}).get("server_public_key")
+                    or self.vpn_manager.get_server_public_key()
+                )
+                wg_profile = self.ssh_access_manager.generate_wireguard_client_profile(
+                    username=username,
+                    client_ip=str(wg_client_ip).split("/")[0],
+                    server_endpoint=wg_server_endpoint,
+                    server_public_key=wg_server_pubkey,
+                    allowed_ips=dynamic_allowed_ips,
+                )
+            except Exception as e:
+                logger.warning(f"Không thể khởi tạo dự phòng WireGuard profile cho {username}: {e}")
+                wg_profile = {
+                    "wireguard_conf": "",
+                    "client_ip": "10.88.40.50",
+                    "wg_public_key": "",
+                    "server_endpoint": self.vpn_manager.wg_easy.public_endpoint,
+                    "allowed_ips": dynamic_allowed_ips,
+                    "status": "NOT_CONFIGURED",
+                }
         member["wireguard"] = {
             **(member.get("wireguard") or {}),
             "client_ip": wg_profile["client_ip"],
@@ -2850,32 +2884,47 @@ class LabOpsDataService:
         wg_ep = bundle.get("wireguard_server_endpoint") or (member.get("wireguard") or {}).get("server_endpoint")
 
         if not wg_conf:
-            # 1. Thử lấy cấu hình từ thiết bị wg-easy đã đăng ký
+            # 1. Thử lấy cấu hình từ thiết bị wg-easy đã đăng ký qua WireGuardConfigBuilder
             profile = member.get("wireguard") or {}
             devices = profile.get("devices") or []
             wg_easy_dev = next((d for d in devices if d.get("provider") == "wg-easy" and d.get("status") == "ACTIVE"), None)
             if wg_easy_dev:
                 try:
-                    ext_id = str(wg_easy_dev.get("external_id") or wg_easy_dev.get("id"))
-                    wg_conf = self.vpn_manager.get_device_configuration(ext_id, "wg-easy")
-                    wg_client_ip = wg_easy_dev.get("client_ip") or wg_easy_dev.get("vpn_ip")
-                    wg_ep = self.vpn_manager.wg_easy.public_endpoint
+                    profile_res = self.vpn_manager.build_dynamic_client_profile(
+                        actor={"username": username, "role": member.get("role", "RESEARCHER")},
+                        member=member,
+                        device=wg_easy_dev,
+                        workspaces=self.workspaces,
+                    )
+                    wg_conf = profile_res["wireguard_conf"]
+                    wg_client_ip = profile_res["vpn_ip"]
+                    wg_ep = profile_res["server_endpoint"]
                 except Exception as e:
-                    logger.warning(f"Không thể lấy tệp cấu hình wg-easy cho device {wg_easy_dev}: {e}")
+                    logger.warning(f"Không thể sinh cấu hình động wg-easy cho device {wg_easy_dev}: {e}")
 
-            # 2. Nếu chưa có cấu hình, sinh profile dự phòng
+            # 2. Nếu chưa có cấu hình, sinh profile dự phòng theo route động của máy chủ
             if not wg_conf:
-                wg_server_pubkey = (
-                    os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY")
-                    or (member.get("wireguard") or {}).get("server_public_key")
-                    or "jf+Uw/DFyi5swclp7mhH9mamYjQgV3ulZRlxBIdqlmQ="
+                assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or "workstation"
+                resolved_route = self.vpn_manager.route_resolver.resolve_routes_for_member(
+                    member=member,
+                    actor_role="ADMIN",
+                    workspaces=self.workspaces,
+                    requested_host_id=assigned_host,
                 )
+                try:
+                    wg_server_pubkey = (
+                        (member.get("wireguard") or {}).get("server_public_key")
+                        or os.getenv("LABOPS_WG_SERVER_PUBLIC_KEY")
+                        or self.vpn_manager.get_server_public_key()
+                    )
+                except Exception:
+                    wg_server_pubkey = ""
                 prof = self.ssh_access_manager.generate_wireguard_client_profile(
                     username=username,
                     client_ip=str(wg_client_ip or "10.88.40.2").split("/")[0],
-                    server_endpoint=wg_ep or getattr(self.vpn_manager.wg_easy, "public_endpoint", "118.70.169.236:2204"),
+                    server_endpoint=wg_ep or self.vpn_manager.wg_easy.public_endpoint,
                     server_public_key=wg_server_pubkey,
-                    allowed_ips="10.88.40.0/24, 192.168.167.250/32",
+                    allowed_ips=resolved_route.allowed_ips,
                 )
                 wg_conf = prof["wireguard_conf"]
                 wg_client_ip = prof["client_ip"]
@@ -3139,21 +3188,29 @@ class LabOpsDataService:
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
         username = member["username"]
+        assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or "workstation"
+        route = self.vpn_manager.route_resolver.resolve_routes_for_member(
+            member=member,
+            actor_role="ADMIN",
+            workspaces=self.workspaces,
+            requested_host_id=assigned_host,
+        )
+        resolved_server_id = route.target_hosts[0].id if route.target_hosts else assigned_host
         dev = self.vpn_manager.create_member_device(username, device_name)
         ext_id = str(dev.get("external_id") or dev.get("id"))
         clean_id = re.sub(r"[^a-zA-Z0-9_-]", "_", ext_id)
         device_entry = {
             "device_id": f"dev-{clean_id}",
             "external_id": dev.get("external_id") or dev["id"],
-            "provider": dev.get("provider", "wg-easy"),
+            "provider": "wg-easy",
             "name": device_name,
             "client_ip": dev.get("vpn_ip", ""),
             "vpn_ip": dev.get("vpn_ip", ""),
             "public_key": dev.get("public_key", ""),
-            "server_id": "track",
+            "server_id": resolved_server_id,
             "server_public_key": dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
             "server_endpoint": dev.get("server_endpoint") or self.vpn_manager.wg_easy.public_endpoint,
-            "allowed_subnets": dev.get("allowed_subnets") or "10.88.40.0/24",
+            "allowed_subnets": route.allowed_ips,
             "status": "ACTIVE",
             "enabled": True,
             "enrolled_at": datetime.now(timezone.utc).isoformat(),
@@ -3170,12 +3227,12 @@ class LabOpsDataService:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "result": "SUCCESS",
             "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-            "details": f"Đã đăng ký thiết bị mới '{device_name}' (IP VPN: {dev.get('vpn_ip')}) cho @{username} qua wg-easy.",
+            "details": f"Đã đăng ký thiết bị mới '{device_name}' (IP VPN: {dev.get('vpn_ip')}, Route: {route.allowed_ips}) cho @{username} qua wg-easy.",
         })
         self._save_persistent_data()
         return device_entry
 
-    def get_member_device_config(self, member_id: str, device_id: str) -> str:
+    def get_member_device_config(self, member_id: str, device_id: str, actor: Optional[Dict[str, Any]] = None) -> str:
         member = self._find_member(member_id)
         if not member:
             raise LookupError(f"Không tìm thấy thành viên: {member_id}")
@@ -3184,8 +3241,14 @@ class LabOpsDataService:
         dev = next((d for d in devices if d.get("device_id") == device_id or str(d.get("external_id")) == device_id or str(d.get("id")) == device_id), None)
         if not dev:
             raise LookupError(f"Không tìm thấy thiết bị: {device_id}")
-        ext_id = str(dev.get("external_id") or dev.get("id") or device_id)
-        return self.vpn_manager.get_device_configuration(ext_id, dev.get("provider", "wg-easy"))
+        act = actor or {"username": member["username"], "role": member.get("role", "RESEARCHER")}
+        profile_res = self.vpn_manager.build_dynamic_client_profile(
+            actor=act,
+            member=member,
+            device=dev,
+            workspaces=self.workspaces,
+        )
+        return profile_res["wireguard_conf"]
 
     def revoke_member_device_v2(self, member_id: str, device_id: str, actor: str = "admin") -> Dict[str, Any]:
         member = self._find_member(member_id)

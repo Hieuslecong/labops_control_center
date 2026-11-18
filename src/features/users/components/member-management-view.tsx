@@ -582,14 +582,12 @@ export function MemberManagementView() {
         <CardContent className='p-4 space-y-3'>
           <div className='flex flex-wrap items-center justify-between gap-2 border-b pb-2'>
             <div className='flex items-center gap-2'>
-              <span className='text-base font-semibold'>Hệ thống WireGuard VPN Mesh</span>
+              <span className='text-base font-semibold'>Hệ thống WireGuard VPN Gateway</span>
               <Badge
                 variant='outline'
                 className='bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
               >
-                {vpnOverview?.active_provider === 'wg-easy'
-                  ? 'wg-easy v15 (Active & Healthy)'
-                  : 'Kernel wg0'}
+                Docker wg-easy v15 (Duy nhất)
               </Badge>
               <Badge variant='outline' className='text-xs'>
                 Trạng thái: {vpnOverview?.status || 'HEALTHY'}
@@ -599,7 +597,7 @@ export function MemberManagementView() {
               <span>
                 Public Endpoint:{' '}
                 <strong className='text-foreground font-mono'>
-                  {vpnOverview?.public_endpoint || '118.70.169.236:2204'}
+                  {vpnOverview?.public_endpoint || '118.70.169.236:2205'}
                 </strong>
               </span>
               <span>
@@ -614,17 +612,17 @@ export function MemberManagementView() {
           <div className='grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs'>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Cổng UDP & Chuyển tiếp</div>
-              <div className='font-mono font-medium text-sm mt-0.5'>UDP 2204 (MikroTik NAT)</div>
-              <div className='text-xs text-muted-foreground mt-0.5'>118.70.169.236:2204</div>
+              <div className='font-mono font-medium text-sm mt-0.5'>UDP 2205 (wg-easy)</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>
+                {vpnOverview?.public_endpoint || '118.70.169.236:2205'}
+              </div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Thiết bị VPN / Kết nối</div>
               <div className='font-mono font-medium text-sm mt-0.5 text-emerald-600 dark:text-emerald-400'>
                 {vpnOverview?.active_clients ?? 0} / {vpnOverview?.total_clients ?? 0} online
               </div>
-              <div className='text-xs text-muted-foreground mt-0.5'>
-                Handshake gần nhất &lt; 3 phút
-              </div>
+              <div className='text-xs text-muted-foreground mt-0.5'>Xác minh Handshake thực tế</div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Lưu lượng Mạng VPN</div>
@@ -635,12 +633,12 @@ export function MemberManagementView() {
               <div className='text-xs text-muted-foreground mt-0.5'>Tổng lưu lượng toàn trạm</div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
-              <div className='text-muted-foreground'>Độc lập & Bảo toàn</div>
+              <div className='text-muted-foreground'>Chính sách Định tuyến</div>
               <div className='font-mono font-medium text-sm mt-0.5 text-blue-600 dark:text-blue-400'>
-                wg0 (2204) & SSH (22/1911)
+                Per-Host Dynamic Route
               </div>
               <div className='text-xs text-muted-foreground mt-0.5'>
-                Bảo toàn nguyên vẹn hạ tầng host
+                Phân giải theo Host được cấp
               </div>
             </div>
           </div>

@@ -82,7 +82,7 @@ func RunWithOptions(args []string, progName string, opts Options) int {
 	command := args[0]
 	switch command {
 	case "version", "--version", "-v":
-		fmt.Fprintln(opts.Stdout, "gitaiot CLI v2.1.0 (LabOps Secure Repository Gateway Client)")
+		fmt.Fprintf(opts.Stdout, "%s CLI v2.1.0 (LabOps Secure Repository Gateway Client)\n", progName)
 		return 0
 	case "help", "--help", "-h":
 		printUsage(opts.Stdout, progName)

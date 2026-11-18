@@ -33,7 +33,7 @@ class ZaloBotEngine:
     COMMANDS = {
         "/start": "Khởi động và giới thiệu trợ lý LabOps",
         "/help": "Xem danh sách các lệnh hỗ trợ",
-        "/ask": "Hỏi đáp thông minh với AI qua 9Router (/ask <câu hỏi>)",
+        "/ask": "Hỏi đáp thông minh với AI (/ask <câu hỏi>)",
         "/status": "Tổng hợp trạng thái toàn bộ máy chủ, CPU, RAM, GPU, Ổ cứng và Cảnh báo",
         "/jobs": "Danh sách các tác vụ tính toán và tiến trình GPU đang chạy",
         "/report": "Xem hoặc tạo báo cáo tuần tổng hợp hoạt động của Lab",
@@ -410,9 +410,9 @@ class ZaloBotEngine:
             except Exception:
                 pass
 
-        # 4. 9Router status
+        # 4. AI Gateway status
         r_health = self.ai_client.check_health()
-        r_str = f"9Router: {r_health['status']} (Model: {self.ai_client.model})"
+        r_str = f"{r_health['status']}"
 
         # 5. Cảnh báo động theo chỉ số thời gian thực
         alerts = [

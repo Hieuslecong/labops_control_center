@@ -94,7 +94,7 @@ export default function AIAssistantView() {
   const [chatLog, setChatLog] = useState<Array<{ sender: string; text: string }>>([
     {
       sender: 'assistant',
-      text: 'Xin chào! Tôi là LabOps AI Assistant kết nối trực tiếp với 9Router cục bộ (model model_free). Bạn có thể thử các lệnh /status, /jobs, /report, /quota hoặc đặt câu hỏi.'
+      text: 'Xin chào! Tôi là LabOps AI Assistant. Bạn có thể thử các lệnh /status, /jobs, /report, /quota hoặc đặt câu hỏi kỹ thuật về hệ thống.'
     }
   ]);
   const [sending, setSending] = useState(false);
@@ -229,7 +229,7 @@ export default function AIAssistantView() {
           <div>
             <h2 className='text-lg font-bold'>Trợ lý AI & Zalo Bot Control Plane</h2>
             <p className='text-xs text-muted-foreground'>
-              Vận hành trên Workstation Primary (`aiot-ws1`) • 9Router AI Gateway (Cổng 20128)
+              Vận hành trên Workstation Primary (`aiot-ws1`) • LabOps AI Control Plane
             </p>
           </div>
         </div>
@@ -242,13 +242,13 @@ export default function AIAssistantView() {
             variant='outline'
             className='bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono text-xs'
           >
-            9Router: ONLINE
+            AI Gateway: ONLINE
           </Badge>
           <Badge
             variant='outline'
             className='bg-primary/10 text-primary border-primary/20 font-mono text-xs'
           >
-            Model: {overview?.active_model || 'model_free'}
+            Trạng thái: SẴN SÀNG
           </Badge>
         </div>
       </div>
@@ -327,7 +327,7 @@ export default function AIAssistantView() {
             <Card>
               <CardHeader className='pb-2'>
                 <div className='flex justify-between items-center'>
-                  <CardTitle className='text-sm font-semibold'>9Router AI Gateway</CardTitle>
+                  <CardTitle className='text-sm font-semibold'>AI Gateway Engine</CardTitle>
                   <Badge
                     variant='outline'
                     className='bg-emerald-500/10 text-emerald-600 font-mono text-xs'
@@ -336,7 +336,7 @@ export default function AIAssistantView() {
                   </Badge>
                 </div>
                 <CardDescription className='text-xs'>
-                  Cổng kết nối AI cục bộ cổng 20128
+                  Cổng kết nối mô hình ngôn ngữ AI
                 </CardDescription>
               </CardHeader>
               <CardContent className='space-y-2 text-xs pt-1'>
@@ -447,7 +447,7 @@ export default function AIAssistantView() {
                 ))}
                 {sending && (
                   <div className='text-xs text-muted-foreground animate-pulse'>
-                    Đang kết nối 9Router và tạo phản hồi...
+                    Đang xử lý và tạo phản hồi...
                   </div>
                 )}
               </div>

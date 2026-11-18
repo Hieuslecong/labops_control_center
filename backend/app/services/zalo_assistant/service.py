@@ -68,7 +68,7 @@ class ZaloAssistantService:
         alerts.append({
             "id": "ai-gateway-health",
             "level": "INFO" if ai_health.get("status") == "ONLINE" else "WARNING",
-            "message": f"9Router AI Gateway: {ai_health.get('status')} (model {self.ai_client.model} tại {self.ai_client.base_url}).",
+            "message": f"AI Gateway: {ai_health.get('status')} sẵn sàng kết nối.",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         return alerts[:10]

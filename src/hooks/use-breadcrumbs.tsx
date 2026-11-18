@@ -8,35 +8,37 @@ type BreadcrumbItem = {
   link: string;
 };
 
-// This allows to add custom title as well
-const routeMapping: Record<string, BreadcrumbItem[]> = {
-  '/dashboard': [{ title: 'Dashboard', link: '/dashboard' }],
-  '/dashboard/employee': [
-    { title: 'Dashboard', link: '/dashboard' },
-    { title: 'Employee', link: '/dashboard/employee' }
-  ],
-  '/dashboard/product': [
-    { title: 'Dashboard', link: '/dashboard' },
-    { title: 'Product', link: '/dashboard/product' }
-  ]
-  // Add more custom mappings as needed
+// Bản đồ tiêu đề đường dẫn cho LabOps Control Center
+const segmentLabels: Record<string, string> = {
+  dashboard: 'Bảng điều khiển',
+  overview: 'Tổng quan',
+  servers: 'Máy chủ & GPU',
+  users: 'Thành viên & Truy cập',
+  resources: 'Workspace & Lưu trữ',
+  jobs: 'Tác vụ & Tiến trình',
+  security: 'Kiểm duyệt Kho mã',
+  monitoring: 'Giám sát An ninh',
+  'ai-assistant': 'Trợ lý AI & Zalo',
+  usage: 'Báo cáo Sử dụng',
+  'audit-logs': 'Nhật ký Kiểm toán',
+  calendar: 'Lịch Lab & Bảo trì',
+  settings: 'Cài đặt Hệ thống',
+  notifications: 'Thông báo vận hành',
+  profile: 'Hồ sơ phiên đăng nhập',
+  researcher: 'Không gian cá nhân',
+  connect: 'Kết nối & Bảo mật',
+  workspace: 'Workspace của tôi'
 };
 
 export function useBreadcrumbs() {
   const pathname = usePathname();
 
   const breadcrumbs = useMemo(() => {
-    // Check if we have a custom mapping for this exact path
-    if (routeMapping[pathname]) {
-      return routeMapping[pathname];
-    }
-
-    // If no exact match, fall back to generating breadcrumbs from the path
     const segments = pathname.split('/').filter(Boolean);
-    return segments.map((segment, index) => {
+    return segments.map((segment, index): BreadcrumbItem => {
       const path = `/${segments.slice(0, index + 1).join('/')}`;
       return {
-        title: segment.charAt(0).toUpperCase() + segment.slice(1),
+        title: segmentLabels[segment] || segment.charAt(0).toUpperCase() + segment.slice(1),
         link: path
       };
     });

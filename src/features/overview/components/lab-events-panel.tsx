@@ -13,7 +13,7 @@ function getEventBadge(type: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px]'
+          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs'
         >
           SEMINAR
         </Badge>
@@ -22,7 +22,7 @@ function getEventBadge(type: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px]'
+          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs'
         >
           BẢO TRÌ
         </Badge>
@@ -31,7 +31,7 @@ function getEventBadge(type: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
         >
           HỌP LAB
         </Badge>
@@ -40,14 +40,14 @@ function getEventBadge(type: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-[10px]'
+          className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-xs'
         >
           WORKSHOP
         </Badge>
       );
     default:
       return (
-        <Badge variant='secondary' className='text-[10px]'>
+        <Badge variant='secondary' className='text-xs'>
           SỰ KIỆN
         </Badge>
       );
@@ -94,14 +94,12 @@ export function LabEventsPanel() {
                   {evt.title}
                 </span>
               </div>
-              <span className='text-[11px] font-mono text-muted-foreground shrink-0'>
-                {evt.date}
-              </span>
+              <span className='text-xs font-mono text-muted-foreground shrink-0'>{evt.date}</span>
             </div>
 
-            <p className='text-[11px] text-muted-foreground line-clamp-2'>{evt.description}</p>
+            <p className='text-xs text-muted-foreground line-clamp-2'>{evt.description}</p>
 
-            <div className='flex items-center justify-between text-[10px] text-muted-foreground border-t border-border/40 pt-1.5 mt-0.5'>
+            <div className='flex items-center justify-between text-xs text-muted-foreground border-t border-border/40 pt-1.5 mt-0.5'>
               <span className='flex items-center gap-1'>
                 <Icons.clock className='size-3' />
                 {evt.startTime} - {evt.endTime}

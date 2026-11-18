@@ -27,7 +27,8 @@ export function useAuthSession() {
         const data = (await res.json()) as UserSessionData;
         globalCachedSession = data;
         setSession(data);
-      } else if (res && res.status === 401) {
+      } else if (res && (res.status === 401 || res.status === 403)) {
+        globalCachedSession = null;
         setSession(null);
       }
     } catch {
@@ -63,18 +64,34 @@ export function useAuthSession() {
     notifyListeners();
   }, []);
 
-  // Determine effective role:
-  // 1. Preview role if set by Admin
-  // 2. Server session role from /api/labops/session
-  // 3. Client clerk user metadata fallback
+  const logout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors during sign-out cleanup
+    } finally {
+      globalCachedSession = null;
+      globalPreviewRole = null;
+      setSession(null);
+      setLocalPreviewRole(null);
+      notifyListeners();
+      window.location.assign('/auth/sign-in');
+    }
+  }, []);
+
+  // Determine effective role (fail-closed: never default to ADMIN before verification)
   const rawRole: 'ADMIN' | 'RESEARCHER' = useMemo(() => {
-    if (session?.role) return session.role;
-    const metadataRole = String(
-      (user?.publicMetadata as { role?: string })?.role || ''
-    ).toUpperCase();
-    if (metadataRole === 'RESEARCHER') return 'RESEARCHER';
-    return 'ADMIN'; // Default
-  }, [session, user]);
+    if (session?.role === 'ADMIN' || session?.role === 'RESEARCHER') {
+      return session.role;
+    }
+    if (!session && isSignedIn) {
+      const metadataRole = String(
+        (user?.publicMetadata as { role?: string })?.role || ''
+      ).toUpperCase();
+      if (metadataRole === 'ADMIN') return 'ADMIN';
+    }
+    return 'RESEARCHER';
+  }, [session, user, isSignedIn]);
 
   const effectiveRole: 'ADMIN' | 'RESEARCHER' = useMemo(() => {
     if (previewRole && rawRole === 'ADMIN') return previewRole;
@@ -84,7 +101,7 @@ export function useAuthSession() {
   const displayUser = useMemo(() => {
     if (session && session.authenticated) {
       return {
-        fullName: session.fullName || user?.fullName || 'Người dùng LabOps',
+        fullName: session.fullName || user?.fullName || `@${session.username || 'user'}`,
         imageUrl: session.imageUrl || user?.imageUrl || '',
         emailAddresses: session.email
           ? [{ emailAddress: session.email }]
@@ -106,12 +123,12 @@ export function useAuthSession() {
       };
     }
     return {
-      fullName: 'Quản trị viên LabOps',
+      fullName: loading ? 'Đang tải phiên...' : 'Người dùng LabOps',
       imageUrl: '',
-      emailAddresses: [{ emailAddress: 'admin@labops.local' }],
-      username: 'admin'
+      emailAddresses: [{ emailAddress: '' }],
+      username: ''
     };
-  }, [session, user, isSignedIn]);
+  }, [session, user, isSignedIn, loading]);
 
   return {
     session,
@@ -123,6 +140,7 @@ export function useAuthSession() {
     isPreviewMode: previewRole !== null && rawRole === 'ADMIN',
     previewRole,
     setPreviewRole,
+    logout,
     isLoading: loading && !clerkLoaded,
     refetchSession: fetchSession
   };

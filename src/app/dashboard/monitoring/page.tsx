@@ -5,7 +5,8 @@ import { Badge } from '@/components/ui/badge';
 
 export const metadata = {
   title: 'Giám sát và cảnh báo - LabOps Control Center',
-  description: 'Giám sát hạ tầng tập trung qua Beszel, NVML và psutil kèm nhãn nguồn dữ liệu và độ tươi'
+  description:
+    'Giám sát hạ tầng tập trung qua Beszel, NVML và psutil kèm nhãn nguồn dữ liệu và độ tươi'
 };
 
 export default async function MonitoringPage() {
@@ -20,7 +21,7 @@ export default async function MonitoringPage() {
           <CardHeader>
             <div className='flex items-center justify-between'>
               <CardTitle className='text-sm font-bold'>Trạng thái Tích hợp Beszel Hub</CardTitle>
-              <Badge variant='outline' className='font-mono text-[10px] text-amber-600'>
+              <Badge variant='outline' className='font-mono text-xs text-amber-600'>
                 NOT_CONFIGURED / LOCAL_FALLBACK
               </Badge>
             </div>
@@ -44,7 +45,7 @@ export default async function MonitoringPage() {
           <CardHeader>
             <div className='flex items-center justify-between'>
               <CardTitle className='text-sm font-bold'>Trạng thái Tích hợp Arcane Docker</CardTitle>
-              <Badge variant='outline' className='font-mono text-[10px] text-blue-600'>
+              <Badge variant='outline' className='font-mono text-xs text-blue-600'>
                 ADMIN ONLY • v1.1.0
               </Badge>
             </div>
@@ -67,4 +68,3 @@ export default async function MonitoringPage() {
     </PageContainer>
   );
 }
-

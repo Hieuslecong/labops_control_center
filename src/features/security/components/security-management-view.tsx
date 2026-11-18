@@ -1,7 +1,6 @@
-/* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useEffect, useState, useTransition } from 'react';
+import React, { useMemo, useState, useTransition } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,6 +18,7 @@ import {
 import { Icons } from '@/components/icons';
 import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
+import { useRepositoryRequestsQuery } from '@/features/labops/queries';
 import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
 
 function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
@@ -29,7 +29,7 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono font-semibold'
+          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono font-semibold'
         >
           {status === 'AUTO_APPROVED' ? 'TỰ ĐỘNG PHÊ DUYỆT' : 'ADMIN ĐÃ DUYỆT'}
         </Badge>
@@ -39,7 +39,7 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] font-mono font-semibold'
+          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-mono font-semibold'
         >
           CẦN ADMIN DUYỆT
         </Badge>
@@ -48,7 +48,7 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-rose-600/10 text-rose-600 border-rose-600/30 text-[10px] font-mono font-semibold'
+          className='bg-rose-600/10 text-rose-600 border-rose-600/30 text-xs font-mono font-semibold'
         >
           TỪ CHỐI
         </Badge>
@@ -57,7 +57,7 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/30 text-[10px] font-mono'
+          className='bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/30 text-xs font-mono'
         >
           THẤT BẠI
         </Badge>
@@ -66,7 +66,7 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/30 text-[10px] font-mono font-semibold'
+          className='bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/30 text-xs font-mono font-semibold'
         >
           ĐÃ PHÂN PHỐI
         </Badge>
@@ -78,14 +78,14 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-mono animate-pulse'
+          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-mono animate-pulse'
         >
           ĐANG QUÉT & CÁCH LY
         </Badge>
       );
     default:
       return (
-        <Badge variant='outline' className='text-[10px] font-mono'>
+        <Badge variant='outline' className='text-xs font-mono'>
           {status}
         </Badge>
       );
@@ -93,9 +93,12 @@ function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
 }
 
 export function SecurityManagementView() {
-  const [requests, setRequests] = useState<RepositoryGuardRequest[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isPending, startTransition] = useTransition();
+
+  const requestsQuery = useRepositoryRequestsQuery({ intervalMs: 15_000 });
+  const requests = useMemo(() => requestsQuery.data ?? [], [requestsQuery.data]);
+  const loading = requestsQuery.isFetching;
+  const fetchRequests = () => requestsQuery.refetch();
 
   // Modals
   const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
@@ -107,23 +110,6 @@ export function SecurityManagementView() {
   // Form submit state
   const [repoUrl, setRepoUrl] = useState('');
   const [ref, setRef] = useState('HEAD');
-
-  const fetchRequests = async () => {
-    setLoading(true);
-    const res = await labopsCall<RepositoryGuardRequest[]>('repositories/requests');
-    if (res.ok && Array.isArray(res.data)) {
-      setRequests(res.data);
-    }
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    void fetchRequests();
-    const timer = setInterval(() => {
-      void fetchRequests();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, []);
 
   // KPIs
   const autoApprovedCount = requests.filter(
@@ -191,52 +177,52 @@ export function SecurityManagementView() {
       {/* KPI Stats */}
       <div className='grid grid-cols-2 sm:grid-cols-5 gap-3'>
         <Card className='p-3.5 bg-card border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
+          <span className='text-xs text-muted-foreground font-medium'>
             Tự động duyệt (Auto-Approved)
           </span>
           <div className='text-xl font-bold mt-0.5 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
             <Icons.check className='size-5' />
             {autoApprovedCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Đạt 100% tiêu chuẩn chính sách</span>
+          <span className='text-xs text-muted-foreground'>Đạt 100% tiêu chuẩn chính sách</span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
+          <span className='text-xs text-muted-foreground font-medium'>
             Chờ Admin duyệt (Review)
           </span>
           <div className='text-xl font-bold mt-0.5 text-amber-600 dark:text-amber-400 flex items-center gap-1.5'>
             <Icons.warning className='size-5' />
             {reviewRequiredCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Phát hiện rủi ro mức High</span>
+          <span className='text-xs text-muted-foreground'>Phát hiện rủi ro mức High</span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Từ chối (Rejected)</span>
+          <span className='text-xs text-muted-foreground font-medium'>Từ chối (Rejected)</span>
           <div className='text-xl font-bold mt-0.5 text-rose-600 dark:text-rose-400 flex items-center gap-1.5'>
             <Icons.close className='size-5' />
             {rejectedCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Phát hiện Secrets hoặc Critical</span>
+          <span className='text-xs text-muted-foreground'>Phát hiện Secrets hoặc Critical</span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Lỗi / Thất bại</span>
+          <span className='text-xs text-muted-foreground font-medium'>Lỗi / Thất bại</span>
           <div className='text-xl font-bold mt-0.5 text-red-600 dark:text-red-400 flex items-center gap-1.5'>
             <Icons.alertCircle className='size-5' />
             {failedCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Fail-closed an toàn</span>
+          <span className='text-xs text-muted-foreground'>Fail-closed an toàn</span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Cache Hit</span>
+          <span className='text-xs text-muted-foreground font-medium'>Cache Hit</span>
           <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
             <Icons.database className='size-5' />
             {cacheHitCount} lượt
           </div>
-          <span className='text-[10px] text-muted-foreground'>Tái sử dụng kết quả xác minh</span>
+          <span className='text-xs text-muted-foreground'>Tái sử dụng kết quả xác minh</span>
         </Card>
       </div>
 
@@ -247,8 +233,8 @@ export function SecurityManagementView() {
             <h4 className='text-sm font-bold tracking-tight'>
               Cổng Kiểm duyệt Mã nguồn Tự động (Repository Security Gateway)
             </h4>
-            <Badge variant='outline' className='text-[10px] font-mono'>
-              ZERO-TRUST REPOSITORY EGRESS
+            <Badge variant='outline' className='text-xs font-mono'>
+              KIỂM DUYỆT CÁCH LY (REPO GUARD)
             </Badge>
           </div>
           <div className='grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 pt-1 text-center text-xs'>
@@ -264,8 +250,8 @@ export function SecurityManagementView() {
                 key={s.step}
                 className='p-2 rounded-lg border bg-muted/20 flex flex-col items-center justify-center'
               >
-                <span className='font-bold text-[11px] text-foreground'>{s.step}</span>
-                <span className='text-[10px] text-muted-foreground'>{s.desc}</span>
+                <span className='font-bold text-xs text-foreground'>{s.step}</span>
+                <span className='text-xs text-muted-foreground'>{s.desc}</span>
               </div>
             ))}
           </div>
@@ -325,7 +311,8 @@ export function SecurityManagementView() {
                   <tr>
                     <td colSpan={7} className='py-8 text-center text-muted-foreground'>
                       Chưa có yêu cầu kiểm duyệt kho mã nào. Bấm &quot;Gửi Repo Kiểm duyệt&quot;
-                      hoặc sử dụng CLI `labops clone` trong terminal.
+                      hoặc sử dụng CLI <code className='font-mono'>gitaiot clone</code> trong
+                      terminal.
                     </td>
                   </tr>
                 ) : (
@@ -336,12 +323,12 @@ export function SecurityManagementView() {
                           <Icons.github className='size-4 text-muted-foreground shrink-0' />
                           {r.repo_name || r.canonical_repo}
                         </div>
-                        <div className='text-[10px] text-muted-foreground font-mono mt-0.5 truncate max-w-xs'>
+                        <div className='text-xs text-muted-foreground font-mono mt-0.5 truncate max-w-xs'>
                           {r.canonical_repo}
                         </div>
                       </td>
 
-                      <td className='py-3 px-3 font-mono text-[11px]'>
+                      <td className='py-3 px-3 font-mono text-xs'>
                         {r.commit_sha ? (
                           <span className='bg-muted px-1.5 py-0.5 rounded-sm'>
                             {r.commit_sha.slice(0, 8)}
@@ -351,11 +338,11 @@ export function SecurityManagementView() {
                         )}
                       </td>
 
-                      <td className='py-3 px-3 font-mono text-[11px]'>@{r.submitted_by}</td>
+                      <td className='py-3 px-3 font-mono text-xs'>@{r.submitted_by}</td>
 
                       <td className='py-3 px-3'>
                         {r.report ? (
-                          <div className='flex items-center gap-1 text-[10px] font-mono'>
+                          <div className='flex items-center gap-1 text-xs font-mono'>
                             {r.report.secrets_count > 0 && (
                               <Badge
                                 variant='outline'
@@ -392,13 +379,13 @@ export function SecurityManagementView() {
                               )}
                           </div>
                         ) : (
-                          <span className='text-muted-foreground text-[10px]'>Chưa có dữ liệu</span>
+                          <span className='text-muted-foreground text-xs'>Chưa có dữ liệu</span>
                         )}
                       </td>
 
                       <td className='py-3 px-3'>{getSecurityStatusBadge(r.state)}</td>
 
-                      <td className='py-3 px-3 text-[11px] text-muted-foreground'>
+                      <td className='py-3 px-3 text-xs text-muted-foreground'>
                         {r.submitted_at ? new Date(r.submitted_at).toLocaleTimeString() : '—'}
                       </td>
 
@@ -452,28 +439,28 @@ export function SecurityManagementView() {
             <div className='flex flex-col gap-3 py-2 text-xs'>
               <div className='grid grid-cols-2 gap-2 p-2.5 rounded-lg border bg-muted/20'>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Kho lưu trữ</span>
+                  <span className='text-xs text-muted-foreground block'>Kho lưu trữ</span>
                   <span className='font-mono font-semibold'>{selectedReq.canonical_repo}</span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Commit SHA</span>
+                  <span className='text-xs text-muted-foreground block'>Commit SHA</span>
                   <span className='font-mono font-semibold truncate block'>
                     {selectedReq.commit_sha || 'N/A'}
                   </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Người gửi</span>
+                  <span className='text-xs text-muted-foreground block'>Người gửi</span>
                   <span className='font-mono'>@{selectedReq.submitted_by}</span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Trạng thái</span>
+                  <span className='text-xs text-muted-foreground block'>Trạng thái</span>
                   <div className='mt-0.5'>{getSecurityStatusBadge(selectedReq.state)}</div>
                 </div>
               </div>
 
               {selectedReq.artifact_digest && (
-                <div className='p-2 rounded-md bg-muted/30 border font-mono text-[11px]'>
-                  <span className='text-muted-foreground block text-[10px] font-sans'>
+                <div className='p-2 rounded-md bg-muted/30 border font-mono text-xs'>
+                  <span className='text-muted-foreground block text-xs font-sans'>
                     Chữ ký SHA-256 Artifact Digest:
                   </span>
                   <span className='text-emerald-700 dark:text-emerald-400 break-all'>
@@ -487,7 +474,7 @@ export function SecurityManagementView() {
                   <h5 className='font-semibold text-xs'>Lý do đánh giá chính sách bảo mật:</h5>
                   <ul className='list-disc pl-4 space-y-1 text-muted-foreground'>
                     {selectedReq.report.policy_reasons.map((reason, idx) => (
-                      <li key={idx} className='text-[11px]'>
+                      <li key={idx} className='text-xs'>
                         {reason}
                       </li>
                     ))}
@@ -498,7 +485,7 @@ export function SecurityManagementView() {
                       <h5 className='font-semibold text-xs mb-1.5'>
                         Phát hiện bảo mật chi tiết ({selectedReq.report.findings.length}):
                       </h5>
-                      <div className='max-h-40 overflow-y-auto divide-y border rounded-md text-[11px]'>
+                      <div className='max-h-40 overflow-y-auto divide-y border rounded-md text-xs'>
                         {selectedReq.report.findings.map((f, i) => (
                           <div key={i} className='p-2 flex flex-col gap-0.5 bg-card'>
                             <div className='flex items-center justify-between'>
@@ -517,11 +504,11 @@ export function SecurityManagementView() {
                               </Badge>
                             </div>
                             <span className='text-muted-foreground'>{f.title}</span>
-                            <span className='text-[10px] font-mono text-muted-foreground truncate'>
+                            <span className='text-xs font-mono text-muted-foreground truncate'>
                               Tệp: {f.target_file}
                             </span>
                             {f.masked_value && (
-                              <span className='text-[10px] font-mono text-rose-600 dark:text-rose-400'>
+                              <span className='text-xs font-mono text-rose-600 dark:text-rose-400'>
                                 Giá trị: {f.masked_value}
                               </span>
                             )}
@@ -666,7 +653,7 @@ export function SecurityManagementView() {
                 />
               </div>
 
-              <div className='p-2.5 rounded-lg border bg-muted/20 text-[11px] text-muted-foreground'>
+              <div className='p-2.5 rounded-lg border bg-muted/20 text-xs text-muted-foreground'>
                 Hệ thống sẽ tải snapshot về vùng Quarantine cô lập (No-Exec, giới hạn 500MB), phân
                 tích tĩnh các lỗ hổng CVE và phát hiện rò rỉ khóa bí mật. Nếu đạt chính sách an
                 ninh, mã nguồn sẽ được tự động phân phối vào workspace.

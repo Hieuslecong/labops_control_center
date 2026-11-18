@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLabOpsStore } from '@/features/labops/store';
 import { MemberProvisioningWizard } from './member-provisioning-wizard';
+import { SafeMemberDeleteDialog } from './safe-member-delete-dialog';
 import { LabMember, WireGuardDevice, WireGuardVpnOverview } from '@/types/labops';
 import { toast } from 'sonner';
 
@@ -121,6 +122,7 @@ export function MemberManagementView() {
   >({});
   const [tempPasswordInput, setTempPasswordInput] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [deleteTargetMember, setDeleteTargetMember] = useState<LabMember | null>(null);
 
   const refresh = useCallback(async () => {
     if (DEMO_MODE) return;
@@ -143,9 +145,12 @@ export function MemberManagementView() {
     const results = await Promise.all(
       rows.map(async (member) => {
         try {
-          const v2Res = await fetch(`/api/labops/v2/members/${encodeURIComponent(member.id)}/devices`, {
-            cache: 'no-store'
-          });
+          const v2Res = await fetch(
+            `/api/labops/v2/members/${encodeURIComponent(member.id)}/devices`,
+            {
+              cache: 'no-store'
+            }
+          );
           if (v2Res.ok) {
             const rawDevices = await v2Res.json();
             if (Array.isArray(rawDevices) && rawDevices.length > 0) {
@@ -155,7 +160,8 @@ export function MemberManagementView() {
                 name: d.name || 'Thiết bị VPN',
                 clientIp: d.address || d.clientIp || d.vpn_ip || '',
                 publicKey: d.public_key || d.publicKey || '',
-                status: (d.status || (d.enabled !== false ? 'ACTIVE' : 'DISABLED')) as WireGuardDevice['status'],
+                status: (d.status ||
+                  (d.enabled !== false ? 'ACTIVE' : 'DISABLED')) as WireGuardDevice['status'],
                 enabled: d.enabled !== false,
                 lastHandshake: d.last_handshake || d.lastHandshake || null,
                 transferRx: Number(d.transfer_rx || d.transferRx || 0),
@@ -168,9 +174,12 @@ export function MemberManagementView() {
           // fallback to legacy
         }
         try {
-          const response = await fetch(`/api/access/users/${encodeURIComponent(member.id)}/wireguard/devices`, {
-            cache: 'no-store'
-          });
+          const response = await fetch(
+            `/api/access/users/${encodeURIComponent(member.id)}/wireguard/devices`,
+            {
+              cache: 'no-store'
+            }
+          );
           if (!response.ok) return [member.id, []] as const;
           const devices = await response.json();
           return [member.id, Array.isArray(devices) ? devices : []] as const;
@@ -224,7 +233,9 @@ export function MemberManagementView() {
       await refresh();
       return result;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Không thể xác minh kết quả từ backend.');
+      toast.error(
+        error instanceof Error ? error.message : 'Không thể xác minh kết quả từ backend.'
+      );
       return null;
     } finally {
       setBusy(false);
@@ -240,7 +251,9 @@ export function MemberManagementView() {
       );
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(typeof err.detail === 'string' ? err.detail : `Lỗi tải config (${response.status})`);
+        throw new Error(
+          typeof err.detail === 'string' ? err.detail : `Lỗi tải config (${response.status})`
+        );
       }
       const confText = await response.text();
       const safeName = (device.name || 'device').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
@@ -266,7 +279,9 @@ export function MemberManagementView() {
   };
 
   const revokeDeviceV2Action = async (member: LabMember, device: WireGuardDevice) => {
-    const confirmed = window.confirm(`Xác nhận thu hồi thiết bị "${device.name}" của @${member.username}?`);
+    const confirmed = window.confirm(
+      `Xác nhận thu hồi thiết bị "${device.name}" của @${member.username}?`
+    );
     if (!confirmed) return;
     const result = await runAction(
       `/api/labops/v2/members/${encodeURIComponent(member.id)}/devices/${encodeURIComponent(device.deviceId)}`,
@@ -294,7 +309,9 @@ export function MemberManagementView() {
       if (result.configuration) {
         const safeName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
         downloadTextFile(`${member.username}-${safeName}.conf`, result.configuration);
-        toast.success(`Đã tự động tải cấu hình ${member.username}-${safeName}.conf để import ngay!`);
+        toast.success(
+          `Đã tự động tải cấu hình ${member.username}-${safeName}.conf để import ngay!`
+        );
       }
     }
   };
@@ -421,7 +438,9 @@ export function MemberManagementView() {
       );
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Gói khóa riêng đã được tải trước đó.');
+        throw new Error(
+          typeof data.detail === 'string' ? data.detail : 'Gói khóa riêng đã được tải trước đó.'
+        );
       }
       setClaimedBundleByUser((prev) => ({ ...prev, [member.id]: data }));
       if (data.wireguard_conf) {
@@ -450,7 +469,9 @@ export function MemberManagementView() {
       );
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Thông tin bí mật đã được lấy trước đó.');
+        throw new Error(
+          typeof data.detail === 'string' ? data.detail : 'Thông tin bí mật đã được lấy trước đó.'
+        );
       }
       setClaimedSecretsByUser((prev) => ({ ...prev, [member.id]: data }));
       toast.success('Đã lấy Passphrase & Mật khẩu tạm (1 lần duy nhất). Hãy gửi qua kênh riêng!');
@@ -474,7 +495,9 @@ export function MemberManagementView() {
     );
     if (result) {
       if (result.status === 'VERIFIED_REVOKED') {
-        toast.success(`Đã xác minh thu hồi SSH thành công (VERIFIED_REVOKED) cho @${member.username}.`);
+        toast.success(
+          `Đã xác minh thu hồi SSH thành công (VERIFIED_REVOKED) cho @${member.username}.`
+        );
       } else {
         toast.warning(`Trạng thái thu hồi: ${result.status} — ${result.reason}`);
       }
@@ -494,27 +517,8 @@ export function MemberManagementView() {
     );
   };
 
-  const deleteMemberAction = async (member: LabMember) => {
-    const confirmed = window.confirm(
-      `⚠️ CẢNH BÁO XÓA TÀI KHOẢN VĨNH VIỄN:\n\n` +
-        `Bạn có chắc chắn muốn XÓA VĨNH VIỄN tài khoản @${member.username} (${member.fullName})?\n\n` +
-        `Thao tác này sẽ thực hiện:\n` +
-        `1. Dừng và xóa container workspace ws-${member.username}\n` +
-        `2. Thu hồi và xóa toàn bộ WireGuard VPN peers trên wg-easy\n` +
-        `3. Hủy bỏ toàn bộ SSH keys và secrets của thành viên\n` +
-        `4. Dọn dẹp thư mục workspace trên máy chủ\n\n` +
-        `Thao tác này KHÔNG THỂ KHÔI PHỤC!`
-    );
-    if (!confirmed) return;
-    const result = await runAction(
-      `/api/labops/v2/members/${encodeURIComponent(member.id)}`,
-      'DELETE'
-    );
-    if (result) {
-      toast.success(`Đã xóa vĩnh viễn tài khoản @${member.username} thành công.`);
-      if (managedUser === member.id) setManagedUser(null);
-      await refresh();
-    }
+  const deleteMemberAction = (member: LabMember) => {
+    setDeleteTargetMember(member);
   };
 
   const handleFirstLoginPasswordChange = async (member: LabMember) => {
@@ -522,15 +526,21 @@ export function MemberManagementView() {
       toast.error('Vui lòng nhập đầy đủ mật khẩu tạm và mật khẩu mới.');
       return;
     }
-    const result = await runAction('/api/labops/v2/ssh-access/first-login-change-password', 'POST', {
-      username: member.username,
-      temporary_password: tempPasswordInput,
-      new_password: newPasswordInput
-    });
+    const result = await runAction(
+      '/api/labops/v2/ssh-access/first-login-change-password',
+      'POST',
+      {
+        username: member.username,
+        temporary_password: tempPasswordInput,
+        new_password: newPasswordInput
+      }
+    );
     if (result) {
       setTempPasswordInput('');
       setNewPasswordInput('');
-      toast.success(`Đã đổi mật khẩu lần đầu thành công cho @${member.username}! Mật khẩu tạm đã hết hiệu lực.`);
+      toast.success(
+        `Đã đổi mật khẩu lần đầu thành công cho @${member.username}! Mật khẩu tạm đã hết hiệu lực.`
+      );
     }
   };
 
@@ -540,7 +550,8 @@ export function MemberManagementView() {
         <div>
           <h1 className='text-2xl font-semibold'>Quản lý Thành viên & Quyền Truy cập SSH</h1>
           <p className='text-sm text-muted-foreground'>
-            Admin tạo, cấp phát khóa SSH mã hóa Passphrase, mật khẩu tạm lần đầu và thu hồi quyền truy cập từ Dashboard
+            Admin tạo, cấp phát khóa SSH mã hóa Passphrase, mật khẩu tạm lần đầu và thu hồi quyền
+            truy cập từ Dashboard
           </p>
         </div>
         <div className='flex gap-2'>
@@ -572,8 +583,13 @@ export function MemberManagementView() {
           <div className='flex flex-wrap items-center justify-between gap-2 border-b pb-2'>
             <div className='flex items-center gap-2'>
               <span className='text-base font-semibold'>Hệ thống WireGuard VPN Mesh</span>
-              <Badge variant='outline' className='bg-emerald-500/10 text-emerald-600 border-emerald-500/30'>
-                {vpnOverview?.active_provider === 'wg-easy' ? 'wg-easy v15 (Active & Healthy)' : 'Kernel wg0'}
+              <Badge
+                variant='outline'
+                className='bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
+              >
+                {vpnOverview?.active_provider === 'wg-easy'
+                  ? 'wg-easy v15 (Active & Healthy)'
+                  : 'Kernel wg0'}
               </Badge>
               <Badge variant='outline' className='text-xs'>
                 Trạng thái: {vpnOverview?.status || 'HEALTHY'}
@@ -588,7 +604,9 @@ export function MemberManagementView() {
               </span>
               <span>
                 Subnet:{' '}
-                <strong className='text-foreground font-mono'>{vpnOverview?.cidr || '10.88.40.0/24'}</strong>
+                <strong className='text-foreground font-mono'>
+                  {vpnOverview?.cidr || '10.88.40.0/24'}
+                </strong>
               </span>
             </div>
           </div>
@@ -597,28 +615,33 @@ export function MemberManagementView() {
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Cổng UDP & Chuyển tiếp</div>
               <div className='font-mono font-medium text-sm mt-0.5'>UDP 2204 (MikroTik NAT)</div>
-              <div className='text-[11px] text-muted-foreground mt-0.5'>118.70.169.236:2204</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>118.70.169.236:2204</div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Thiết bị VPN / Kết nối</div>
               <div className='font-mono font-medium text-sm mt-0.5 text-emerald-600 dark:text-emerald-400'>
                 {vpnOverview?.active_clients ?? 0} / {vpnOverview?.total_clients ?? 0} online
               </div>
-              <div className='text-[11px] text-muted-foreground mt-0.5'>Handshake gần nhất &lt; 3 phút</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>
+                Handshake gần nhất &lt; 3 phút
+              </div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Lưu lượng Mạng VPN</div>
               <div className='font-mono font-medium text-sm mt-0.5'>
-                ↓ {formatBytes(vpnOverview?.total_rx_bytes)} · ↑ {formatBytes(vpnOverview?.total_tx_bytes)}
+                ↓ {formatBytes(vpnOverview?.total_rx_bytes)} · ↑{' '}
+                {formatBytes(vpnOverview?.total_tx_bytes)}
               </div>
-              <div className='text-[11px] text-muted-foreground mt-0.5'>Tổng lưu lượng toàn trạm</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>Tổng lưu lượng toàn trạm</div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Độc lập & Bảo toàn</div>
               <div className='font-mono font-medium text-sm mt-0.5 text-blue-600 dark:text-blue-400'>
                 wg0 (2204) & SSH (22/1911)
               </div>
-              <div className='text-[11px] text-muted-foreground mt-0.5'>Bảo toàn nguyên vẹn hạ tầng host</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>
+                Bảo toàn nguyên vẹn hạ tầng host
+              </div>
             </div>
           </div>
         </CardContent>
@@ -645,8 +668,8 @@ export function MemberManagementView() {
               {statusBadge('ACTIVE')}
             </div>
             <p className='text-xs text-muted-foreground'>
-              Mỗi thành viên sử dụng khóa công khai OpenSSH riêng và được cấp cổng SSH riêng biệt (dải{' '}
-              <code>22001–29999</code>) vào Workspace cô lập.
+              Mỗi thành viên sử dụng khóa công khai OpenSSH riêng và được cấp cổng SSH riêng biệt
+              (dải <code>22001–29999</code>) vào Workspace cô lập.
             </p>
           </CardContent>
         </Card>
@@ -678,7 +701,9 @@ export function MemberManagementView() {
                   const devices = devicesByUser[member.id] || member.wireguard?.devices || [];
                   const expanded = managedUser === member.id;
                   const canEnroll =
-                    !DEMO_MODE && member.workspaceStatus === 'VERIFIED' && health?.network_policy === 'VERIFIED';
+                    !DEMO_MODE &&
+                    member.workspaceStatus === 'VERIFIED' &&
+                    health?.network_policy === 'VERIFIED';
                   return (
                     <Fragment key={member.id}>
                       <tr className='border-b align-top'>
@@ -691,7 +716,9 @@ export function MemberManagementView() {
                         <td className='p-3'>{member.role}</td>
                         <td className='p-3'>
                           <span className='font-mono uppercase'>{member.assignedServer}</span>
-                          <div className='text-xs text-muted-foreground'>{member.workspaceName}</div>
+                          <div className='text-xs text-muted-foreground'>
+                            {member.workspaceName}
+                          </div>
                         </td>
                         <td className='p-3'>
                           {statusBadge(member.sshKeyStatus || 'NOT_CONFIGURED')}
@@ -707,11 +734,15 @@ export function MemberManagementView() {
                               ? 'ACTIVE'
                               : devices[0]?.status || 'NOT_CONFIGURED'
                           )}
-                          <div className='text-xs text-muted-foreground'>{devices.length} thiết bị</div>
+                          <div className='text-xs text-muted-foreground'>
+                            {devices.length} thiết bị
+                          </div>
                         </td>
                         <td className='p-3'>
                           {statusBadge(member.status)}
-                          <div className='text-xs text-muted-foreground'>{member.provisioningState || '—'}</div>
+                          <div className='text-xs text-muted-foreground'>
+                            {member.provisioningState || '—'}
+                          </div>
                         </td>
                         <td className='p-3' aria-label='Thao tác'>
                           <div className='flex flex-wrap gap-2'>
@@ -726,9 +757,7 @@ export function MemberManagementView() {
                               size='sm'
                               variant='destructive'
                               disabled={
-                                busy ||
-                                DEMO_MODE ||
-                                member.sshKeyStatus === 'VERIFIED_REVOKED'
+                                busy || DEMO_MODE || member.sshKeyStatus === 'VERIFIED_REVOKED'
                               }
                               onClick={() => void revokeMemberSsh(member)}
                             >
@@ -778,29 +807,43 @@ export function MemberManagementView() {
                                     <div className='space-y-2 text-xs'>
                                       <div className='flex justify-between border-b pb-1.5'>
                                         <span className='text-muted-foreground'>Họ và tên:</span>
-                                        <span className='font-semibold'>{member.fullName || 'Chưa cập nhật'}</span>
+                                        <span className='font-semibold'>
+                                          {member.fullName || 'Chưa cập nhật'}
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
                                         <span className='text-muted-foreground'>Username:</span>
-                                        <span className='font-mono font-bold'>@{member.username}</span>
+                                        <span className='font-mono font-bold'>
+                                          @{member.username}
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
                                         <span className='text-muted-foreground'>Email:</span>
                                         <span>{member.email || 'N/A'}</span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
-                                        <span className='text-muted-foreground'>Vai trò hệ thống:</span>
-                                        <Badge variant='outline' className='text-[10px] font-mono'>
+                                        <span className='text-muted-foreground'>
+                                          Vai trò hệ thống:
+                                        </span>
+                                        <Badge variant='outline' className='text-xs font-mono'>
                                           {member.role || 'RESEARCHER'}
                                         </Badge>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
-                                        <span className='text-muted-foreground'>Trạng thái tài khoản:</span>
+                                        <span className='text-muted-foreground'>
+                                          Trạng thái tài khoản:
+                                        </span>
                                         {statusBadge(member.status)}
                                       </div>
                                       <div className='flex justify-between'>
-                                        <span className='text-muted-foreground'>Ngày kích hoạt:</span>
-                                        <span>{member.createdAt ? new Date(member.createdAt).toLocaleDateString() : 'Chưa xác định'}</span>
+                                        <span className='text-muted-foreground'>
+                                          Ngày kích hoạt:
+                                        </span>
+                                        <span>
+                                          {member.createdAt
+                                            ? new Date(member.createdAt).toLocaleDateString()
+                                            : 'Chưa xác định'}
+                                        </span>
                                       </div>
                                     </div>
                                   </div>
@@ -811,25 +854,38 @@ export function MemberManagementView() {
                                     </h4>
                                     <div className='space-y-2 text-xs'>
                                       <div className='rounded-md border bg-muted/30 p-2.5 space-y-1'>
-                                        <div className='text-muted-foreground text-[11px]'>Đường dẫn thư mục riêng trên máy chủ:</div>
+                                        <div className='text-muted-foreground text-xs'>
+                                          Đường dẫn thư mục riêng trên máy chủ:
+                                        </div>
                                         <div className='font-mono font-bold text-xs select-all text-foreground'>
                                           /media/LabOps-Data/{member.username}
                                         </div>
-                                        <p className='text-[10px] text-muted-foreground'>
-                                          Thư mục cô lập, chỉ tài khoản này và admin có quyền truy xuất.
+                                        <p className='text-xs text-muted-foreground'>
+                                          Thư mục cô lập, chỉ tài khoản này và admin có quyền truy
+                                          xuất.
                                         </p>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5 pt-1'>
-                                        <span className='text-muted-foreground'>Hạn mức CPU (vCPU):</span>
-                                        <span className='font-semibold'>{member.cpuLimitCores || 8} vCPU</span>
+                                        <span className='text-muted-foreground'>
+                                          Hạn mức CPU (vCPU):
+                                        </span>
+                                        <span className='font-semibold'>
+                                          {member.cpuLimitCores || 8} vCPU
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
                                         <span className='text-muted-foreground'>Hạn mức RAM:</span>
-                                        <span className='font-semibold'>{member.ramLimitGb || 32} GB</span>
+                                        <span className='font-semibold'>
+                                          {member.ramLimitGb || 32} GB
+                                        </span>
                                       </div>
                                       <div className='flex justify-between'>
-                                        <span className='text-muted-foreground'>Hạn mức Lưu trữ (Storage):</span>
-                                        <span className='font-semibold'>{member.storageQuotaGb || 100} GB</span>
+                                        <span className='text-muted-foreground'>
+                                          Hạn mức Lưu trữ (Storage):
+                                        </span>
+                                        <span className='font-semibold'>
+                                          {member.storageQuotaGb || 100} GB
+                                        </span>
                                       </div>
                                     </div>
                                   </div>
@@ -840,425 +896,482 @@ export function MemberManagementView() {
                               <TabsContent value='access' className='mt-3'>
                                 <div className='grid gap-5 lg:grid-cols-2'>
                                   {/* CỘT 1: VÒNG ĐỜI QUYỀN SSH DO ADMIN QUẢN LÝ */}
-                              <section className='space-y-3 rounded-lg border bg-background p-4'>
-                                <div className='flex items-center justify-between'>
-                                  <h3 className='font-semibold text-sm'>
-                                    1. Quản lý Vòng đời Khóa SSH & Mật khẩu tạm (@{member.username})
-                                  </h3>
-                                  {statusBadge(member.sshKeyStatus || 'NOT_CONFIGURED')}
-                                </div>
-                                {member.sshPort && (
-                                  <div className='rounded-md bg-emerald-500/10 border border-emerald-500/30 p-2.5 text-xs font-mono space-y-1'>
-                                    <p className='font-semibold text-emerald-700 dark:text-emerald-300'>
-                                      Endpoint SSH đã cấp:
-                                    </p>
-                                    <p>
-                                      <code>
-                                        ssh -i id_ed25519_{member.username} -p {member.sshPort} {member.username}@
-                                        {member.sshIp || '192.168.167.250'}
-                                      </code>
-                                    </p>
-                                    {member.sshFingerprint && (
-                                      <p className='text-[11px] text-muted-foreground'>
-                                        Fingerprint: {member.sshFingerprint}
-                                      </p>
-                                    )}
-                                    <p className='text-[11px] text-muted-foreground'>
-                                      Trạng thái mật khẩu lần đầu: <strong>{member.passwordStatus || 'NOT_APPLICABLE'}</strong>
-                                    </p>
-                                  </div>
-                                )}
-
-                                <div className='rounded-md border p-3 space-y-2 bg-muted/30'>
-                                  <p className='text-xs font-semibold'>
-                                    A. Tạo mới / Cấp lại Khóa SSH (Bảo vệ bằng Passphrase) & Bàn giao 1 lần
-                                  </p>
-                                  <div className='flex flex-wrap gap-2'>
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      disabled={busy || DEMO_MODE}
-                                      onClick={() => void rotateMemberSshKeypair(member, false)}
-                                    >
-                                      ⚡ Cấp khóa kết nối thẳng 1 chạm (Không Passphrase)
-                                    </Button>
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      variant='outline'
-                                      disabled={busy || DEMO_MODE}
-                                      onClick={() => void rotateMemberSshKeypair(member, true)}
-                                    >
-                                      🔒 Cấp khóa có Passphrase
-                                    </Button>
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      variant='outline'
-                                      disabled={busy || DEMO_MODE}
-                                      onClick={() => void reissueMemberTempPassword(member)}
-                                    >
-                                      Cấp lại Mật khẩu tạm lần đầu
-                                    </Button>
-                                  </div>
-
-                                  <div className='flex flex-wrap items-center gap-2 pt-1'>
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      className='font-bold'
-                                      disabled={busy || DEMO_MODE}
-                                      onClick={() => void downloadMemberAccessZip(member)}
-                                    >
-                                      📦 Tải bộ kết nối (.zip)
-                                    </Button>
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      variant='secondary'
-                                      disabled={busy || DEMO_MODE || !member.oneTimePackage?.channel_secrets_available}
-                                      onClick={() => void claimMemberSecrets(member)}
-                                    >
-                                      {member.oneTimePackage?.channel_secrets_available
-                                        ? '🔑 Passphrase & Mật khẩu tạm (Kênh riêng)'
-                                        : 'Passphrase & Mật khẩu tạm đã lấy'}
-                                    </Button>
-                                  </div>
-
-                                  {!member.oneTimePackage?.key_bundle_available && (
-                                    <div className='rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200'>
-                                      Khóa riêng SSH của @{member.username} đã được giải phóng khỏi RAM theo chính sách một lần (One-Time Vault).
-                                      Nếu thành viên làm mất file khóa, Admin bấm <strong>Cấp khóa 1 chạm</strong> hoặc <strong>Cấp khóa có Passphrase</strong> bên trên để tạo cặp khóa mới và tải lại file ZIP ngay!
+                                  <section className='space-y-3 rounded-lg border bg-background p-4'>
+                                    <div className='flex items-center justify-between'>
+                                      <h3 className='font-semibold text-sm'>
+                                        1. Quản lý Vòng đời Khóa SSH & Mật khẩu tạm (@
+                                        {member.username})
+                                      </h3>
+                                      {statusBadge(member.sshKeyStatus || 'NOT_CONFIGURED')}
                                     </div>
-                                  )}
+                                    {member.sshPort && (
+                                      <div className='rounded-md bg-emerald-500/10 border border-emerald-500/30 p-2.5 text-xs font-mono space-y-1'>
+                                        <p className='font-semibold text-emerald-700 dark:text-emerald-300'>
+                                          Endpoint SSH đã cấp:
+                                        </p>
+                                        <p>
+                                          <code>
+                                            ssh -i id_ed25519_{member.username} -p {member.sshPort}{' '}
+                                            {member.username}@{member.sshIp || '192.168.167.250'}
+                                          </code>
+                                        </p>
+                                        {member.sshFingerprint && (
+                                          <p className='text-xs text-muted-foreground'>
+                                            Fingerprint: {member.sshFingerprint}
+                                          </p>
+                                        )}
+                                        <p className='text-xs text-muted-foreground'>
+                                          Trạng thái mật khẩu lần đầu:{' '}
+                                          <strong>
+                                            {member.passwordStatus || 'NOT_APPLICABLE'}
+                                          </strong>
+                                        </p>
+                                      </div>
+                                    )}
 
-                                  <div className='pt-1'>
-                                    <details className='text-xs text-muted-foreground cursor-pointer'>
-                                      <summary className='font-medium text-primary hover:underline py-0.5'>
-                                        ▶ Hoặc giải nén / lấy từng file cấu hình rời (.conf, .sh, SSH key)
-                                      </summary>
-                                      <div className='mt-2 space-y-2 pl-2 border-l-2 border-muted'>
+                                    <div className='rounded-md border p-3 space-y-2 bg-muted/30'>
+                                      <p className='text-xs font-semibold'>
+                                        A. Tạo mới / Cấp lại Khóa SSH (Bảo vệ bằng Passphrase) & Bàn
+                                        giao 1 lần
+                                      </p>
+                                      <div className='flex flex-wrap gap-2'>
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          disabled={busy || DEMO_MODE}
+                                          onClick={() => void rotateMemberSshKeypair(member, false)}
+                                        >
+                                          ⚡ Cấp khóa kết nối thẳng 1 chạm (Không Passphrase)
+                                        </Button>
                                         <Button
                                           type='button'
                                           size='sm'
                                           variant='outline'
-                                          disabled={busy || DEMO_MODE || !member.oneTimePackage?.key_bundle_available}
-                                          onClick={() => void claimMemberKeyBundle(member)}
+                                          disabled={busy || DEMO_MODE}
+                                          onClick={() => void rotateMemberSshKeypair(member, true)}
                                         >
-                                          {member.oneTimePackage?.key_bundle_available
-                                            ? 'Tải rời: WireGuard .conf & Script SSH 1 chạm'
-                                            : 'Gói Config rời đã tải / không còn trong RAM'}
+                                          🔒 Cấp khóa có Passphrase
+                                        </Button>
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          variant='outline'
+                                          disabled={busy || DEMO_MODE}
+                                          onClick={() => void reissueMemberTempPassword(member)}
+                                        >
+                                          Cấp lại Mật khẩu tạm lần đầu
+                                        </Button>
+                                      </div>
+
+                                      <div className='flex flex-wrap items-center gap-2 pt-1'>
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          className='font-bold'
+                                          disabled={busy || DEMO_MODE}
+                                          onClick={() => void downloadMemberAccessZip(member)}
+                                        >
+                                          📦 Tải bộ kết nối (.zip)
+                                        </Button>
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          variant='secondary'
+                                          disabled={
+                                            busy ||
+                                            DEMO_MODE ||
+                                            !member.oneTimePackage?.channel_secrets_available
+                                          }
+                                          onClick={() => void claimMemberSecrets(member)}
+                                        >
+                                          {member.oneTimePackage?.channel_secrets_available
+                                            ? '🔑 Passphrase & Mật khẩu tạm (Kênh riêng)'
+                                            : 'Passphrase & Mật khẩu tạm đã lấy'}
+                                        </Button>
+                                      </div>
+
+                                      {!member.oneTimePackage?.key_bundle_available && (
+                                        <div className='rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200'>
+                                          Khóa riêng SSH của @{member.username} đã được giải phóng
+                                          khỏi RAM theo chính sách một lần (One-Time Vault). Nếu
+                                          thành viên làm mất file khóa, Admin bấm{' '}
+                                          <strong>Cấp khóa 1 chạm</strong> hoặc{' '}
+                                          <strong>Cấp khóa có Passphrase</strong> bên trên để tạo
+                                          cặp khóa mới và tải lại file ZIP ngay!
+                                        </div>
+                                      )}
+
+                                      <div className='pt-1'>
+                                        <details className='text-xs text-muted-foreground cursor-pointer'>
+                                          <summary className='font-medium text-primary hover:underline py-0.5'>
+                                            ▶ Hoặc giải nén / lấy từng file cấu hình rời (.conf,
+                                            .sh, SSH key)
+                                          </summary>
+                                          <div className='mt-2 space-y-2 pl-2 border-l-2 border-muted'>
+                                            <Button
+                                              type='button'
+                                              size='sm'
+                                              variant='outline'
+                                              disabled={
+                                                busy ||
+                                                DEMO_MODE ||
+                                                !member.oneTimePackage?.key_bundle_available
+                                              }
+                                              onClick={() => void claimMemberKeyBundle(member)}
+                                            >
+                                              {member.oneTimePackage?.key_bundle_available
+                                                ? 'Tải rời: WireGuard .conf & Script SSH 1 chạm'
+                                                : 'Gói Config rời đã tải / không còn trong RAM'}
+                                            </Button>
+                                          </div>
+                                        </details>
+                                      </div>
+
+                                      {claimedBundleByUser[member.id] && (
+                                        <div className='rounded border border-primary/40 bg-primary/5 p-2.5 text-xs space-y-2'>
+                                          <p className='font-semibold'>
+                                            Các tệp cấu hình dùng ngay cho @{member.username}:
+                                          </p>
+                                          <div className='flex flex-wrap gap-2'>
+                                            {claimedBundleByUser[member.id]?.wireguard_conf && (
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='outline'
+                                                onClick={() =>
+                                                  downloadTextFile(
+                                                    `${member.username}-labops-wg0.conf`,
+                                                    claimedBundleByUser[member.id]!.wireguard_conf!
+                                                  )
+                                                }
+                                              >
+                                                Tải {member.username}-labops-wg0.conf (Import vào
+                                                WireGuard)
+                                              </Button>
+                                            )}
+                                            {claimedBundleByUser[member.id]?.quick_setup_script && (
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='outline'
+                                                onClick={() =>
+                                                  downloadTextFile(
+                                                    `setup-ssh-${member.username}.sh`,
+                                                    claimedBundleByUser[member.id]!
+                                                      .quick_setup_script!
+                                                  )
+                                                }
+                                              >
+                                                Tải setup-ssh-{member.username}.sh (Tự động cài SSH
+                                                & Key)
+                                              </Button>
+                                            )}
+                                            {claimedBundleByUser[member.id]?.ssh_config_snippet && (
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='outline'
+                                                onClick={() =>
+                                                  downloadTextFile(
+                                                    `ssh_config_${member.username}`,
+                                                    claimedBundleByUser[member.id]!
+                                                      .ssh_config_snippet!
+                                                  )
+                                                }
+                                              >
+                                                Tải ssh_config_{member.username}
+                                              </Button>
+                                            )}
+                                            <Button
+                                              type='button'
+                                              size='sm'
+                                              variant='outline'
+                                              onClick={() =>
+                                                downloadTextFile(
+                                                  `id_ed25519_${member.username}`,
+                                                  claimedBundleByUser[member.id]!
+                                                    .encrypted_private_key
+                                                )
+                                              }
+                                            >
+                                              Tải riêng Key id_ed25519_{member.username}
+                                            </Button>
+                                          </div>
+                                          <p className='font-mono text-xs text-muted-foreground'>
+                                            Chạy <code>bash setup-ssh-{member.username}.sh</code>{' '}
+                                            xong gõ luôn:{' '}
+                                            <strong className='text-foreground'>
+                                              {claimedBundleByUser[member.id]?.ssh_alias_command ||
+                                                `ssh labops-${member.username}`}
+                                            </strong>
+                                          </p>
+                                        </div>
+                                      )}
+
+                                      {claimedSecretsByUser[member.id] && (
+                                        <div className='rounded border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs font-mono space-y-1'>
+                                          <p className='font-sans font-semibold text-emerald-800 dark:text-emerald-200'>
+                                            Thông tin bí mật hiển thị 1 lần (Gửi cho @
+                                            {member.username} qua kênh riêng):
+                                          </p>
+                                          {claimedSecretsByUser[member.id]?.key_passphrase && (
+                                            <p>
+                                              Passphrase mở khóa Private Key:{' '}
+                                              <strong className='select-all bg-background px-1.5 py-0.5 rounded border'>
+                                                {claimedSecretsByUser[member.id]?.key_passphrase}
+                                              </strong>
+                                            </p>
+                                          )}
+                                          {claimedSecretsByUser[member.id]?.temporary_password && (
+                                            <p>
+                                              Mật khẩu tạm đăng nhập lần đầu:{' '}
+                                              <strong className='select-all bg-background px-1.5 py-0.5 rounded border'>
+                                                {
+                                                  claimedSecretsByUser[member.id]
+                                                    ?.temporary_password
+                                                }
+                                              </strong>
+                                            </p>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div className='rounded-md border p-3 space-y-2'>
+                                      <p className='text-xs font-semibold'>
+                                        B. Đổi mật khẩu lần đầu (Từ mật khẩu tạm sang mật khẩu chính
+                                        thức)
+                                      </p>
+                                      <div className='grid gap-2 sm:grid-cols-2'>
+                                        <Input
+                                          type='password'
+                                          placeholder='Mật khẩu tạm được cấp'
+                                          value={tempPasswordInput}
+                                          onChange={(e) => setTempPasswordInput(e.target.value)}
+                                        />
+                                        <Input
+                                          type='password'
+                                          placeholder='Mật khẩu mới (>=12 ký tự, chữ hoa/thường/số/ký tự ĐB)'
+                                          value={newPasswordInput}
+                                          onChange={(e) => setNewPasswordInput(e.target.value)}
+                                        />
+                                      </div>
+                                      <Button
+                                        type='button'
+                                        size='sm'
+                                        variant='outline'
+                                        disabled={busy || DEMO_MODE}
+                                        onClick={() => void handleFirstLoginPasswordChange(member)}
+                                      >
+                                        Xác nhận đổi mật khẩu lần đầu
+                                      </Button>
+                                    </div>
+
+                                    <div className='flex flex-wrap items-center justify-between gap-2 pt-1 border-t'>
+                                      <span className='text-xs text-muted-foreground'>
+                                        Đóng các phiên SSH đang mở của workspace (tách riêng với thu
+                                        hồi khóa):
+                                      </span>
+                                      <Button
+                                        type='button'
+                                        size='sm'
+                                        variant='destructive'
+                                        disabled={busy || DEMO_MODE}
+                                        onClick={() => void terminateMemberSessions(member)}
+                                      >
+                                        Đóng phiên SSH đang mở
+                                      </Button>
+                                    </div>
+                                  </section>
+
+                                  {/* CỘT 2: WIREGUARD VPN THEO THIẾT BỊ (MULTI-DEVICE WG-EASY V15) */}
+                                  <section className='space-y-3 rounded-lg border bg-background p-4'>
+                                    <div className='flex items-center justify-between'>
+                                      <h3 className='font-semibold text-sm'>
+                                        2. Quản lý Đa Thiết Bị WireGuard VPN (@{member.username})
+                                      </h3>
+                                      <Badge variant='outline' className='text-xs'>
+                                        {devices.length} thiết bị
+                                      </Badge>
+                                    </div>
+
+                                    {devices.length ? (
+                                      <div className='space-y-2 max-h-[360px] overflow-y-auto pr-1'>
+                                        {devices.map((device) => (
+                                          <div
+                                            key={device.deviceId}
+                                            className='rounded-md border p-3 text-xs space-y-2 bg-card'
+                                          >
+                                            <div className='flex flex-wrap items-center justify-between gap-1'>
+                                              <div className='flex items-center gap-2'>
+                                                <span className='font-semibold text-sm'>
+                                                  {device.name}
+                                                </span>
+                                                <Badge
+                                                  variant='outline'
+                                                  className={
+                                                    device.enabled && device.status === 'ACTIVE'
+                                                      ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
+                                                      : 'bg-amber-500/10 text-amber-700 border-amber-500/30'
+                                                  }
+                                                >
+                                                  {device.enabled ? 'ACTIVE' : 'PAUSED'}
+                                                </Badge>
+                                              </div>
+                                              <div className='font-mono text-muted-foreground'>
+                                                IP:{' '}
+                                                <strong className='text-foreground'>
+                                                  {device.clientIp || '10.88.40.x'}
+                                                </strong>
+                                              </div>
+                                            </div>
+
+                                            <div className='grid grid-cols-2 gap-2 text-xs text-muted-foreground'>
+                                              <div>
+                                                Handshake:{' '}
+                                                <span className='text-foreground'>
+                                                  {device.lastHandshake
+                                                    ? typeof device.lastHandshake === 'number'
+                                                      ? new Date(
+                                                          device.lastHandshake * 1000
+                                                        ).toLocaleString()
+                                                      : String(device.lastHandshake)
+                                                    : 'Chưa có kết nối'}
+                                                </span>
+                                              </div>
+                                              <div>
+                                                Lưu lượng:{' '}
+                                                <span className='text-foreground font-mono'>
+                                                  ↓ {formatBytes(device.transferRx)} · ↑{' '}
+                                                  {formatBytes(device.transferTx)}
+                                                </span>
+                                              </div>
+                                            </div>
+
+                                            <div className='flex flex-wrap items-center gap-2 pt-1 border-t'>
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='outline'
+                                                disabled={busy || DEMO_MODE}
+                                                onClick={() =>
+                                                  void downloadDeviceConfigFile(member, device)
+                                                }
+                                              >
+                                                📥 Tải .conf
+                                              </Button>
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='outline'
+                                                disabled={busy || DEMO_MODE}
+                                                onClick={() =>
+                                                  void toggleDeviceState(member, device)
+                                                }
+                                              >
+                                                {device.enabled ? '⏸ Tạm dừng' : '▶ Kích hoạt'}
+                                              </Button>
+                                              <Button
+                                                type='button'
+                                                size='sm'
+                                                variant='destructive'
+                                                disabled={busy || DEMO_MODE}
+                                                onClick={() =>
+                                                  void revokeDeviceV2Action(member, device)
+                                                }
+                                              >
+                                                Thu hồi
+                                              </Button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className='rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground'>
+                                        Chưa có thiết bị VPN nào. Hãy tạo thiết bị bên dưới để cấp
+                                        file .conf kết nối!
+                                      </div>
+                                    )}
+
+                                    {/* FORM CẤP THIẾT BỊ 1 CHẠM */}
+                                    <div className='rounded-md border p-3 space-y-2 bg-muted/20'>
+                                      <p className='text-xs font-semibold'>
+                                        ⚡ Cấp thiết bị WireGuard mới (1-chạm tự sinh Key & Config)
+                                      </p>
+                                      <div className='flex gap-2'>
+                                        <Input
+                                          aria-label='Tên thiết bị mới'
+                                          placeholder='VD: MacBook M3, iPhone, Máy trạm cá nhân...'
+                                          value={newDeviceNames[member.id] || ''}
+                                          onChange={(e) =>
+                                            setNewDeviceNames((prev) => ({
+                                              ...prev,
+                                              [member.id]: e.target.value
+                                            }))
+                                          }
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              void quickAddMemberDevice(member);
+                                            }
+                                          }}
+                                        />
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          disabled={
+                                            busy ||
+                                            DEMO_MODE ||
+                                            !(newDeviceNames[member.id] || '').trim()
+                                          }
+                                          onClick={() => void quickAddMemberDevice(member)}
+                                        >
+                                          + Cấp thiết bị
+                                        </Button>
+                                      </div>
+                                      <p className='text-xs text-muted-foreground'>
+                                        Hệ thống wg-easy tự động cấp IP riêng trong subnet{' '}
+                                        <code>10.88.40.0/24</code> và tải ngay file cấu hình{' '}
+                                        <code>.conf</code>.
+                                      </p>
+                                    </div>
+
+                                    {/* NÂNG CAO: TỰ NHẬP PUBLIC KEY */}
+                                    <details className='text-xs text-muted-foreground cursor-pointer'>
+                                      <summary className='font-medium text-primary hover:underline py-0.5'>
+                                        ▶ Nâng cao: Đăng ký bằng WireGuard Public Key tự sinh
+                                      </summary>
+                                      <div className='mt-2 space-y-2 pl-2 border-l-2 border-muted'>
+                                        <Input
+                                          aria-label='Tên thiết bị'
+                                          placeholder='Tên thiết bị'
+                                          value={deviceName}
+                                          onChange={(event) => setDeviceName(event.target.value)}
+                                        />
+                                        <Input
+                                          aria-label='WireGuard public key'
+                                          placeholder='WireGuard public key (Base64 44 ký tự)'
+                                          value={publicKey}
+                                          onChange={(event) => setPublicKey(event.target.value)}
+                                        />
+                                        <Button
+                                          size='sm'
+                                          variant='outline'
+                                          disabled={busy || !deviceName.trim() || !publicKey.trim()}
+                                          onClick={() => void registerDevice(member)}
+                                        >
+                                          Đăng ký WireGuard Public Key
                                         </Button>
                                       </div>
                                     </details>
-                                  </div>
 
-                                  {claimedBundleByUser[member.id] && (
-                                    <div className='rounded border border-primary/40 bg-primary/5 p-2.5 text-xs space-y-2'>
-                                      <p className='font-semibold'>
-                                        Các tệp cấu hình dùng ngay cho @{member.username}:
-                                      </p>
-                                      <div className='flex flex-wrap gap-2'>
-                                        {claimedBundleByUser[member.id]?.wireguard_conf && (
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='outline'
-                                            onClick={() =>
-                                              downloadTextFile(
-                                                `${member.username}-labops-wg0.conf`,
-                                                claimedBundleByUser[member.id]!.wireguard_conf!
-                                              )
-                                            }
-                                          >
-                                            Tải {member.username}-labops-wg0.conf (Import vào WireGuard)
-                                          </Button>
-                                        )}
-                                        {claimedBundleByUser[member.id]?.quick_setup_script && (
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='outline'
-                                            onClick={() =>
-                                              downloadTextFile(
-                                                `setup-ssh-${member.username}.sh`,
-                                                claimedBundleByUser[member.id]!.quick_setup_script!
-                                              )
-                                            }
-                                          >
-                                            Tải setup-ssh-{member.username}.sh (Tự động cài SSH & Key)
-                                          </Button>
-                                        )}
-                                        {claimedBundleByUser[member.id]?.ssh_config_snippet && (
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='outline'
-                                            onClick={() =>
-                                              downloadTextFile(
-                                                `ssh_config_${member.username}`,
-                                                claimedBundleByUser[member.id]!.ssh_config_snippet!
-                                              )
-                                            }
-                                          >
-                                            Tải ssh_config_{member.username}
-                                          </Button>
-                                        )}
-                                        <Button
-                                          type='button'
-                                          size='sm'
-                                          variant='outline'
-                                          onClick={() =>
-                                            downloadTextFile(
-                                              `id_ed25519_${member.username}`,
-                                              claimedBundleByUser[member.id]!.encrypted_private_key
-                                            )
-                                          }
-                                        >
-                                          Tải riêng Key id_ed25519_{member.username}
-                                        </Button>
-                                      </div>
-                                      <p className='font-mono text-[11px] text-muted-foreground'>
-                                        Chạy <code>bash setup-ssh-{member.username}.sh</code> xong gõ luôn:{' '}
-                                        <strong className='text-foreground'>
-                                          {claimedBundleByUser[member.id]?.ssh_alias_command || `ssh labops-${member.username}`}
-                                        </strong>
-                                      </p>
+                                    <div className='border-t pt-2 text-xs text-muted-foreground flex justify-between'>
+                                      <span>
+                                        Workspace: {member.workspaceStatus || 'NOT_VERIFIED'}
+                                      </span>
+                                      <span>Last VPN handshake: {latestHandshake(devices)}</span>
                                     </div>
-                                  )}
-
-                                  {claimedSecretsByUser[member.id] && (
-                                    <div className='rounded border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs font-mono space-y-1'>
-                                      <p className='font-sans font-semibold text-emerald-800 dark:text-emerald-200'>
-                                        Thông tin bí mật hiển thị 1 lần (Gửi cho @{member.username} qua kênh riêng):
-                                      </p>
-                                      {claimedSecretsByUser[member.id]?.key_passphrase && (
-                                        <p>
-                                          Passphrase mở khóa Private Key:{' '}
-                                          <strong className='select-all bg-background px-1.5 py-0.5 rounded border'>
-                                            {claimedSecretsByUser[member.id]?.key_passphrase}
-                                          </strong>
-                                        </p>
-                                      )}
-                                      {claimedSecretsByUser[member.id]?.temporary_password && (
-                                        <p>
-                                          Mật khẩu tạm đăng nhập lần đầu:{' '}
-                                          <strong className='select-all bg-background px-1.5 py-0.5 rounded border'>
-                                            {claimedSecretsByUser[member.id]?.temporary_password}
-                                          </strong>
-                                        </p>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-
-                                <div className='rounded-md border p-3 space-y-2'>
-                                  <p className='text-xs font-semibold'>
-                                    B. Đổi mật khẩu lần đầu (Từ mật khẩu tạm sang mật khẩu chính thức)
-                                  </p>
-                                  <div className='grid gap-2 sm:grid-cols-2'>
-                                    <Input
-                                      type='password'
-                                      placeholder='Mật khẩu tạm được cấp'
-                                      value={tempPasswordInput}
-                                      onChange={(e) => setTempPasswordInput(e.target.value)}
-                                    />
-                                    <Input
-                                      type='password'
-                                      placeholder='Mật khẩu mới (>=12 ký tự, chữ hoa/thường/số/ký tự ĐB)'
-                                      value={newPasswordInput}
-                                      onChange={(e) => setNewPasswordInput(e.target.value)}
-                                    />
-                                  </div>
-                                  <Button
-                                    type='button'
-                                    size='sm'
-                                    variant='outline'
-                                    disabled={busy || DEMO_MODE}
-                                    onClick={() => void handleFirstLoginPasswordChange(member)}
-                                  >
-                                    Xác nhận đổi mật khẩu lần đầu
-                                  </Button>
-                                </div>
-
-                                <div className='flex flex-wrap items-center justify-between gap-2 pt-1 border-t'>
-                                  <span className='text-xs text-muted-foreground'>
-                                    Đóng các phiên SSH đang mở của workspace (tách riêng với thu hồi khóa):
-                                  </span>
-                                  <Button
-                                    type='button'
-                                    size='sm'
-                                    variant='destructive'
-                                    disabled={busy || DEMO_MODE}
-                                    onClick={() => void terminateMemberSessions(member)}
-                                  >
-                                    Đóng phiên SSH đang mở
-                                  </Button>
-                                </div>
-                              </section>
-
-                              {/* CỘT 2: WIREGUARD VPN THEO THIẾT BỊ (MULTI-DEVICE WG-EASY V15) */}
-                              <section className='space-y-3 rounded-lg border bg-background p-4'>
-                                <div className='flex items-center justify-between'>
-                                  <h3 className='font-semibold text-sm'>
-                                    2. Quản lý Đa Thiết Bị WireGuard VPN (@{member.username})
-                                  </h3>
-                                  <Badge variant='outline' className='text-xs'>
-                                    {devices.length} thiết bị
-                                  </Badge>
-                                </div>
-
-                                {devices.length ? (
-                                  <div className='space-y-2 max-h-[360px] overflow-y-auto pr-1'>
-                                    {devices.map((device) => (
-                                      <div
-                                        key={device.deviceId}
-                                        className='rounded-md border p-3 text-xs space-y-2 bg-card'
-                                      >
-                                        <div className='flex flex-wrap items-center justify-between gap-1'>
-                                          <div className='flex items-center gap-2'>
-                                            <span className='font-semibold text-sm'>{device.name}</span>
-                                            <Badge
-                                              variant='outline'
-                                              className={
-                                                device.enabled && device.status === 'ACTIVE'
-                                                  ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
-                                                  : 'bg-amber-500/10 text-amber-700 border-amber-500/30'
-                                              }
-                                            >
-                                              {device.enabled ? 'ACTIVE' : 'PAUSED'}
-                                            </Badge>
-                                          </div>
-                                          <div className='font-mono text-muted-foreground'>
-                                            IP: <strong className='text-foreground'>{device.clientIp || '10.88.40.x'}</strong>
-                                          </div>
-                                        </div>
-
-                                        <div className='grid grid-cols-2 gap-2 text-[11px] text-muted-foreground'>
-                                          <div>
-                                            Handshake:{' '}
-                                            <span className='text-foreground'>
-                                              {device.lastHandshake
-                                                ? typeof device.lastHandshake === 'number'
-                                                  ? new Date(device.lastHandshake * 1000).toLocaleString()
-                                                  : String(device.lastHandshake)
-                                                : 'Chưa có kết nối'}
-                                            </span>
-                                          </div>
-                                          <div>
-                                            Lưu lượng:{' '}
-                                            <span className='text-foreground font-mono'>
-                                              ↓ {formatBytes(device.transferRx)} · ↑ {formatBytes(device.transferTx)}
-                                            </span>
-                                          </div>
-                                        </div>
-
-                                        <div className='flex flex-wrap items-center gap-2 pt-1 border-t'>
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='outline'
-                                            disabled={busy || DEMO_MODE}
-                                            onClick={() => void downloadDeviceConfigFile(member, device)}
-                                          >
-                                            📥 Tải .conf
-                                          </Button>
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='outline'
-                                            disabled={busy || DEMO_MODE}
-                                            onClick={() => void toggleDeviceState(member, device)}
-                                          >
-                                            {device.enabled ? '⏸ Tạm dừng' : '▶ Kích hoạt'}
-                                          </Button>
-                                          <Button
-                                            type='button'
-                                            size='sm'
-                                            variant='destructive'
-                                            disabled={busy || DEMO_MODE}
-                                            onClick={() => void revokeDeviceV2Action(member, device)}
-                                          >
-                                            Thu hồi
-                                          </Button>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className='rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground'>
-                                    Chưa có thiết bị VPN nào. Hãy tạo thiết bị bên dưới để cấp file .conf kết nối!
-                                  </div>
-                                )}
-
-                                {/* FORM CẤP THIẾT BỊ 1 CHẠM */}
-                                <div className='rounded-md border p-3 space-y-2 bg-muted/20'>
-                                  <p className='text-xs font-semibold'>
-                                    ⚡ Cấp thiết bị WireGuard mới (1-chạm tự sinh Key & Config)
-                                  </p>
-                                  <div className='flex gap-2'>
-                                    <Input
-                                      aria-label='Tên thiết bị mới'
-                                      placeholder='VD: MacBook M3, iPhone, Máy trạm cá nhân...'
-                                      value={newDeviceNames[member.id] || ''}
-                                      onChange={(e) =>
-                                        setNewDeviceNames((prev) => ({ ...prev, [member.id]: e.target.value }))
-                                      }
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter') {
-                                          e.preventDefault();
-                                          void quickAddMemberDevice(member);
-                                        }
-                                      }}
-                                    />
-                                    <Button
-                                      type='button'
-                                      size='sm'
-                                      disabled={busy || DEMO_MODE || !(newDeviceNames[member.id] || '').trim()}
-                                      onClick={() => void quickAddMemberDevice(member)}
-                                    >
-                                      + Cấp thiết bị
-                                    </Button>
-                                  </div>
-                                  <p className='text-[11px] text-muted-foreground'>
-                                    Hệ thống wg-easy tự động cấp IP riêng trong subnet <code>10.88.40.0/24</code> và tải ngay file cấu hình <code>.conf</code>.
-                                  </p>
-                                </div>
-
-                                {/* NÂNG CAO: TỰ NHẬP PUBLIC KEY */}
-                                <details className='text-xs text-muted-foreground cursor-pointer'>
-                                  <summary className='font-medium text-primary hover:underline py-0.5'>
-                                    ▶ Nâng cao: Đăng ký bằng WireGuard Public Key tự sinh
-                                  </summary>
-                                  <div className='mt-2 space-y-2 pl-2 border-l-2 border-muted'>
-                                    <Input
-                                      aria-label='Tên thiết bị'
-                                      placeholder='Tên thiết bị'
-                                      value={deviceName}
-                                      onChange={(event) => setDeviceName(event.target.value)}
-                                    />
-                                    <Input
-                                      aria-label='WireGuard public key'
-                                      placeholder='WireGuard public key (Base64 44 ký tự)'
-                                      value={publicKey}
-                                      onChange={(event) => setPublicKey(event.target.value)}
-                                    />
-                                    <Button
-                                      size='sm'
-                                      variant='outline'
-                                      disabled={busy || !deviceName.trim() || !publicKey.trim()}
-                                      onClick={() => void registerDevice(member)}
-                                    >
-                                      Đăng ký WireGuard Public Key
-                                    </Button>
-                                  </div>
-                                </details>
-
-                                <div className='border-t pt-2 text-xs text-muted-foreground flex justify-between'>
-                                  <span>Workspace: {member.workspaceStatus || 'NOT_VERIFIED'}</span>
-                                  <span>Last VPN handshake: {latestHandshake(devices)}</span>
-                                </div>
-                              </section>
+                                  </section>
                                 </div>
 
                                 {/* KHU VỰC NGUY HIỂM: XÓA VĨNH VIỄN TÀI KHOẢN */}
@@ -1268,7 +1381,9 @@ export function MemberManagementView() {
                                       Khu vực nguy hiểm: Xóa vĩnh viễn tài khoản @{member.username}
                                     </h4>
                                     <p className='text-xs text-muted-foreground mt-0.5'>
-                                      Dừng và xóa container workspace ws-{member.username}, thu hồi và xóa toàn bộ VPN peers trên wg-easy, hủy bỏ các khóa SSH và dọn dẹp thư mục trên máy chủ.
+                                      Dừng và xóa container workspace ws-{member.username}, thu hồi
+                                      và xóa toàn bộ VPN peers trên wg-easy, hủy bỏ các khóa SSH và
+                                      dọn dẹp thư mục trên máy chủ.
                                     </p>
                                   </div>
                                   <Button
@@ -1287,27 +1402,43 @@ export function MemberManagementView() {
                               <TabsContent value='workspace' className='mt-3 space-y-3'>
                                 <div className='rounded-lg border bg-background p-4 space-y-3'>
                                   <div className='flex items-center justify-between'>
-                                    <h4 className='text-sm font-semibold'>Thông tin Container Workspace</h4>
+                                    <h4 className='text-sm font-semibold'>
+                                      Thông tin Container Workspace
+                                    </h4>
                                     {statusBadge(member.workspaceStatus)}
                                   </div>
                                   <div className='grid gap-4 md:grid-cols-2 text-xs'>
                                     <div className='space-y-2'>
                                       <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Tên Container:</span>
-                                        <span className='font-mono font-bold'>ws-{member.username}</span>
+                                        <span className='text-muted-foreground'>
+                                          Tên Container:
+                                        </span>
+                                        <span className='font-mono font-bold'>
+                                          ws-{member.username}
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Máy chủ vật lý:</span>
-                                        <span className='font-semibold'>aiotlab-rack (192.168.167.250)</span>
+                                        <span className='text-muted-foreground'>
+                                          Máy chủ vật lý:
+                                        </span>
+                                        <span className='font-semibold'>
+                                          aiotlab-rack (192.168.167.250)
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Cổng SSH ánh xạ:</span>
-                                        <span className='font-mono font-bold text-foreground'>{member.sshPort || 'Chưa cấp'}</span>
+                                        <span className='text-muted-foreground'>
+                                          Cổng SSH ánh xạ:
+                                        </span>
+                                        <span className='font-mono font-bold text-foreground'>
+                                          {member.sshPort || 'Chưa cấp'}
+                                        </span>
                                       </div>
                                     </div>
                                     <div className='space-y-2'>
                                       <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Giới hạn vCPU:</span>
+                                        <span className='text-muted-foreground'>
+                                          Giới hạn vCPU:
+                                        </span>
                                         <span>{member.cpuLimitCores || 8} cores</span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
@@ -1315,8 +1446,12 @@ export function MemberManagementView() {
                                         <span>{member.ramLimitGb || 32} GB</span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Thư mục Mount:</span>
-                                        <code className='font-mono'>/media/LabOps-Data/{member.username}</code>
+                                        <span className='text-muted-foreground'>
+                                          Thư mục Mount:
+                                        </span>
+                                        <code className='font-mono'>
+                                          /media/LabOps-Data/{member.username}
+                                        </code>
                                       </div>
                                     </div>
                                   </div>
@@ -1327,12 +1462,17 @@ export function MemberManagementView() {
                               <TabsContent value='gpu_jobs' className='mt-3 space-y-3'>
                                 <div className='rounded-lg border bg-background p-4 space-y-3 text-xs'>
                                   <div className='flex items-center justify-between'>
-                                    <h4 className='text-sm font-semibold'>Tài nguyên GPU &amp; Tiến trình đang chạy</h4>
-                                    <Badge variant='outline' className='font-mono text-[10px]'>FULL_GPU_EXCLUSIVE</Badge>
+                                    <h4 className='text-sm font-semibold'>
+                                      Tài nguyên GPU &amp; Tiến trình đang chạy
+                                    </h4>
+                                    <Badge variant='outline' className='font-mono text-xs'>
+                                      FULL_GPU_EXCLUSIVE
+                                    </Badge>
                                   </div>
                                   <p className='text-muted-foreground'>
-                                    Thành viên @{member.username} được cấp quyền giữ chỗ GPU độc quyền theo UUID.
-                                    Mọi tiến trình chạy trên GPU đều được xác minh thực tế qua Go Node Agent và NVIDIA NVML.
+                                    Thành viên @{member.username} được cấp quyền giữ chỗ GPU độc
+                                    quyền theo UUID. Mọi tiến trình chạy trên GPU đều được xác minh
+                                    thực tế qua Go Node Agent và NVIDIA NVML.
                                   </p>
                                   <div className='pt-2 flex gap-2'>
                                     <Button
@@ -1349,19 +1489,31 @@ export function MemberManagementView() {
                               {/* TAB 5: NHẬT KÝ */}
                               <TabsContent value='logs' className='mt-3 space-y-3'>
                                 <div className='rounded-lg border bg-background p-4 space-y-3 text-xs'>
-                                  <h4 className='text-sm font-semibold'>Nhật ký bảo mật &amp; Hoạt động gần đây</h4>
+                                  <h4 className='text-sm font-semibold'>
+                                    Nhật ký bảo mật &amp; Hoạt động gần đây
+                                  </h4>
                                   <div className='space-y-2'>
                                     <div className='flex justify-between border-b pb-1'>
-                                      <span className='text-muted-foreground'>Lần handshake VPN mới nhất:</span>
+                                      <span className='text-muted-foreground'>
+                                        Lần handshake VPN mới nhất:
+                                      </span>
                                       <span className='font-mono'>{latestHandshake(devices)}</span>
                                     </div>
                                     <div className='flex justify-between border-b pb-1'>
-                                      <span className='text-muted-foreground'>Trạng thái mật khẩu tạm:</span>
-                                      <span className='font-mono'>{member.passwordStatus || 'NOT_APPLICABLE'}</span>
+                                      <span className='text-muted-foreground'>
+                                        Trạng thái mật khẩu tạm:
+                                      </span>
+                                      <span className='font-mono'>
+                                        {member.passwordStatus || 'NOT_APPLICABLE'}
+                                      </span>
                                     </div>
                                     <div className='flex justify-between border-b pb-1'>
-                                      <span className='text-muted-foreground'>SSH Key Fingerprint:</span>
-                                      <span className='font-mono'>{member.sshFingerprint || 'Chưa ghi nhận'}</span>
+                                      <span className='text-muted-foreground'>
+                                        SSH Key Fingerprint:
+                                      </span>
+                                      <span className='font-mono'>
+                                        {member.sshFingerprint || 'Chưa ghi nhận'}
+                                      </span>
                                     </div>
                                   </div>
                                 </div>
@@ -1376,7 +1528,9 @@ export function MemberManagementView() {
                 {!visibleMembers.length && (
                   <tr>
                     <td colSpan={7} className='p-8 text-center text-sm text-muted-foreground'>
-                      {memberSyncError ? 'Không thể tải danh sách từ backend.' : 'Chưa có thành viên nào.'}
+                      {memberSyncError
+                        ? 'Không thể tải danh sách từ backend.'
+                        : 'Chưa có thành viên nào.'}
                     </td>
                   </tr>
                 )}
@@ -1390,6 +1544,23 @@ export function MemberManagementView() {
         onOpenChange={(open) => {
           setWizardOpen(open);
           if (!open) void refresh();
+        }}
+      />
+      <SafeMemberDeleteDialog
+        open={Boolean(deleteTargetMember)}
+        member={deleteTargetMember}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTargetMember(null);
+        }}
+        onMemberUpdated={async () => {
+          await refresh();
+        }}
+        onDeleted={async () => {
+          if (deleteTargetMember && managedUser === deleteTargetMember.id) {
+            setManagedUser(null);
+          }
+          setDeleteTargetMember(null);
+          await refresh();
         }}
       />
     </div>

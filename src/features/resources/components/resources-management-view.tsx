@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,20 +14,10 @@ export function ResourcesManagementView() {
   const gpus = useLabOpsStore((state) => state.gpus);
   const jobs = useLabOpsStore((state) => state.jobs);
   const storagePools = useLabOpsStore((state) => state.storagePools);
-  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const lastSyncTime = useLabOpsStore((state) => state.lastSyncTime);
 
   const [allocateOpen, setAllocateOpen] = useState(false);
   const [selectedGpuId, setSelectedGpuId] = useState<string | undefined>(undefined);
-
-  // Poll live telemetry every 4 seconds to ensure GPU states are always synchronized
-  useEffect(() => {
-    fetchLiveState();
-    const timer = setInterval(() => {
-      fetchLiveState();
-    }, 4000);
-    return () => clearInterval(timer);
-  }, [fetchLiveState]);
 
   const totalUsedVramMb = gpus.reduce((acc, g) => acc + (g.vramUsedMb || 0), 0);
   const reportedVramMb = gpus.reduce((acc, g) => acc + g.vramTotalMb, 0);
@@ -50,61 +40,57 @@ export function ResourcesManagementView() {
       {/* Overview Statistics Banner */}
       <div className='grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3'>
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>GPU được báo cáo</span>
+          <span className='text-xs text-muted-foreground font-medium'>GPU được báo cáo</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.gpu className='size-5 text-primary' />
             {gpus.length} GPU
           </div>
-          <span className='text-[10px] text-muted-foreground'>NVIDIA A30 (aiot-ws1)</span>
+          <span className='text-xs text-muted-foreground'>NVIDIA A30 (aiot-ws1)</span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Tổng VRAM được báo cáo
-          </span>
+          <span className='text-xs text-muted-foreground font-medium'>Tổng VRAM được báo cáo</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-primary'>
             {Math.round(reportedVramMb / 1024)} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>HBM2 24GB Bus D8:00.0</span>
+          <span className='text-xs text-muted-foreground'>HBM2 24GB Bus D8:00.0</span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>VRAM đang sử dụng</span>
+          <span className='text-xs text-muted-foreground font-medium'>VRAM đang sử dụng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-indigo-600 dark:text-indigo-400'>
             {totalUsedVramGb} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>
+          <span className='text-xs text-muted-foreground'>
             {gpus.length ? `${reportedVramPercent}% VRAM đang dùng` : 'Chưa có telemetry GPU'}
           </span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>VRAM còn khả dụng</span>
+          <span className='text-xs text-muted-foreground font-medium'>VRAM còn khả dụng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-emerald-600 dark:text-emerald-400'>
             {reportedFreeVramGb} GB
           </div>
-          <span className='text-[10px] text-muted-foreground'>Phần VRAM trống quan sát được</span>
+          <span className='text-xs text-muted-foreground'>Phần VRAM trống quan sát được</span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Tổng ổ đĩa nhận diện
-          </span>
+          <span className='text-xs text-muted-foreground font-medium'>Tổng ổ đĩa nhận diện</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.database className='size-5 text-primary' />
             {totalDiskCapacityTb} TB
           </div>
-          <span className='text-[10px] text-muted-foreground font-mono'>
+          <span className='text-xs text-muted-foreground font-mono'>
             {storagePools.length} Ổ đĩa vật lý (aiot-ws1)
           </span>
         </Card>
 
         <Card className='p-3.5 bg-card min-w-0'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Lưu trữ đã dùng</span>
+          <span className='text-xs text-muted-foreground font-medium'>Lưu trữ đã dùng</span>
           <div className='text-xl font-bold mt-0.5 font-mono text-indigo-600 dark:text-indigo-400'>
             {totalDiskUsedTb} TB
           </div>
-          <span className='text-[10px] text-muted-foreground font-mono'>
+          <span className='text-xs text-muted-foreground font-mono'>
             {totalDiskUsedPercent}% dùng • Trống {totalDiskFreeTb} TB
           </span>
         </Card>
@@ -128,33 +114,33 @@ export function ResourcesManagementView() {
               <div className='p-2 rounded border bg-background/80'>
                 <Badge
                   variant='outline'
-                  className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[9px] font-mono'
+                  className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono'
                 >
                   HARDWARE_ENFORCED
                 </Badge>
-                <p className='text-[11px] text-muted-foreground mt-1'>
+                <p className='text-xs text-muted-foreground mt-1'>
                   Chiếm trọn vẹn GPU vật lý ở chế độ Exclusive hoặc phân hoạch MIG phần cứng.
                 </p>
               </div>
               <div className='p-2 rounded border bg-background/80'>
                 <Badge
                   variant='outline'
-                  className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[9px] font-mono'
+                  className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-mono'
                 >
                   DRIVER_ENFORCED_VERIFIED
                 </Badge>
-                <p className='text-[11px] text-muted-foreground mt-1'>
+                <p className='text-xs text-muted-foreground mt-1'>
                   Áp dụng cgroups memory controller và NVIDIA MPS Server giới hạn cứng bộ nhớ.
                 </p>
               </div>
               <div className='p-2 rounded border bg-background/80'>
                 <Badge
                   variant='outline'
-                  className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[9px] font-mono'
+                  className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-mono'
                 >
                   MONITOR_ONLY
                 </Badge>
-                <p className='text-[11px] text-muted-foreground mt-1'>
+                <p className='text-xs text-muted-foreground mt-1'>
                   Chế độ giám sát ngưỡng cảnh báo; không kill tiến trình khi vượt ngưỡng nhẹ.
                 </p>
               </div>
@@ -171,7 +157,7 @@ export function ResourcesManagementView() {
           </h3>
           <div className='flex items-center gap-2'>
             {lastSyncTime && (
-              <span className='text-[10px] text-muted-foreground font-mono flex items-center gap-1'>
+              <span className='text-xs text-muted-foreground font-mono flex items-center gap-1'>
                 <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse' />
                 {lastSyncTime}
               </span>
@@ -219,21 +205,21 @@ export function ResourcesManagementView() {
                         <CardTitle className='text-sm font-bold'>{gpu.displayLabel}</CardTitle>
                         <Badge
                           variant={gpu.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'}
-                          className='text-[10px]'
+                          className='text-xs'
                         >
                           {gpu.allocationMode}
                         </Badge>
                         {isRunning ? (
-                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs font-medium'>
                             <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
                             ĐANG CHẠY
                           </Badge>
                         ) : (
-                          <Badge variant='outline' className='text-muted-foreground text-[10px]'>
+                          <Badge variant='outline' className='text-muted-foreground text-xs'>
                             SẴN SÀNG
                           </Badge>
                         )}
-                        <Badge variant='outline' className='text-[10px] font-mono'>
+                        <Badge variant='outline' className='text-xs font-mono'>
                           {gpu.serverName}
                         </Badge>
                       </div>
@@ -246,7 +232,7 @@ export function ResourcesManagementView() {
                       <span className='font-mono font-bold text-base text-primary'>
                         {usedGb} / 24 GB
                       </span>
-                      <div className='text-[10px] text-muted-foreground'>{percent}% VRAM</div>
+                      <div className='text-xs text-muted-foreground'>{percent}% VRAM</div>
                     </div>
                   </div>
                 </CardHeader>
@@ -273,7 +259,7 @@ export function ResourcesManagementView() {
                         );
                       })}
                     </div>
-                    <div className='flex justify-between text-[10px] text-muted-foreground font-mono'>
+                    <div className='flex justify-between text-xs text-muted-foreground font-mono'>
                       <span>0 GB</span>
                       <span>12 GB</span>
                       <span>24 GB (Tối đa)</span>
@@ -281,17 +267,17 @@ export function ResourcesManagementView() {
                   </div>
 
                   {/* Telemetry row */}
-                  <div className='grid grid-cols-3 gap-2 py-2 px-2.5 rounded bg-muted/20 text-[11px]'>
+                  <div className='grid grid-cols-3 gap-2 py-2 px-2.5 rounded bg-muted/20 text-xs'>
                     <div>
-                      <span className='text-muted-foreground block text-[10px]'>Tải tính toán</span>
+                      <span className='text-muted-foreground block text-xs'>Tải tính toán</span>
                       <span className='font-bold font-mono'>{gpu.gpuUtilPercent}%</span>
                     </div>
                     <div>
-                      <span className='text-muted-foreground block text-[10px]'>Nhiệt độ</span>
+                      <span className='text-muted-foreground block text-xs'>Nhiệt độ</span>
                       <span className='font-bold font-mono'>{gpu.tempCelsius}°C</span>
                     </div>
                     <div>
-                      <span className='text-muted-foreground block text-[10px]'>Công suất</span>
+                      <span className='text-muted-foreground block text-xs'>Công suất</span>
                       <span className='font-bold font-mono'>
                         {gpu.powerWatts}W / {gpu.powerLimitWatts}W
                       </span>
@@ -300,7 +286,7 @@ export function ResourcesManagementView() {
 
                   {/* Active processes in this GPU */}
                   <div className='space-y-1.5'>
-                    <span className='text-[11px] font-semibold text-muted-foreground block'>
+                    <span className='text-xs font-semibold text-muted-foreground block'>
                       Tiến trình đang chiếm dụng ({gpu.activeProcesses.length}):
                     </span>
                     {gpu.activeProcesses.length > 0 ? (
@@ -311,10 +297,10 @@ export function ResourcesManagementView() {
                         >
                           <div>
                             <span className='font-bold text-foreground'>@{proc.username}</span>
-                            <span className='text-muted-foreground ml-1 font-mono text-[11px]'>
+                            <span className='text-muted-foreground ml-1 font-mono text-xs'>
                               ({proc.workspace})
                             </span>
-                            <div className='font-mono text-[11px] text-muted-foreground truncate max-w-[280px]'>
+                            <div className='font-mono text-xs text-muted-foreground truncate max-w-[280px]'>
                               {proc.name} (PID: {proc.pid})
                             </div>
                           </div>
@@ -326,7 +312,7 @@ export function ResourcesManagementView() {
                         </div>
                       ))
                     ) : (
-                      <div className='py-2 text-center text-[11px] text-muted-foreground rounded border border-dashed'>
+                      <div className='py-2 text-center text-xs text-muted-foreground rounded border border-dashed'>
                         Không có tiến trình chiếm dụng VRAM. Sẵn sàng nhận tác vụ mới.
                       </div>
                     )}
@@ -378,7 +364,7 @@ export function ResourcesManagementView() {
             <span className='text-xs font-mono font-bold text-foreground'>
               {totalDiskUsedTb} TB / {totalDiskCapacityTb} TB
             </span>
-            <span className='text-[11px] text-muted-foreground block font-mono'>
+            <span className='text-xs text-muted-foreground block font-mono'>
               {totalDiskUsedPercent}% dùng • Trống {totalDiskFreeTb} TB
             </span>
           </div>
@@ -410,12 +396,12 @@ export function ResourcesManagementView() {
                       <div className='flex items-center gap-1.5 flex-wrap'>
                         <span className='font-bold text-sm text-foreground'>{pool.label}</span>
                         {isMain && (
-                          <Badge className='bg-primary/10 text-primary border-primary/20 text-[9px] font-semibold'>
+                          <Badge className='bg-primary/10 text-primary border-primary/20 text-xs font-semibold'>
                             MẶC ĐỊNH LƯU TRỮ AI
                           </Badge>
                         )}
                         {isRoot && (
-                          <Badge variant='outline' className='text-[9px] font-mono'>
+                          <Badge variant='outline' className='text-xs font-mono'>
                             HỆ THỐNG OS
                           </Badge>
                         )}
@@ -434,7 +420,7 @@ export function ResourcesManagementView() {
                           ? `${(pool.capacityGb / 1024).toFixed(2)} TB`
                           : `${pool.capacityGb} GB`}
                       </span>
-                      <div className='text-[10px] text-muted-foreground font-mono'>
+                      <div className='text-xs text-muted-foreground font-mono'>
                         {percent}% dung lượng
                       </div>
                     </div>
@@ -454,7 +440,7 @@ export function ResourcesManagementView() {
                         style={{ width: `${percent}%` }}
                       />
                     </div>
-                    <div className='flex justify-between text-[10px] text-muted-foreground font-mono'>
+                    <div className='flex justify-between text-xs text-muted-foreground font-mono'>
                       <span>
                         Đã dùng:{' '}
                         {pool.usedGb >= 1024
@@ -471,12 +457,12 @@ export function ResourcesManagementView() {
                   </div>
                 </div>
 
-                <div className='pt-3 mt-2 border-t flex items-center justify-between text-[11px] text-muted-foreground'>
+                <div className='pt-3 mt-2 border-t flex items-center justify-between text-xs text-muted-foreground'>
                   <span className='flex items-center gap-1'>
                     <span className='size-1.5 rounded-full bg-emerald-500' />
                     {pool.healthStatus || 'HEALTHY'}
                   </span>
-                  <span className='font-mono text-[10px]'>{pool.serverName}</span>
+                  <span className='font-mono text-xs'>{pool.serverName}</span>
                 </div>
               </Card>
             );
@@ -522,22 +508,22 @@ export function ResourcesManagementView() {
                       <tr key={j.id} className='hover:bg-muted/30 transition-colors'>
                         <td className='py-2.5 px-3'>
                           <div className='font-bold text-foreground'>{j.fullName}</div>
-                          <div className='text-[11px] text-muted-foreground font-mono'>
+                          <div className='text-xs text-muted-foreground font-mono'>
                             @{j.username}
                           </div>
                         </td>
                         <td className='py-2.5 px-3'>
-                          <Badge variant='default' className='font-mono text-[10px]'>
+                          <Badge variant='default' className='font-mono text-xs'>
                             {j.gpuId}
                           </Badge>
-                          <div className='text-[10px] text-muted-foreground font-mono uppercase mt-0.5'>
+                          <div className='text-xs text-muted-foreground font-mono uppercase mt-0.5'>
                             {j.serverId}
                           </div>
                         </td>
                         <td className='py-2.5 px-3 max-w-xs'>
-                          <div className='font-mono font-bold text-[11px]'>PID: {j.pid}</div>
+                          <div className='font-mono font-bold text-xs'>PID: {j.pid}</div>
                           <div
-                            className='font-mono text-muted-foreground text-[11px] truncate max-w-[280px]'
+                            className='font-mono text-muted-foreground text-xs truncate max-w-[280px]'
                             title={j.script}
                           >
                             {j.script}
@@ -550,7 +536,7 @@ export function ResourcesManagementView() {
                         <td className='py-2.5 px-3'>
                           <Badge
                             variant='outline'
-                            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                            className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
                           >
                             ACTIVE
                           </Badge>

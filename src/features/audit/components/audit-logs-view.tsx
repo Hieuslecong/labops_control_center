@@ -58,42 +58,36 @@ export function AuditLogsView() {
       {/* KPI Stats on Audits */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Tổng số thao tác đã ghi
-          </span>
+          <span className='text-xs text-muted-foreground font-medium'>Tổng số thao tác đã ghi</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.audit className='size-5 text-primary' />
             {auditLogs.length} bản ghi
           </div>
-          <span className='text-[10px] text-muted-foreground'>
-            Nhật ký bất biến (Immutable Audit)
-          </span>
+          <span className='text-xs text-muted-foreground'>Nhật ký bất biến (Immutable Audit)</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Thao tác thành công</span>
+          <span className='text-xs text-muted-foreground font-medium'>Thao tác thành công</span>
           <div className='text-xl font-bold mt-0.5 text-emerald-600 dark:text-emerald-400'>
             {auditLogs.filter((l) => l.result === 'SUCCESS').length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Thực thi chuẩn xác</span>
+          <span className='text-xs text-muted-foreground'>Thực thi chuẩn xác</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Cảnh báo & Can thiệp
-          </span>
+          <span className='text-xs text-muted-foreground font-medium'>Cảnh báo & Can thiệp</span>
           <div className='text-xl font-bold mt-0.5 text-amber-600 dark:text-amber-400'>
             {auditLogs.filter((l) => l.result === 'WARNING').length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Cách ly Sandbox & Tạm khóa</span>
+          <span className='text-xs text-muted-foreground'>Cách ly Sandbox & Tạm khóa</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Thao tác thất bại</span>
+          <span className='text-xs text-muted-foreground font-medium'>Thao tác thất bại</span>
           <div className='text-xl font-bold mt-0.5 text-rose-600 dark:text-rose-400'>
             {auditLogs.filter((l) => l.result === 'FAILED').length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>Bị từ chối bởi chính sách</span>
+          <span className='text-xs text-muted-foreground'>Bị từ chối bởi chính sách</span>
         </Card>
       </div>
 
@@ -170,7 +164,7 @@ export function AuditLogsView() {
               <tbody className='divide-y divide-border/60'>
                 {filteredLogs.map((log) => (
                   <tr key={log.id} className='hover:bg-muted/30 transition-colors'>
-                    <td className='py-3 px-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap'>
+                    <td className='py-3 px-3 font-mono text-xs text-muted-foreground whitespace-nowrap'>
                       {log.timestamp}
                     </td>
 
@@ -183,26 +177,24 @@ export function AuditLogsView() {
                     </td>
 
                     <td className='py-3 px-3'>
-                      <Badge variant='outline' className='font-mono text-[10px]'>
+                      <Badge variant='outline' className='font-mono text-xs'>
                         {log.targetType}: {log.targetId}
                       </Badge>
                     </td>
 
-                    <td className='py-3 px-3 font-mono text-[10px] text-muted-foreground'>
+                    <td className='py-3 px-3 font-mono text-xs text-muted-foreground'>
                       {log.correlationId}
                     </td>
 
                     <td className='py-3 px-3 max-w-sm'>
-                      <p className='text-[11px] text-muted-foreground line-clamp-2'>
-                        {log.details}
-                      </p>
+                      <p className='text-xs text-muted-foreground line-clamp-2'>{log.details}</p>
                     </td>
 
                     <td className='py-3 px-3 text-right'>
                       {log.result === 'SUCCESS' && (
                         <Badge
                           variant='outline'
-                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono'
+                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono'
                         >
                           SUCCESS
                         </Badge>
@@ -210,7 +202,7 @@ export function AuditLogsView() {
                       {log.result === 'WARNING' && (
                         <Badge
                           variant='outline'
-                          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] font-mono'
+                          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-mono'
                         >
                           WARNING
                         </Badge>
@@ -218,7 +210,7 @@ export function AuditLogsView() {
                       {log.result === 'FAILED' && (
                         <Badge
                           variant='outline'
-                          className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[10px] font-mono'
+                          className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs font-mono'
                         >
                           FAILED
                         </Badge>

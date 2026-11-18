@@ -53,21 +53,21 @@ function RenderTreeNode({ node, level = 0 }: { node: ProcessTreeNode; level?: nu
       >
         <div className='flex items-center gap-2 truncate max-w-sm'>
           {level > 0 && <span className='text-muted-foreground'>└─</span>}
-          <Badge variant='outline' className='text-[10px] py-0 px-1.5'>
+          <Badge variant='outline' className='text-xs py-0 px-1.5'>
             PID: {node.pid}
           </Badge>
           <span className='font-bold text-foreground'>{node.name}</span>
-          <span className='text-[10px] text-muted-foreground truncate' title={node.command_line}>
+          <span className='text-xs text-muted-foreground truncate' title={node.command_line}>
             {node.command_line}
           </span>
         </div>
 
-        <div className='flex items-center gap-2 shrink-0 text-[10px]'>
+        <div className='flex items-center gap-2 shrink-0 text-xs'>
           <span className='text-muted-foreground'>@{node.user}</span>
           <span className='text-blue-600 font-semibold'>{node.cpu_percent}% CPU</span>
           <span className='text-zinc-600 dark:text-zinc-400'>{node.memory_rss_mb} MB RAM</span>
           {isGpu && (
-            <Badge variant='default' className='bg-indigo-600 text-white text-[9px] py-0 px-1'>
+            <Badge variant='default' className='bg-indigo-600 text-white text-xs py-0 px-1'>
               GPU: {node.vram_mb} MB
             </Badge>
           )}

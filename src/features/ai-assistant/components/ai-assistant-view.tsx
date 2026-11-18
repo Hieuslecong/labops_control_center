@@ -285,7 +285,7 @@ export default function AIAssistantView() {
               <CardHeader className='pb-2'>
                 <div className='flex justify-between items-center'>
                   <CardTitle className='text-sm font-semibold'>Zalo Outbound Quota</CardTitle>
-                  <Badge variant='secondary' className='text-[10px] font-mono'>
+                  <Badge variant='secondary' className='text-xs font-mono'>
                     Tháng {overview?.quota?.current_month}
                   </Badge>
                 </div>
@@ -308,17 +308,13 @@ export default function AIAssistantView() {
                 </div>
                 <div className='grid grid-cols-2 gap-2 text-xs pt-1 border-t'>
                   <div>
-                    <span className='text-muted-foreground block text-[11px]'>
-                      Tin thông thường:
-                    </span>
+                    <span className='text-muted-foreground block text-xs'>Tin thông thường:</span>
                     <span className='font-mono font-bold'>
                       {overview?.quota?.standard_remaining} / 2.800
                     </span>
                   </div>
                   <div>
-                    <span className='text-muted-foreground block text-[11px]'>
-                      Dự phòng khẩn cấp:
-                    </span>
+                    <span className='text-muted-foreground block text-xs'>Dự phòng khẩn cấp:</span>
                     <span className='font-mono font-bold text-amber-600'>
                       {overview?.quota?.critical_remaining} / 200
                     </span>
@@ -334,7 +330,7 @@ export default function AIAssistantView() {
                   <CardTitle className='text-sm font-semibold'>9Router AI Gateway</CardTitle>
                   <Badge
                     variant='outline'
-                    className='bg-emerald-500/10 text-emerald-600 font-mono text-[10px]'
+                    className='bg-emerald-500/10 text-emerald-600 font-mono text-xs'
                   >
                     {overview?.ai_gateway?.status || 'ONLINE'}
                   </Badge>
@@ -350,7 +346,7 @@ export default function AIAssistantView() {
                 </div>
                 <div className='flex justify-between py-1 border-b'>
                   <span className='text-muted-foreground'>Đường dẫn (Endpoint):</span>
-                  <span className='font-mono text-[11px]'>http://127.0.0.1:20128/v1</span>
+                  <span className='font-mono text-xs'>http://127.0.0.1:20128/v1</span>
                 </div>
                 <div className='flex justify-between py-1'>
                   <span className='text-muted-foreground'>Lượt gọi AI tháng này:</span>
@@ -370,8 +366,8 @@ export default function AIAssistantView() {
                     variant='outline'
                     className={
                       overview?.consumer?.has_token
-                        ? 'bg-emerald-500/10 text-emerald-600 font-mono text-[10px]'
-                        : 'bg-amber-500/10 text-amber-600 font-mono text-[10px]'
+                        ? 'bg-emerald-500/10 text-emerald-600 font-mono text-xs'
+                        : 'bg-amber-500/10 text-amber-600 font-mono text-xs'
                     }
                   >
                     {overview?.consumer?.has_token ? 'ACTIVE' : 'STANDBY (Chưa token)'}
@@ -392,7 +388,7 @@ export default function AIAssistantView() {
                 </div>
                 <div className='flex justify-between py-1'>
                   <span className='text-muted-foreground'>Token trạng thái:</span>
-                  <span className='font-mono text-[11px]'>{overview?.consumer?.token_masked}</span>
+                  <span className='font-mono text-xs'>{overview?.consumer?.token_masked}</span>
                 </div>
               </CardContent>
             </Card>
@@ -435,7 +431,7 @@ export default function AIAssistantView() {
                     key={idx}
                     className={`flex flex-col ${m.sender === 'user' ? 'items-end' : 'items-start'}`}
                   >
-                    <span className='text-[10px] text-muted-foreground mb-1'>
+                    <span className='text-xs text-muted-foreground mb-1'>
                       {m.sender === 'user' ? 'Bạn' : 'LabOps AI Assistant'}
                     </span>
                     <div
@@ -501,7 +497,7 @@ export default function AIAssistantView() {
                   )}
                   <div className='flex-1'>
                     <p className='font-medium'>{alt.message}</p>
-                    <span className='text-[10px] text-muted-foreground'>{alt.timestamp}</span>
+                    <span className='text-xs text-muted-foreground'>{alt.timestamp}</span>
                   </div>
                 </div>
               ))}
@@ -534,7 +530,7 @@ export default function AIAssistantView() {
                     className='font-semibold flex items-center justify-between'
                   >
                     <span>Zalo Bot Token (Cập nhật token mới an toàn):</span>
-                    <span className='text-muted-foreground font-mono text-[11px]'>
+                    <span className='text-muted-foreground font-mono text-xs'>
                       Hiện tại: {config?.zalo_token_masked}
                     </span>
                   </label>
@@ -546,7 +542,7 @@ export default function AIAssistantView() {
                     placeholder='Dán Zalo Bot Token mới nếu muốn thay đổi...'
                     className='text-xs font-mono'
                   />
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Để trống nếu giữ nguyên token hiện tại. Không bao giờ commit token vào kho mã
                     nguồn.
                   </p>
@@ -563,7 +559,7 @@ export default function AIAssistantView() {
                     placeholder='admin, user1, user2...'
                     className='text-xs font-mono'
                   />
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Phân tách bằng dấu phẩy. Dùng `*` nếu cho phép toàn bộ thành viên trong Lab.
                   </p>
                 </div>
@@ -579,7 +575,7 @@ export default function AIAssistantView() {
                     placeholder='model_free'
                     className='text-xs font-mono'
                   />
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Mặc định: <code>model_free</code> (chạy trên 9Router cổng 20128).
                   </p>
                 </div>
@@ -594,7 +590,7 @@ export default function AIAssistantView() {
                     disabled
                     className='text-xs font-mono bg-muted'
                   />
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Cố định loopback an toàn, không mở cổng công khai ra internet.
                   </p>
                 </div>
@@ -639,7 +635,7 @@ export default function AIAssistantView() {
                     <div className='flex items-center justify-between'>
                       <CardTitle className='text-sm font-bold'>{rpt.title}</CardTitle>
                       <div className='flex items-center gap-2'>
-                        <span className='text-[11px] text-muted-foreground font-mono'>
+                        <span className='text-xs text-muted-foreground font-mono'>
                           {rpt.created_at}
                         </span>
                         <a
@@ -762,18 +758,16 @@ export default function AIAssistantView() {
                       <div className='space-y-0.5'>
                         <div className='flex items-center gap-2'>
                           <span className='font-bold text-primary'>{m.id}</span>
-                          <Badge variant='outline' className='text-[10px]'>
+                          <Badge variant='outline' className='text-xs'>
                             {m.is_critical ? 'CRITICAL ALERT' : 'STANDARD'}
                           </Badge>
-                          <span className='text-muted-foreground text-[10px]'>
+                          <span className='text-muted-foreground text-xs'>
                             Tới: {m.recipient_id}
                           </span>
                         </div>
-                        <p className='text-muted-foreground text-[11px]'>{m.message_snippet}...</p>
+                        <p className='text-muted-foreground text-xs'>{m.message_snippet}...</p>
                       </div>
-                      <span className='text-[10px] text-muted-foreground shrink-0'>
-                        {m.created_at}
-                      </span>
+                      <span className='text-xs text-muted-foreground shrink-0'>{m.created_at}</span>
                     </div>
                   ))
                 )}

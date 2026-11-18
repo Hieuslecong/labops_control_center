@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { verifySessionCookieToken } from '@/lib/session-token';
 
 /**
  * Bảo vệ trang nhạy cảm và phân quyền Role-Based Access Control (RBAC).
@@ -22,43 +22,23 @@ export function hasRealClerkKeys(): boolean {
 export interface LocalSession {
   username: string;
   role: 'ADMIN' | 'RESEARCHER';
+  memberId?: string | null;
+  rawToken?: string;
 }
 
 export async function getLocalSession(): Promise<LocalSession | null> {
   try {
     const cookieStore = await cookies();
     const token = cookieStore.get('labops_session')?.value;
-    if (!token) return null;
-
-    const secret =
-      process.env.LABOPS_SESSION_SECRET ||
-      process.env.LABOPS_AUTH_SECRET ||
-      '';
-    if (!secret) return null;
-
-    const parts = token.split('.');
-    if (parts.length !== 2) return null;
-    const [payloadB64, sigB64] = parts;
-
-    const payloadBuf = Buffer.from(payloadB64, 'base64url');
-    const expectedSig = createHmac('sha256', secret).update(payloadBuf).digest();
-    const actualSig = Buffer.from(sigB64, 'base64url');
-
-    if (expectedSig.length !== actualSig.length || !timingSafeEqual(expectedSig, actualSig)) {
-      return null;
-    }
-
-    const data = JSON.parse(payloadBuf.toString('utf-8'));
-    if (!Number.isSafeInteger(data.exp) || data.exp <= Math.floor(Date.now() / 1000)) {
-      return null;
-    }
-    if (typeof data.sub !== 'string' || !data.sub.trim() || (data.role !== 'ADMIN' && data.role !== 'RESEARCHER')) {
-      return null;
-    }
+    const secret = process.env.LABOPS_SESSION_SECRET || process.env.LABOPS_AUTH_SECRET || '';
+    const verified = verifySessionCookieToken(token, secret);
+    if (!verified) return null;
 
     return {
-      username: data.sub,
-      role: data.role as 'ADMIN' | 'RESEARCHER'
+      username: verified.username,
+      role: verified.role,
+      memberId: verified.memberId,
+      rawToken: verified.rawToken
     };
   } catch {
     return null;

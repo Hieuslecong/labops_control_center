@@ -230,7 +230,7 @@ export function GpuHoursChart() {
           </ChartContainer>
         </div>
 
-        <div className='flex items-center gap-2 mt-2 pt-2 border-t text-[11px] text-muted-foreground'>
+        <div className='flex items-center gap-2 mt-2 pt-2 border-t text-xs text-muted-foreground'>
           <Icons.info className='size-3.5 text-primary shrink-0' />
           <span>
             <strong>Định nghĩa tính toán:</strong> GPU-Hours được đo lường dựa trên thời gian GPU có

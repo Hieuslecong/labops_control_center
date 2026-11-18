@@ -24,12 +24,7 @@ interface ForceKillDialogProps {
   onSuccess?: () => void;
 }
 
-export function ForceKillDialog({
-  job,
-  open,
-  onOpenChange,
-  onSuccess
-}: ForceKillDialogProps) {
+export function ForceKillDialog({ job, open, onOpenChange, onSuccess }: ForceKillDialogProps) {
   const killProcess = useLabOpsStore((state) => state.killProcess);
   const [reason, setReason] = useState('Tiến trình treo không phản hồi sau thời gian ân hạn');
   const [confirmedRisk, setConfirmedRisk] = useState(false);
@@ -38,7 +33,8 @@ export function ForceKillDialog({
 
   if (!job) return null;
 
-  const processRef = job.ref || `track:${job.workspace || 'host'}:${job.pid}:0`;
+  const processRef =
+    job.ref || `${job.serverId || 'workstation'}:${job.workspace || 'host'}:${job.pid}:0`;
 
   const handleConfirm = async () => {
     if (!confirmedRisk) {
@@ -75,7 +71,8 @@ export function ForceKillDialog({
                 CẢNH BÁO: Buộc dừng Cưỡng chế (SIGKILL)
               </DialogTitle>
               <DialogDescription className='text-xs text-muted-foreground'>
-                Hành động này sẽ gửi tín hiệu SIGKILL lập tức tới tiến trình mà không qua thời gian ân hạn.
+                Hành động này sẽ gửi tín hiệu SIGKILL lập tức tới tiến trình mà không qua thời gian
+                ân hạn.
               </DialogDescription>
             </div>
           </div>
@@ -83,18 +80,19 @@ export function ForceKillDialog({
 
         <div className='space-y-4 py-2 text-xs'>
           {/* Cảnh báo rủi ro dữ liệu */}
-          <div className='p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-900 dark:text-rose-200 leading-relaxed text-[11px] space-y-1'>
+          <div className='p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-900 dark:text-rose-200 leading-relaxed text-xs space-y-1'>
             <div className='font-bold flex items-center gap-1.5 text-rose-700 dark:text-rose-300'>
               <Icons.shieldAlert className='size-4' />
               RỦI RO MẤT DỮ LIỆU & CHECKPOINT
             </div>
             <p>
-              Mọi dữ liệu tính toán trong bộ nhớ RAM, gradients hoặc checkpoint chưa kịp flush xuống đĩa của thành viên <strong>@{job.username}</strong> sẽ bị xóa sạch ngay lập tức.
+              Mọi dữ liệu tính toán trong bộ nhớ RAM, gradients hoặc checkpoint chưa kịp flush xuống
+              đĩa của thành viên <strong>@{job.username}</strong> sẽ bị xóa sạch ngay lập tức.
             </p>
           </div>
 
           {/* Thông tin tiến trình đích */}
-          <div className='p-3 rounded-lg border bg-zinc-50 dark:bg-zinc-900/50 space-y-1.5 font-mono text-[11px]'>
+          <div className='p-3 rounded-lg border bg-zinc-50 dark:bg-zinc-900/50 space-y-1.5 font-mono text-xs'>
             <div className='flex items-center justify-between'>
               <span className='font-sans text-muted-foreground'>Lệnh:</span>
               <span className='font-bold text-foreground break-all'>{job.script}</span>
@@ -145,7 +143,8 @@ export function ForceKillDialog({
               className='size-4 mt-0.5 rounded border-rose-400 text-rose-600 focus:ring-rose-500'
             />
             <span className='text-xs font-semibold text-rose-900 dark:text-rose-200 leading-tight'>
-              Tôi hiểu rõ rủi ro mất mát checkpoint / dữ liệu huấn luyện và xác nhận gửi tín hiệu SIGKILL cưỡng chế.
+              Tôi hiểu rõ rủi ro mất mát checkpoint / dữ liệu huấn luyện và xác nhận gửi tín hiệu
+              SIGKILL cưỡng chế.
             </span>
           </label>
         </div>

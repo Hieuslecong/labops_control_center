@@ -65,7 +65,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [workspaceName, setWorkspaceName] = useState('');
   const [mountPath, setMountPath] = useState('/workspace');
   const [storageQuotaGb, setStorageQuotaGb] = useState(100);
-  const [backupPolicy, setBackupPolicy] = useState<'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE'>('DAILY_SNAPSHOT');
+  const [backupPolicy, setBackupPolicy] = useState<'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE'>(
+    'DAILY_SNAPSHOT'
+  );
   const [cpuLimitCores, setCpuLimitCores] = useState(4);
   const [ramLimitGb, setRamLimitGb] = useState(16);
   const [selectedGpu, setSelectedGpu] = useState('NONE');
@@ -260,13 +262,20 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     if (!created?.id) return;
     setClaimingBundle(true);
     try {
-      const response = await fetch(`/api/labops/v2/ssh-access/${encodeURIComponent(created.id)}/claim-key-bundle`, {
-        method: 'POST',
-        cache: 'no-store'
-      });
+      const response = await fetch(
+        `/api/labops/v2/ssh-access/${encodeURIComponent(created.id)}/claim-key-bundle`,
+        {
+          method: 'POST',
+          cache: 'no-store'
+        }
+      );
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Không thể tải gói khóa riêng (đã tải trước đó).');
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'Không thể tải gói khóa riêng (đã tải trước đó).'
+        );
       }
       setClaimedBundle(data);
       // 1. Tự động tải file cấu hình WireGuard (.conf) để import luôn vào WireGuard
@@ -292,16 +301,25 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     if (!created?.id) return;
     setClaimingSecrets(true);
     try {
-      const response = await fetch(`/api/labops/v2/ssh-access/${encodeURIComponent(created.id)}/claim-secrets`, {
-        method: 'POST',
-        cache: 'no-store'
-      });
+      const response = await fetch(
+        `/api/labops/v2/ssh-access/${encodeURIComponent(created.id)}/claim-secrets`,
+        {
+          method: 'POST',
+          cache: 'no-store'
+        }
+      );
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Passphrase & mật khẩu tạm đã được lấy trước đó.');
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'Passphrase & mật khẩu tạm đã được lấy trước đó.'
+        );
       }
       setClaimedSecrets(data);
-      toast.success('Đã hiển thị Passphrase & Mật khẩu tạm (1 lần duy nhất). Hãy gửi qua kênh riêng!');
+      toast.success(
+        'Đã hiển thị Passphrase & Mật khẩu tạm (1 lần duy nhất). Hãy gửi qua kênh riêng!'
+      );
       await useLabOpsStore.getState().fetchAccessMembers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Lỗi nhận thông tin bí mật.');
@@ -318,10 +336,13 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             <div>
               <DialogTitle>Tạo quyền truy cập SSH cho Thành viên (LabOps V2)</DialogTitle>
               <DialogDescription>
-                Admin tạo workspace riêng, hệ thống tự động sinh cặp khóa SSH mã hóa bằng passphrase và mật khẩu tạm lần đầu.
+                Admin tạo workspace riêng, hệ thống tự động sinh cặp khóa SSH mã hóa bằng passphrase
+                và mật khẩu tạm lần đầu.
               </DialogDescription>
             </div>
-            <Badge variant={DEMO_MODE ? 'secondary' : 'outline'}>{DEMO_MODE ? 'DEMO' : `${step}/5`}</Badge>
+            <Badge variant={DEMO_MODE ? 'secondary' : 'outline'}>
+              {DEMO_MODE ? 'DEMO' : `${step}/5`}
+            </Badge>
           </div>
         </DialogHeader>
 
@@ -353,7 +374,8 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   onChange={(event) => {
                     const value = event.target.value.toLowerCase();
                     setUsername(value);
-                    if (!workspaceName || workspaceName === `ws-${username}`) setWorkspaceName(`ws-${value}`);
+                    if (!workspaceName || workspaceName === `ws-${username}`)
+                      setWorkspaceName(`ws-${value}`);
                   }}
                 />
                 {username && !usernameIsValid && (
@@ -374,7 +396,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   onChange={(event) => setEmail(event.target.value)}
                 />
                 {email.trim() && !email.includes('@') && (
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Tự động bổ sung tên miền: <code>{effectiveEmail}</code>
                   </p>
                 )}
@@ -554,7 +576,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 ))}
               </select>
               {!assignedGpus.length && (
-                <p className='text-xs text-muted-foreground'>Chưa có GPU telemetry xác minh cho server này.</p>
+                <p className='text-xs text-muted-foreground'>
+                  Chưa có GPU telemetry xác minh cho server này.
+                </p>
               )}
             </div>
             <div className='space-y-1.5'>
@@ -592,9 +616,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   Chế độ Admin-Managed SSH (Thành viên không cần tự tạo SSH Key)
                 </p>
                 <p className='text-xs text-muted-foreground'>
-                  Hệ thống tự động sinh cặp khóa <code>ssh-ed25519</code> thật bằng <code>ssh-keygen</code>, bảo vệ
-                  Private Key bằng Passphrase mạnh, cài đặt Public Key vào thư mục Workspace riêng (<code>0700</code>)
-                  và cấp <strong>Mật khẩu tạm đăng nhập lần đầu</strong> (bắt buộc đổi ngay khi đăng nhập).
+                  Hệ thống tự động sinh cặp khóa <code>ssh-ed25519</code> thật bằng{' '}
+                  <code>ssh-keygen</code>, bảo vệ Private Key bằng Passphrase mạnh, cài đặt Public
+                  Key vào thư mục Workspace riêng (<code>0700</code>) và cấp{' '}
+                  <strong>Mật khẩu tạm đăng nhập lần đầu</strong> (bắt buộc đổi ngay khi đăng nhập).
                 </p>
               </div>
             </Card>
@@ -631,8 +656,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     onClick={() => setRequirePassphrase(false)}
                     className={`rounded border p-2.5 text-left text-xs ${!requirePassphrase ? 'border-emerald-600 bg-emerald-500/10 font-semibold' : 'border-border'}`}
                   >
-                    <span className='block text-emerald-800 dark:text-emerald-300'>⚡ Kết nối 1 chạm (Không Passphrase)</span>
-                    <span className='block text-[11px] text-muted-foreground mt-0.5'>
+                    <span className='block text-emerald-800 dark:text-emerald-300'>
+                      ⚡ Kết nối 1 chạm (Không Passphrase)
+                    </span>
+                    <span className='block text-xs text-muted-foreground mt-0.5'>
                       Thành viên gõ lệnh là vào thẳng terminal ngay, không bị hỏi mật khẩu
                     </span>
                   </button>
@@ -642,7 +669,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     className={`rounded border p-2.5 text-left text-xs ${requirePassphrase ? 'border-primary bg-primary/10 font-semibold' : 'border-border'}`}
                   >
                     <span className='block'>🔒 Đặt Passphrase bảo vệ</span>
-                    <span className='block text-[11px] text-muted-foreground mt-0.5'>
+                    <span className='block text-xs text-muted-foreground mt-0.5'>
                       Bắt buộc nhập passphrase mỗi lần kết nối SSH để tăng cường bảo mật
                     </span>
                   </button>
@@ -712,8 +739,8 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                       <p>
                         Lệnh SSH:{' '}
                         <code className='text-primary font-bold'>
-                          ssh -i id_ed25519_{created.username} -p {created.sshPort} {created.username}@
-                          {created.sshIp || '192.168.167.250'}
+                          ssh -i id_ed25519_{created.username} -p {created.sshPort}{' '}
+                          {created.username}@{created.sshIp || '192.168.167.250'}
                         </code>
                       </p>
                       <p>
@@ -725,23 +752,34 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   {created.runtimeVerification && (
                     <div className='rounded border bg-background p-3 text-xs space-y-1.5'>
                       <p className='font-semibold'>Bằng chứng kiểm tra Runtime thực tế:</p>
-                      <div className='grid grid-cols-2 gap-1 font-mono text-[11px]'>
-                        <span>Host Online: {created.runtimeVerification.host_online ? 'ONLINE' : 'OFFLINE'}</span>
-                        <span>Cách ly thư mục (0700): {created.runtimeVerification.directory_isolation}</span>
-                        <span>Khóa SSH (0600): {created.runtimeVerification.ssh_key_installed}</span>
-                        <span>Không Sudo / Docker sock: {created.runtimeVerification.privilege_isolation}</span>
+                      <div className='grid grid-cols-2 gap-1 font-mono text-xs'>
+                        <span>
+                          Host Online:{' '}
+                          {created.runtimeVerification.host_online ? 'ONLINE' : 'OFFLINE'}
+                        </span>
+                        <span>
+                          Cách ly thư mục (0700): {created.runtimeVerification.directory_isolation}
+                        </span>
+                        <span>
+                          Khóa SSH (0600): {created.runtimeVerification.ssh_key_installed}
+                        </span>
+                        <span>
+                          Không Sudo / Docker sock:{' '}
+                          {created.runtimeVerification.privilege_isolation}
+                        </span>
                         <span>Giới hạn CPU/RAM: {created.runtimeVerification.cpu_ram_limits}</span>
                         <span>Storage Quota: {created.runtimeVerification.storage_quota}</span>
                         <span>SSH Daemon Runtime: {created.runtimeVerification.ssh_runtime}</span>
                         <span>Tổng kết: {created.runtimeVerification.overall_status}</span>
                       </div>
-                      {created.runtimeVerification.reasons && created.runtimeVerification.reasons.length > 0 && (
-                        <ul className='list-disc pl-4 text-[11px] text-amber-700 dark:text-amber-300 space-y-0.5'>
-                          {created.runtimeVerification.reasons.map((reason, idx) => (
-                            <li key={idx}>{reason}</li>
-                          ))}
-                        </ul>
-                      )}
+                      {created.runtimeVerification.reasons &&
+                        created.runtimeVerification.reasons.length > 0 && (
+                          <ul className='list-disc pl-4 text-xs text-amber-700 dark:text-amber-300 space-y-0.5'>
+                            {created.runtimeVerification.reasons.map((reason, idx) => (
+                              <li key={idx}>{reason}</li>
+                            ))}
+                          </ul>
+                        )}
                     </div>
                   )}
                 </Card>
@@ -758,7 +796,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                       disabled={downloadingZip}
                       onClick={() => void handleDownloadZip()}
                     >
-                      {downloadingZip ? 'Đang đóng gói và tải ZIP…' : '📦 Tải trọn gói kết nối (.zip) dùng ngay'}
+                      {downloadingZip
+                        ? 'Đang đóng gói và tải ZIP…'
+                        : '📦 Tải trọn gói kết nối (.zip) dùng ngay'}
                     </Button>
                     <Button
                       type='button'
@@ -801,7 +841,8 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   {claimedBundle && (
                     <div className='rounded-md border border-primary/40 bg-primary/5 p-3 text-xs space-y-2'>
                       <p className='font-semibold'>
-                        Các tệp cấu hình dùng ngay cho @{claimedBundle.username} (Đã tải tự động — có thể bấm tải lại ngay trong phiên này):
+                        Các tệp cấu hình dùng ngay cho @{claimedBundle.username} (Đã tải tự động —
+                        có thể bấm tải lại ngay trong phiên này):
                       </p>
                       <div className='flex flex-wrap gap-2'>
                         {claimedBundle.wireguard_conf && (
@@ -810,7 +851,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                             size='sm'
                             variant='outline'
                             onClick={() =>
-                              downloadTextFile(`${claimedBundle.username}-labops-wg0.conf`, claimedBundle.wireguard_conf!)
+                              downloadTextFile(
+                                `${claimedBundle.username}-labops-wg0.conf`,
+                                claimedBundle.wireguard_conf!
+                              )
                             }
                           >
                             Tải {claimedBundle.username}-labops-wg0.conf (Import vào WireGuard)
@@ -822,7 +866,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                             size='sm'
                             variant='outline'
                             onClick={() =>
-                              downloadTextFile(`setup-ssh-${claimedBundle.username}.sh`, claimedBundle.quick_setup_script!)
+                              downloadTextFile(
+                                `setup-ssh-${claimedBundle.username}.sh`,
+                                claimedBundle.quick_setup_script!
+                              )
                             }
                           >
                             Tải setup-ssh-{claimedBundle.username}.sh (Tự động cài SSH & Key)
@@ -834,7 +881,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                             size='sm'
                             variant='outline'
                             onClick={() =>
-                              downloadTextFile(`ssh_config_${claimedBundle.username}`, claimedBundle.ssh_config_snippet!)
+                              downloadTextFile(
+                                `ssh_config_${claimedBundle.username}`,
+                                claimedBundle.ssh_config_snippet!
+                              )
                             }
                           >
                             Tải ssh_config_{claimedBundle.username}
@@ -845,16 +895,21 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                           size='sm'
                           variant='outline'
                           onClick={() =>
-                            downloadTextFile(`id_ed25519_${claimedBundle.username}`, claimedBundle.encrypted_private_key)
+                            downloadTextFile(
+                              `id_ed25519_${claimedBundle.username}`,
+                              claimedBundle.encrypted_private_key
+                            )
                           }
                         >
                           Tải riêng Key id_ed25519_{claimedBundle.username}
                         </Button>
                       </div>
-                      <p className='font-mono text-[11px] text-muted-foreground'>
-                        Sau khi chạy <code>bash setup-ssh-{claimedBundle.username}.sh</code>, thành viên chỉ cần gõ:{' '}
+                      <p className='font-mono text-xs text-muted-foreground'>
+                        Sau khi chạy <code>bash setup-ssh-{claimedBundle.username}.sh</code>, thành
+                        viên chỉ cần gõ:{' '}
                         <strong className='text-foreground'>
-                          {claimedBundle.ssh_alias_command || `ssh labops-${claimedBundle.username}`}
+                          {claimedBundle.ssh_alias_command ||
+                            `ssh labops-${claimedBundle.username}`}
                         </strong>
                       </p>
                     </div>
@@ -863,7 +918,8 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   {claimedSecrets && (
                     <div className='rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs font-mono space-y-1.5'>
                       <p className='font-sans font-semibold text-emerald-800 dark:text-emerald-200'>
-                        Gửi 2 thông tin dưới đây cho @{created.username} qua kênh liên lạc riêng (KHÔNG gửi chung với tệp Private Key):
+                        Gửi 2 thông tin dưới đây cho @{created.username} qua kênh liên lạc riêng
+                        (KHÔNG gửi chung với tệp Private Key):
                       </p>
                       <p>
                         Passphrase mở khóa Private Key:{' '}
@@ -877,8 +933,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                           {claimedSecrets.temporary_password}
                         </strong>
                       </p>
-                      <p className='text-[11px] text-muted-foreground font-sans'>
-                        Hạn sử dụng mật khẩu tạm: {claimedSecrets.temp_password_expires_at} · Thành viên bắt buộc đổi mật khẩu mới ngay ở lần đăng nhập đầu tiên.
+                      <p className='text-xs text-muted-foreground font-sans'>
+                        Hạn sử dụng mật khẩu tạm: {claimedSecrets.temp_password_expires_at} · Thành
+                        viên bắt buộc đổi mật khẩu mới ngay ở lần đăng nhập đầu tiên.
                       </p>
                     </div>
                   )}
@@ -891,11 +948,14 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   {fullName} · @{username} · {effectiveEmail} · {role}
                 </p>
                 <p>
-                  Host: <strong>{serverId}</strong> · Workspace: <code>{workspaceName || `ws-${username}`}</code>
+                  Host: <strong>{serverId}</strong> · Workspace:{' '}
+                  <code>{workspaceName || `ws-${username}`}</code>
                 </p>
                 <p>
-                  Storage: {assignedPools.find((pool) => pool.id === storagePoolId)?.label || 'Pool mặc định'} ·{' '}
-                  {storageQuotaGb} GB · {mountPath} · {backupPolicy}
+                  Storage:{' '}
+                  {assignedPools.find((pool) => pool.id === storagePoolId)?.label ||
+                    'Pool mặc định'}{' '}
+                  · {storageQuotaGb} GB · {mountPath} · {backupPolicy}
                 </p>
                 <p>
                   CPU: {cpuLimitCores} cores · RAM: {ramLimitGb} GB · GPU: {selectedGpu}
@@ -904,10 +964,13 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   Chế độ khóa SSH:{' '}
                   {autoGenerateSsh ? (
                     <span className='font-medium text-emerald-700 dark:text-emerald-300'>
-                      Hệ thống tự động tạo cặp khóa Ed25519 (mã hóa Passphrase) + Mật khẩu tạm lần đầu
+                      Hệ thống tự động tạo cặp khóa Ed25519 (mã hóa Passphrase) + Mật khẩu tạm lần
+                      đầu
                     </span>
                   ) : sshPublicKey.trim() ? (
-                    <code className='text-xs text-emerald-600'>{sshPublicKey.trim().slice(0, 44)}...</code>
+                    <code className='text-xs text-emerald-600'>
+                      {sshPublicKey.trim().slice(0, 44)}...
+                    </code>
                   ) : (
                     <span className='text-amber-600'>Chưa nhập khóa</span>
                   )}
@@ -926,7 +989,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
           {step < 4 && (
             <Button
               type='button'
-              disabled={step === 1 && (!fullName.trim() || !usernameIsValid || !effectiveEmail.includes('@'))}
+              disabled={
+                step === 1 &&
+                (!fullName.trim() || !usernameIsValid || !effectiveEmail.includes('@'))
+              }
               onClick={() => setStep(step + 1)}
             >
               Tiếp tục

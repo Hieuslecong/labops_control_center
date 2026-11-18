@@ -63,7 +63,8 @@ export function GpuAllocationDialog({
       if (!res.ok) {
         const detail = data?.detail;
         toast.error('Không thể giữ GPU', {
-          description: typeof detail === 'string' ? detail : detail?.message || `Lỗi HTTP ${res.status}`
+          description:
+            typeof detail === 'string' ? detail : detail?.message || `Lỗi HTTP ${res.status}`
         });
         return;
       }
@@ -118,11 +119,11 @@ export function GpuAllocationDialog({
                     >
                       <div className='flex items-center justify-between'>
                         <span className='font-bold text-xs'>{gpu.displayLabel}</span>
-                        <Badge variant='outline' className='text-[9px] px-1 py-0 font-mono'>
+                        <Badge variant='outline' className='text-xs px-1 py-0 font-mono'>
                           {gpu.serverName}
                         </Badge>
                       </div>
-                      <div className='text-[10px] text-muted-foreground mt-1'>
+                      <div className='text-xs text-muted-foreground mt-1'>
                         {busy ? (
                           <span className='text-amber-600'>Đang có process — không thể giữ</span>
                         ) : (
@@ -147,16 +148,17 @@ export function GpuAllocationDialog({
                 <option value=''>Chính tôi (người đang đăng nhập)</option>
                 {members.map((m) => (
                   <option key={m.id} value={m.username}>
-                    {m.fullName} (@{m.username} •{' '}
-                    {m.assignedServer})
+                    {m.fullName} (@{m.username} • {m.assignedServer})
                   </option>
                 ))}
               </select>
             </div>
 
             {/* Chế độ cấp phát: V1 chỉ hỗ trợ độc quyền toàn bộ GPU */}
-            <div className='rounded-md border border-blue-200 bg-blue-50 p-2.5 text-[11px] text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200'>
-              <div className='font-semibold'>Chế độ: Độc quyền toàn bộ GPU (FULL_GPU_EXCLUSIVE)</div>
+            <div className='rounded-md border border-blue-200 bg-blue-50 p-2.5 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200'>
+              <div className='font-semibold'>
+                Chế độ: Độc quyền toàn bộ GPU (FULL_GPU_EXCLUSIVE)
+              </div>
               <div className='mt-0.5'>
                 Docker không giới hạn VRAM theo GB, nên hệ thống không cho chọn hạn ngạch VRAM. GPU
                 chỉ được giữ khi NVML xác nhận không có process ngoài đang chạy.

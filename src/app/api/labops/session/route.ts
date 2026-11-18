@@ -21,9 +21,18 @@ export async function GET(request: Request) {
     const localSession = await getLocalSession();
     if (localSession) {
       return NextResponse.json<UserSessionData>({
-        authenticated: true, userId: localSession.username, username: localSession.username,
-        fullName: 'Quản trị viên LabOps', email: '', imageUrl: '', role: localSession.role,
-        permissions: localSession.role === 'ADMIN' ? ['all'] : ['researcher:read', 'researcher:write'],
+        authenticated: true,
+        userId: localSession.username,
+        username: localSession.username,
+        fullName:
+          localSession.role === 'ADMIN'
+            ? 'Quản trị viên LabOps'
+            : `Thành viên @${localSession.username}`,
+        email: '',
+        imageUrl: '',
+        role: localSession.role,
+        permissions:
+          localSession.role === 'ADMIN' ? ['all'] : ['researcher:read', 'researcher:write'],
         isDemo: false
       });
     }
@@ -33,7 +42,9 @@ export async function GET(request: Request) {
     if (isDemo && !hasRealClerkKeys()) {
       const url = new URL(request.url);
       const previewRole = url.searchParams.get('previewRole');
-      const role = (previewRole === 'RESEARCHER' ? 'RESEARCHER' : 'ADMIN') as 'ADMIN' | 'RESEARCHER';
+      const role = (previewRole === 'RESEARCHER' ? 'RESEARCHER' : 'ADMIN') as
+        | 'ADMIN'
+        | 'RESEARCHER';
       return NextResponse.json<UserSessionData>({
         authenticated: true,
         userId: 'demo_admin_user',
@@ -90,7 +101,8 @@ export async function GET(request: Request) {
       const user = await currentUser();
       if (user) {
         fullName = user.fullName || `${user.firstName || ''} ${user.lastName || ''}`.trim();
-        email = user.primaryEmailAddress?.emailAddress || user.emailAddresses?.[0]?.emailAddress || '';
+        email =
+          user.primaryEmailAddress?.emailAddress || user.emailAddresses?.[0]?.emailAddress || '';
         imageUrl = user.imageUrl || '';
         if (!username) username = user.username || email.split('@')[0] || userId;
       }
@@ -115,7 +127,9 @@ export async function GET(request: Request) {
     });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ authenticated: false, role: null, error: errorMsg }, { status: 500 });
+    return NextResponse.json(
+      { authenticated: false, role: null, error: errorMsg },
+      { status: 500 }
+    );
   }
 }
-

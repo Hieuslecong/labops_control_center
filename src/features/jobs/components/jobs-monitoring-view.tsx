@@ -1,13 +1,13 @@
-/* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
+import { useLabOpsProcessesQuery, useLabOpsTelemetrySyncQuery } from '@/features/labops/queries';
 import { ProcessDetailSheet } from '@/features/overview/components/process-detail-sheet';
 import { StopProcessDialog } from '@/features/jobs/components/stop-process-dialog';
 import { ForceKillDialog } from '@/features/jobs/components/force-kill-dialog';
@@ -22,9 +22,6 @@ export function JobsMonitoringView() {
 
   // View Mode: 'workloads' (Mặc định: chỉ tác vụ thành viên) | 'diagnostics' (Chẩn đoán: toàn bộ tiến trình hệ thống)
   const [viewMode, setViewMode] = useState<'workloads' | 'diagnostics'>('workloads');
-
-  const [allProcesses, setAllProcesses] = useState<ComputeJob[]>([]);
-  const [loadingProcesses, setLoadingProcesses] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [classificationFilter, setClassificationFilter] = useState<string>('all');
@@ -41,73 +38,28 @@ export function JobsMonitoringView() {
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Fetch full processes list from /api/labops/processes (chỉ phục vụ Chẩn đoán Quản trị Nâng cao)
-  const fetchProcessesList = useCallback(async () => {
-    try {
-      setLoadingProcesses(true);
-      const res = await fetch('/api/labops/processes?classification=all').catch(() => null);
-      if (res && res.ok) {
-        const data = await res.json();
-        const items = data.items || [];
-        const mapped: ComputeJob[] = items.map((rawP: unknown) => {
-          const p = rawP as Record<string, unknown>;
-          return {
-            id: String(p.pid),
-            ref: p.ref ? String(p.ref) : undefined,
-            username: String(p.username || 'unknown'),
-            fullName: String(p.full_name || `@${String(p.username || 'unknown')}`),
-            serverId: (p.host_id || p.server_id || 'workstation') as ComputeJob['serverId'],
-            serverName: String(p.server_name || 'Server 02 — Workstation'),
-            workspace: String(
-              p.workspace ||
-                (p.container_id ? `docker-${String(p.container_id)}` : 'Trực tiếp trên Host')
-            ),
-            pid: Number(p.pid),
-            ppid: p.ppid ? Number(p.ppid) : undefined,
-            script: String(p.script_display || p.name || 'cmd'),
-            cmdline: p.cmdline ? String(p.cmdline) : undefined,
-            gpuId: p.gpu_id ? String(p.gpu_id) : undefined,
-            cpuPercent: Number(p.cpu_percent || 0),
-            ramUsedMb: Number(p.memory_rss_mb || 0),
-            vramUsedMb: Number(p.vram_mb || 0),
-            startTime: String(p.start_time || ''),
-            elapsedTime: String(p.elapsed_time || ''),
-            status: 'RUNNING' as const,
-            sshStatus: p.username ? 'SSH Online' : 'Chạy nền',
-            containerState: p.container_id ? 'Running' : 'Host Process',
-            isGpu: Boolean(p.is_gpu_process || Number(p.vram_mb || 0) > 0),
-            classification: p.classification ? String(p.classification) : undefined,
-            isProtected: Boolean(p.is_protected),
-            childrenCount: Number(p.children_count || 0),
-            attribution: p.attribution ? String(p.attribution) : undefined,
-            isRootWorkload: Boolean(p.is_root_workload ?? true)
-          };
-        });
-        setAllProcesses(mapped);
-      }
-    } catch {
-      // fallback
-    } finally {
-      setLoadingProcesses(false);
-    }
-  }, []);
+  useLabOpsTelemetrySyncQuery({
+    enabled: isAutoRefresh,
+    isAdmin: true,
+    intervalMs: 10_000
+  });
+
+  const processesQuery = useLabOpsProcessesQuery({
+    enabled: viewMode === 'diagnostics' && isAutoRefresh,
+    intervalMs: 10_000
+  });
+  const allProcesses = useMemo(() => processesQuery.data ?? [], [processesQuery.data]);
+  const refetchProcesses = processesQuery.refetch;
 
   const refreshAll = useCallback(async () => {
     setIsRefreshing(true);
-    await Promise.all([fetchLiveJobs(), fetchLiveState(), fetchProcessesList()]);
+    await Promise.all([
+      fetchLiveJobs(),
+      fetchLiveState({ isAdmin: true }),
+      viewMode === 'diagnostics' ? refetchProcesses() : Promise.resolve()
+    ]);
     setIsRefreshing(false);
-  }, [fetchLiveJobs, fetchLiveState, fetchProcessesList]);
-
-  useEffect(() => {
-    refreshAll();
-    if (!isAutoRefresh) return;
-    const timer = setInterval(() => {
-      fetchLiveJobs();
-      fetchLiveState();
-      fetchProcessesList();
-    }, 4000);
-    return () => clearInterval(timer);
-  }, [refreshAll, fetchLiveJobs, fetchLiveState, fetchProcessesList, isAutoRefresh]);
+  }, [fetchLiveJobs, fetchLiveState, refetchProcesses, viewMode]);
 
   // Nguồn dữ liệu hiển thị theo chế độ
   const displayList = useMemo(() => {
@@ -202,7 +154,7 @@ export function JobsMonitoringView() {
             Tác vụ Thành viên (Mặc định)
             <Badge
               variant='secondary'
-              className={`ml-1 text-[10px] px-1.5 py-0 h-4 ${
+              className={`ml-1 text-xs px-1.5 py-0 h-4 ${
                 viewMode === 'workloads'
                   ? 'bg-primary-foreground/20 text-primary-foreground'
                   : 'bg-zinc-200 dark:bg-zinc-800 text-foreground'
@@ -223,8 +175,8 @@ export function JobsMonitoringView() {
           >
             <Icons.settings className='size-3.5 text-muted-foreground' />
             Chẩn đoán Quản trị (Toàn bộ tiến trình)
-            <Badge variant='outline' className='ml-1 text-[10px] px-1.5 py-0 h-4'>
-              {allProcesses.length}
+            <Badge variant='outline' className='ml-1 text-xs px-1.5 py-0 h-5'>
+              {processesQuery.data ? allProcesses.length : 'Raw'}
             </Badge>
           </Button>
         </div>
@@ -239,7 +191,7 @@ export function JobsMonitoringView() {
             <span
               className={`size-1.5 rounded-full mr-1.5 ${isAutoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-400'}`}
             />
-            {isAutoRefresh ? 'Tự cập nhật 4s' : 'Đã tạm dừng'}
+            {isAutoRefresh ? 'Tự cập nhật 10s' : 'Đã tạm dừng'}
           </Button>
 
           <Button
@@ -271,33 +223,33 @@ export function JobsMonitoringView() {
       {/* KPI Stats Cards - White Clean Theme */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+          <span className='text-xs text-muted-foreground font-semibold uppercase tracking-wider'>
             {viewMode === 'workloads' ? 'Tác vụ Đang chạy' : 'Tổng Tiến trình'}
           </span>
           <div className='text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
             <Icons.job className='size-5' />
             {viewMode === 'workloads' ? jobs.length : allProcesses.length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>
+          <span className='text-xs text-muted-foreground'>
             {viewMode === 'workloads' ? 'Tác vụ thành viên chủ động' : 'Bao gồm background daemons'}
           </span>
         </Card>
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+          <span className='text-xs text-muted-foreground font-semibold uppercase tracking-wider'>
             ⚡ Chiếm dụng GPU
           </span>
           <div className='text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'>
             <Icons.gpu className='size-5' />
             {gpuWorkloadsCount}
           </div>
-          <span className='text-[10px] text-muted-foreground'>
+          <span className='text-xs text-muted-foreground'>
             Đang dùng {(totalVramMb / 1024).toFixed(1)} GB VRAM
           </span>
         </Card>
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+          <span className='text-xs text-muted-foreground font-semibold uppercase tracking-wider'>
             {viewMode === 'workloads' ? 'Tác vụ CPU thuần' : 'Tiến trình Thành viên'}
           </span>
           <div className='text-2xl font-bold mt-1 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
@@ -313,20 +265,20 @@ export function JobsMonitoringView() {
                     p.classification === 'MEMBER_PROCESS' || p.classification === 'RESEARCH_JOB'
                 ).length}
           </div>
-          <span className='text-[10px] text-muted-foreground'>
+          <span className='text-xs text-muted-foreground'>
             {viewMode === 'workloads' ? 'Xử lý trên đa luồng CPU' : 'Tiến trình user space'}
           </span>
         </Card>
 
         <Card className='p-3.5 bg-white dark:bg-zinc-950 border shadow-xs'>
-          <span className='text-[11px] text-muted-foreground font-semibold uppercase tracking-wider'>
+          <span className='text-xs text-muted-foreground font-semibold uppercase tracking-wider'>
             Thành viên Hoạt động
           </span>
           <div className='text-2xl font-bold mt-1 text-foreground flex items-center gap-1.5'>
             <Icons.user className='size-5' />
             {userCounts.length} tài khoản
           </div>
-          <span className='text-[10px] text-muted-foreground truncate'>
+          <span className='text-xs text-muted-foreground truncate'>
             {userCounts.length > 0
               ? userCounts
                   .slice(0, 3)
@@ -354,9 +306,7 @@ export function JobsMonitoringView() {
         {viewMode === 'diagnostics' && (
           <div className='flex flex-wrap items-center justify-between gap-2 pb-2 border-b'>
             <div className='flex items-center gap-1.5 flex-wrap'>
-              <span className='text-[11px] font-semibold text-muted-foreground mr-1'>
-                Phân loại:
-              </span>
+              <span className='text-xs font-semibold text-muted-foreground mr-1'>Phân loại:</span>
               <Button
                 size='sm'
                 variant={classificationFilter === 'all' ? 'default' : 'outline'}
@@ -495,7 +445,11 @@ export function JobsMonitoringView() {
                             className='h-7 text-xs gap-1.5'
                           >
                             <Icons.settings className='size-3 text-primary' />
-                            Mở Chẩn đoán Hệ thống ({allProcesses.length} tiến trình thô)
+                            Mở Chẩn đoán Hệ thống (
+                            {processesQuery.data
+                              ? `${allProcesses.length} tiến trình thô`
+                              : 'Tiến trình thô'}
+                            )
                           </Button>
                         </div>
                       )}
@@ -524,18 +478,18 @@ export function JobsMonitoringView() {
                         {/* Cột 1: Thành viên */}
                         <td className='py-3 px-3'>
                           <div className='font-bold text-foreground'>{item.fullName}</div>
-                          <div className='text-[11px] text-muted-foreground font-mono'>
+                          <div className='text-xs text-muted-foreground font-mono'>
                             @{item.username}
                           </div>
                         </td>
 
                         {/* Cột 2: Máy chủ & Workspace */}
                         <td className='py-3 px-3'>
-                          <Badge variant='outline' className='font-mono text-[10px] uppercase'>
+                          <Badge variant='outline' className='font-mono text-xs uppercase'>
                             {item.serverId === 'track' ? 'Server 01 — Rack' : item.serverId}
                           </Badge>
                           <div
-                            className='text-[11px] text-muted-foreground font-mono mt-0.5 truncate max-w-[150px]'
+                            className='text-xs text-muted-foreground font-mono mt-0.5 truncate max-w-[150px]'
                             title={item.workspace}
                           >
                             {item.workspace}
@@ -545,25 +499,25 @@ export function JobsMonitoringView() {
                         {/* Cột 3: PID / Lệnh */}
                         <td className='py-3 px-3 max-w-sm'>
                           <div className='flex items-center gap-1.5 flex-wrap'>
-                            <span className='font-mono font-bold text-foreground text-[11px]'>
+                            <span className='font-mono font-bold text-foreground text-xs'>
                               PID: {item.pid}
                             </span>
                             {item.childrenCount && item.childrenCount > 0 ? (
                               <Badge
                                 variant='secondary'
-                                className='text-[10px] px-1.5 py-0 h-4 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium'
+                                className='text-xs px-1.5 py-0 h-4 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium'
                               >
                                 +{item.childrenCount} tiến trình con
                               </Badge>
                             ) : null}
                             {item.ppid ? (
-                              <span className='text-[10px] text-muted-foreground font-mono'>
+                              <span className='text-xs text-muted-foreground font-mono'>
                                 (PPID: {item.ppid})
                               </span>
                             ) : null}
                           </div>
                           <div
-                            className='font-mono text-[11px] text-muted-foreground truncate max-w-[280px]'
+                            className='font-mono text-xs text-muted-foreground truncate max-w-[280px]'
                             title={item.cmdline || item.script}
                           >
                             {item.script}
@@ -575,7 +529,7 @@ export function JobsMonitoringView() {
                           {item.classification === 'RESEARCH_JOB' && (
                             <Badge
                               variant='outline'
-                              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-medium'
+                              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-medium'
                             >
                               Tác vụ AI
                             </Badge>
@@ -583,7 +537,7 @@ export function JobsMonitoringView() {
                           {item.classification === 'GPU_PROCESS' && (
                             <Badge
                               variant='outline'
-                              className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'
+                              className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs font-medium'
                             >
                               Chiếm GPU
                             </Badge>
@@ -591,7 +545,7 @@ export function JobsMonitoringView() {
                           {item.classification === 'MEMBER_PROCESS' && (
                             <Badge
                               variant='outline'
-                              className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-medium'
+                              className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-medium'
                             >
                               Thành viên
                             </Badge>
@@ -599,20 +553,20 @@ export function JobsMonitoringView() {
                           {item.classification === 'SYSTEM_PROCESS' && (
                             <Badge
                               variant='secondary'
-                              className='text-zinc-600 dark:text-zinc-400 text-[10px] font-medium'
+                              className='text-zinc-600 dark:text-zinc-400 text-xs font-medium'
                             >
                               Hệ thống
                             </Badge>
                           )}
                           {!item.classification && (
-                            <Badge variant='secondary' className='text-[10px]'>
+                            <Badge variant='secondary' className='text-xs'>
                               Tiến trình
                             </Badge>
                           )}
                         </td>
 
                         {/* Cột 5: Tải CPU / RAM */}
-                        <td className='py-3 px-3 font-mono text-[11px]'>
+                        <td className='py-3 px-3 font-mono text-xs'>
                           <div className='font-semibold text-foreground'>
                             {item.cpuPercent > 0 ? `${item.cpuPercent}% CPU` : '-'}
                           </div>
@@ -624,13 +578,13 @@ export function JobsMonitoringView() {
                         </td>
 
                         {/* Cột 6: VRAM GPU */}
-                        <td className='py-3 px-3 font-mono text-[11px]'>
+                        <td className='py-3 px-3 font-mono text-xs'>
                           {item.vramUsedMb > 0 ? (
                             <div className='flex flex-col'>
                               <span className='font-bold text-indigo-600 dark:text-indigo-400'>
                                 {(item.vramUsedMb / 1024).toFixed(1)} GB
                               </span>
-                              <span className='text-[10px] text-muted-foreground'>
+                              <span className='text-xs text-muted-foreground'>
                                 {item.gpuId || 'GPU 0'}
                               </span>
                             </div>
@@ -644,7 +598,7 @@ export function JobsMonitoringView() {
                           <div className='font-medium text-foreground'>
                             {item.elapsedTime || '-'}
                           </div>
-                          <div className='text-[10px] text-muted-foreground'>{item.startTime}</div>
+                          <div className='text-xs text-muted-foreground'>{item.startTime}</div>
                         </td>
 
                         {/* Cột 8: Thao tác Quản trị */}

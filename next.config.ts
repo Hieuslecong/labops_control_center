@@ -3,17 +3,13 @@ import { withSentryConfig } from '@sentry/nextjs/config';
 
 // Define the base Next.js configuration
 const baseConfig: NextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   experimental: {
     agentUpgrade: 'security'
   } as any,
   output: process.env.BUILD_STANDALONE === 'true' ? 'standalone' : undefined,
   images: {
     remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: 'api.slingacademy.com',
-        port: ''
-      },
       {
         protocol: 'https',
         hostname: 'img.clerk.com',
@@ -29,14 +25,6 @@ const baseConfig: NextConfig = {
   transpilePackages: ['geist'],
   compiler: {
     removeConsole: process.env.NODE_ENV === 'production'
-  },
-  async rewrites() {
-    return [
-      {
-        source: '/api/v1/:path*',
-        destination: 'http://127.0.0.1:8000/api/v1/:path*'
-      }
-    ];
   }
 };
 

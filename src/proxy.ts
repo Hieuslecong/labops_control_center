@@ -1,5 +1,6 @@
 import { clerkMiddleware } from '@clerk/nextjs/server';
 import { NextResponse, type NextRequest, type NextFetchEvent } from 'next/server';
+import { verifySessionCookieToken } from '@/lib/session-token';
 
 const isDemoMode =
   process.env.NEXT_PUBLIC_DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
@@ -21,23 +22,53 @@ const handler: MiddlewareHandler | null = hasRealClerkKeys
 
 const PROTECTED = /^\/(dashboard|api)(\/|$)/;
 
+const ADMIN_DASHBOARD_PREFIXES = [
+  '/dashboard/overview',
+  '/dashboard/servers',
+  '/dashboard/users',
+  '/dashboard/vpn-ssh',
+  '/dashboard/resources',
+  '/dashboard/jobs',
+  '/dashboard/monitoring',
+  '/dashboard/security',
+  '/dashboard/ai-assistant',
+  '/dashboard/audit-logs',
+  '/dashboard/calendar',
+  '/dashboard/usage',
+  '/dashboard/settings'
+];
+
 export default function middleware(request: NextRequest, event: NextFetchEvent) {
+  const pathname = request.nextUrl.pathname;
+
   // Cho phép gọi các endpoint đăng nhập/đăng xuất cục bộ
-  if (request.nextUrl.pathname.startsWith('/api/auth/')) {
+  if (pathname.startsWith('/api/auth/')) {
     return NextResponse.next();
   }
 
-  // Nếu người dùng đã đăng nhập bằng phiên LabOps (cookie labops_session), cho phép đi tiếp
-  const hasLocalSession = Boolean(request.cookies.get('labops_session')?.value);
-  if (hasLocalSession) {
+  const secret = process.env.LABOPS_SESSION_SECRET || process.env.LABOPS_AUTH_SECRET || '';
+  const verifiedSession = verifySessionCookieToken(
+    request.cookies.get('labops_session')?.value,
+    secret
+  );
+
+  if (verifiedSession) {
+    if (
+      verifiedSession.role === 'RESEARCHER' &&
+      ADMIN_DASHBOARD_PREFIXES.some(
+        (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+      )
+    ) {
+      return NextResponse.redirect(new URL('/dashboard/researcher', request.url));
+    }
     return NextResponse.next();
   }
 
   if (handler) return handler(request, event);
   if (isDemoMode) return NextResponse.next();
-  // Fail-closed: chưa có phiên đăng nhập thì chuyển hướng hoặc chặn API
-  if (PROTECTED.test(request.nextUrl.pathname)) {
-    if (request.nextUrl.pathname.startsWith('/dashboard')) {
+  // Fail-closed: chưa có phiên đăng nhập hợp lệ thì chuyển hướng hoặc chặn API
+  if (PROTECTED.test(pathname)) {
+    if (pathname.startsWith('/dashboard')) {
       const signInUrl = new URL('/auth/sign-in', request.url);
       return NextResponse.redirect(signInUrl);
     }

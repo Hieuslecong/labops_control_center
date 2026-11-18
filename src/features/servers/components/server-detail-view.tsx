@@ -43,17 +43,6 @@ export function ServerDetailView() {
   const jobs = useLabOpsStore((state) => state.jobs);
   const members = useLabOpsStore((state) => state.members);
   const storagePools = useLabOpsStore((state) => state.storagePools);
-  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
-  const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
-
-  React.useEffect(() => {
-    fetchLiveState();
-    fetchLiveJobs();
-    const interval = setInterval(() => {
-      fetchLiveJobs();
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [fetchLiveState, fetchLiveJobs]);
 
   const [selectedServerId, setSelectedServerId] = useState<ServerId>('workstation');
   const [jobSearchTerm, setJobSearchTerm] = useState('');
@@ -120,10 +109,10 @@ export function ServerDetailView() {
               variant='outline'
               className={
                 server.status === 'online'
-                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[11px]'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-xs'
                   : server.status === 'offline'
-                    ? 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-[11px]'
-                    : 'bg-amber-500/10 text-amber-800 border-amber-500/30 font-mono text-[11px]'
+                    ? 'bg-destructive/10 text-destructive border-destructive/30 font-mono text-xs'
+                    : 'bg-amber-500/10 text-amber-800 border-amber-500/30 font-mono text-xs'
               }
             >
               <span
@@ -146,7 +135,7 @@ export function ServerDetailView() {
             </Badge>
             <Badge
               variant='outline'
-              className='bg-primary/5 text-primary border-primary/20 font-mono text-[11px] flex items-center gap-1'
+              className='bg-primary/5 text-primary border-primary/20 font-mono text-xs flex items-center gap-1'
             >
               <Icons.shield className='size-3 text-emerald-500' />
               Zero-Trust mTLS Mesh
@@ -261,7 +250,7 @@ export function ServerDetailView() {
                   Tải CPU ({server.cpuCores} Cores)
                 </span>
                 <div className='text-2xl font-bold font-mono mt-1'>{server.cpuUsagePercent}%</div>
-                <span className='text-[11px] text-muted-foreground truncate block max-w-[200px]'>
+                <span className='text-xs text-muted-foreground truncate block max-w-[200px]'>
                   {server.cpuModel}
                 </span>
               </div>
@@ -279,7 +268,7 @@ export function ServerDetailView() {
                 <div className='text-2xl font-bold font-mono mt-1'>
                   {Math.round(server.ramUsedGb)} / {server.ramTotalGb} GB
                 </div>
-                <span className='text-[11px] text-muted-foreground'>
+                <span className='text-xs text-muted-foreground'>
                   {server.ramUsagePercent}% đã sử dụng
                 </span>
               </div>
@@ -297,7 +286,7 @@ export function ServerDetailView() {
                 <div className='text-2xl font-bold font-mono mt-1'>
                   {server.diskUsedTb.toFixed(1)} / {server.diskTotalTb} TB
                 </div>
-                <span className='text-[11px] text-muted-foreground'>{server.diskType}</span>
+                <span className='text-xs text-muted-foreground'>{server.diskType}</span>
               </div>
               <CircularGauge
                 value={server.diskUsagePercent}
@@ -312,19 +301,19 @@ export function ServerDetailView() {
             <CardTitle className='text-sm font-bold mb-3'>Thông tin Nền tảng & Ảo hóa</CardTitle>
             <div className='grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs'>
               <div className='p-2.5 rounded border bg-muted/20'>
-                <span className='text-muted-foreground block text-[11px]'>Container Manager</span>
+                <span className='text-muted-foreground block text-xs'>Container Manager</span>
                 <span className='font-bold text-foreground'>Incus {server.incusVersion}</span>
               </div>
               <div className='p-2.5 rounded border bg-muted/20'>
-                <span className='text-muted-foreground block text-[11px]'>NVIDIA Driver</span>
+                <span className='text-muted-foreground block text-xs'>NVIDIA Driver</span>
                 <span className='font-bold text-foreground'>{server.driverVersion}</span>
               </div>
               <div className='p-2.5 rounded border bg-muted/20'>
-                <span className='text-muted-foreground block text-[11px]'>CUDA Toolkit</span>
+                <span className='text-muted-foreground block text-xs'>CUDA Toolkit</span>
                 <span className='font-bold text-foreground'>{server.cudaVersion}</span>
               </div>
               <div className='p-2.5 rounded border bg-muted/20'>
-                <span className='text-muted-foreground block text-[11px]'>Kernel Linux</span>
+                <span className='text-muted-foreground block text-xs'>Kernel Linux</span>
                 <span className='font-mono font-bold text-foreground'>Chưa được API cung cấp</span>
               </div>
             </div>
@@ -341,7 +330,7 @@ export function ServerDetailView() {
                   ? 'Máy chủ không phản hồi'
                   : 'Chưa có GPU được xác minh'}
               </span>
-              <span className='max-w-md text-[11px]'>
+              <span className='max-w-md text-xs'>
                 {server.status === 'offline'
                   ? 'Kiểm tra kết nối backend tới máy chủ.'
                   : 'Số liệu GPU chưa được xác minh từ agent giám sát.'}
@@ -372,20 +361,20 @@ export function ServerDetailView() {
                       <div className='flex items-center gap-1.5'>
                         <span className='font-bold text-sm'>{gpu.displayLabel}</span>
                         {isRunning ? (
-                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 font-medium text-[10px] px-1.5 py-0'>
+                          <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 font-medium text-xs px-1.5 py-0'>
                             <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
                             ĐANG CHẠY
                           </Badge>
                         ) : (
                           <Badge
                             variant='outline'
-                            className='text-muted-foreground text-[10px] px-1.5 py-0'
+                            className='text-muted-foreground text-xs px-1.5 py-0'
                           >
                             RỖI
                           </Badge>
                         )}
                       </div>
-                      <Badge variant='outline' className='font-mono text-[10px]'>
+                      <Badge variant='outline' className='font-mono text-xs'>
                         {gpu.allocationMode}
                       </Badge>
                     </div>
@@ -396,7 +385,7 @@ export function ServerDetailView() {
                         <span className='font-mono font-bold text-foreground'>
                           {(gpu.vramUsedMb / 1024).toFixed(1)} /{' '}
                           {(gpu.vramTotalMb / 1024).toFixed(1)} GB{' '}
-                          <span className='font-normal text-[11px] text-muted-foreground'>
+                          <span className='font-normal text-xs text-muted-foreground'>
                             ({vramPercent}%)
                           </span>
                         </span>
@@ -414,7 +403,7 @@ export function ServerDetailView() {
                         />
                       </div>
                     </div>
-                    <div className='text-[11px] text-muted-foreground space-y-1'>
+                    <div className='text-xs text-muted-foreground space-y-1'>
                       <div className='flex items-center justify-between'>
                         <span>
                           Nhiệt độ: <strong className='text-foreground'>{gpu.tempCelsius}°C</strong>
@@ -429,14 +418,14 @@ export function ServerDetailView() {
                           </strong>
                         </span>
                       </div>
-                      <div className='truncate font-mono text-[10px]'>
+                      <div className='truncate font-mono text-xs'>
                         UUID: <span>{gpu.uuid.slice(0, 22)}...</span>
                       </div>
                     </div>
 
                     {/* Active processes on this GPU */}
                     <div className='mt-3 pt-2.5 border-t space-y-1.5'>
-                      <span className='text-[11px] font-semibold text-muted-foreground block'>
+                      <span className='text-xs font-semibold text-muted-foreground block'>
                         Tiến trình chiếm dụng ({gpu.activeProcesses.length}):
                       </span>
                       {gpu.activeProcesses.length > 0 ? (
@@ -444,22 +433,22 @@ export function ServerDetailView() {
                           {gpu.activeProcesses.map((proc) => (
                             <div
                               key={proc.pid}
-                              className='p-1.5 rounded bg-muted/40 border text-[11px] flex items-center justify-between gap-1'
+                              className='p-1.5 rounded bg-muted/40 border text-xs flex items-center justify-between gap-1'
                             >
                               <div className='truncate min-w-0 flex-1'>
                                 <span className='font-bold text-foreground font-mono'>
                                   @{proc.username}
                                 </span>
-                                <span className='text-muted-foreground text-[10px] ml-1 font-mono'>
+                                <span className='text-muted-foreground text-xs ml-1 font-mono'>
                                   (PID: {proc.pid})
                                 </span>
-                                <div className='font-mono text-[10px] text-muted-foreground truncate'>
+                                <div className='font-mono text-xs text-muted-foreground truncate'>
                                   {proc.name}
                                 </div>
                               </div>
                               <Badge
                                 variant='outline'
-                                className='font-mono text-[10px] shrink-0 font-bold text-indigo-600 dark:text-indigo-400'
+                                className='font-mono text-xs shrink-0 font-bold text-indigo-600 dark:text-indigo-400'
                               >
                                 {(proc.vramMb / 1024).toFixed(1)} GB
                               </Badge>
@@ -467,7 +456,7 @@ export function ServerDetailView() {
                           ))}
                         </div>
                       ) : (
-                        <div className='text-[10px] text-muted-foreground italic py-1'>
+                        <div className='text-xs text-muted-foreground italic py-1'>
                           Không có tiến trình chiếm dụng VRAM.
                         </div>
                       )}
@@ -570,15 +559,15 @@ export function ServerDetailView() {
                               {pool.label}
                             </span>
                             {pool.isDefault && (
-                              <Badge className='bg-primary/10 text-primary border-primary/20 text-[10px]'>
+                              <Badge className='bg-primary/10 text-primary border-primary/20 text-xs'>
                                 MẶC ĐỊNH LƯU TRỮ
                               </Badge>
                             )}
-                            <Badge variant='outline' className='text-[10px] font-mono'>
+                            <Badge variant='outline' className='text-xs font-mono'>
                               {pool.driver.toUpperCase()}
                             </Badge>
                           </div>
-                          <p className='text-muted-foreground text-[11px] font-mono'>
+                          <p className='text-muted-foreground text-xs font-mono'>
                             Gắn tại:{' '}
                             <span className='text-foreground font-semibold'>{pool.mountPoint}</span>{' '}
                             • Thiết bị: {pool.diskIdentifier}
@@ -602,7 +591,7 @@ export function ServerDetailView() {
                             {pool.usedGb.toLocaleString('vi-VN')} /{' '}
                             {pool.capacityGb.toLocaleString('vi-VN')} GB
                           </span>
-                          <div className='text-[10px] text-muted-foreground font-mono'>
+                          <div className='text-xs text-muted-foreground font-mono'>
                             {percent}% đã dùng • Trống {pool.freeGb.toLocaleString('vi-VN')} GB
                           </div>
                         </div>
@@ -634,7 +623,7 @@ export function ServerDetailView() {
                     <span className='text-muted-foreground ml-2 font-medium'>
                       ({m.fullName} - @{m.username})
                     </span>
-                    <div className='text-[11px] text-muted-foreground mt-0.5'>
+                    <div className='text-xs text-muted-foreground mt-0.5'>
                       Hạn ngạch: {m.cpuLimitCores} Cores CPU • {m.ramLimitGb}GB RAM •{' '}
                       {m.storageQuotaGb}GB ZFS
                     </div>
@@ -643,8 +632,8 @@ export function ServerDetailView() {
                     variant='outline'
                     className={
                       m.workspaceStatus === 'VERIFIED'
-                        ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
-                        : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px]'
+                        ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
+                        : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-xs'
                     }
                   >
                     {m.workspaceStatus || 'NOT_VERIFIED'}
@@ -682,14 +671,14 @@ export function ServerDetailView() {
                           <span className='font-mono font-bold text-foreground'>
                             ssh {m.username}@{server.vpnIp}
                           </span>
-                          <div className='text-[11px] text-muted-foreground mt-0.5'>
+                          <div className='text-xs text-muted-foreground mt-0.5'>
                             Người dùng: {m.fullName} • {m.sshSessionsCount} phiên hoạt động • Khóa:{' '}
                             {m.sshPublicKeyPreview.slice(0, 32)}...
                           </div>
                         </div>
                         <Badge
                           variant='outline'
-                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+                          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
                         >
                           ACTIVE
                         </Badge>
@@ -720,7 +709,7 @@ export function ServerDetailView() {
                   size='sm'
                   variant={jobResourceFilter === 'all' ? 'default' : 'outline'}
                   onClick={() => setJobResourceFilter('all')}
-                  className='h-6 text-[11px] px-2 rounded-full'
+                  className='h-6 text-xs px-2 rounded-full'
                 >
                   Tất cả ({serverJobs.length})
                 </Button>
@@ -728,7 +717,7 @@ export function ServerDetailView() {
                   size='sm'
                   variant={jobResourceFilter === 'gpu' ? 'default' : 'outline'}
                   onClick={() => setJobResourceFilter('gpu')}
-                  className={`h-6 text-[11px] px-2 rounded-full ${
+                  className={`h-6 text-xs px-2 rounded-full ${
                     jobResourceFilter === 'gpu'
                       ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
                       : 'text-indigo-600 border-indigo-500/30'
@@ -740,7 +729,7 @@ export function ServerDetailView() {
                   size='sm'
                   variant={jobResourceFilter === 'cpu' ? 'default' : 'outline'}
                   onClick={() => setJobResourceFilter('cpu')}
-                  className={`h-6 text-[11px] px-2 rounded-full ${
+                  className={`h-6 text-xs px-2 rounded-full ${
                     jobResourceFilter === 'cpu'
                       ? 'bg-blue-600 hover:bg-blue-700 text-white'
                       : 'text-blue-600 border-blue-500/30'
@@ -765,7 +754,7 @@ export function ServerDetailView() {
               </div>
 
               <div className='flex items-center gap-1.5'>
-                <span className='text-muted-foreground text-[11px] font-medium'>Người dùng:</span>
+                <span className='text-muted-foreground text-xs font-medium'>Người dùng:</span>
                 <select
                   value={jobUserFilter}
                   onChange={(e) => setJobUserFilter(e.target.value)}
@@ -781,7 +770,7 @@ export function ServerDetailView() {
               </div>
 
               <div className='flex items-center gap-1.5'>
-                <span className='text-muted-foreground text-[11px] font-medium'>Tài nguyên:</span>
+                <span className='text-muted-foreground text-xs font-medium'>Tài nguyên:</span>
                 <select
                   value={jobResourceFilter}
                   onChange={(e) => setJobResourceFilter(e.target.value as 'all' | 'gpu' | 'cpu')}
@@ -829,17 +818,17 @@ export function ServerDetailView() {
                         <span className='font-mono font-bold'>PID {j.pid}</span>
                         <Badge
                           variant={j.isGpu ? 'default' : 'outline'}
-                          className={`text-[10px] font-mono ${
+                          className={`text-xs font-mono ${
                             j.isGpu ? 'bg-indigo-600 hover:bg-indigo-700' : 'text-muted-foreground'
                           }`}
                         >
                           {j.gpuId || 'CPU Only'}
                         </Badge>
                         <span className='text-muted-foreground font-semibold'>@{j.username}</span>
-                        <span className='text-[11px] text-muted-foreground'>({j.fullName})</span>
+                        <span className='text-xs text-muted-foreground'>({j.fullName})</span>
                       </div>
                       <div
-                        className='font-mono text-muted-foreground text-[11px] mt-1 truncate max-w-xl'
+                        className='font-mono text-muted-foreground text-xs mt-1 truncate max-w-xl'
                         title={j.cmdline || j.script}
                       >
                         {j.script}
@@ -851,9 +840,7 @@ export function ServerDetailView() {
                           ? `${(j.vramUsedMb / 1024).toFixed(1)} GB VRAM`
                           : `${j.cpuPercent}% CPU`}
                       </span>
-                      <div className='text-[10px] text-muted-foreground font-mono'>
-                        {j.elapsedTime}
-                      </div>
+                      <div className='text-xs text-muted-foreground font-mono'>{j.elapsedTime}</div>
                     </div>
                   </div>
                 ))

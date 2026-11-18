@@ -40,26 +40,26 @@ export default function AppSidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const filteredGroups = useFilteredNavGroups();
-  const { user, role, actualRole, isPreviewMode, setPreviewRole } = useAuthSession();
+  const { user, role, actualRole, isPreviewMode, setPreviewRole, logout } = useAuthSession();
 
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='group-data-[collapsible=icon]:pt-4'>
         <OrgSwitcher />
         {isPreviewMode && (
-          <div className='mx-2 my-1.5 p-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-md text-[11px] text-amber-800 dark:text-amber-200 group-data-[collapsible=icon]:hidden'>
+          <div className='mx-2 my-1.5 p-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-md text-xs text-amber-800 dark:text-amber-200 group-data-[collapsible=icon]:hidden'>
             <div className='flex items-center justify-between font-semibold'>
               <span>Chế độ Xem thử</span>
               <Button
                 size='sm'
                 variant='ghost'
-                className='h-5 px-1.5 text-[10px] text-amber-900 dark:text-amber-100 hover:bg-amber-200/50'
+                className='h-6 px-1.5 text-xs text-amber-900 dark:text-amber-100 hover:bg-amber-200/50'
                 onClick={() => setPreviewRole(null)}
               >
                 Thoát
               </Button>
             </div>
-            <p className='mt-0.5 text-[10px] text-amber-700/80 dark:text-amber-300/70'>
+            <p className='mt-0.5 text-xs text-amber-700/80 dark:text-amber-300/70'>
               Đang mô phỏng giao diện Nghiên cứu viên.
             </p>
           </div>
@@ -101,15 +101,11 @@ export default function AppSidebar() {
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className='p-0 font-normal'>
                     <div className='px-1 py-1.5 flex flex-col gap-1.5'>
-                      <UserAvatarProfile
-                        className='h-8 w-8 rounded-lg'
-                        showInfo
-                        user={user}
-                      />
+                      <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />
                       <div className='flex items-center gap-1.5 px-1'>
                         <Badge
                           variant='outline'
-                          className={`text-[10px] font-medium ${
+                          className={`text-xs font-medium ${
                             role === 'ADMIN'
                               ? 'bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30'
                               : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30'
@@ -118,7 +114,10 @@ export default function AppSidebar() {
                           {role === 'ADMIN' ? 'Quản trị viên' : 'Nghiên cứu viên'}
                         </Badge>
                         {isPreviewMode && (
-                          <Badge variant='outline' className='text-[10px] bg-amber-500/10 text-amber-700 border-amber-500/30'>
+                          <Badge
+                            variant='outline'
+                            className='text-xs bg-amber-500/10 text-amber-700 border-amber-500/30'
+                          >
                             Xem thử
                           </Badge>
                         )}
@@ -143,7 +142,9 @@ export default function AppSidebar() {
                         }}
                       >
                         <Icons.user className='mr-2 h-4 w-4' />
-                        {isPreviewMode ? 'Quay lại chế độ Quản trị' : 'Xem thử giao diện Nghiên cứu viên'}
+                        {isPreviewMode
+                          ? 'Quay lại chế độ Quản trị'
+                          : 'Xem thử giao diện Nghiên cứu viên'}
                       </DropdownMenuItem>
                     </DropdownMenuGroup>
                     <DropdownMenuSeparator />
@@ -168,16 +169,27 @@ export default function AppSidebar() {
                     </>
                   ) : (
                     <>
-                      <DropdownMenuItem onClick={() => router.push('/dashboard/researcher/connect')}>
+                      <DropdownMenuItem
+                        onClick={() => router.push('/dashboard/researcher/connect')}
+                      >
                         <Icons.key className='mr-2 h-4 w-4' />
                         Khóa SSH & Kết nối
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => router.push('/dashboard/researcher/workspace')}>
+                      <DropdownMenuItem
+                        onClick={() => router.push('/dashboard/researcher/workspace')}
+                      >
                         <Icons.database className='mr-2 h-4 w-4' />
                         Workspace của tôi
                       </DropdownMenuItem>
                     </>
                   )}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={() => void logout()}>
+                    <Icons.logout className='mr-2 h-4 w-4 text-destructive' />
+                    Đăng xuất
+                  </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>

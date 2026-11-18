@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { QuickActionsBar } from './quick-actions-bar';
 import { KpiSummary } from './kpi-summary';
 import { ServerMonitoringPanel } from './server-monitoring-panel';
@@ -12,21 +12,10 @@ import { SecuritySummaryPanel } from './security-summary-panel';
 import { MemberRepoHistoryPanel } from './member-repo-history-panel';
 import { GpuAllocationDialog } from './gpu-allocation-dialog';
 import { GpuAccountAllocationMatrix } from '@/features/resources/components/gpu-account-allocation-matrix';
-import { useLabOpsStore } from '@/features/labops/store';
 
 export function OverviewContent() {
   const [allocateOpen, setAllocateOpen] = useState(false);
   const [selectedGpuId, setSelectedGpuId] = useState<string | undefined>(undefined);
-  const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
-
-  // Poll live telemetry every 4 seconds for immediate GPU VRAM and process sync
-  useEffect(() => {
-    fetchLiveState();
-    const timer = setInterval(() => {
-      fetchLiveState();
-    }, 4000);
-    return () => clearInterval(timer);
-  }, [fetchLiveState]);
 
   const handleOpenAllocate = (gpuId?: string) => {
     setSelectedGpuId(gpuId);

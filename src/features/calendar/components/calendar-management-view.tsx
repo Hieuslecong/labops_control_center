@@ -25,7 +25,7 @@ function getEventBadge(type: EventType) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px]'
+          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs'
         >
           SEMINAR
         </Badge>
@@ -34,7 +34,7 @@ function getEventBadge(type: EventType) {
       return (
         <Badge
           variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px]'
+          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs'
         >
           BẢO TRÌ
         </Badge>
@@ -43,7 +43,7 @@ function getEventBadge(type: EventType) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
         >
           HỌP LAB
         </Badge>
@@ -52,7 +52,7 @@ function getEventBadge(type: EventType) {
       return (
         <Badge
           variant='outline'
-          className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-[10px]'
+          className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-xs'
         >
           WORKSHOP
         </Badge>
@@ -62,7 +62,7 @@ function getEventBadge(type: EventType) {
       return (
         <Badge
           variant='outline'
-          className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px]'
+          className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs'
         >
           BÁO CÁO
         </Badge>
@@ -122,38 +122,36 @@ export function CalendarManagementView() {
       {/* KPI Stats */}
       <div className='grid grid-cols-2 sm:grid-cols-4 gap-3'>
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Tổng số sự kiện</span>
+          <span className='text-xs text-muted-foreground font-medium'>Tổng số sự kiện</span>
           <div className='text-xl font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
             <Icons.calendar className='size-5 text-primary' />
             {events.length} sự kiện
           </div>
-          <span className='text-[10px] text-muted-foreground'>Lên lịch trong tháng 11</span>
+          <span className='text-xs text-muted-foreground'>Lên lịch trong tháng 11</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Bảo trì hệ thống</span>
+          <span className='text-xs text-muted-foreground font-medium'>Bảo trì hệ thống</span>
           <div className='text-xl font-bold mt-0.5 text-amber-600 dark:text-amber-400'>
             {events.filter((e) => e.type === 'MAINTENANCE').length} đợt
           </div>
-          <span className='text-[10px] text-muted-foreground'>Server Track & Workstation</span>
+          <span className='text-xs text-muted-foreground'>Server Track & Workstation</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>
-            Seminars & Workshops
-          </span>
+          <span className='text-xs text-muted-foreground font-medium'>Seminars & Workshops</span>
           <div className='text-xl font-bold mt-0.5 text-blue-600 dark:text-blue-400'>
             {events.filter((e) => e.type === 'SEMINAR' || e.type === 'WORKSHOP').length} buổi
           </div>
-          <span className='text-[10px] text-muted-foreground'>Hội thảo chia sẻ kỹ thuật</span>
+          <span className='text-xs text-muted-foreground'>Hội thảo chia sẻ kỹ thuật</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
-          <span className='text-[11px] text-muted-foreground font-medium'>Họp Lab định kỳ</span>
+          <span className='text-xs text-muted-foreground font-medium'>Họp Lab định kỳ</span>
           <div className='text-xl font-bold mt-0.5 text-emerald-600 dark:text-emerald-400'>
             {events.filter((e) => e.type === 'LAB_MEETING').length} phiên
           </div>
-          <span className='text-[10px] text-muted-foreground'>Đánh giá tiến độ nghiên cứu</span>
+          <span className='text-xs text-muted-foreground'>Đánh giá tiến độ nghiên cứu</span>
         </Card>
       </div>
 
@@ -221,15 +219,12 @@ export function CalendarManagementView() {
                   <div className='flex items-center gap-2 flex-wrap'>
                     {getEventBadge(evt.type)}
                     {evt.relatedServer && (
-                      <Badge variant='secondary' className='text-[10px] font-mono uppercase'>
+                      <Badge variant='secondary' className='text-xs font-mono uppercase'>
                         Máy chủ: {evt.relatedServer}
                       </Badge>
                     )}
                     {evt.status === 'CANCELLED' && (
-                      <Badge
-                        variant='outline'
-                        className='text-rose-600 border-rose-500/30 text-[10px]'
-                      >
+                      <Badge variant='outline' className='text-rose-600 border-rose-500/30 text-xs'>
                         ĐÃ HỦY
                       </Badge>
                     )}
@@ -241,7 +236,7 @@ export function CalendarManagementView() {
 
                 <div className='text-right shrink-0 p-2 rounded-lg bg-muted/40 border border-muted/60'>
                   <span className='block text-xs font-bold font-mono text-primary'>{evt.date}</span>
-                  <span className='block text-[10px] text-muted-foreground'>
+                  <span className='block text-xs text-muted-foreground'>
                     {evt.startTime} - {evt.endTime}
                   </span>
                 </div>
@@ -253,7 +248,7 @@ export function CalendarManagementView() {
                 {evt.description}
               </CardDescription>
 
-              <div className='pt-2 border-t flex items-center justify-between text-[11px] text-muted-foreground'>
+              <div className='pt-2 border-t flex items-center justify-between text-xs text-muted-foreground'>
                 <span>
                   Địa điểm: <strong className='text-foreground'>{evt.location}</strong> • Chủ trì:{' '}
                   <strong className='text-foreground'>{evt.organizer}</strong>
@@ -267,7 +262,7 @@ export function CalendarManagementView() {
                       updateEventStatus(evt.id, 'CANCELLED');
                       toast.warning(`Đã hủy sự kiện: ${evt.title}`);
                     }}
-                    className='h-6 text-[10px] text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
+                    className='h-6 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
                   >
                     Hủy lịch
                   </Button>

@@ -18,6 +18,7 @@ import {
   useSidebar
 } from '@/components/ui/sidebar';
 import { Badge } from '@/components/ui/badge';
+import { useLabOpsStore } from '@/features/labops/store';
 
 interface ClusterScope {
   id: string;
@@ -29,20 +30,20 @@ interface ClusterScope {
 const CLUSTERS: ClusterScope[] = [
   {
     id: 'all',
-    name: 'Toàn bộ Lab (Tất cả cụm)',
-    location: 'Hà Nội & TP.HCM',
+    name: 'Toàn bộ Lab (2 máy chủ vật lý)',
+    location: '192.168.167.250 & .251',
     gpus: '4x NVIDIA A30 (96 GB)'
   },
   {
     id: 'track',
-    name: 'Cụm TRACK (Server 01)',
-    location: 'Phòng Lab Hà Nội',
+    name: 'Server 01 — Rack (aiotlab-rack)',
+    location: '192.168.167.250 • SSH 1911',
     gpus: '3x NVIDIA A30 (72 GB)'
   },
   {
     id: 'workstation',
-    name: 'Cụm WORKSTATION (Server 02)',
-    location: 'Phòng Lab TP.HCM',
+    name: 'Server 02 — Workstation (aiot-ws1)',
+    location: '192.168.167.251 • SSH 1912',
     gpus: '1x NVIDIA A30 (24 GB)'
   }
 ];
@@ -51,6 +52,42 @@ export function OrgSwitcher() {
   const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
   const { state } = useSidebar();
   const [selectedCluster, setSelectedCluster] = useState<ClusterScope>(CLUSTERS[0]);
+  const servers = useLabOpsStore((s) => s.servers);
+  const syncError = useLabOpsStore((s) => s.syncError);
+
+  const onlineCount = servers.filter((s) => s.status === 'online').length;
+  const matchedServer =
+    selectedCluster.id === 'all' ? null : servers.find((s) => s.id === selectedCluster.id);
+
+  let statusLabel = 'ĐANG ĐỒNG BỘ';
+  let statusBadgeClass =
+    'text-xs px-1.5 py-0 h-5 border-border text-muted-foreground bg-muted/40 font-mono';
+
+  if (isDemoMode) {
+    statusLabel = 'DEMO';
+    statusBadgeClass =
+      'text-xs px-1.5 py-0 h-5 border-amber-500/40 text-amber-500 bg-amber-500/10 font-mono';
+  } else if (syncError) {
+    statusLabel = 'MẤT ĐỒNG BỘ';
+    statusBadgeClass =
+      'text-xs px-1.5 py-0 h-5 border-amber-500/40 text-amber-500 bg-amber-500/10 font-mono';
+  } else if (servers.length > 0) {
+    if (selectedCluster.id === 'all') {
+      statusLabel = `${onlineCount}/${servers.length} ONLINE`;
+      statusBadgeClass =
+        onlineCount > 0
+          ? 'text-xs px-1.5 py-0 h-5 border-emerald-500/40 text-emerald-500 bg-emerald-500/10 font-mono'
+          : 'text-xs px-1.5 py-0 h-5 border-rose-500/40 text-rose-500 bg-rose-500/10 font-mono';
+    } else if (matchedServer?.status === 'online') {
+      statusLabel = 'ONLINE';
+      statusBadgeClass =
+        'text-xs px-1.5 py-0 h-5 border-emerald-500/40 text-emerald-500 bg-emerald-500/10 font-mono';
+    } else {
+      statusLabel = 'OFFLINE';
+      statusBadgeClass =
+        'text-xs px-1.5 py-0 h-5 border-rose-500/40 text-rose-500 bg-rose-500/10 font-mono';
+    }
+  }
 
   return (
     <SidebarMenu>
@@ -76,21 +113,9 @@ export function OrgSwitcher() {
             >
               <div className='flex items-center gap-1.5'>
                 <span className='truncate font-bold tracking-tight'>LabOps Control</span>
-                {isDemoMode ? (
-                  <Badge
-                    variant='outline'
-                    className='text-[10px] px-1 py-0 h-4 border-amber-500/40 text-amber-400 bg-amber-500/10 font-mono'
-                  >
-                    DEMO
-                  </Badge>
-                ) : (
-                  <Badge
-                    variant='outline'
-                    className='text-[10px] px-1 py-0 h-4 border-emerald-500/40 text-emerald-400 bg-emerald-500/10 font-mono'
-                  >
-                    LIVE
-                  </Badge>
-                )}
+                <Badge variant='outline' className={statusBadgeClass}>
+                  {statusLabel}
+                </Badge>
               </div>
               <span className='text-sidebar-foreground/70 truncate text-xs font-normal'>
                 {selectedCluster.name}
@@ -140,10 +165,10 @@ export function OrgSwitcher() {
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <div className='px-2.5 py-1.5 text-[11px] text-muted-foreground leading-normal'>
+              <div className='px-2.5 py-1.5 text-xs text-muted-foreground leading-normal'>
                 <span className='font-semibold text-foreground'>Hệ thống 2 máy chủ vật lý:</span>
-                <br />• Track (3x A30 24GB)
-                <br />• Workstation (1x A30 24GB)
+                <br />• Rack aiotlab-rack (3x A30 24GB)
+                <br />• Workstation aiot-ws1 (1x A30 24GB)
               </div>
             </DropdownMenuGroup>
           </DropdownMenuContent>

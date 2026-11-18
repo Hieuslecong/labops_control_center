@@ -7,6 +7,7 @@ import { Breadcrumbs } from '../breadcrumbs';
 import SearchInput from '../search-input';
 import { ThemeModeToggle } from '../themes/theme-mode-toggle';
 import { NotificationCenter } from '@/features/notifications/components/notification-center';
+import { UserNav } from './user-nav';
 import { Badge } from '@/components/ui/badge';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
@@ -98,7 +99,7 @@ export default function Header() {
                 }`}
               ></span>
             </span>
-            <span className='flex items-center gap-1.5 font-mono text-[11px]'>
+            <span className='flex items-center gap-1.5 font-mono text-xs'>
               <Icons.server className='size-3.5' />
               {hostStatusText}
             </span>
@@ -107,7 +108,7 @@ export default function Header() {
                 <span className='text-muted-foreground/60'>•</span>
                 {isGpuRunning ? (
                   <span
-                    className='font-mono text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5'
+                    className='font-mono text-xs text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5'
                     title={`GPU đang chạy tác vụ (${usedVramGb} / ${totalVramGb} GB VRAM)`}
                   >
                     <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse' />
@@ -117,7 +118,7 @@ export default function Header() {
                     </span>
                   </span>
                 ) : (
-                  <span className='font-mono text-[11px] text-muted-foreground'>
+                  <span className='font-mono text-xs text-muted-foreground'>
                     {verifiedGpus.length}x A30 ({totalVramGb} GB)
                   </span>
                 )}
@@ -129,14 +130,14 @@ export default function Header() {
         {isDemoMode ? (
           <Badge
             variant='outline'
-            className='hidden sm:inline-flex bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[11px] font-medium'
+            className='hidden sm:inline-flex bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-medium'
           >
             Chế độ Demo
           </Badge>
         ) : (
           <Badge
             variant='outline'
-            className='hidden sm:inline-flex bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700 text-[11px] font-medium'
+            className='hidden sm:inline-flex bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700 text-xs font-medium'
           >
             {role === 'ADMIN' ? 'Quản trị' : 'Nghiên cứu'}
           </Badge>
@@ -147,6 +148,7 @@ export default function Header() {
         </div>
         <ThemeModeToggle />
         <NotificationCenter />
+        <UserNav />
       </div>
     </header>
   );

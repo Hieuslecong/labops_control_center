@@ -24,12 +24,7 @@ interface StopProcessDialogProps {
   onSuccess?: () => void;
 }
 
-export function StopProcessDialog({
-  job,
-  open,
-  onOpenChange,
-  onSuccess
-}: StopProcessDialogProps) {
+export function StopProcessDialog({ job, open, onOpenChange, onSuccess }: StopProcessDialogProps) {
   const stopProcess = useLabOpsStore((state) => state.stopProcess);
   const [reason, setReason] = useState('Giải phóng tài nguyên hệ thống');
   const [terminateTree, setTerminateTree] = useState(true);
@@ -37,7 +32,8 @@ export function StopProcessDialog({
 
   if (!job) return null;
 
-  const processRef = job.ref || `track:${job.workspace || 'host'}:${job.pid}:0`;
+  const processRef =
+    job.ref || `${job.serverId || 'workstation'}:${job.workspace || 'host'}:${job.pid}:0`;
 
   const handleConfirm = async () => {
     setIsSubmitting(true);
@@ -66,9 +62,12 @@ export function StopProcessDialog({
               <Icons.warning className='size-5' />
             </div>
             <div>
-              <DialogTitle className='text-base font-bold'>Dừng An toàn Tiến trình (SIGTERM)</DialogTitle>
+              <DialogTitle className='text-base font-bold'>
+                Dừng An toàn Tiến trình (SIGTERM)
+              </DialogTitle>
               <DialogDescription className='text-xs text-muted-foreground'>
-                Gửi tín hiệu dừng an toàn tới tiến trình của thành viên với thời gian ân hạn 10 giây.
+                Gửi tín hiệu dừng an toàn tới tiến trình của thành viên với thời gian ân hạn 10
+                giây.
               </DialogDescription>
             </div>
           </div>
@@ -83,11 +82,15 @@ export function StopProcessDialog({
             </div>
             <div className='flex items-center justify-between'>
               <span className='font-semibold text-muted-foreground'>Host PID:</span>
-              <Badge variant='outline' className='font-mono text-xs'>{job.pid}</Badge>
+              <Badge variant='outline' className='font-mono text-xs'>
+                {job.pid}
+              </Badge>
             </div>
             <div className='flex items-center justify-between'>
               <span className='font-semibold text-muted-foreground'>Thành viên:</span>
-              <span className='font-bold text-foreground'>@{job.username} ({job.fullName})</span>
+              <span className='font-bold text-foreground'>
+                @{job.username} ({job.fullName})
+              </span>
             </div>
             <div className='flex items-center justify-between'>
               <span className='font-semibold text-muted-foreground'>Workspace:</span>
@@ -96,7 +99,9 @@ export function StopProcessDialog({
             {job.vramUsedMb > 0 && (
               <div className='flex items-center justify-between text-indigo-600 font-semibold'>
                 <span>VRAM đang chiếm:</span>
-                <span>{(job.vramUsedMb / 1024).toFixed(1)} GB ({job.gpuId || 'GPU 0'})</span>
+                <span>
+                  {(job.vramUsedMb / 1024).toFixed(1)} GB ({job.gpuId || 'GPU 0'})
+                </span>
               </div>
             )}
           </div>
@@ -113,7 +118,7 @@ export function StopProcessDialog({
               placeholder='Nhập lý do gửi tín hiệu dừng...'
               className='h-8 text-xs bg-white dark:bg-zinc-900'
             />
-            <p className='text-[10px] text-muted-foreground'>
+            <p className='text-xs text-muted-foreground'>
               Lý do này sẽ được ghi vào nhật ký kiểm toán (Audit Trail) phục vụ đối soát.
             </p>
           </div>

@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
+import { useLabOpsTelemetrySyncQuery } from '@/features/labops/queries';
 import { ProcessDetailSheet } from './process-detail-sheet';
 import { ComputeJob } from '@/types/labops';
 import Link from 'next/link';
@@ -17,7 +18,7 @@ function getJobStatusBadge(status: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-medium text-[11px]'
+          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-medium text-xs'
         >
           <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse mr-1' />
           RUNNING
@@ -27,7 +28,7 @@ function getJobStatusBadge(status: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 font-medium text-[11px]'
+          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 font-medium text-xs'
         >
           PENDING
         </Badge>
@@ -36,7 +37,7 @@ function getJobStatusBadge(status: string) {
       return (
         <Badge
           variant='outline'
-          className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 font-medium text-[11px]'
+          className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 font-medium text-xs'
         >
           FAILED
         </Badge>
@@ -44,7 +45,7 @@ function getJobStatusBadge(status: string) {
     case 'COMPLETED':
     default:
       return (
-        <Badge variant='secondary' className='text-muted-foreground font-medium text-[11px]'>
+        <Badge variant='secondary' className='text-muted-foreground font-medium text-xs'>
           COMPLETED
         </Badge>
       );
@@ -61,7 +62,7 @@ export function RunningJobsTable() {
   const [selectedJob, setSelectedJob] = useState<ComputeJob | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
-  // Auto-refresh state (every 4 seconds)
+  // Auto-refresh state (visibility-aware 10s sync via shared TanStack Query)
   const [isAutoRefresh, setIsAutoRefresh] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -71,17 +72,11 @@ export function RunningJobsTable() {
   const [userFilter, setUserFilter] = useState<string>('all');
   const [gpuFilter, setGpuFilter] = useState<string>('all');
 
-  // Initial and periodic fetch
-  useEffect(() => {
-    fetchLiveJobs();
-    if (!isAutoRefresh) return;
-
-    const timer = setInterval(() => {
-      fetchLiveJobs();
-    }, 4000);
-
-    return () => clearInterval(timer);
-  }, [fetchLiveJobs, isAutoRefresh]);
+  useLabOpsTelemetrySyncQuery({
+    enabled: isAutoRefresh,
+    isAdmin: true,
+    intervalMs: 10_000
+  });
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -155,7 +150,7 @@ export function RunningJobsTable() {
                       jobs.length > 0
                         ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
                         : 'bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-500/30'
-                    } text-[10px] font-mono`}
+                    } text-xs font-mono`}
                   >
                     <span
                       className={`size-1.5 rounded-full ${
@@ -167,14 +162,14 @@ export function RunningJobsTable() {
                 </div>
                 <p className='text-xs text-muted-foreground mt-0.5'>
                   Dữ liệu thời gian thực từ Linux host (/proc, psutil) và NVIDIA NVML. Tự động đồng
-                  bộ mỗi 4 giây.
+                  bộ mỗi 10 giây (tự tạm dừng khi ẩn tab).
                 </p>
               </div>
             </div>
 
             <div className='flex items-center gap-2 text-xs'>
               {/* Sync status */}
-              <div className='text-[11px] text-muted-foreground flex items-center gap-1 font-mono'>
+              <div className='text-xs text-muted-foreground flex items-center gap-1 font-mono'>
                 <span
                   className={`size-1.5 rounded-full ${syncError ? 'bg-amber-500' : 'bg-emerald-500'}`}
                 />
@@ -240,7 +235,7 @@ export function RunningJobsTable() {
               size='sm'
               variant={gpuFilter === 'all' ? 'default' : 'outline'}
               onClick={() => setGpuFilter('all')}
-              className='h-6 text-[11px] px-2.5 rounded-full'
+              className='h-6 text-xs px-2.5 rounded-full'
             >
               Tất cả ({jobs.length})
             </Button>
@@ -248,7 +243,7 @@ export function RunningJobsTable() {
               size='sm'
               variant={gpuFilter === 'gpu_only' ? 'default' : 'outline'}
               onClick={() => setGpuFilter('gpu_only')}
-              className={`h-6 text-[11px] px-2.5 rounded-full ${
+              className={`h-6 text-xs px-2.5 rounded-full ${
                 gpuFilter === 'gpu_only'
                   ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
                   : 'text-indigo-600 dark:text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/10'
@@ -260,7 +255,7 @@ export function RunningJobsTable() {
               size='sm'
               variant={gpuFilter === 'cpu_only' ? 'default' : 'outline'}
               onClick={() => setGpuFilter('cpu_only')}
-              className={`h-6 text-[11px] px-2.5 rounded-full ${
+              className={`h-6 text-xs px-2.5 rounded-full ${
                 gpuFilter === 'cpu_only'
                   ? 'bg-blue-600 hover:bg-blue-700 text-white'
                   : 'text-blue-600 dark:text-blue-400 border-blue-500/30 hover:bg-blue-500/10'
@@ -285,7 +280,7 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-[11px] font-medium'>Máy chủ:</span>
+              <span className='text-muted-foreground text-xs font-medium'>Máy chủ:</span>
               <select
                 value={serverFilter}
                 onChange={(e) => setServerFilter(e.target.value)}
@@ -298,7 +293,7 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-[11px] font-medium'>Người dùng:</span>
+              <span className='text-muted-foreground text-xs font-medium'>Người dùng:</span>
               <select
                 value={userFilter}
                 onChange={(e) => setUserFilter(e.target.value)}
@@ -314,7 +309,7 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-[11px] font-medium'>Tài nguyên:</span>
+              <span className='text-muted-foreground text-xs font-medium'>Tài nguyên:</span>
               <select
                 value={gpuFilter}
                 onChange={(e) => setGpuFilter(e.target.value)}
@@ -345,7 +340,7 @@ export function RunningJobsTable() {
               </Button>
             )}
 
-            <span className='ml-auto text-[11px] text-muted-foreground hidden lg:inline'>
+            <span className='ml-auto text-xs text-muted-foreground hidden lg:inline'>
               Hiển thị {filteredJobs.length} / {jobs.length} tiến trình
             </span>
           </div>
@@ -398,7 +393,7 @@ export function RunningJobsTable() {
                         <td className='py-2.5 px-3 whitespace-nowrap'>
                           <Badge
                             variant='outline'
-                            className={`font-mono text-[10px] uppercase ${
+                            className={`font-mono text-xs uppercase ${
                               job.serverId === 'track'
                                 ? 'border-blue-500/40 text-blue-500'
                                 : 'border-purple-500/40 text-purple-500'
@@ -411,13 +406,13 @@ export function RunningJobsTable() {
                         {/* Thành viên */}
                         <td className='py-2.5 px-3'>
                           <div className='font-semibold text-foreground'>{job.fullName}</div>
-                          <div className='text-[11px] text-muted-foreground font-mono'>
+                          <div className='text-xs text-muted-foreground font-mono'>
                             @{job.username}
                           </div>
                         </td>
 
                         {/* Workspace */}
-                        <td className='py-2.5 px-3 font-mono text-[11px] text-muted-foreground'>
+                        <td className='py-2.5 px-3 font-mono text-xs text-muted-foreground'>
                           {job.workspace}
                         </td>
 
@@ -431,13 +426,13 @@ export function RunningJobsTable() {
                         {/* Chương trình / Script */}
                         <td className='py-2.5 px-3 max-w-xs'>
                           <div
-                            className='font-mono text-[11px] text-foreground font-medium truncate max-w-[240px]'
+                            className='font-mono text-xs text-foreground font-medium truncate max-w-[240px]'
                             title={job.cmdline || job.script}
                           >
                             {job.script}
                           </div>
                           {job.cmdline && (
-                            <div className='text-[10px] text-muted-foreground truncate max-w-[240px] font-mono'>
+                            <div className='text-xs text-muted-foreground truncate max-w-[240px] font-mono'>
                               {job.cmdline.slice(0, 50)}...
                             </div>
                           )}
@@ -449,29 +444,29 @@ export function RunningJobsTable() {
                             <div className='flex flex-col gap-0.5 items-start'>
                               <Badge
                                 variant='default'
-                                className='font-mono text-[10px] bg-indigo-600 hover:bg-indigo-600 text-white gap-1'
+                                className='font-mono text-xs bg-indigo-600 hover:bg-indigo-600 text-white gap-1'
                               >
                                 <span className='size-1 rounded-full bg-white animate-pulse' />
                                 {job.gpuId || 'WS-GPU-01'}
                               </Badge>
-                              <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono font-bold'>
+                              <span className='text-xs text-indigo-600 dark:text-indigo-400 font-mono font-bold'>
                                 {((job.vramUsedMb || 0) / 1024).toFixed(1)} GB
                               </span>
                             </div>
                           ) : (
-                            <span className='text-muted-foreground font-mono text-[11px]'>-</span>
+                            <span className='text-muted-foreground font-mono text-xs'>-</span>
                           )}
                         </td>
 
                         {/* CPU */}
-                        <td className='py-2.5 px-3 font-mono text-[11px] whitespace-nowrap'>
+                        <td className='py-2.5 px-3 font-mono text-xs whitespace-nowrap'>
                           <span className={job.cpuPercent > 50 ? 'text-amber-500 font-bold' : ''}>
                             {job.cpuPercent > 0 ? `${job.cpuPercent}%` : '0%'}
                           </span>
                         </td>
 
                         {/* RAM */}
-                        <td className='py-2.5 px-3 font-mono text-[11px] whitespace-nowrap'>
+                        <td className='py-2.5 px-3 font-mono text-xs whitespace-nowrap'>
                           {job.ramUsedMb > 0 ? (
                             <span>{(job.ramUsedMb / 1024).toFixed(1)} GB</span>
                           ) : (
@@ -480,7 +475,7 @@ export function RunningJobsTable() {
                         </td>
 
                         {/* VRAM */}
-                        <td className='py-2.5 px-3 font-mono text-[11px] whitespace-nowrap'>
+                        <td className='py-2.5 px-3 font-mono text-xs whitespace-nowrap'>
                           {job.vramUsedMb > 0 ? (
                             <span className='font-bold text-indigo-600 dark:text-indigo-400'>
                               {(job.vramUsedMb / 1024).toFixed(1)} GB
@@ -492,17 +487,17 @@ export function RunningJobsTable() {
 
                         {/* Thời gian chạy */}
                         <td className='py-2.5 px-3 whitespace-nowrap'>
-                          <div className='font-medium text-foreground font-mono text-[11px]'>
+                          <div className='font-medium text-foreground font-mono text-xs'>
                             {job.elapsedTime}
                           </div>
-                          <div className='text-[10px] text-muted-foreground'>{job.startTime}</div>
+                          <div className='text-xs text-muted-foreground'>{job.startTime}</div>
                         </td>
 
                         {/* Trạng thái */}
                         <td className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex flex-col gap-1 items-start'>
                             {getJobStatusBadge(job.status)}
-                            <span className='text-[10px] text-muted-foreground flex items-center gap-1'>
+                            <span className='text-xs text-muted-foreground flex items-center gap-1'>
                               <span
                                 className={`size-1.5 rounded-full ${
                                   job.sshStatus.includes('Online')

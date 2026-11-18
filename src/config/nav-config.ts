@@ -2,44 +2,19 @@ import { NavGroup } from '@/types';
 
 /**
  * LabOps Control Center - Cấu hình Điều hướng Phân quyền (RBAC Navigation Config)
- * - Quản trị viên (ADMIN): 7 nhóm tính năng cốt lõi tinh giản.
- * - Nghiên cứu viên (RESEARCHER): 4 nhóm tính năng cá nhân cô lập.
- * - Loại bỏ hoàn toàn đánh số thứ tự cố định ('1.', '2.', '11.') trong title.
+ * - Quản trị viên (ADMIN): 5 nhóm vận hành cốt lõi tinh giản.
+ * - Nghiên cứu viên (RESEARCHER): Không gian cá nhân cô lập.
  */
 
 export const adminNavGroups: NavGroup[] = [
   {
-    label: 'Điều hành & Hạ tầng',
+    label: 'Tổng quan & Điều hành',
     items: [
       {
         title: 'Tổng quan',
         url: '/dashboard/overview',
         icon: 'dashboard',
         shortcut: ['t', 'q'],
-        roles: ['ADMIN'],
-        items: []
-      },
-      {
-        title: 'Hạ tầng & GPU',
-        url: '/dashboard/servers',
-        icon: 'server',
-        shortcut: ['h', 't'],
-        roles: ['ADMIN'],
-        items: []
-      },
-      {
-        title: 'Thành viên & Truy cập',
-        url: '/dashboard/users',
-        icon: 'teams',
-        shortcut: ['t', 'v'],
-        roles: ['ADMIN'],
-        items: []
-      },
-      {
-        title: 'Workspace & Lưu trữ',
-        url: '/dashboard/resources',
-        icon: 'database',
-        shortcut: ['w', 's'],
         roles: ['ADMIN'],
         items: []
       },
@@ -54,16 +29,58 @@ export const adminNavGroups: NavGroup[] = [
     ]
   },
   {
-    label: 'Bảo mật & Quản trị',
+    label: 'Hạ tầng & Tài nguyên',
     items: [
       {
-        title: 'Giám sát & Bảo mật',
+        title: 'Máy chủ & GPU',
+        url: '/dashboard/servers',
+        icon: 'server',
+        shortcut: ['h', 't'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
+        title: 'Workspace & Lưu trữ',
+        url: '/dashboard/resources',
+        icon: 'database',
+        shortcut: ['w', 's'],
+        roles: ['ADMIN'],
+        items: []
+      }
+    ]
+  },
+  {
+    label: 'Thành viên & Bảo mật',
+    items: [
+      {
+        title: 'Thành viên & Truy cập',
+        url: '/dashboard/users',
+        icon: 'teams',
+        shortcut: ['t', 'v'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
+        title: 'Kiểm duyệt Kho mã',
+        url: '/dashboard/security',
+        icon: 'shield',
+        shortcut: ['k', 'd'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
+        title: 'Giám sát An ninh',
         url: '/dashboard/monitoring',
         icon: 'gauge',
         shortcut: ['g', 's'],
         roles: ['ADMIN'],
         items: []
-      },
+      }
+    ]
+  },
+  {
+    label: 'Trợ lý AI & Báo cáo',
+    items: [
       {
         title: 'Trợ lý AI & Zalo',
         url: '/dashboard/ai-assistant',
@@ -73,37 +90,41 @@ export const adminNavGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Quản trị hệ thống',
-        url: '/dashboard/audit-logs',
-        icon: 'settings',
-        shortcut: ['q', 't'],
+        title: 'Báo cáo Sử dụng',
+        url: '/dashboard/usage',
+        icon: 'activity',
+        shortcut: ['b', 'c'],
         roles: ['ADMIN'],
-        items: [
-          {
-            title: 'Nhật ký kiểm toán',
-            url: '/dashboard/audit-logs',
-            icon: 'audit',
-            roles: ['ADMIN']
-          },
-          {
-            title: 'Lịch Lab & Bảo trì',
-            url: '/dashboard/calendar',
-            icon: 'calendar',
-            roles: ['ADMIN']
-          },
-          {
-            title: 'Báo cáo sử dụng',
-            url: '/dashboard/usage',
-            icon: 'activity',
-            roles: ['ADMIN']
-          },
-          {
-            title: 'Cài đặt hệ thống',
-            url: '/dashboard/settings',
-            icon: 'settings',
-            roles: ['ADMIN']
-          }
-        ]
+        items: []
+      }
+    ]
+  },
+  {
+    label: 'Quản trị Hệ thống',
+    items: [
+      {
+        title: 'Nhật ký Kiểm toán',
+        url: '/dashboard/audit-logs',
+        icon: 'audit',
+        shortcut: ['n', 'k'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
+        title: 'Lịch Lab & Bảo trì',
+        url: '/dashboard/calendar',
+        icon: 'calendar',
+        shortcut: ['l', 'l'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
+        title: 'Cài đặt Hệ thống',
+        url: '/dashboard/settings',
+        icon: 'settings',
+        shortcut: ['c', 'd'],
+        roles: ['ADMIN'],
+        items: []
       }
     ]
   }
@@ -149,7 +170,4 @@ export const researcherNavGroups: NavGroup[] = [
   }
 ];
 
-export const navGroups: NavGroup[] = [
-  ...adminNavGroups,
-  ...researcherNavGroups
-];
+export const navGroups: NavGroup[] = [...adminNavGroups, ...researcherNavGroups];

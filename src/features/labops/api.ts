@@ -10,14 +10,20 @@ export interface LabOpsCallResult<T = unknown> {
 
 export async function labopsCall<T = unknown>(
   path: string,
-  init: { method?: string; body?: unknown; idempotent?: boolean } = {}
+  init: {
+    method?: string;
+    body?: unknown;
+    idempotent?: boolean;
+    headers?: Record<string, string>;
+  } = {}
 ): Promise<LabOpsCallResult<T>> {
   try {
     const res = await fetch(`/api/labops/${path.replace(/^\//, '')}`, {
       method: init.method ?? 'GET',
       headers: {
         ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...(init.idempotent ? { 'Idempotency-Key': crypto.randomUUID() } : {})
+        ...(init.idempotent ? { 'Idempotency-Key': crypto.randomUUID() } : {}),
+        ...init.headers
       },
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {})
     });
@@ -54,4 +60,3 @@ export function toastVerification(
     });
   }
 }
-

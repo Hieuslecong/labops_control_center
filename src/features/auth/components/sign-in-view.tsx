@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   IconCpu,
   IconShieldCheck,
@@ -18,7 +17,7 @@ interface SignInViewPageProps {
 }
 
 export default function SignInViewPage({ error: initialError }: SignInViewPageProps) {
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(initialError || null);
   const [loading, setLoading] = useState(false);
@@ -102,10 +101,10 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
               <IconLock className='size-6' />
             </div>
             <h2 className='text-2xl font-bold tracking-tight text-slate-900 dark:text-white'>
-              Đăng nhập Quản trị viên
+              Đăng nhập LabOps Control Center
             </h2>
             <p className='text-xs text-slate-500'>
-              Nhập tài khoản và mật khẩu hệ thống để truy cập Control Center.
+              Đăng nhập bằng tài khoản Quản trị viên hoặc tài khoản Nghiên cứu viên.
             </p>
           </div>
 
@@ -119,19 +118,19 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
           <form onSubmit={handleSubmit} className='w-full space-y-4'>
             <div className='space-y-1.5'>
               <label
-                htmlFor='admin-username'
+                htmlFor='login-username'
                 className='text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5'
               >
                 <IconUser className='size-3.5' />
-                Tài khoản Quản trị
+                Tên đăng nhập
               </label>
               <input
-                id='admin-username'
+                id='login-username'
                 type='text'
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder='admin'
+                placeholder='admin hoặc username nghiên cứu viên'
                 disabled={loading}
                 className='w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 transition'
               />

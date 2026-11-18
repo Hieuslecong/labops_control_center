@@ -38,14 +38,25 @@ export function ServerMonitoringPanel() {
 
           const serverGpus = gpus.filter((g) => g.serverId === server.id);
           const serverGpu = serverGpus[0];
-          const gpuVramTotalGb = serverGpus.reduce((total, gpu) => total + gpu.vramTotalMb, 0) / 1024;
+          const gpuVramTotalGb =
+            serverGpus.reduce((total, gpu) => total + gpu.vramTotalMb, 0) / 1024;
           const gpuVramUsedGb = serverGpus.reduce((total, gpu) => total + gpu.vramUsedMb, 0) / 1024;
           const isGpuRunning = Boolean(
-            serverGpus.some((gpu) => gpu.vramUsedMb > 512 || gpu.gpuUtilPercent > 0 || gpu.activeProcesses.length > 0)
+            serverGpus.some(
+              (gpu) =>
+                gpu.vramUsedMb > 512 || gpu.gpuUtilPercent > 0 || gpu.activeProcesses.length > 0
+            )
           );
           const gpuUsedGb = gpuVramUsedGb.toFixed(1);
-          const gpuVramPercent = gpuVramTotalGb ? Math.round((gpuVramUsedGb / gpuVramTotalGb) * 100) : 0;
-          const statusLabel = server.status === 'online' ? 'ONLINE' : server.status === 'offline' ? 'MẤT KẾT NỐI' : 'CHƯA XÁC MINH';
+          const gpuVramPercent = gpuVramTotalGb
+            ? Math.round((gpuVramUsedGb / gpuVramTotalGb) * 100)
+            : 0;
+          const statusLabel =
+            server.status === 'online'
+              ? 'ONLINE'
+              : server.status === 'offline'
+                ? 'MẤT KẾT NỐI'
+                : 'CHƯA XÁC MINH';
 
           return (
             <Card
@@ -69,22 +80,24 @@ export function ServerMonitoringPanel() {
                         variant='outline'
                         className={
                           server.status === 'online'
-                            ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
+                            ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono px-1.5 py-0 shrink-0'
                             : server.status === 'offline'
-                              ? 'bg-destructive/10 text-destructive border-destructive/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
-                              : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-[10px] font-mono px-1.5 py-0 shrink-0'
+                              ? 'bg-destructive/10 text-destructive border-destructive/30 text-xs font-mono px-1.5 py-0 shrink-0'
+                              : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-xs font-mono px-1.5 py-0 shrink-0'
                         }
                       >
                         <span
                           className={`size-1.5 rounded-full mr-1 ${
                             server.status === 'online'
                               ? 'bg-emerald-500 animate-pulse'
-                              : server.status === 'offline' ? 'bg-destructive' : 'bg-amber-500'
+                              : server.status === 'offline'
+                                ? 'bg-destructive'
+                                : 'bg-amber-500'
                           }`}
                         ></span>
                         {statusLabel}
                       </Badge>
-                      <Badge variant='secondary' className='text-[10px] font-mono shrink-0'>
+                      <Badge variant='secondary' className='text-xs font-mono shrink-0'>
                         {server.hostname}
                       </Badge>
                     </div>
@@ -112,10 +125,20 @@ export function ServerMonitoringPanel() {
                 {/* 3 Circular Gauges or Offline alert */}
                 {server.status !== 'online' ? (
                   <div className='py-6 px-3 text-center text-xs text-muted-foreground flex flex-col items-center justify-center gap-1.5 bg-destructive/5 rounded-lg border border-destructive/20'>
-                    <Icons.warning className={`size-5 ${server.status === 'offline' ? 'text-destructive' : 'text-amber-600'}`} />
-                    <p className={`font-semibold ${server.status === 'offline' ? 'text-destructive' : 'text-amber-700'}`}>{server.status === 'offline' ? 'Máy chủ không phản hồi' : 'Chưa có telemetry xác minh'}</p>
-                    <p className='text-[11px] text-muted-foreground'>
-                      {server.status === 'offline' ? 'Backend xác nhận máy chủ hiện không phản hồi.' : 'LabOps chưa xác minh trạng thái kết nối; dữ liệu phần cứng bị ẩn.'}
+                    <Icons.warning
+                      className={`size-5 ${server.status === 'offline' ? 'text-destructive' : 'text-amber-600'}`}
+                    />
+                    <p
+                      className={`font-semibold ${server.status === 'offline' ? 'text-destructive' : 'text-amber-700'}`}
+                    >
+                      {server.status === 'offline'
+                        ? 'Máy chủ không phản hồi'
+                        : 'Chưa có telemetry xác minh'}
+                    </p>
+                    <p className='text-xs text-muted-foreground'>
+                      {server.status === 'offline'
+                        ? 'Backend xác nhận máy chủ hiện không phản hồi.'
+                        : 'LabOps chưa xác minh trạng thái kết nối; dữ liệu phần cứng bị ẩn.'}
                     </p>
                   </div>
                 ) : (
@@ -150,7 +173,7 @@ export function ServerMonitoringPanel() {
                 {/* Key specs and status indicators */}
                 <div className='grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs min-w-0'>
                   <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
-                    <div className='flex items-center justify-between text-[11px] text-muted-foreground'>
+                    <div className='flex items-center justify-between text-xs text-muted-foreground'>
                       <span className='truncate'>GPU Vật lý</span>
                       {isGpuRunning && (
                         <span
@@ -167,7 +190,7 @@ export function ServerMonitoringPanel() {
                       />
                       {server.gpuCount} GPU · {serverGpu?.model || 'mẫu chưa xác minh'}
                     </span>
-                    <span className='text-[10px] font-mono truncate'>
+                    <span className='text-xs font-mono truncate'>
                       {isGpuRunning ? (
                         <span className='text-indigo-600 dark:text-indigo-400 font-semibold'>
                           {gpuUsedGb}/24 GB ({gpuVramPercent}%)
@@ -176,50 +199,44 @@ export function ServerMonitoringPanel() {
                         <span className='text-muted-foreground'>
                           {server.status === 'online' && gpuVramTotalGb > 0
                             ? `${gpuVramUsedGb.toFixed(1)} / ${gpuVramTotalGb.toFixed(1)} GB VRAM`
-                            : server.status === 'offline' ? 'Mất kết nối' : 'Chưa xác minh'}
+                            : server.status === 'offline'
+                              ? 'Mất kết nối'
+                              : 'Chưa xác minh'}
                         </span>
                       )}
                     </span>
                   </div>
 
                   <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
-                    <span className='text-[11px] text-muted-foreground truncate'>
-                      Băng thông Mạng
-                    </span>
+                    <span className='text-xs text-muted-foreground truncate'>Băng thông Mạng</span>
                     <span className='font-bold text-sm text-foreground font-mono mt-0.5 truncate'>
                       ↓{server.networkInMbps} ↑{server.networkOutMbps}
                     </span>
-                    <span className='text-[10px] text-muted-foreground truncate'>
-                      Mbps (WireGuard)
-                    </span>
+                    <span className='text-xs text-muted-foreground truncate'>Mbps (WireGuard)</span>
                   </div>
 
                   <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
-                    <span className='text-[11px] text-muted-foreground truncate'>
+                    <span className='text-xs text-muted-foreground truncate'>
                       Thành viên / Tác vụ
                     </span>
                     <span className='font-bold text-sm text-foreground mt-0.5 truncate'>
                       {server.activeMembers} người • {server.activeJobs} jobs
                     </span>
-                    <span className='text-[10px] text-muted-foreground truncate'>
-                      Incus Workspaces
-                    </span>
+                    <span className='text-xs text-muted-foreground truncate'>Incus Workspaces</span>
                   </div>
 
                   <div className='p-2 rounded-md bg-background border flex flex-col min-w-0'>
-                    <span className='text-[11px] text-muted-foreground truncate'>
-                      Thời gian Uptime
-                    </span>
+                    <span className='text-xs text-muted-foreground truncate'>Thời gian Uptime</span>
                     <span className='font-bold text-sm text-foreground mt-0.5 truncate'>
                       {server.uptime}
                     </span>
-                    <span className='text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate'>
+                    <span className='text-xs text-emerald-600 dark:text-emerald-400 font-medium truncate'>
                       Ổn định tuyệt đối
                     </span>
                   </div>
                 </div>
 
-                <div className='flex items-center justify-between text-[11px] text-muted-foreground border-t pt-2'>
+                <div className='flex items-center justify-between text-xs text-muted-foreground border-t pt-2'>
                   <span className='truncate font-mono'>
                     Incus {server.incusVersion} • Driver {server.driverVersion} • CUDA{' '}
                     {server.cudaVersion}

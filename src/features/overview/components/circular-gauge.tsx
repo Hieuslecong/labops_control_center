@@ -60,7 +60,7 @@ export function CircularGauge({
         <div className='absolute flex flex-col items-center justify-center leading-none'>
           <span className='font-bold text-sm tracking-tight font-mono'>
             {Math.round(percentage)}
-            <span className='text-[10px] font-normal text-muted-foreground'>{unit}</span>
+            <span className='text-xs font-normal text-muted-foreground'>{unit}</span>
           </span>
         </div>
       </div>
@@ -74,7 +74,7 @@ export function CircularGauge({
       )}
       {sublabel && (
         <span
-          className='text-[10px] sm:text-[11px] text-muted-foreground font-mono truncate max-w-full mt-0.5'
+          className='text-xs sm:text-xs text-muted-foreground font-mono truncate max-w-full mt-0.5'
           title={sublabel}
         >
           {sublabel}

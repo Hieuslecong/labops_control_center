@@ -1,7 +1,6 @@
-/* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useState, useEffect, useMemo, useTransition } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,8 +13,8 @@ import {
   DialogDescription
 } from '@/components/ui/dialog';
 import { Icons } from '@/components/icons';
-import { toast } from 'sonner';
-import { labopsCall } from '@/features/labops/api';
+import { useRepositoryAuditQuery, useRepositoryRequestsQuery } from '@/features/labops/queries';
+import { useAuthSession } from '@/hooks/use-auth-session';
 import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
 import Link from 'next/link';
 
@@ -25,7 +24,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.check className='size-3 text-emerald-600' />
           TỰ ĐỘNG DUYỆT
@@ -36,7 +35,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-teal-500/15 text-teal-700 dark:text-teal-400 border-teal-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-teal-500/15 text-teal-700 dark:text-teal-400 border-teal-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.circleCheck className='size-3 text-teal-600' />
           ADMIN ĐÃ DUYỆT
@@ -46,7 +45,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.check className='size-3 text-blue-600' />
           ĐÃ PHÂN PHỐI
@@ -57,7 +56,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.warning className='size-3 text-amber-600' />
           CHỜ ADMIN DUYỆT
@@ -67,7 +66,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.close className='size-3 text-rose-600' />
           BỊ TỪ CHỐI
@@ -77,7 +76,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30 text-[11px] font-semibold gap-1 shrink-0'
+          className='bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30 text-xs font-semibold gap-1 shrink-0'
         >
           <Icons.alertCircle className='size-3 text-red-600' />
           THẤT BẠI
@@ -90,7 +89,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       return (
         <Badge
           variant='outline'
-          className='bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30 text-[11px] font-mono animate-pulse shrink-0'
+          className='bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30 text-xs font-mono animate-pulse shrink-0'
         >
           <Icons.spinner className='size-3 animate-spin' />
           ĐANG QUÉT
@@ -98,7 +97,7 @@ function getApprovalBadge(status: SecurityReviewStatus | string) {
       );
     default:
       return (
-        <Badge variant='outline' className='text-[11px] font-mono shrink-0'>
+        <Badge variant='outline' className='text-xs font-mono shrink-0'>
           {status}
         </Badge>
       );
@@ -139,10 +138,17 @@ function formatDateTime(isoString?: string): { formatted: string; relative: stri
 }
 
 export function MemberRepoHistoryPanel() {
-  const [requests, setRequests] = useState<RepositoryGuardRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [, startTransition] = useTransition();
+  const { isAdmin } = useAuthSession();
+  const requestsQuery = useRepositoryRequestsQuery({ intervalMs: 15_000 });
+  const auditQuery = useRepositoryAuditQuery({
+    enabled: isAdmin,
+    limit: 100,
+    intervalMs: 15_000
+  });
+  const requests = useMemo(() => requestsQuery.data ?? [], [requestsQuery.data]);
+  const loading = requestsQuery.isPending;
+  const isRefreshing = requestsQuery.isFetching || auditQuery.isFetching;
+  const auditEntriesCount = auditQuery.data?.length ?? 0;
 
   // Filters
   const [selectedMember, setSelectedMember] = useState<string>('all');
@@ -152,29 +158,12 @@ export function MemberRepoHistoryPanel() {
   // Selected for detail modal
   const [selectedReq, setSelectedReq] = useState<RepositoryGuardRequest | null>(null);
 
-  const fetchHistory = async (showLoading = false) => {
-    if (showLoading) setLoading(true);
-    setIsRefreshing(true);
-    try {
-      const res = await labopsCall<RepositoryGuardRequest[]>('repositories/requests');
-      if (res.ok && Array.isArray(res.data)) {
-        setRequests(res.data);
-      }
-    } catch {
-      // silent fail on poll
-    } finally {
-      setLoading(false);
-      setIsRefreshing(false);
-    }
+  const fetchHistory = async () => {
+    await Promise.all([
+      requestsQuery.refetch(),
+      isAdmin ? auditQuery.refetch() : Promise.resolve()
+    ]);
   };
-
-  useEffect(() => {
-    void fetchHistory(true);
-    const interval = setInterval(() => {
-      void fetchHistory(false);
-    }, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Distinct member list for filter
   const memberList = useMemo(() => {
@@ -260,17 +249,18 @@ export function MemberRepoHistoryPanel() {
                 </CardTitle>
                 <Badge
                   variant='outline'
-                  className='text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 shrink-0 hidden sm:inline-flex'
+                  className='text-xs bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 shrink-0 hidden sm:inline-flex'
                 >
-                  ZERO-TRUST EGRESS
+                  KIỂM DUYỆT CÁCH LY
                 </Badge>
               </div>
               <CardDescription className='text-xs text-muted-foreground truncate'>
                 Ghi nhận lịch sử kèm thời gian thực tế toàn bộ yêu cầu tải mã nguồn qua{' '}
-                <code className='bg-muted px-1 py-0.5 rounded text-[11px] font-mono text-foreground'>
-                  gitlabops clone
+                <code className='bg-muted px-1 py-0.5 rounded text-xs font-mono text-foreground'>
+                  gitaiot clone
                 </code>{' '}
-                — phân loại chi tiết theo từng thành viên (được duyệt & bị từ chối/chặn).
+                — phân loại chi tiết theo từng thành viên (được duyệt & bị từ chối/chặn)
+                {isAdmin && auditEntriesCount > 0 ? ` • ${auditEntriesCount} sự kiện audit` : ''}.
               </CardDescription>
             </div>
           </div>
@@ -279,28 +269,29 @@ export function MemberRepoHistoryPanel() {
             <Button
               variant='outline'
               size='sm'
-              onClick={() => void fetchHistory(true)}
+              onClick={() => void fetchHistory()}
               disabled={isRefreshing}
               className='h-8 text-xs gap-1.5'
             >
               <Icons.refresh className={`size-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
               <span className='hidden sm:inline'>Làm mới</span>
             </Button>
-            <Link href='/dashboard/security'>
-              <Button size='sm' className='h-8 text-xs gap-1 bg-primary text-primary-foreground'>
-                Trung tâm An ninh
-                <Icons.arrowRight className='size-3.5' />
-              </Button>
-            </Link>
+            <Button
+              nativeButton={false}
+              render={<Link href='/dashboard/security' aria-label='Mở Trung tâm An ninh' />}
+              size='sm'
+              className='h-8 text-xs gap-1 bg-primary text-primary-foreground'
+            >
+              Trung tâm An ninh
+              <Icons.arrowRight className='size-3.5' />
+            </Button>
           </div>
         </div>
 
         {/* Mini KPI Bar */}
         <div className='grid grid-cols-2 sm:grid-cols-5 gap-2.5 pt-3'>
           <div className='p-2.5 rounded-lg border bg-muted/20'>
-            <span className='text-[10px] text-muted-foreground font-medium block'>
-              Tổng lượt clone
-            </span>
+            <span className='text-xs text-muted-foreground font-medium block'>Tổng lượt clone</span>
             <div className='text-lg font-bold mt-0.5 text-foreground flex items-center gap-1.5'>
               <Icons.github className='size-4 text-muted-foreground' />
               {stats.total}
@@ -308,7 +299,7 @@ export function MemberRepoHistoryPanel() {
           </div>
 
           <div className='p-2.5 rounded-lg border bg-emerald-500/5 border-emerald-500/20'>
-            <span className='text-[10px] text-emerald-700 dark:text-emerald-400 font-medium block'>
+            <span className='text-xs text-emerald-700 dark:text-emerald-400 font-medium block'>
               Đã được phê duyệt
             </span>
             <div className='text-lg font-bold mt-0.5 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
@@ -318,7 +309,7 @@ export function MemberRepoHistoryPanel() {
           </div>
 
           <div className='p-2.5 rounded-lg border bg-rose-500/5 border-rose-500/20'>
-            <span className='text-[10px] text-rose-700 dark:text-rose-400 font-medium block'>
+            <span className='text-xs text-rose-700 dark:text-rose-400 font-medium block'>
               Không được duyệt / Bị chặn
             </span>
             <div className='text-lg font-bold mt-0.5 text-rose-600 dark:text-rose-400 flex items-center gap-1.5'>
@@ -328,7 +319,7 @@ export function MemberRepoHistoryPanel() {
           </div>
 
           <div className='p-2.5 rounded-lg border bg-amber-500/5 border-amber-500/20'>
-            <span className='text-[10px] text-amber-700 dark:text-amber-400 font-medium block'>
+            <span className='text-xs text-amber-700 dark:text-amber-400 font-medium block'>
               Cần Admin duyệt ngoại lệ
             </span>
             <div className='text-lg font-bold mt-0.5 text-amber-600 dark:text-amber-400 flex items-center gap-1.5'>
@@ -338,7 +329,7 @@ export function MemberRepoHistoryPanel() {
           </div>
 
           <div className='p-2.5 rounded-lg border bg-muted/20'>
-            <span className='text-[10px] text-muted-foreground font-medium block'>
+            <span className='text-xs text-muted-foreground font-medium block'>
               Tỷ lệ duyệt an toàn
             </span>
             <div className='text-lg font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
@@ -444,7 +435,7 @@ export function MemberRepoHistoryPanel() {
           <div className='overflow-x-auto max-w-full'>
             <table className='w-full text-left border-collapse text-xs'>
               <thead>
-                <tr className='border-b bg-muted/40 text-muted-foreground text-[11px] font-semibold'>
+                <tr className='border-b bg-muted/40 text-muted-foreground text-xs font-semibold'>
                   <th className='py-2.5 px-3 whitespace-nowrap'>Thời gian</th>
                   <th className='py-2.5 px-3 whitespace-nowrap'>Thành viên</th>
                   <th className='py-2.5 px-3 min-w-[200px]'>Kho lưu trữ & Nhánh</th>
@@ -471,10 +462,10 @@ export function MemberRepoHistoryPanel() {
                         <span className='font-medium'>
                           Không tìm thấy yêu cầu clone nào phù hợp bộ lọc
                         </span>
-                        <span className='text-[11px] text-muted-foreground/80'>
+                        <span className='text-xs text-muted-foreground/80'>
                           Các lệnh thực thi qua{' '}
                           <code className='bg-muted px-1 rounded text-foreground font-mono'>
-                            gitlabops clone
+                            gitaiot clone
                           </code>{' '}
                           sẽ xuất hiện tự động tại đây.
                         </span>
@@ -501,11 +492,11 @@ export function MemberRepoHistoryPanel() {
                         {/* 1. Thời gian */}
                         <td aria-label='Thời gian' className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex flex-col'>
-                            <span className='font-mono font-medium text-foreground text-[11px] flex items-center gap-1'>
+                            <span className='font-mono font-medium text-foreground text-xs flex items-center gap-1'>
                               <Icons.clock className='size-3 text-muted-foreground shrink-0' />
                               {timeInfo.formatted}
                             </span>
-                            <span className='text-[10px] text-muted-foreground pl-4'>
+                            <span className='text-xs text-muted-foreground pl-4'>
                               {timeInfo.relative}
                             </span>
                           </div>
@@ -514,15 +505,15 @@ export function MemberRepoHistoryPanel() {
                         {/* 2. Thành viên */}
                         <td aria-label='Thành viên' className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex items-center gap-1.5'>
-                            <div className='size-6 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-[10px] uppercase shrink-0'>
+                            <div className='size-6 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-xs uppercase shrink-0'>
                               {(r.submitted_by || 'U')[0]}
                             </div>
                             <div className='flex flex-col'>
-                              <span className='font-mono font-semibold text-foreground text-[11px]'>
+                              <span className='font-mono font-semibold text-foreground text-xs'>
                                 @{r.submitted_by || 'unknown'}
                               </span>
                               {r.target_workspace && (
-                                <span className='text-[9px] text-muted-foreground font-mono truncate max-w-[90px]'>
+                                <span className='text-xs text-muted-foreground font-mono truncate max-w-[90px]'>
                                   ws: {r.target_workspace}
                                 </span>
                               )}
@@ -539,7 +530,7 @@ export function MemberRepoHistoryPanel() {
                                 href={r.canonical_repo || r.repo_url}
                                 target='_blank'
                                 rel='noreferrer'
-                                className='font-semibold text-foreground hover:text-primary hover:underline truncate max-w-[200px] text-[11px]'
+                                className='font-semibold text-foreground hover:text-primary hover:underline truncate max-w-[200px] text-xs'
                                 title={r.canonical_repo || r.repo_url}
                               >
                                 {r.owner && r.repo_name
@@ -548,27 +539,27 @@ export function MemberRepoHistoryPanel() {
                               </a>
                             </div>
 
-                            <div className='flex items-center gap-1.5 text-[10px] text-muted-foreground'>
+                            <div className='flex items-center gap-1.5 text-xs text-muted-foreground'>
                               <Badge
                                 variant='secondary'
-                                className='px-1 py-0 text-[9px] font-mono shrink-0'
+                                className='px-1 py-0 text-xs font-mono shrink-0'
                               >
                                 {r.requested_ref || 'HEAD'}
                               </Badge>
                               {r.commit_sha ? (
                                 <span
-                                  className='font-mono text-[9px] truncate max-w-[80px]'
+                                  className='font-mono text-xs truncate max-w-[80px]'
                                   title={r.commit_sha}
                                 >
                                   #{r.commit_sha.slice(0, 7)}
                                 </span>
                               ) : (
-                                <span className='text-[9px] italic'>chưa phân giải</span>
+                                <span className='text-xs italic'>chưa phân giải</span>
                               )}
                               {r.cache_hit && (
                                 <Badge
                                   variant='outline'
-                                  className='px-1 py-0 text-[8px] bg-blue-500/10 text-blue-600 border-blue-500/30'
+                                  className='px-1 py-0 text-xs bg-blue-500/10 text-blue-600 border-blue-500/30'
                                 >
                                   Cache Hit
                                 </Badge>
@@ -582,7 +573,7 @@ export function MemberRepoHistoryPanel() {
                           <div className='flex flex-col gap-1 items-start'>
                             {getApprovalBadge(r.state)}
                             {r.decision && (
-                              <span className='text-[9px] text-muted-foreground font-mono truncate max-w-[120px]'>
+                              <span className='text-xs text-muted-foreground font-mono truncate max-w-[120px]'>
                                 bởi @{r.decision.reviewer}
                               </span>
                             )}
@@ -598,7 +589,7 @@ export function MemberRepoHistoryPanel() {
                                 {r.report.secrets_count > 0 && (
                                   <Badge
                                     variant='outline'
-                                    className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/40 text-[9px] px-1 py-0'
+                                    className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/40 text-xs px-1 py-0'
                                   >
                                     {r.report.secrets_count} Secret
                                   </Badge>
@@ -606,7 +597,7 @@ export function MemberRepoHistoryPanel() {
                                 {r.report.vulnerabilities?.critical > 0 && (
                                   <Badge
                                     variant='outline'
-                                    className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-[9px] px-1 py-0'
+                                    className='bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs px-1 py-0'
                                   >
                                     {r.report.vulnerabilities.critical} Critical
                                   </Badge>
@@ -614,7 +605,7 @@ export function MemberRepoHistoryPanel() {
                                 {r.report.vulnerabilities?.high > 0 && (
                                   <Badge
                                     variant='outline'
-                                    className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[9px] px-1 py-0'
+                                    className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs px-1 py-0'
                                   >
                                     {r.report.vulnerabilities.high} High
                                   </Badge>
@@ -624,7 +615,7 @@ export function MemberRepoHistoryPanel() {
                                   r.report.vulnerabilities?.high === 0 && (
                                     <Badge
                                       variant='outline'
-                                      className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[9px] px-1 py-0'
+                                      className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs px-1 py-0'
                                     >
                                       Sạch (0 CVE, 0 Secret)
                                     </Badge>
@@ -633,7 +624,7 @@ export function MemberRepoHistoryPanel() {
                             ) : null}
 
                             {/* Lý do phê duyệt / từ chối */}
-                            <div className='text-[10px] text-muted-foreground truncate'>
+                            <div className='text-xs text-muted-foreground truncate'>
                               {r.decision?.reason ? (
                                 <span className='text-foreground font-medium'>
                                   Ghi chú Admin: {r.decision.reason}
@@ -653,7 +644,7 @@ export function MemberRepoHistoryPanel() {
                                   {r.report.policy_reasons[0]}
                                 </span>
                               ) : (
-                                <span>Tiêu chuẩn LabOps Zero-Trust</span>
+                                <span>Kiểm duyệt Cách ly LabOps</span>
                               )}
                             </div>
                           </div>
@@ -703,9 +694,7 @@ export function MemberRepoHistoryPanel() {
               {/* Summary metadata box */}
               <div className='grid grid-cols-2 gap-2 p-2.5 rounded-lg border bg-muted/20'>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>
-                    Kho lưu trữ GitHub
-                  </span>
+                  <span className='text-xs text-muted-foreground block'>Kho lưu trữ GitHub</span>
                   <a
                     href={selectedReq.canonical_repo || selectedReq.repo_url}
                     target='_blank'
@@ -716,19 +705,17 @@ export function MemberRepoHistoryPanel() {
                   </a>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Trạng thái duyệt</span>
+                  <span className='text-xs text-muted-foreground block'>Trạng thái duyệt</span>
                   <div className='mt-0.5'>{getApprovalBadge(selectedReq.state)}</div>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Nhánh / Tag</span>
+                  <span className='text-xs text-muted-foreground block'>Nhánh / Tag</span>
                   <span className='font-mono font-semibold'>
                     {selectedReq.requested_ref || 'HEAD'}
                   </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>
-                    Commit SHA (40-hex)
-                  </span>
+                  <span className='text-xs text-muted-foreground block'>Commit SHA (40-hex)</span>
                   <span
                     className='font-mono font-semibold truncate block'
                     title={selectedReq.commit_sha}
@@ -737,13 +724,13 @@ export function MemberRepoHistoryPanel() {
                   </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Thời gian gửi</span>
+                  <span className='text-xs text-muted-foreground block'>Thời gian gửi</span>
                   <span className='text-foreground'>
                     {formatDateTime(selectedReq.submitted_at).formatted}
                   </span>
                 </div>
                 <div>
-                  <span className='text-[10px] text-muted-foreground block'>Cập nhật lần cuối</span>
+                  <span className='text-xs text-muted-foreground block'>Cập nhật lần cuối</span>
                   <span className='text-foreground'>
                     {formatDateTime(selectedReq.updated_at).formatted}
                   </span>
@@ -753,14 +740,14 @@ export function MemberRepoHistoryPanel() {
               {/* SHA-256 Digest if Approved */}
               {selectedReq.artifact_digest && (
                 <div className='p-2.5 rounded-lg border bg-emerald-500/5 border-emerald-500/30'>
-                  <span className='text-[10px] text-emerald-700 dark:text-emerald-400 font-bold block flex items-center gap-1'>
+                  <span className='text-xs text-emerald-700 dark:text-emerald-400 font-bold block flex items-center gap-1'>
                     <Icons.check className='size-3.5' /> Chữ ký số SHA-256 Digest (Approved Store)
                   </span>
-                  <code className='text-[11px] font-mono break-all text-foreground mt-1 block select-all'>
+                  <code className='text-xs font-mono break-all text-foreground mt-1 block select-all'>
                     {selectedReq.artifact_digest}
                   </code>
                   {selectedReq.artifact_size_bytes ? (
-                    <span className='text-[10px] text-muted-foreground mt-1 block'>
+                    <span className='text-xs text-muted-foreground mt-1 block'>
                       Kích thước gói nén an toàn:{' '}
                       {(selectedReq.artifact_size_bytes / 1024).toFixed(1)} KB
                     </span>
@@ -771,7 +758,7 @@ export function MemberRepoHistoryPanel() {
               {/* Error box if Failed */}
               {selectedReq.error && (
                 <div className='p-2.5 rounded-lg border bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-400'>
-                  <span className='font-bold block text-[11px] flex items-center gap-1'>
+                  <span className='font-bold block text-xs flex items-center gap-1'>
                     <Icons.alertCircle className='size-3.5' /> Lý do thất bại / Bị chặn
                   </span>
                   <p className='text-xs mt-1 font-mono break-all'>{selectedReq.error}</p>
@@ -781,34 +768,34 @@ export function MemberRepoHistoryPanel() {
               {/* Scan Report Breakdown */}
               {selectedReq.report && (
                 <div className='flex flex-col gap-2 p-2.5 rounded-lg border bg-card'>
-                  <span className='font-semibold text-foreground text-[11px] flex items-center justify-between'>
+                  <span className='font-semibold text-foreground text-xs flex items-center justify-between'>
                     <span>Kết quả quét tĩnh bằng Trivy ({selectedReq.report.scanner_version})</span>
-                    <Badge variant='outline' className='text-[9px] font-mono'>
+                    <Badge variant='outline' className='text-xs font-mono'>
                       Thời gian quét: {selectedReq.report.scan_duration_ms}ms
                     </Badge>
                   </span>
 
                   <div className='grid grid-cols-4 gap-1.5 text-center'>
                     <div className='p-1.5 rounded bg-muted/30 border'>
-                      <span className='text-[9px] text-muted-foreground block'>Critical</span>
+                      <span className='text-xs text-muted-foreground block'>Critical</span>
                       <span className='font-bold text-rose-600 text-sm'>
                         {selectedReq.report.vulnerabilities.critical}
                       </span>
                     </div>
                     <div className='p-1.5 rounded bg-muted/30 border'>
-                      <span className='text-[9px] text-muted-foreground block'>High</span>
+                      <span className='text-xs text-muted-foreground block'>High</span>
                       <span className='font-bold text-amber-600 text-sm'>
                         {selectedReq.report.vulnerabilities.high}
                       </span>
                     </div>
                     <div className='p-1.5 rounded bg-muted/30 border'>
-                      <span className='text-[9px] text-muted-foreground block'>Secrets</span>
+                      <span className='text-xs text-muted-foreground block'>Secrets</span>
                       <span className='font-bold text-rose-600 text-sm'>
                         {selectedReq.report.secrets_count}
                       </span>
                     </div>
                     <div className='p-1.5 rounded bg-muted/30 border'>
-                      <span className='text-[9px] text-muted-foreground block'>Scorecard</span>
+                      <span className='text-xs text-muted-foreground block'>Scorecard</span>
                       <span className='font-bold text-blue-600 text-sm'>
                         {selectedReq.report.scorecard?.score ?? 'N/A'}
                       </span>
@@ -817,10 +804,10 @@ export function MemberRepoHistoryPanel() {
 
                   {selectedReq.report.policy_reasons?.length ? (
                     <div className='mt-1.5'>
-                      <span className='text-[10px] text-muted-foreground font-semibold block'>
+                      <span className='text-xs text-muted-foreground font-semibold block'>
                         Đánh giá chính sách:
                       </span>
-                      <ul className='list-disc list-inside text-[11px] space-y-0.5 text-foreground mt-0.5'>
+                      <ul className='list-disc list-inside text-xs space-y-0.5 text-foreground mt-0.5'>
                         {selectedReq.report.policy_reasons.map((reason, idx) => (
                           <li key={idx}>{reason}</li>
                         ))}
@@ -833,10 +820,10 @@ export function MemberRepoHistoryPanel() {
               {/* Admin Decision Note if present */}
               {selectedReq.decision && (
                 <div className='p-2.5 rounded-lg border bg-muted/40'>
-                  <span className='font-semibold text-foreground text-[11px] block'>
+                  <span className='font-semibold text-foreground text-xs block'>
                     Biên bản quyết định của Quản trị viên
                   </span>
-                  <div className='text-[11px] text-muted-foreground mt-1'>
+                  <div className='text-xs text-muted-foreground mt-1'>
                     <div>
                       Người duyệt:{' '}
                       <span className='font-mono text-foreground font-semibold'>

@@ -23,20 +23,28 @@ export function QuickActionsBar({ onOpenAllocateDialog }: QuickActionsBarProps) 
           {isDemoMode ? (
             <Badge
               variant='outline'
-              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-mono'
+              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono'
             >
               Incus 6.0 LTS • CUDA 12.4
             </Badge>
           ) : (
-            <Badge variant='outline' className='bg-amber-500/10 text-amber-700 border-amber-500/30 text-[11px] font-mono'>
+            <Badge
+              variant='outline'
+              className='bg-amber-500/10 text-amber-700 border-amber-500/30 text-xs font-mono'
+            >
               Trạng thái phần cứng theo API
             </Badge>
           )}
         </div>
         <p className='text-xs text-muted-foreground mt-0.5'>
-          {isDemoMode
-            ? <>Hạ tầng minh họa: <strong>Server Track</strong> (3x NVIDIA A30 24GB) & <strong>Server Workstation</strong> (1x NVIDIA A30 24GB)</>
-            : 'Thông tin máy chủ và GPU chỉ được hiển thị khi backend xác minh telemetry.'}
+          {isDemoMode ? (
+            <>
+              Hạ tầng minh họa: <strong>Server Track</strong> (3x NVIDIA A30 24GB) &{' '}
+              <strong>Server Workstation</strong> (1x NVIDIA A30 24GB)
+            </>
+          ) : (
+            'Thông tin máy chủ và GPU chỉ được hiển thị khi backend xác minh telemetry.'
+          )}
         </p>
       </div>
 

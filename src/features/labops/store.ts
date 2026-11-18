@@ -1,5 +1,6 @@
 /* oxlint-disable typescript/no-explicit-any */
 import { create } from 'zustand';
+import { labopsCall, toastVerification } from '@/features/labops/api';
 import {
   PhysicalServer,
   PhysicalGpu,
@@ -82,7 +83,7 @@ interface LabOpsState {
   updateEventStatus: (id: string, status: LabEvent['status']) => void;
 
   addAuditLog: (log: Omit<AuditLog, 'id' | 'timestamp' | 'correlationId'>) => void;
-  fetchLiveState: () => Promise<void>;
+  fetchLiveState: (options?: { isAdmin?: boolean }) => Promise<void>;
 }
 
 const INITIAL_SERVERS: PhysicalServer[] = [
@@ -1778,7 +1779,16 @@ function mapRawServer(raw: Record<string, unknown>): PhysicalServer {
     incusVersion: s.incusVersion ?? s.incus_version ?? '',
     driverVersion: s.driverVersion ?? s.driver_version ?? '',
     cudaVersion: s.cudaVersion ?? s.cuda_version ?? '',
-    lastUpdated: s.lastUpdated ?? s.last_updated ?? ''
+    lastUpdated: s.lastUpdated ?? s.last_updated ?? '',
+    collectedAt: s.collectedAt ?? s.collected_at ?? null,
+    ageSeconds:
+      s.ageSeconds !== undefined
+        ? Number(s.ageSeconds)
+        : s.age_seconds !== undefined
+          ? Number(s.age_seconds)
+          : null,
+    telemetrySource: s.telemetrySource ?? s.telemetry_source ?? null,
+    freshnessStatus: s.freshnessStatus ?? s.freshness_status ?? null
   };
 }
 
@@ -1814,7 +1824,16 @@ function mapRawGpu(raw: Record<string, unknown>): PhysicalGpu {
         })
       : [],
     activeUsers: g.activeUsers ?? g.active_users ?? [],
-    associatedJobs: g.associatedJobs ?? g.associated_jobs ?? []
+    associatedJobs: g.associatedJobs ?? g.associated_jobs ?? [],
+    collectedAt: g.collectedAt ?? g.collected_at ?? null,
+    ageSeconds:
+      g.ageSeconds !== undefined
+        ? Number(g.ageSeconds)
+        : g.age_seconds !== undefined
+          ? Number(g.age_seconds)
+          : null,
+    telemetrySource: g.telemetrySource ?? g.telemetry_source ?? null,
+    freshnessStatus: g.freshnessStatus ?? g.freshness_status ?? null
   };
 }
 
@@ -1938,9 +1957,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
   securityReviews: isDemoMode ? INITIAL_SECURITY_REVIEWS : [],
   events: isDemoMode ? INITIAL_EVENTS : [],
   auditLogs: isDemoMode ? INITIAL_AUDIT_LOGS : [],
-  storagePools: INITIAL_STORAGE_POOLS,
-  gpuAllocations: INITIAL_GPU_ALLOCATIONS,
-  gpuAllocationGroups: INITIAL_GPU_ALLOCATION_GROUPS,
+  storagePools: isDemoMode ? INITIAL_STORAGE_POOLS : [],
+  gpuAllocations: isDemoMode ? INITIAL_GPU_ALLOCATIONS : [],
+  gpuAllocationGroups: isDemoMode ? INITIAL_GPU_ALLOCATION_GROUPS : [],
   sshEndpoints: isDemoMode ? INITIAL_SSH_ENDPOINTS : [],
   storageAllocations: isDemoMode ? INITIAL_STORAGE_ALLOCATIONS : [],
   sshPolicies: isDemoMode ? INITIAL_SSH_POLICIES : [],
@@ -1960,7 +1979,7 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       const response = await fetch('/api/access/users', { cache: 'no-store' });
       if (response.status === 401 || response.status === 403) {
         throw new Error(
-          'Quản lý truy cập cần phiên quản trị viên Clerk; dashboard hiện không yêu cầu đăng nhập.'
+          'Thao tác yêu cầu phiên Quản trị viên LabOps hợp lệ. Vui lòng đăng nhập lại.'
         );
       }
       if (response.status === 503) {
@@ -2069,8 +2088,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
     } catch {}
   },
 
-  fetchLiveState: async () => {
+  fetchLiveState: async (options?: { isAdmin?: boolean }) => {
     if (isDemoMode) return;
+    const isAdmin = options?.isAdmin !== false;
     try {
       const [
         resServers,
@@ -2085,9 +2105,13 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         fetch('/api/labops/servers').catch(() => null),
         fetch('/api/labops/gpus').catch(() => null),
         fetch('/api/labops/jobs/active').catch(() => null),
-        fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null),
-        fetch('/api/labops/servers/track/ssh-sessions').catch(() => null),
-        fetch('/api/labops/storage-pools').catch(() => null),
+        isAdmin
+          ? fetch('/api/labops/servers/workstation/ssh-sessions').catch(() => null)
+          : Promise.resolve(null),
+        isAdmin
+          ? fetch('/api/labops/servers/track/ssh-sessions').catch(() => null)
+          : Promise.resolve(null),
+        isAdmin ? fetch('/api/labops/storage-pools').catch(() => null) : Promise.resolve(null),
         fetch('/api/labops/gpus/allocations').catch(() => null),
         fetch('/api/labops/gpus/allocations/by-gpu').catch(() => null)
       ]);
@@ -2123,15 +2147,17 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         failures.push('jobs');
       }
       const sshCombined: RealSshSession[] = [];
-      if (resSshWs && resSshWs.ok) {
-        const dataWs = await resSshWs.json();
-        sshCombined.push(...(dataWs.actual_observations || []).map(mapRawSshSession));
-      } else {
-        failures.push('SSH sessions');
-      }
-      if (resSshTrack && resSshTrack.ok) {
-        const dataTrack = await resSshTrack.json();
-        sshCombined.push(...(dataTrack.actual_observations || []).map(mapRawSshSession));
+      if (isAdmin) {
+        if (resSshWs && resSshWs.ok) {
+          const dataWs = await resSshWs.json();
+          sshCombined.push(...(dataWs.actual_observations || []).map(mapRawSshSession));
+        } else {
+          failures.push('SSH sessions');
+        }
+        if (resSshTrack && resSshTrack.ok) {
+          const dataTrack = await resSshTrack.json();
+          sshCombined.push(...(dataTrack.actual_observations || []).map(mapRawSshSession));
+        }
       }
       updates.activeSshSessions = sshCombined;
       if (resStorage && resStorage.ok) {
@@ -2282,12 +2308,16 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       return;
     }
 
-    // Production
-    fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' })
-      .then(() => {
-        get().fetchLiveJobs();
-      })
-      .catch(() => {});
+    // Production: đi qua BFF /api/labops và thông báo kết quả xác minh trung thực
+    void labopsCall<{ verification?: string; state?: string }>(
+      `jobs/${encodeURIComponent(jobId)}/stop`,
+      { method: 'POST', idempotent: true }
+    ).then((res) => {
+      toastVerification('Dừng tác vụ', res);
+      if (res.ok) {
+        void get().fetchLiveJobs();
+      }
+    });
   },
 
   stopProcess: async (

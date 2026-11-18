@@ -30,7 +30,7 @@ function getAccountPillClasses(status: GpuAccountAllocation['status']): string {
 function renderStatusBadge(alloc: GpuAccountAllocation) {
   if (alloc.status === 'IN_USE') {
     return (
-      <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+      <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs font-medium'>
         <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
         ĐANG SỬ DỤNG
       </Badge>
@@ -38,7 +38,7 @@ function renderStatusBadge(alloc: GpuAccountAllocation) {
   }
   if (alloc.status === 'RESERVED') {
     return (
-      <Badge className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-[10px] font-medium'>
+      <Badge className='bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/30 text-xs font-medium'>
         ĐANG GIỮ CHỖ
       </Badge>
     );
@@ -47,14 +47,14 @@ function renderStatusBadge(alloc: GpuAccountAllocation) {
     return (
       <Badge
         variant='outline'
-        className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px]'
+        className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs'
       >
         SẴN SÀNG
       </Badge>
     );
   }
   return (
-    <Badge variant='outline' className='text-muted-foreground text-[10px]'>
+    <Badge variant='outline' className='text-muted-foreground text-xs'>
       HOST NGOẠI TUYẾN
     </Badge>
   );
@@ -85,7 +85,7 @@ function GpuMasterCell({
           {group.isOnline ? (
             <Badge
               variant='outline'
-              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono px-1.5 py-0'
+              className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono px-1.5 py-0'
             >
               <span className='size-1.5 rounded-full bg-emerald-500 animate-pulse mr-1' />
               ONLINE
@@ -93,14 +93,14 @@ function GpuMasterCell({
           ) : (
             <Badge
               variant='outline'
-              className='text-muted-foreground text-[10px] font-mono px-1.5 py-0'
+              className='text-muted-foreground text-xs font-mono px-1.5 py-0'
             >
               OFFLINE
             </Badge>
           )}
         </div>
 
-        <div className='text-[11px] text-muted-foreground space-y-0.5'>
+        <div className='text-xs text-muted-foreground space-y-0.5'>
           <div className='font-medium text-foreground/90'>
             {group.gpuModel} • {Math.round(group.vramTotalGb)} GB
           </div>
@@ -108,20 +108,18 @@ function GpuMasterCell({
             {group.serverName}
           </div>
           {group.pciBusId && (
-            <div className='font-mono text-[10px] text-muted-foreground/80'>
-              Bus: {group.pciBusId}
-            </div>
+            <div className='font-mono text-xs text-muted-foreground/80'>Bus: {group.pciBusId}</div>
           )}
         </div>
 
         <div className='flex items-center gap-1.5 flex-wrap'>
-          <Badge variant='secondary' className='text-[10px] font-medium'>
+          <Badge variant='secondary' className='text-xs font-medium'>
             {group.accountsCount > 0
               ? `${group.accountsCount} tài khoản được cấp`
               : 'Chưa cấp tài khoản'}
           </Badge>
           {group.activeAccountsCount > 0 && (
-            <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] font-medium'>
+            <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs font-medium'>
               {group.activeAccountsCount} đang hoạt động
             </Badge>
           )}
@@ -141,7 +139,7 @@ function GpuMasterCell({
                 style={{ width: `${group.vramUsagePercent}%` }}
               />
             </div>
-            <div className='text-[10px] font-mono text-muted-foreground'>
+            <div className='text-xs font-mono text-muted-foreground'>
               {group.vramUsedGb} / {group.vramTotalGb} GB VRAM ({group.vramUsagePercent}%) •{' '}
               {group.gpuUtilPercent}% tải • {group.tempCelsius}°C
             </div>
@@ -154,7 +152,7 @@ function GpuMasterCell({
               size='sm'
               variant='outline'
               onClick={() => onAllocateGpu(group.gpuId)}
-              className='h-6 text-[11px] font-semibold px-2'
+              className='h-6 text-xs font-semibold px-2'
             >
               + Cấp phát vào GPU này
             </Button>
@@ -199,7 +197,7 @@ export function GpuAccountAllocationMatrix({
             </CardDescription>
           </div>
           <div className='flex items-center gap-2 flex-wrap self-start sm:self-auto'>
-            <Badge variant='outline' className='font-mono text-[11px]'>
+            <Badge variant='outline' className='font-mono text-xs'>
               {visibleGroups.length} GPU • {totalAssignedAccounts} lượt cấp tài khoản
             </Badge>
           </div>
@@ -258,7 +256,7 @@ export function GpuAccountAllocationMatrix({
                       {group.gpuLabel}
                     </span>
                   </div>
-                  <Badge variant='outline' className='text-[10px] font-mono px-1.5 py-0 shrink-0'>
+                  <Badge variant='outline' className='text-xs font-mono px-1.5 py-0 shrink-0'>
                     {group.accountsCount > 0 ? `${group.accountsCount} tài khoản` : 'Chưa cấp'}
                   </Badge>
                 </div>
@@ -269,18 +267,18 @@ export function GpuAccountAllocationMatrix({
                       <span
                         key={`pill-${group.gpuId}-${acc.username}`}
                         title={`${acc.fullName} • ${acc.allocationMode} • Quota ${acc.vramQuotaGb} GB`}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-mono ${getAccountPillClasses(
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-mono ${getAccountPillClasses(
                           acc.status
                         )}`}
                       >
                         @{acc.username}
                         {acc.vramUsedGb > 0 && (
-                          <span className='text-[9px] opacity-85'>({acc.vramUsedGb}G)</span>
+                          <span className='text-xs opacity-85'>({acc.vramUsedGb}G)</span>
                         )}
                       </span>
                     ))
                   ) : (
-                    <span className='text-[11px] italic text-muted-foreground'>
+                    <span className='text-xs italic text-muted-foreground'>
                       Chưa có tài khoản được cấp
                     </span>
                   )}
@@ -341,10 +339,10 @@ export function GpuAccountAllocationMatrix({
                         )}
                         <td className='py-2.5 px-3'>
                           <div className='font-bold text-foreground'>{alloc.fullName}</div>
-                          <div className='text-[11px] text-muted-foreground font-mono flex items-center gap-1.5'>
+                          <div className='text-xs text-muted-foreground font-mono flex items-center gap-1.5'>
                             <span>@{alloc.username}</span>
                             <span className='size-1 rounded-full bg-border' />
-                            <span className='text-[10px] uppercase font-semibold text-primary'>
+                            <span className='text-xs uppercase font-semibold text-primary'>
                               {alloc.role}
                             </span>
                           </div>
@@ -355,12 +353,12 @@ export function GpuAccountAllocationMatrix({
                               variant={
                                 alloc.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'
                               }
-                              className='text-[10px] font-mono'
+                              className='text-xs font-mono'
                             >
                               {alloc.allocationMode}
                             </Badge>
                           </div>
-                          <div className='text-[11px] font-mono text-muted-foreground mt-0.5'>
+                          <div className='text-xs font-mono text-muted-foreground mt-0.5'>
                             Quota:{' '}
                             <span className='font-semibold text-foreground'>
                               {alloc.vramQuotaGb} GB
@@ -373,25 +371,25 @@ export function GpuAccountAllocationMatrix({
                               <span className='font-mono font-bold text-indigo-600 dark:text-indigo-400'>
                                 {alloc.vramUsedGb} GB
                               </span>
-                              <div className='text-[10px] text-muted-foreground font-mono'>
+                              <div className='text-xs text-muted-foreground font-mono'>
                                 {alloc.vramUsedMb} MiB
                               </div>
                             </div>
                           ) : (
-                            <span className='text-muted-foreground font-mono text-[11px]'>
+                            <span className='text-muted-foreground font-mono text-xs'>
                               0 GB (Trống)
                             </span>
                           )}
                         </td>
                         <td className='py-2.5 px-3 max-w-xs'>
                           <div
-                            className='font-mono font-medium text-[11px] text-foreground truncate max-w-[260px]'
+                            className='font-mono font-medium text-xs text-foreground truncate max-w-[260px]'
                             title={alloc.primaryScript}
                           >
                             {alloc.primaryScript}
                           </div>
                           {(alloc.processCount > 0 || alloc.primaryPid) && (
-                            <div className='text-[10px] text-muted-foreground font-mono'>
+                            <div className='text-xs text-muted-foreground font-mono'>
                               {alloc.processCount > 0 ? `${alloc.processCount} tiến trình` : ''}
                               {alloc.processCount > 0 && alloc.primaryPid ? ' • ' : ''}
                               {alloc.primaryPid ? `PID chính: ${alloc.primaryPid}` : ''}

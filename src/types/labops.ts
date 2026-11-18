@@ -34,6 +34,10 @@ export interface PhysicalServer {
   driverVersion: string;
   cudaVersion: string;
   lastUpdated: string;
+  collectedAt?: string | null;
+  ageSeconds?: number | null;
+  telemetrySource?: string | null;
+  freshnessStatus?: string | null;
 }
 
 export type GpuAllocationMode = 'SHARED' | 'EXCLUSIVE' | 'MIG';
@@ -73,6 +77,10 @@ export interface PhysicalGpu {
   activeProcesses: GpuProcess[];
   activeUsers: string[];
   associatedJobs: string[];
+  collectedAt?: string | null;
+  ageSeconds?: number | null;
+  telemetrySource?: string | null;
+  freshnessStatus?: string | null;
 }
 
 export type MemberRole =

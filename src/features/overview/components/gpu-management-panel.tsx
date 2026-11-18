@@ -68,7 +68,7 @@ function getEnforcementBadge(state: PhysicalGpu['enforcementState']) {
       return (
         <Badge
           variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[10px] font-mono'
+          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono'
         >
           HARDWARE ENFORCED
         </Badge>
@@ -77,7 +77,7 @@ function getEnforcementBadge(state: PhysicalGpu['enforcementState']) {
       return (
         <Badge
           variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[10px] font-mono'
+          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-mono'
         >
           DRIVER ENFORCED
         </Badge>
@@ -87,7 +87,7 @@ function getEnforcementBadge(state: PhysicalGpu['enforcementState']) {
       return (
         <Badge
           variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] font-mono'
+          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-mono'
         >
           MONITOR ONLY
         </Badge>
@@ -137,19 +137,19 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
               </CardTitle>
               <Badge
                 variant={gpu.allocationMode === 'EXCLUSIVE' ? 'default' : 'secondary'}
-                className='text-[10px] px-1.5 py-0 font-medium'
+                className='text-xs px-1.5 py-0 font-medium'
               >
                 {gpu.allocationMode}
               </Badge>
               {isRunning ? (
-                <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-[10px] px-1.5 py-0 font-medium'>
+                <Badge className='bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30 text-xs px-1.5 py-0 font-medium'>
                   <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse mr-1' />
                   ĐANG CHẠY
                 </Badge>
               ) : (
                 <Badge
                   variant='outline'
-                  className='text-muted-foreground text-[10px] px-1.5 py-0 font-medium'
+                  className='text-muted-foreground text-xs px-1.5 py-0 font-medium'
                 >
                   SẴN SÀNG
                 </Badge>
@@ -164,7 +164,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
             <span className={`text-xl font-bold font-mono ${getUtilColor(gpu.gpuUtilPercent)}`}>
               {gpu.gpuUtilPercent}%
             </span>
-            <div className='text-[10px] text-muted-foreground'>Compute Load</div>
+            <div className='text-xs text-muted-foreground'>Compute Load</div>
           </div>
         </div>
       </CardHeader>
@@ -176,9 +176,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
             <span className='font-medium text-muted-foreground'>Bộ nhớ VRAM:</span>
             <span className='font-mono font-bold text-foreground'>
               {usedGb} / {totalGb} GB{' '}
-              <span className='text-[11px] font-normal text-muted-foreground'>
-                ({vramPercent}%)
-              </span>
+              <span className='text-xs font-normal text-muted-foreground'>({vramPercent}%)</span>
             </span>
           </div>
           <div className='w-full bg-muted rounded-full h-2 overflow-hidden'>
@@ -200,7 +198,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
           <div className='flex items-center gap-1.5'>
             <Icons.gauge className='size-3.5 text-muted-foreground' />
             <div>
-              <span className='text-[10px] text-muted-foreground block'>Nhiệt độ</span>
+              <span className='text-xs text-muted-foreground block'>Nhiệt độ</span>
               <span
                 className={`font-mono font-bold ${gpu.tempCelsius > 75 ? 'text-rose-500' : 'text-foreground'}`}
               >
@@ -211,10 +209,10 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
           <div className='flex items-center gap-1.5'>
             <Icons.power className='size-3.5 text-muted-foreground' />
             <div>
-              <span className='text-[10px] text-muted-foreground block'>Điện năng tiêu thụ</span>
+              <span className='text-xs text-muted-foreground block'>Điện năng tiêu thụ</span>
               <span className='font-mono font-bold text-foreground'>
                 {gpu.powerWatts}W{' '}
-                <span className='text-[10px] text-muted-foreground font-normal'>
+                <span className='text-xs text-muted-foreground font-normal'>
                   / {gpu.powerLimitWatts}W
                 </span>
               </span>
@@ -224,7 +222,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
 
         {/* Active Processes list */}
         <div className='space-y-1.5'>
-          <div className='flex items-center justify-between text-[11px] text-muted-foreground'>
+          <div className='flex items-center justify-between text-xs text-muted-foreground'>
             <span>Tiến trình đang chạy ({gpu.activeProcesses.length}):</span>
             {getEnforcementBadge(gpu.enforcementState)}
           </div>
@@ -234,18 +232,16 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
               {gpu.activeProcesses.map((proc) => (
                 <div
                   key={proc.pid}
-                  className='p-1.5 rounded border bg-background/80 text-[11px] flex items-center justify-between'
+                  className='p-1.5 rounded border bg-background/80 text-xs flex items-center justify-between'
                 >
                   <div className='truncate flex-1 mr-1'>
                     <span className='font-mono font-semibold text-primary'>{proc.username}</span>
-                    <span className='text-muted-foreground text-[10px] ml-1 truncate'>
+                    <span className='text-muted-foreground text-xs ml-1 truncate'>
                       (PID: {proc.pid})
                     </span>
-                    <div className='truncate text-[10px] text-foreground font-mono'>
-                      {proc.name}
-                    </div>
+                    <div className='truncate text-xs text-foreground font-mono'>{proc.name}</div>
                   </div>
-                  <Badge variant='outline' className='font-mono text-[10px] px-1 py-0 shrink-0'>
+                  <Badge variant='outline' className='font-mono text-xs px-1 py-0 shrink-0'>
                     {(proc.vramMb / 1024).toFixed(1)} GB
                   </Badge>
                 </div>
@@ -261,7 +257,7 @@ function GpuCard({ gpu, onAllocate }: { gpu: PhysicalGpu; onAllocate: () => void
         {/* Card Footer: UUID & Action */}
         <div className='pt-2 border-t flex items-center justify-between gap-2 mt-auto'>
           <span
-            className='text-[10px] text-muted-foreground font-mono truncate max-w-[140px]'
+            className='text-xs text-muted-foreground font-mono truncate max-w-[140px]'
             title={gpu.uuid}
           >
             {gpu.uuid.substring(0, 16)}...

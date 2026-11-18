@@ -64,20 +64,17 @@ next-env.d.ts
 # Sentry Config File
 .env.sentry-build-plugin
 
-# Runtime Telemetry Data
-backend/data/process_history.json
-
-# LabOps runtime locks
+# Runtime Telemetry Data & Persistent Local State (NEVER commit live PII/hashes/keys)
+backend/data/*.json
+backend/data/*.json.*
+backend/data/*.jsonl
+backend/data/*.db
+backend/data/*.sqlite*
+backend/data/*.journal
 backend/data/*.lock
 backend/data/*.tmp
-backend/data/security_scans.json
-graphify-out/
-
-# LabOps runtime locks & cache
-backend/data/*.lock
-backend/data/*.tmp
-backend/data/security_scans.json
 backend/data/workspaces/
+!backend/data/examples/*.example.json
 graphify-out/
 
 # Client VPN and binary packages

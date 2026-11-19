@@ -696,9 +696,21 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép cấp lại cặp khóa SSH"})
                 return
             member_id = path.split("/")[5]
+            require_passphrase = bool((body or {}).get("require_passphrase", True))
             try:
-                rotated = service.rotate_member_ssh_keypair(member_id, actor=principal.username)
+                rotated = service.rotate_member_ssh_keypair(
+                    member_id, actor=principal.username, require_passphrase=require_passphrase
+                )
                 self._send_json(200, _format_member(rotated))
+            except LookupError as e:
+                self._send_json(404, {"detail": str(e)})
+        elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/verify"):
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên được phép kiểm chứng runtime workspace"})
+                return
+            member_id = path.split("/")[5]
+            try:
+                self._send_json(200, service.reverify_member_workspace(member_id, actor=principal.username))
             except LookupError as e:
                 self._send_json(404, {"detail": str(e)})
         elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/reissue-temp-password"):

@@ -26,8 +26,9 @@ from app.adapters.node_agent_adapter import NodeAgentClient, NodeAgentError
 from app.adapters.arcane_adapter import ArcaneAdapter
 from app.adapters.beszel_adapter import BeszelAdapter
 from app.services.workspace_controller import WorkspaceController
-from app.services.vpn_ssh_service import SshKeyRegistry
+from app.services.vpn_ssh_service import SshKeyRegistry, compute_ssh_fingerprint
 from app.services.ssh_access_manager import SshAccessManager
+from app.services.ssh_authorization_gate import evaluate_ssh_authorization_gate
 from app.adapters.process_monitor_adapter import ProcessMonitorAdapter
 from app.adapters.teleport_adapter import TeleportAdapter
 from app.services.vpn_manager import VPNManager
@@ -2696,16 +2697,114 @@ class LabOpsDataService:
                 return candidate
         raise RuntimeError("Hết dải IP WireGuard 10.88.40.10-249 khả dụng")
 
+    def _sync_member_ssh_authorization(
+        self,
+        member: Dict[str, Any],
+        *,
+        actor: str,
+        allow_canary_local_sync: bool = False,
+        save: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Cổng kiểm soát tập trung (Central SSH Authorization Gate):
+        - Đánh giá đồng thời cả 8 cổng bảo mật trước khi mở authorized_keys hoặc đánh dấu READY.
+        - Đồng bộ authorized_keys vào Docker runtime (qua Go Node Agent) hoặc canary test dir.
+        """
+        username = member["username"]
+        server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
+        server = next((s for s in self.servers if s["id"] == server_id), None)
+        host_online = self._is_host_online(server_id)
+        account_security = self.ssh_access_manager.get_account_security_state(username)
+        vpn_overview = {"status": (member.get("wireguard") or {}).get("status")}
+
+        gate = evaluate_ssh_authorization_gate(
+            member=member,
+            account_security=account_security,
+            runtime_verification=member.get("runtime_verification"),
+            vpn_overview=vpn_overview,
+        )
+
+        keys_to_sync = [member["ssh_public_key"]] if (gate["ssh_authorized"] and member.get("ssh_public_key")) else []
+        synced_ok = False
+
+        if member.get("workspace_id") and member.get("container_id"):
+            if host_online and server is not None:
+                try:
+                    self.node_agent.dispatch(
+                        server,
+                        "SYNC_SSH_AUTHORIZED_KEYS",
+                        params={
+                            "workspace_id": str(member["workspace_id"]),
+                            "member_username": username,
+                            "keys_json": json.dumps(keys_to_sync),
+                        },
+                        idempotency_key=f"sync-keys-{member['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                        actor_id=actor,
+                        actor_role="ADMIN",
+                    )
+                    synced_ok = True
+                except Exception as sync_exc:
+                    if keys_to_sync:
+                        gate["ssh_authorized"] = False
+                        gate["overall_readiness"] = "AGENT_UNAVAILABLE"
+                        gate["ssh_runtime_state"] = "SSH_ACCESS_DENIED"
+                        gate["blocking_codes"].append("SYNC_SSH_KEYS_FAILED")
+                        gate["blocking_reasons"].append(
+                            f"Không thể đồng bộ authorized_keys qua Go Node Agent: {getattr(sync_exc, 'message', str(sync_exc))}"
+                        )
+            elif keys_to_sync:
+                gate["ssh_authorized"] = False
+                gate["overall_readiness"] = "AGENT_UNAVAILABLE"
+                gate["ssh_runtime_state"] = "SSH_ACCESS_DENIED"
+                gate["blocking_codes"].append("AGENT_UNAVAILABLE")
+        elif (
+            not self._is_live_production_data_dir
+            and member.get("workspace_dir")
+            and (allow_canary_local_sync or not keys_to_sync)
+        ):
+            ws_dir = str(member["workspace_dir"])
+            if os.path.isdir(os.path.join(ws_dir, ".ssh")) or os.path.isdir(ws_dir):
+                synced_ok = self.ssh_access_manager.write_authorized_keys_state(ws_dir, keys_to_sync)
+
+        if gate["ssh_authorized"] and synced_ok:
+            rv = member.get("runtime_verification")
+            if isinstance(rv, dict):
+                rv["ssh_key_installed"] = "VERIFIED"
+                if all(
+                    rv.get(k) == "VERIFIED"
+                    for k in ("docker_running", "directory_isolation", "privilege_isolation", "cpu_ram_limits", "storage_quota", "ssh_runtime")
+                ) and rv.get("gpu_isolation") in ("VERIFIED", "NOT_APPLICABLE"):
+                    rv["overall_status"] = "READY"
+
+        member["activation_status"] = gate["activation_status"]
+        member["authorization_gate"] = gate
+        member["overall_readiness"] = gate["overall_readiness"]
+
+        terminal_or_revoked = {"DELETE_ELIGIBLE", "ARCHIVED", "DELETED", "SUSPENDED", "REVOKED"}
+        if member.get("ssh_key_status") in ("VERIFIED_REVOKED", "PENDING_REVOKE"):
+            member["ssh_status"] = member["ssh_key_status"]
+            member["provisioning_state"] = member.get("provisioning_state") or member["ssh_key_status"]
+        else:
+            member["ssh_status"] = gate["ssh_runtime_state"]
+            member["provisioning_state"] = gate["overall_readiness"]
+            member["workspace_status"] = gate["overall_readiness"]
+            if member.get("status") not in terminal_or_revoked:
+                member["status"] = "READY" if gate["overall_readiness"] == "READY" else "PENDING_PROVISIONING"
+
+        if save:
+            self._save_persistent_data()
+        return gate
+
     def provision_member_ssh_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Luồng Admin tạo và cấp quyền truy cập SSH tự động cho thành viên:
         1. Kiểm tra username, host, tài nguyên.
-        2. Sinh cặp khóa OpenSSH Ed25519 thật được bảo vệ bằng passphrase mạnh (hoặc dùng public key nếu Admin tự dán).
-        3. Cấp mật khẩu tạm riêng cho lần đăng nhập đầu tiên (PBKDF2 hash, CHANGE_REQUIRED, có hạn sử dụng).
-        4. Tạo thư mục workspace riêng (0700) và .ssh/authorized_keys (0600).
-        5. Kiểm chứng thực tế tại runtime (host online, cách ly thư mục, giới hạn CPU/RAM/storage, SSH listener).
-        6. Chỉ chuyển sang READY khi tất cả các kiểm tra bắt buộc tại runtime đều VERIFIED.
-        7. Lưu gói kết nối (encrypted private key) và bí mật (passphrase + mật khẩu tạm) vào kho bộ nhớ tạm 1 lần.
+        2. Dùng client-enrolled OpenSSH public key (nếu có) hoặc sinh cặp khóa Ed25519 mã hóa passphrase.
+        3. Cấp mật khẩu tạm riêng cho lần đăng nhập đầu tiên (scrypt hash, CHANGE_REQUIRED, PENDING_ACTIVATION).
+        4. Tạo thư mục workspace riêng (0700) và giữ .ssh/authorized_keys RỖNG trước khi kích hoạt.
+        5. Ủy quyền cấp phát Docker container + kiểm chứng runtime qua Go Node Agent.
+        6. Chỉ mở authorized_keys và chuyển sang READY khi tất cả 8 cổng SSH Authorization Gate đều VERIFIED.
+        7. Lưu gói kết nối (encrypted private key nếu server sinh) và bí mật (kênh riêng) vào One-Time Vault.
         """
         actor_id = payload.get("_actor_id") or "admin"
         enforce_canary_runtime = bool(payload.get("enforce_canary_runtime") or payload.get("enforceCanaryRuntime"))
@@ -2728,21 +2827,36 @@ class LabOpsDataService:
         storage_quota_gb = int(payload.get("storage_quota_gb", payload.get("storageQuotaGb", 250)))
         gpu_permissions = list(payload.get("gpu_permissions", payload.get("gpuPermissions", [])) or [])
         workspace_name = payload.get("workspace_name") or payload.get("workspaceName") or f"ws-{username}"
+        cpu_policy = payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED"
+        cpu_weight = int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100)
 
-        require_passphrase = payload.get("require_passphrase")
-        if require_passphrase is None:
-            require_passphrase = payload.get("requirePassphrase", True)
-        require_passphrase = bool(require_passphrase)
+        client_pubkey = str(payload.get("ssh_public_key") or payload.get("sshPublicKey") or "").strip()
+        if client_pubkey:
+            meta = compute_ssh_fingerprint(client_pubkey)
+            public_key = client_pubkey
+            fingerprint = meta["fingerprint_sha256"]
+            encrypted_private_key = ""
+            passphrase = ""
+            ssh_key_enrollment_mode = "CLIENT_ENROLLED_PUBKEY"
+            ssh_key_passphrase_mode = "CLIENT_ENROLLED_KEY"
+        else:
+            require_passphrase = payload.get("require_passphrase")
+            if require_passphrase is None:
+                require_passphrase = payload.get("requirePassphrase", True)
+            require_passphrase = bool(require_passphrase)
+            generated = self.ssh_access_manager.generate_encrypted_ed25519_keypair(
+                username, workspace_name, require_passphrase=require_passphrase
+            )
+            public_key = generated["public_key"]
+            fingerprint = generated["fingerprint"]
+            encrypted_private_key = generated["encrypted_private_key"]
+            passphrase = generated["passphrase"]
+            ssh_key_enrollment_mode = "SERVER_GENERATED_ENCRYPTED_KEY"
+            ssh_key_passphrase_mode = (
+                "PASSPHRASE_VERIFIED" if require_passphrase else "NO_PASSPHRASE_SERVER_GENERATED"
+            )
 
-        # Tạo cặp khóa OpenSSH Ed25519 (tùy chọn có hoặc không có passphrase để kết nối thẳng 1 chạm)
-        generated = self.ssh_access_manager.generate_encrypted_ed25519_keypair(
-            username, workspace_name, require_passphrase=require_passphrase
-        )
-        public_key = generated["public_key"]
-        encrypted_private_key = generated["encrypted_private_key"]
-        passphrase = generated["passphrase"]
-
-        # Tạo thư mục workspace cô lập (0700) và cài đặt public key vào authorized_keys (0600)
+        # Tạo thư mục workspace cô lập (0700) nhưng GIỮ authorized_keys RỖNG tới khi kích hoạt & pass gate
         ws_fs = self.ssh_access_manager.setup_isolated_workspace_filesystem(
             host_id=server_id,
             username=username,
@@ -2753,6 +2867,7 @@ class LabOpsDataService:
             storage_quota_gb=storage_quota_gb,
             gpu_permissions=gpu_permissions,
             extra_mounts=payload.get("extra_mounts"),
+            authorize_ssh_key=False,
         )
 
         # Nếu là thành viên mới, khởi tạo bản ghi thành viên qua provision_member cơ bản (bỏ cờ provision_ssh_access)
@@ -2761,13 +2876,17 @@ class LabOpsDataService:
             base_payload.pop("provision_ssh_access", None)
             base_payload.pop("provisionSshAccess", None)
             base_payload["ssh_public_key"] = public_key
-            base_payload["ssh_key_label"] = payload.get("ssh_key_label") or payload.get("sshKeyLabel") or "Admin-Managed Ed25519 Key"
+            base_payload["ssh_key_label"] = (
+                payload.get("ssh_key_label")
+                or payload.get("sshKeyLabel")
+                or ("Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key")
+            )
             member = self.provision_member(base_payload)
         else:
             member = existing_member
             key_rec = self.ssh_key_registry.register_key(
                 username=username,
-                label="Admin-Managed Ed25519 Key",
+                label="Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key",
                 public_key=public_key,
                 actor=actor_id,
             )
@@ -2793,17 +2912,25 @@ class LabOpsDataService:
                 if payload.get(storage_field) and not member.get(storage_field):
                     member[storage_field] = payload[storage_field]
 
-        # Cấp mật khẩu tạm cho lần đăng nhập đầu tiên (chỉ lưu PBKDF2 hash)
+        member["ssh_key_enrollment_mode"] = ssh_key_enrollment_mode
+        member["ssh_key_passphrase_mode"] = ssh_key_passphrase_mode
+        member["_canary_mode"] = enforce_canary_runtime
+        member["cpu_policy"] = cpu_policy
+        member["cpu_weight"] = cpu_weight
+
+        # Cấp mật khẩu tạm cho lần đăng nhập đầu tiên (chỉ lưu scrypt hash, trạng thái PENDING_ACTIVATION)
         temp_password, pw_meta = self.ssh_access_manager.issue_temporary_password(
             member_id=member["id"],
             username=username,
             actor=actor_id,
             ttl_seconds=temp_password_ttl_seconds,
         )
+        member["activation_status"] = "PENDING_ACTIVATION"
         member["password_status"] = "CHANGE_REQUIRED"
         member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
 
         host_online = self._is_host_online(server_id)
+        agent_verification_rec: Optional[Dict[str, Any]] = None
         if enforce_canary_runtime:
             is_test_ctx = "PYTEST_CURRENT_TEST" in os.environ or os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") == "1"
             if self._is_live_production_data_dir or not is_test_ctx:
@@ -2841,8 +2968,8 @@ class LabOpsDataService:
                         storage_path=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
                         member_storage_dir=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
                         container_mount_path="/workspace",
-                        resource_mode=payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED",
-                        cpu_weight=int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100),
+                        resource_mode=cpu_policy,
+                        cpu_weight=cpu_weight,
                     )
                 except Exception as ws_exc:
                     logger.warning("Workspace controller validation note for %s: %s", username, ws_exc)
@@ -2883,6 +3010,28 @@ class LabOpsDataService:
                     member["workspace_agent_request_id"] = agent_res.get("request_id")
                     if agent_rec.get("canonical_container_id"):
                         member["container_id"] = agent_rec["canonical_container_id"]
+                        try:
+                            ver_res = self.node_agent.dispatch(
+                                server,
+                                "VERIFY_DOCKER_WORKSPACE",
+                                params={
+                                    "workspace_id": spec["workspace_id"],
+                                    "container_id": agent_rec["canonical_container_id"],
+                                    "uid": str(spec["uid"]),
+                                    "gid": str(spec["gid"]),
+                                    "ssh_port": str(spec["ssh_port"]),
+                                    "resource_mode": spec.get("resource_mode") or cpu_policy,
+                                    "vpn_bind_ip": spec.get("vpn_bind_ip") or "",
+                                },
+                                idempotency_key=f"ws-ver-{spec['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                                actor_id=actor_id,
+                                actor_role="ADMIN",
+                            )
+                            ver_payload = ver_res.get("result") or {}
+                            if isinstance(ver_payload, dict) and ver_payload.get("checks"):
+                                agent_verification_rec = ver_payload
+                        except Exception as ver_err:
+                            logger.warning("VERIFY_DOCKER_WORKSPACE failed for %s: %s", username, ver_err)
                 except Exception as prov_err:
                     # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent hoặc Spec lỗi
                     err_code = getattr(prov_err, "code", "")
@@ -2920,22 +3069,13 @@ class LabOpsDataService:
             known_gpu_ids=known_gpu_ids,
             enforce_canary_runtime=enforce_canary_runtime,
             workspace_dir=effective_ws_dir,
+            agent_verification=agent_verification_rec,
+            cpu_policy=cpu_policy,
+            cpu_weight=cpu_weight,
+            expected_uid=member.get("uid"),
+            require_authorized_key_present=False,
         )
 
-        overall_state = verification["overall_status"]
-        delegation_state = member.get("workspace_delegation_status")
-        if not enforce_canary_runtime and delegation_state in ("PROVISION_FAILED", "AGENT_UNAVAILABLE") and overall_state != "READY":
-            effective_prov_state = delegation_state
-            effective_ssh_status = "SSH_ACCESS_DENIED"
-        else:
-            effective_prov_state = "READY" if overall_state == "READY" else overall_state
-            effective_ssh_status = "READY" if overall_state == "READY" else "SSH_ACCESS_DENIED"
-
-        # Chỉ báo READY khi TẤT CẢ kiểm tra bắt buộc đều VERIFIED
-        member["workspace_status"] = effective_prov_state
-        member["provisioning_state"] = effective_prov_state
-        member["status"] = "READY" if overall_state == "READY" else "PENDING_PROVISIONING"
-        member["ssh_status"] = effective_ssh_status
         member["ssh_key_status"] = "ACTIVE" if host_online else "PENDING_SYNC"
         member["workspace_dir"] = effective_ws_dir
         member["runtime_verification"] = verification
@@ -3084,7 +3224,7 @@ class LabOpsDataService:
             ssh_port=ssh_port,
             workspace_name=workspace_name,
             workspace_path=ws_fs["work_dir"],
-            fingerprint=generated["fingerprint"],
+            fingerprint=fingerprint,
             encrypted_private_key=encrypted_private_key,
             passphrase=passphrase,
             temporary_password=temp_password,
@@ -3098,6 +3238,13 @@ class LabOpsDataService:
         )
         member["one_time_package"] = vault_info
 
+        gate = self._sync_member_ssh_authorization(
+            member,
+            actor=actor_id,
+            allow_canary_local_sync=enforce_canary_runtime,
+            save=False,
+        )
+
         op_id = f"op-prov-{uuid.uuid4().hex[:12]}"
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
@@ -3106,22 +3253,22 @@ class LabOpsDataService:
             "target_type": "MEMBER",
             "target_id": username,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": overall_state,
+            "result": gate["overall_readiness"],
             "correlation_id": op_id,
             "details": (
-                f"Đã khởi tạo cặp khóa Ed25519 mã hóa passphrase ({generated['fingerprint']}) và mật khẩu tạm lần đầu "
-                f"cho @{username} trên host '{server_id}' (cổng {ssh_port}). Trạng thái xác minh runtime: {overall_state}."
+                f"Đã khởi tạo khóa OpenSSH ({ssh_key_enrollment_mode}, {fingerprint}) và mật khẩu tạm lần đầu "
+                f"cho @{username} trên host '{server_id}' (cổng {ssh_port}). Trạng thái tổng thể: {gate['overall_readiness']}."
             ),
         })
         self._save_persistent_data()
         return member
 
     def rotate_member_ssh_keypair(
-        self, member_id_or_username: str, actor: str, require_passphrase: bool = False
+        self, member_id_or_username: str, actor: str, require_passphrase: bool = True
     ) -> Dict[str, Any]:
         """
         Cấp lại cặp khóa SSH mới (khi khóa cũ bị mất hoặc lộ) và thu hồi toàn bộ khóa cũ của thành viên.
-        Mặc định require_passphrase = False để kết nối thẳng 1 chạm không cần nhập mật khẩu.
+        Mặc định require_passphrase = True để tuân thủ chính sách bảo mật Ed25519 có passphrase.
         """
         member = self._find_member(member_id_or_username)
         username = member["username"]
@@ -3132,7 +3279,7 @@ class LabOpsDataService:
             if old_key.get("desired_state") != "REVOKED":
                 self.ssh_key_registry.revoke_key(old_key["id"], actor=actor, is_admin=True)
 
-        # Tạo cặp khóa mới và ghi đè authorized_keys của workspace
+        # Tạo cặp khóa mới và đồng bộ qua Central SSH Authorization Gate
         updated = self.provision_member_ssh_access({
             "username": username,
             "full_name": member.get("full_name", username),
@@ -3172,7 +3319,8 @@ class LabOpsDataService:
         self, member_id_or_username: str, actor: str, ttl_seconds: int = 86400
     ) -> Dict[str, Any]:
         """
-        Cấp lại mật khẩu tạm mới cho thành viên (vô hiệu hóa ngay lập tức mật khẩu tạm cũ).
+        Cấp lại mật khẩu tạm mới cho thành viên (vô hiệu hóa ngay lập tức mật khẩu tạm cũ
+        và đưa trạng thái về PENDING_ACTIVATION cho tới khi người dùng đổi mật khẩu lần đầu).
         """
         member = self._find_member(member_id_or_username)
         username = member["username"]
@@ -3182,6 +3330,7 @@ class LabOpsDataService:
             actor=actor,
             ttl_seconds=ttl_seconds,
         )
+        member["activation_status"] = "PENDING_ACTIVATION"
         member["password_status"] = "CHANGE_REQUIRED"
         member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
         vault_meta = self.ssh_access_manager.vault.store_reissued_temp_password(
@@ -3191,6 +3340,12 @@ class LabOpsDataService:
             temp_password_expires_at=pw_meta["temp_password_expires_at"],
         )
         member["one_time_package"] = self.ssh_access_manager.vault.get_availability(member["id"])
+        gate = self._sync_member_ssh_authorization(
+            member,
+            actor=actor,
+            allow_canary_local_sync=bool(member.get("_canary_mode")),
+            save=False,
+        )
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
             "actor": actor,
@@ -3206,8 +3361,10 @@ class LabOpsDataService:
         return {
             "member_id": member["id"],
             "username": username,
+            "activation_status": "PENDING_ACTIVATION",
             "password_status": "CHANGE_REQUIRED",
             "temp_password_expires_at": pw_meta["temp_password_expires_at"],
+            "authorization_gate": gate,
             "one_time_secrets": vault_meta,
         }
 
@@ -3249,12 +3406,9 @@ class LabOpsDataService:
         except Exception:
             pass
 
-        channel_secrets = self.ssh_access_manager.vault._channel_secrets.get(member["id"]) or {}
-        key_passphrase = channel_secrets.get("key_passphrase")
-        temp_pw = channel_secrets.get("temporary_password")
-        temp_pw_exp = channel_secrets.get("temp_password_expires_at") or member.get("temp_password_expires_at")
-
-        priv_key = bundle.get("encrypted_private_key")
+        # Tuyệt đối KHÔNG đóng gói passphrase hoặc temporary password vào file ZIP (bắt buộc qua kênh riêng)
+        temp_pw_exp = member.get("temp_password_expires_at")
+        priv_key = bundle.get("encrypted_private_key") or None
         wg_conf = bundle.get("wireguard_conf")
         wg_client_ip = (
             bundle.get("wireguard_client_ip")
@@ -3326,8 +3480,8 @@ class LabOpsDataService:
             wireguard_conf=wg_conf,
             wireguard_client_ip=wg_client_ip,
             wireguard_endpoint=wg_ep,
-            key_passphrase=key_passphrase,
-            temporary_password=temp_pw,
+            key_passphrase=None,
+            temporary_password=None,
             temp_password_expires_at=temp_pw_exp,
             ssh_login_user=effective_ssh_user,
         )
@@ -3405,12 +3559,31 @@ class LabOpsDataService:
     ) -> Dict[str, Any]:
         """
         Thu hồi quyền SSH của thành viên và xác minh tại runtime.
-        Chỉ báo VERIFIED_REVOKED khi đã gỡ khóa khỏi authorized_keys của workspace và xác minh thành công.
-        Nếu host offline hoặc không kiểm chứng được, giữ ở trạng thái PENDING_REVOKE hoặc FAILED.
+        Chỉ báo VERIFIED_REVOKED khi đã gỡ khóa khỏi authorized_keys của container/workspace và xác minh thành công.
+        Nếu host offline hoặc Go Node Agent lỗi, giữ ở trạng thái PENDING_REVOKE hoặc FAILED.
         """
         member = self._find_member(member_id_or_username)
         server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
+        server = next((s for s in self.servers if s["id"] == server_id), None)
         host_online = self._is_host_online(server_id)
+
+        container_sync_err: Optional[str] = None
+        if host_online and member.get("workspace_id") and member.get("container_id") and server is not None:
+            try:
+                self.node_agent.dispatch(
+                    server,
+                    "SYNC_SSH_AUTHORIZED_KEYS",
+                    params={
+                        "workspace_id": str(member["workspace_id"]),
+                        "member_username": member["username"],
+                        "keys_json": "[]",
+                    },
+                    idempotency_key=f"revoke-keys-{member['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                    actor_id=actor,
+                    actor_role="ADMIN",
+                )
+            except Exception as sync_exc:
+                container_sync_err = getattr(sync_exc, "message", str(sync_exc))
 
         res = self.ssh_access_manager.revoke_member_ssh(
             member=member,
@@ -3420,9 +3593,16 @@ class LabOpsDataService:
             passphrase_for_probe=passphrase_for_probe,
             workspace_dir=member.get("workspace_dir"),
         )
+        if container_sync_err:
+            res["status"] = "FAILED"
+            res["ssh_key_status"] = "FAILED"
+            res["verified_revoked"] = False
+            res["reason"] = f"Không thể đồng bộ xóa authorized_keys vào Docker container: {container_sync_err}"
+
         member["ssh_key_status"] = res["ssh_key_status"]
         member["ssh_status"] = res["status"]
         member["provisioning_state"] = res["status"]
+        member["activation_status"] = "REVOKED"
         member["password_status"] = "REVOKED"
         member["one_time_package"] = self.ssh_access_manager.vault.get_availability(member["id"])
         # Do not demote status if member is already archived, delete-eligible, or deleted
@@ -3431,6 +3611,16 @@ class LabOpsDataService:
                 member["status"] = "SUSPENDED"
             else:
                 member["status"] = res["status"]
+
+        gate = evaluate_ssh_authorization_gate(
+            member=member,
+            account_security=self.ssh_access_manager.get_account_security_state(member["username"]),
+            runtime_verification=member.get("runtime_verification"),
+            vpn_overview={"status": (member.get("wireguard") or {}).get("status")},
+        )
+        member["authorization_gate"] = gate
+        member["overall_readiness"] = "SSH_ACCESS_DENIED"
+        res["authorization_gate"] = gate
 
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
@@ -3478,6 +3668,16 @@ class LabOpsDataService:
                 new_password=new_password,
             )
             member["password_status"] = "ACTIVE"
+            member["activation_status"] = "ACTIVATED"
+            gate = self._sync_member_ssh_authorization(
+                member,
+                actor=member["username"],
+                allow_canary_local_sync=bool(member.get("_canary_mode")),
+                save=False,
+            )
+            res["activation_status"] = "ACTIVATED"
+            res["authorization_gate"] = gate
+            res["overall_readiness"] = gate["overall_readiness"]
             self.audit_logs.insert(0, {
                 "id": f"aud-{uuid.uuid4().hex[:12]}",
                 "actor": member["username"],
@@ -3485,9 +3685,12 @@ class LabOpsDataService:
                 "target_type": "MEMBER",
                 "target_id": member["username"],
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "result": "ACTIVE",
+                "result": gate["overall_readiness"],
                 "correlation_id": f"op-pwchg-{uuid.uuid4().hex[:12]}",
-                "details": f"Thành viên @{member['username']} đã đổi mật khẩu tạm lần đầu sang mật khẩu chính thức; mật khẩu tạm đã hết hiệu lực.",
+                "details": (
+                    f"Thành viên @{member['username']} đã kích hoạt tài khoản và đổi mật khẩu lần đầu; "
+                    f"ssh_authorized={gate['ssh_authorized']}, readiness={gate['overall_readiness']}."
+                ),
             })
             self._save_persistent_data()
             return res
@@ -3510,6 +3713,7 @@ class LabOpsDataService:
         member = self._find_member(username)
         res = self.ssh_access_manager.verify_workspace_password_login(member["username"], password)
         member["password_status"] = res["password_status"]
+        member["activation_status"] = res.get("activation_status") or member.get("activation_status") or "PENDING_ACTIVATION"
         self._save_persistent_data()
         return res
 
@@ -3525,12 +3729,102 @@ class LabOpsDataService:
             "ssh_port": member.get("ssh_port"),
             "ssh_status": member.get("ssh_status"),
             "ssh_key_status": member.get("ssh_key_status"),
+            "ssh_key_enrollment_mode": member.get("ssh_key_enrollment_mode"),
+            "ssh_key_passphrase_mode": member.get("ssh_key_passphrase_mode"),
             "ssh_fingerprint": member.get("ssh_fingerprint"),
+            "activation_status": member.get("activation_status"),
             "password_status": member.get("password_status"),
+            "overall_readiness": member.get("overall_readiness"),
+            "workspace_delegation_status": member.get("workspace_delegation_status"),
+            "authorization_gate": member.get("authorization_gate"),
             "runtime_verification": member.get("runtime_verification"),
             "one_time_package": self.ssh_access_manager.vault.get_availability(member["id"]),
             "account_security": self.ssh_access_manager.get_account_security_state(username),
         }
+
+    def reverify_member_workspace(self, member_id_or_username: str, actor: str) -> Dict[str, Any]:
+        """Kiểm chứng lại runtime Docker container, quota và cổng ủy quyền SSH của thành viên."""
+        member = self._find_member(member_id_or_username)
+        username = member["username"]
+        server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
+        server = next((s for s in self.servers if s["id"] == server_id), None)
+        host_online = self._is_host_online(server_id)
+        agent_ver_rec: Optional[Dict[str, Any]] = None
+
+        if host_online and member.get("workspace_id") and member.get("container_id") and server is not None:
+            try:
+                ver_res = self.node_agent.dispatch(
+                    server,
+                    "VERIFY_DOCKER_WORKSPACE",
+                    params={
+                        "workspace_id": str(member["workspace_id"]),
+                        "container_id": str(member["container_id"]),
+                        "uid": str(member.get("uid") or 0),
+                        "gid": str(member.get("gid") or 0),
+                        "ssh_port": str(member.get("ssh_port") or 0),
+                        "resource_mode": member.get("cpu_policy") or "SHARED_WEIGHTED",
+                        "vpn_bind_ip": str((member.get("wireguard") or {}).get("client_ip") or ""),
+                    },
+                    idempotency_key=f"ws-reverify-{member['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                    actor_id=actor,
+                    actor_role="ADMIN",
+                )
+                payload = ver_res.get("result") or {}
+                if isinstance(payload, dict) and payload.get("checks"):
+                    agent_ver_rec = payload
+                    member["workspace_delegation_status"] = "VERIFIED" if payload.get("verified") else "PROVISION_FAILED"
+            except Exception as exc:
+                err_code = getattr(exc, "code", "")
+                err_msg = getattr(exc, "message", str(exc))
+                member["workspace_delegation_status"] = (
+                    "AGENT_UNAVAILABLE" if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED") else "PROVISION_FAILED"
+                )
+                member["workspace_delegation_reason"] = err_msg
+
+        known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
+            g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
+        ]
+        ws_dir = str(member.get("workspace_dir") or "") or self.ssh_access_manager.member_workspace_dir(server_id, username)
+        verification = self.ssh_access_manager.verify_workspace_and_runtime(
+            host_id=server_id,
+            host_online=host_online,
+            username=username,
+            workspace_name=member.get("workspace_name") or f"ws-{username}",
+            expected_public_key=member.get("ssh_public_key") or "",
+            ssh_port=int(member.get("ssh_port") or 22001),
+            cpu_limit_cores=int(member.get("cpu_limit_cores") or 8),
+            ram_limit_gb=int(member.get("ram_limit_gb") or 32),
+            storage_quota_gb=int(member.get("storage_quota_gb") or 250),
+            gpu_permissions=list(member.get("gpu_permissions") or []),
+            known_gpu_ids=known_gpu_ids,
+            enforce_canary_runtime=bool(member.get("_canary_mode")),
+            workspace_dir=ws_dir,
+            agent_verification=agent_ver_rec,
+            cpu_policy=member.get("cpu_policy") or "SHARED_WEIGHTED",
+            cpu_weight=int(member.get("cpu_weight") or 100),
+            expected_uid=member.get("uid"),
+            require_authorized_key_present=False,
+        )
+        member["runtime_verification"] = verification
+        gate = self._sync_member_ssh_authorization(
+            member,
+            actor=actor,
+            allow_canary_local_sync=bool(member.get("_canary_mode")),
+            save=False,
+        )
+        self.audit_logs.insert(0, {
+            "id": f"aud-{uuid.uuid4().hex[:12]}",
+            "actor": actor,
+            "action": "WORKSPACE_RUNTIME_REVERIFIED",
+            "target_type": "MEMBER",
+            "target_id": username,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "result": gate["overall_readiness"],
+            "correlation_id": f"op-ver-{uuid.uuid4().hex[:12]}",
+            "details": f"Kiểm chứng lại runtime workspace @{username} trên '{server_id}': {gate['overall_readiness']}.",
+        })
+        self._save_persistent_data()
+        return self.get_member_ssh_access_status(username)
 
     # ------------------------------------------------------------------
     # VPN Administration & Multi-Device Management (wg-easy v15)

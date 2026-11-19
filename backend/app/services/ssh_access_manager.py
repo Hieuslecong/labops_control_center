@@ -82,24 +82,61 @@ def _generate_temp_password() -> str:
 
 def _hash_password(password: str, salt_hex: Optional[str] = None) -> str:
     salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return f"pbkdf2_sha256$200000${salt.hex()}${dk.hex()}"
+    dk = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=16384,
+        r=8,
+        p=1,
+        maxmem=32 * 1024 * 1024,
+        dklen=32,
+    )
+    return f"scrypt$16384$8$1${salt.hex()}${dk.hex()}"
 
 
 def _verify_password(password: str, stored: Optional[str]) -> bool:
-    if not stored or not stored.startswith("pbkdf2_sha256$"):
+    if not stored:
         return False
-    parts = stored.split("$")
-    if len(parts) != 4:
-        return False
-    _, iterations_str, salt_hex, expected_hex = parts
-    try:
-        salt = bytes.fromhex(salt_hex)
-        iterations = int(iterations_str)
-    except ValueError:
-        return False
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return hmac.compare_digest(dk.hex(), expected_hex)
+    if stored.startswith("scrypt$"):
+        parts = stored.split("$")
+        if len(parts) != 6:
+            return False
+        _, n_s, r_s, p_s, salt_hex, expected_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            n_val, r_val, p_val = int(n_s), int(r_s), int(p_s)
+        except ValueError:
+            return False
+        dk = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=n_val,
+            r=r_val,
+            p=p_val,
+            maxmem=64 * 1024 * 1024,
+            dklen=len(bytes.fromhex(expected_hex)),
+        )
+        return hmac.compare_digest(dk.hex(), expected_hex)
+    if stored.startswith("pbkdf2_sha256$"):
+        parts = stored.split("$")
+        if len(parts) != 4:
+            return False
+        _, iterations_str, salt_hex, expected_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            iterations = int(iterations_str)
+        except ValueError:
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(dk.hex(), expected_hex)
+    if stored.startswith("$argon2id$"):
+        try:
+            from argon2 import PasswordHasher  # type: ignore[import-not-found]
+            PasswordHasher().verify(stored, password)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def _validate_new_password_strength(new_password: str) -> None:
@@ -810,8 +847,7 @@ Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
 - **Địa chỉ VPN WireGuard của bạn**: `{wg_ip}`
 - **Endpoint VPN Server**: `{wg_ep}`
 - **Lệnh kết nối nhanh**: `ssh {host_alias}`
-{f'- **Passphrase khóa SSH**: `{key_passphrase}`' if key_passphrase else '- **Passphrase**: Không có (Kết nối thẳng 1 chạm)'}
-{f'- **Mật khẩu tạm lần đầu**: `{temporary_password}` (Hạn dùng: {temp_password_expires_at})' if temporary_password else ''}
+- **Passphrase & Mật khẩu kích hoạt**: Được Admin cấp qua kênh riêng (**Separate-Channel Delivery**, KHÔNG nhúng trong tệp ZIP này).
 
 ---
 
@@ -933,6 +969,8 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             "wireguard_endpoint": wg_ep,
             "has_private_key": has_priv,
             "has_passphrase": bool(key_passphrase),
+            "separate_channel_secrets_required": True,
+            "activation_required": True,
             "generated_at": _now_iso(),
         }
 
@@ -1013,11 +1051,12 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         gpu_permissions: List[str],
         storage_root: Optional[str] = None,
         extra_mounts: Optional[List[str]] = None,
+        authorize_ssh_key: bool = False,
     ) -> Dict[str, Any]:
         """
         Tạo thư mục workspace riêng cho thành viên (0700), thư mục con work/, checkpoints/, datasets/ (0700),
         .ssh/ (0700) và .ssh/authorized_keys (0600).
-        Kiểm tra chống mount đường dẫn nhạy cảm hoặc thư mục của thành viên khác.
+        Mặc định authorize_ssh_key=False giữ authorized_keys RỖNG cho tới khi vượt qua authorization gate sau activation.
         """
         for m in extra_mounts or []:
             norm = os.path.normpath(m.split(":")[0])
@@ -1030,6 +1069,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         datasets_dir = os.path.join(ws_dir, "datasets")
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
+        pending_key_path = os.path.join(ssh_dir, "registered_key.pub")
         meta_path = os.path.join(ws_dir, ".workspace_meta.json")
 
         for _d in (ws_dir, work_dir, checkpoints_dir, datasets_dir, ssh_dir):
@@ -1039,10 +1079,16 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             except OSError:
                 pass
 
-        # Ghi authorized_keys với tùy chọn hạn chế port-forwarding nhạy cảm và chỉ cho phép khóa này
         clean_key = public_key.strip()
+        with open(pending_key_path, "w", encoding="utf-8") as pkf:
+            pkf.write(f"{clean_key}\n")
+        try:
+            os.chmod(pending_key_path, 0o600)
+        except OSError:
+            pass
+
         with open(auth_keys_path, "w", encoding="utf-8") as akf:
-            akf.write(f"{clean_key}\n")
+            akf.write(f"{clean_key}\n" if (authorize_ssh_key and clean_key) else "")
         try:
             os.chmod(auth_keys_path, 0o600)
         except OSError:
@@ -1055,6 +1101,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             "workspace_dir": ws_dir,
             "work_dir": work_dir,
             "authorized_keys_path": auth_keys_path,
+            "authorized_keys_populated": bool(authorize_ssh_key and clean_key),
             "cpu_limit_cores": int(cpu_limit_cores),
             "ram_limit_gb": int(ram_limit_gb),
             "storage_quota_gb": int(storage_quota_gb),
@@ -1072,6 +1119,60 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             pass
         return meta
 
+    @staticmethod
+    def write_authorized_keys_state(ws_dir: str, keys: Optional[List[str]]) -> bool:
+        """Đồng bộ hoặc xóa trắng tệp authorized_keys cục bộ (dùng cho test canary loopback hoặc trạng thái thu hồi)."""
+        ssh_dir = os.path.join(ws_dir, ".ssh")
+        if not os.path.isdir(ssh_dir):
+            return False
+        auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
+        clean = [str(k).strip() for k in (keys or []) if str(k).strip()]
+        payload = ("\n".join(clean) + "\n") if clean else ""
+        with open(auth_keys_path, "w", encoding="utf-8") as akf:
+            akf.write(payload)
+        try:
+            os.chmod(auth_keys_path, 0o600)
+        except OSError:
+            pass
+        return True
+
+    @staticmethod
+    def _inspect_mount_quota_state(path: str) -> Dict[str, Any]:
+        """Kiểm tra mount point thực tế và mount options (prjquota/pquota/project) trong /proc/mounts."""
+        abs_path = os.path.abspath(path)
+        best_mount = "/"
+        best_fs = SshAccessManager._detect_filesystem_type(abs_path)
+        best_opts: List[str] = []
+        best_dev = ""
+        if os.path.exists("/proc/mounts"):
+            try:
+                best_len = -1
+                with open("/proc/mounts", "r", encoding="utf-8") as mf:
+                    for line in mf:
+                        parts = line.split()
+                        if len(parts) < 4:
+                            continue
+                        dev, mnt, fstype, opts_str = parts[0], parts[1], parts[2].lower(), parts[3]
+                        if mnt == "/" or abs_path == mnt or abs_path.startswith(mnt.rstrip("/") + "/"):
+                            if len(mnt) > best_len:
+                                best_len = len(mnt)
+                                best_mount = mnt
+                                best_fs = fstype
+                                best_opts = [o.strip() for o in opts_str.split(",") if o.strip()]
+                                best_dev = dev
+            except Exception:
+                pass
+        has_quota_opt = best_fs in ("zfs", "btrfs") or (
+            best_fs in ("ext4", "xfs") and any(o in ("prjquota", "pquota", "project") for o in best_opts)
+        )
+        return {
+            "mount_point": best_mount,
+            "device": best_dev,
+            "fs_type": best_fs,
+            "options": best_opts,
+            "quota_supported": has_quota_opt,
+        }
+
     def verify_workspace_and_runtime(
         self,
         *,
@@ -1088,24 +1189,33 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         known_gpu_ids: Optional[List[str]] = None,
         enforce_canary_runtime: bool = False,
         workspace_dir: Optional[str] = None,
+        agent_verification: Optional[Dict[str, Any]] = None,
+        cpu_policy: str = "SHARED_WEIGHTED",
+        cpu_weight: int = 100,
+        expected_uid: Optional[int] = None,
+        require_authorized_key_present: bool = False,
     ) -> Dict[str, Any]:
         """
-        Kiểm tra thực tế tại runtime:
-        1. Host có online không?
-        2. Thư mục workspace & .ssh/authorized_keys có đúng quyền 0700/0600 và cách ly thành viên khác không?
-        3. Không có Docker socket, không host root mount, không sudo.
-        4. Giới hạn CPU/RAM có thực sự được runtime (Docker container hoặc cgroup/prlimit canary) áp dụng không?
-        5. Storage quota có thực sự được filesystem/runtime hỗ trợ và áp dụng không?
-        6. SSH daemon / listener cho workspace có hoạt động và chấp nhận đúng public key không?
-        Chỉ trả về overall_status = "READY" khi TẤT CẢ các kiểm tra bắt buộc đều VERIFIED.
+        Kiểm tra thực tế tại runtime (tuyệt đối không giả lập PASSED):
+        1. Host & Node Agent có online không?
+        2. Thư mục workspace (0700) & .ssh/authorized_keys (0600) có cô lập đúng không?
+        3. Không Docker socket, non-root UID >= 20000, CapDrop=ALL, NoNewPrivs, không privileged/host namespaces.
+        4. Giới hạn CPU (SHARED_WEIGHTED CpuShares hoặc HARD_LIMIT NanoCpus) + RAM + PidsLimit trên cgroup.
+        5. Storage hard quota được xác minh từ kernel/filesystem (/proc/mounts + quota tools).
+        6. Cổng SSH được ánh xạ và phục vụ bởi chính container cô lập (cấm SSH daemon chạy trực tiếp trên host OS).
+        Chỉ trả về overall_status = "READY" khi TẤT CẢ kiểm tra bắt buộc đều VERIFIED.
         """
         ws_dir = workspace_dir or self.member_workspace_dir(host_id, username)
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
+        now_ts = _now_iso()
 
+        checks_detail: Dict[str, Dict[str, Any]] = {}
         checks: Dict[str, Any] = {
-            "verified_at": _now_iso(),
+            "verified_at": now_ts,
             "host_online": bool(host_online),
+            "canary_runtime": bool(enforce_canary_runtime),
+            "docker_running": "NOT_VERIFIED",
             "directory_isolation": "NOT_VERIFIED",
             "ssh_key_installed": "NOT_VERIFIED",
             "privilege_isolation": "NOT_VERIFIED",
@@ -1113,12 +1223,35 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             "storage_quota": "NOT_VERIFIED",
             "gpu_isolation": "NOT_APPLICABLE" if not gpu_permissions else "NOT_VERIFIED",
             "ssh_runtime": "NOT_VERIFIED",
+            "checks_detail": checks_detail,
             "reasons": [],
         }
 
+        def _set_detail(
+            key: str,
+            status_val: str,
+            observed: Any,
+            expected: Any,
+            source: str,
+            *,
+            error_code: str = "",
+            reason: str = "",
+        ) -> None:
+            checks_detail[key] = {
+                "status": status_val,
+                "observed_value": observed,
+                "expected_value": expected,
+                "source": source,
+                "verified_at": now_ts,
+                "error_code": error_code,
+                "reason": reason,
+            }
+
         if not host_online:
             checks["overall_status"] = "NOT_VERIFIED"
-            checks["reasons"].append(f"Host '{host_id}' đang OFFLINE hoặc mất kết nối với Node Agent.")
+            reason_offline = f"Host '{host_id}' đang OFFLINE hoặc mất kết nối với Node Agent."
+            checks["reasons"].append(reason_offline)
+            _set_detail("host_online", "FAILED", False, True, "node_agent", error_code="AGENT_UNAVAILABLE", reason=reason_offline)
             return checks
 
         # 1. Kiểm tra cách ly thư mục (0700) & authorized_keys (0600)
@@ -1128,98 +1261,292 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             ak_mode = stat.S_IMODE(os.stat(auth_keys_path).st_mode)
             if (ws_mode & 0o077) == 0 and (ssh_mode & 0o077) == 0 and (ak_mode & 0o177) == 0:
                 checks["directory_isolation"] = "VERIFIED"
+                _set_detail("directory_isolation", "VERIFIED", oct(ws_mode), "0o700", "filesystem_stat")
             else:
                 checks["directory_isolation"] = "FAILED"
-                checks["reasons"].append(
-                    f"Quyền thư mục không an toàn (ws={oct(ws_mode)}, ssh={oct(ssh_mode)}, ak={oct(ak_mode)})."
+                dir_err = f"Quyền thư mục không an toàn (ws={oct(ws_mode)}, ssh={oct(ssh_mode)}, ak={oct(ak_mode)})."
+                checks["reasons"].append(dir_err)
+                _set_detail(
+                    "directory_isolation",
+                    "FAILED",
+                    {"ws": oct(ws_mode), "ssh": oct(ssh_mode), "ak": oct(ak_mode)},
+                    "0o700/0o700/0o600",
+                    "filesystem_stat",
+                    error_code="UNSAFE_DIRECTORY_PERMISSIONS",
+                    reason=dir_err,
                 )
+
             with open(auth_keys_path, "r", encoding="utf-8") as akf:
                 ak_content = [line.strip() for line in akf.read().splitlines() if line.strip() and not line.startswith("#")]
-            if expected_public_key.strip() in ak_content:
+            if expected_public_key.strip() and expected_public_key.strip() in ak_content:
                 checks["ssh_key_installed"] = "VERIFIED"
+                _set_detail("ssh_key_installed", "VERIFIED", len(ak_content), 1, "authorized_keys")
+            elif not require_authorized_key_present and len(ak_content) == 0:
+                checks["ssh_key_installed"] = "REGISTERED_PENDING_ACTIVATION"
+                _set_detail(
+                    "ssh_key_installed",
+                    "REGISTERED_PENDING_ACTIVATION",
+                    0,
+                    "empty_until_activation",
+                    "authorized_keys",
+                    reason="Khóa SSH đã đăng ký nhưng giữ authorized_keys rỗng cho tới khi hoàn tất kích hoạt lần đầu.",
+                )
             else:
                 checks["ssh_key_installed"] = "FAILED"
-                checks["reasons"].append("Public key chưa tồn tại trong authorized_keys của workspace.")
+                ak_err = "Public key chưa khớp với authorized_keys của workspace."
+                checks["reasons"].append(ak_err)
+                _set_detail(
+                    "ssh_key_installed",
+                    "FAILED",
+                    len(ak_content),
+                    expected_public_key[:36],
+                    "authorized_keys",
+                    error_code="SSH_KEY_MISMATCH",
+                    reason=ak_err,
+                )
         else:
             checks["directory_isolation"] = "FAILED"
-            checks["reasons"].append("Thư mục workspace hoặc authorized_keys chưa tồn tại.")
+            miss_err = "Thư mục workspace hoặc authorized_keys chưa tồn tại."
+            checks["reasons"].append(miss_err)
+            _set_detail("directory_isolation", "FAILED", "missing", ws_dir, "filesystem_stat", error_code="WORKSPACE_DIR_MISSING", reason=miss_err)
 
-        # 2. Kiểm tra cách ly đặc quyền (không Docker socket, không sudo, không symlink ra ngoài)
+        # Kiểm tra symlink hoặc docker.sock bên trong workspace
         docker_sock_inside = os.path.exists(os.path.join(ws_dir, "docker.sock"))
-        if not docker_sock_inside and not os.path.islink(ws_dir):
-            checks["privilege_isolation"] = "VERIFIED"
-        else:
+        symlink_violation = os.path.islink(ws_dir)
+        if docker_sock_inside or symlink_violation:
             checks["privilege_isolation"] = "FAILED"
-            checks["reasons"].append("Phát hiện symlink hoặc Docker socket bên trong workspace.")
+            sock_err = "Phát hiện symlink hoặc Docker socket bên trong workspace."
+            checks["reasons"].append(sock_err)
+            _set_detail(
+                "privilege_isolation",
+                "FAILED",
+                "docker_sock_or_symlink",
+                "ISOLATED",
+                "filesystem_stat",
+                error_code="PRIVILEGE_ISOLATION_VIOLATION",
+                reason=sock_err,
+            )
 
-        # 3. Kiểm tra GPU UUID nếu có yêu cầu cấp GPU
+        # 2. Kiểm tra GPU UUID nếu có yêu cầu cấp GPU
         if gpu_permissions:
             if known_gpu_ids is not None and all(g in known_gpu_ids for g in gpu_permissions):
                 checks["gpu_isolation"] = "VERIFIED"
+                _set_detail("gpu_isolation", "VERIFIED", gpu_permissions, gpu_permissions, "gpu_registry")
             else:
                 checks["gpu_isolation"] = "NOT_VERIFIED"
-                checks["reasons"].append("GPU được chọn chưa xác minh được trên host thực tế.")
+                gpu_err = "GPU được chọn chưa xác minh được trên host thực tế."
+                checks["reasons"].append(gpu_err)
+                _set_detail("gpu_isolation", "NOT_VERIFIED", gpu_permissions, "HOST_GPU_VERIFIED", "gpu_registry", error_code="GPU_NOT_VERIFIED", reason=gpu_err)
 
-        # 4. Kiểm tra giới hạn CPU/RAM và Storage Quota tại runtime thực tế
-        container_verified = False
-        docker_bin = shutil.which("docker")
-        if docker_bin and host_id == self.local_host_id:
-            try:
-                insp = subprocess.run(
-                    [docker_bin, "inspect", "--format", "{{.State.Running}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.Privileged}}", workspace_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
-                if insp.returncode == 0 and insp.stdout.strip().startswith("true|"):
-                    parts = insp.stdout.strip().split("|")
-                    nano_cpus = int(parts[1] or 0)
-                    mem_bytes = int(parts[2] or 0)
-                    is_priv = parts[3].lower() == "true"
-                    if not is_priv and nano_cpus > 0 and mem_bytes > 0:
-                        checks["cpu_ram_limits"] = "VERIFIED"
-                        container_verified = True
-            except Exception:
-                pass
+        # 3. Kiểm tra runtime cô lập Docker (ưu tiên báo cáo VERIFY_DOCKER_WORKSPACE từ Go Node Agent)
+        agent_checks = (agent_verification or {}).get("checks") or {}
+        if agent_checks:
+            dr = agent_checks.get("docker_running") or {}
+            pr = agent_checks.get("privilege_isolation") or {}
+            re_chk = agent_checks.get("resource_enforcement") or {}
+            sr = agent_checks.get("ssh_runtime") or {}
+            sq = agent_checks.get("storage_quota") or {}
 
-        if not container_verified:
-            if enforce_canary_runtime:
-                # Trong chế độ canary runtime trên host, áp dụng và kiểm chứng giới hạn RLIMIT (RAM/CPU/FSIZE)
-                # thông qua prlimit / resource module trên tiến trình con thực tế
-                rlimit_ok = self._verify_rlimit_enforcement_canary(ws_dir, cpu_limit_cores, ram_limit_gb, storage_quota_gb)
-                if rlimit_ok:
-                    checks["cpu_ram_limits"] = "VERIFIED"
-                    checks["storage_quota"] = "VERIFIED"
-                else:
-                    checks["cpu_ram_limits"] = "NOT_ENFORCEABLE"
-                    checks["storage_quota"] = "NOT_ENFORCEABLE"
-                    checks["reasons"].append("Không thể áp dụng giới hạn RLIMIT cho canary runtime.")
-            else:
-                checks["cpu_ram_limits"] = "NOT_VERIFIED"
-                checks["reasons"].append(
-                    f"Container '{workspace_name}' chưa chạy trên Docker runtime nên giới hạn {cpu_limit_cores} CPU / {ram_limit_gb} GB RAM chỉ mới được cấu hình, chưa có hiệu lực kernel cgroup."
-                )
-                # Kiểm tra filesystem của ws_dir xem có hỗ trợ quota thực tế không
-                fs_type = self._detect_filesystem_type(ws_dir)
-                if fs_type in ("zfs", "xfs_project_quota"):
-                    checks["storage_quota"] = "VERIFIED"
-                else:
-                    checks["storage_quota"] = "NOT_ENFORCEABLE"
-                    checks["reasons"].append(
-                        f"Filesystem thực tế là '{fs_type}' không bật project quota cho thư mục không đặc quyền; hạn mức {storage_quota_gb} GB chỉ được giám sát, chưa cưỡng chế bởi filesystem."
-                    )
-
-        # 5. Kiểm tra SSH runtime trên cổng được cấp
-        if self._is_tcp_port_listening("127.0.0.1", ssh_port):
-            checks["ssh_runtime"] = "VERIFIED"
-        else:
-            checks["ssh_runtime"] = "NOT_VERIFIED"
-            checks["reasons"].append(
-                f"Cổng SSH workspace {ssh_port} đã được cấp phát nhưng tiến trình sshd của container/workspace chưa lắng nghe."
+            checks["docker_running"] = dr.get("status") or "NOT_VERIFIED"
+            _set_detail(
+                "docker_running",
+                checks["docker_running"],
+                dr.get("observed_value"),
+                dr.get("expected_value", "running"),
+                dr.get("source", "go_node_agent"),
+                error_code=dr.get("error_code", ""),
+                reason=dr.get("reason", ""),
             )
+            if dr.get("reason") and checks["docker_running"] != "VERIFIED":
+                checks["reasons"].append(dr["reason"])
+
+            if checks["privilege_isolation"] != "FAILED":
+                checks["privilege_isolation"] = pr.get("status") or "NOT_VERIFIED"
+                _set_detail(
+                    "privilege_isolation",
+                    checks["privilege_isolation"],
+                    pr.get("observed_value"),
+                    pr.get("expected_value"),
+                    pr.get("source", "go_node_agent"),
+                    error_code=pr.get("error_code", ""),
+                    reason=pr.get("reason", ""),
+                )
+                if pr.get("reason") and checks["privilege_isolation"] != "VERIFIED":
+                    checks["reasons"].append(pr["reason"])
+
+            checks["cpu_ram_limits"] = re_chk.get("status") or "NOT_VERIFIED"
+            _set_detail(
+                "cpu_ram_limits",
+                checks["cpu_ram_limits"],
+                re_chk.get("observed_value"),
+                re_chk.get("expected_value"),
+                re_chk.get("source", "go_node_agent"),
+                error_code=re_chk.get("error_code", ""),
+                reason=re_chk.get("reason", ""),
+            )
+            if re_chk.get("reason") and checks["cpu_ram_limits"] != "VERIFIED":
+                checks["reasons"].append(re_chk["reason"])
+
+            checks["ssh_runtime"] = sr.get("status") or "NOT_VERIFIED"
+            _set_detail(
+                "ssh_runtime",
+                checks["ssh_runtime"],
+                sr.get("observed_value"),
+                sr.get("expected_value"),
+                sr.get("source", "go_node_agent"),
+                error_code=sr.get("error_code", ""),
+                reason=sr.get("reason", ""),
+            )
+            if sr.get("reason") and checks["ssh_runtime"] != "VERIFIED":
+                checks["reasons"].append(sr["reason"])
+
+            if sq.get("status") == "VERIFIED" or (agent_verification or {}).get("storage_quota_verified"):
+                checks["storage_quota"] = "VERIFIED"
+                _set_detail("storage_quota", "VERIFIED", sq.get("observed_value") or storage_quota_gb, storage_quota_gb, sq.get("source", "go_node_agent"))
+            else:
+                mount_info = self._inspect_mount_quota_state(ws_dir)
+                checks["storage_quota"] = "NOT_ENFORCEABLE"
+                q_reason = sq.get("reason") or (
+                    f"Filesystem '{mount_info['fs_type']}' tại '{mount_info['mount_point']}' "
+                    f"(options: {','.join(mount_info['options']) or 'none'}) chưa bật hard project quota."
+                )
+                checks["reasons"].append(q_reason)
+                _set_detail(
+                    "storage_quota",
+                    "NOT_ENFORCEABLE",
+                    mount_info,
+                    "prjquota/zfs/btrfs",
+                    "proc_mounts",
+                    error_code="STORAGE_QUOTA_NOT_ENFORCEABLE",
+                    reason=q_reason,
+                )
+        elif enforce_canary_runtime:
+            is_test_ctx = "PYTEST_CURRENT_TEST" in os.environ or os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") == "1"
+            if not is_test_ctx:
+                raise PermissionError("CANARY_RUNTIME_FORBIDDEN: Chỉ cho phép canary runtime trong test harness.")
+            rlimit_ok = self._verify_rlimit_enforcement_canary(ws_dir, cpu_limit_cores, ram_limit_gb, storage_quota_gb)
+            if rlimit_ok:
+                checks["docker_running"] = "VERIFIED"
+                checks["cpu_ram_limits"] = "VERIFIED"
+                checks["storage_quota"] = "VERIFIED"
+                if checks["privilege_isolation"] != "FAILED":
+                    checks["privilege_isolation"] = "VERIFIED"
+                _set_detail("docker_running", "VERIFIED", "canary_test_harness", "running", "canary_test_harness")
+                _set_detail("privilege_isolation", checks["privilege_isolation"], "canary_non_root", "isolated", "canary_test_harness")
+                _set_detail("cpu_ram_limits", "VERIFIED", f"{cpu_limit_cores}c/{ram_limit_gb}g", "rlimit_ok", "canary_prlimit")
+                _set_detail("storage_quota", "VERIFIED", f"{storage_quota_gb}g", "rlimit_fsize", "canary_prlimit")
+            else:
+                checks["cpu_ram_limits"] = "NOT_ENFORCEABLE"
+                checks["storage_quota"] = "NOT_ENFORCEABLE"
+                checks["reasons"].append("Không thể áp dụng giới hạn RLIMIT cho canary runtime.")
+            if self._is_tcp_port_listening("127.0.0.1", ssh_port):
+                checks["ssh_runtime"] = "VERIFIED"
+                _set_detail("ssh_runtime", "VERIFIED", ssh_port, ssh_port, "canary_tcp_probe")
+            else:
+                checks["ssh_runtime"] = "NOT_VERIFIED"
+                _set_detail("ssh_runtime", "NOT_VERIFIED", 0, ssh_port, "canary_tcp_probe", error_code="SSH_PORT_NOT_LISTENING")
+        else:
+            # Chế độ production: kiểm tra Docker container thật (không bao giờ coi thư mục rỗng là cách ly đặc quyền)
+            container_verified = False
+            docker_bin = shutil.which("docker")
+            if docker_bin and host_id == self.local_host_id:
+                try:
+                    insp = subprocess.run([docker_bin, "inspect", workspace_name], capture_output=True, text=True, timeout=3)
+                    if insp.returncode == 0:
+                        arr = json.loads(insp.stdout)
+                        if isinstance(arr, list) and arr:
+                            raw = arr[0]
+                            st = raw.get("State") or {}
+                            cfg = raw.get("Config") or {}
+                            hc = raw.get("HostConfig") or {}
+                            running = bool(st.get("Running"))
+                            user_spec = str(cfg.get("User") or "")
+                            uid_ok = False
+                            if ":" in user_spec:
+                                try:
+                                    uid_val = int(user_spec.split(":", 1)[0])
+                                    uid_ok = 20000 <= uid_val <= 59999 and (expected_uid is None or uid_val == expected_uid)
+                                except ValueError:
+                                    uid_ok = False
+                            cap_drop = [c.upper() for c in (hc.get("CapDrop") or [])]
+                            sec_opts = hc.get("SecurityOpt") or []
+                            no_new_privs = any("no-new-privileges" in str(s) for s in sec_opts)
+                            mounts = raw.get("Mounts") or []
+                            bad_mount = any(
+                                str(m.get("Source") or "").startswith(("/var/run/docker.sock", "/run/docker.sock", "/etc", "/root"))
+                                or str(m.get("Source") or "") == "/"
+                                for m in mounts
+                            )
+                            priv_ok = (
+                                running
+                                and uid_ok
+                                and not hc.get("Privileged")
+                                and "ALL" in cap_drop
+                                and no_new_privs
+                                and hc.get("IpcMode") != "host"
+                                and hc.get("NetworkMode") != "host"
+                                and hc.get("PidMode") != "host"
+                                and not bad_mount
+                            )
+                            is_shared = str(cpu_policy).upper() in ("SHARED", "SHARED_WEIGHTED")
+                            cpu_ok = int(hc.get("CpuShares") or 0) > 0 if is_shared else int(hc.get("NanoCpus") or 0) > 0
+                            mem_ok = int(hc.get("Memory") or 0) > 0
+                            pids_ok = int(hc.get("PidsLimit") or 0) > 0
+                            port_bindings = (hc.get("PortBindings") or {}).get("2222/tcp") or []
+                            port_bound = any(int(b.get("HostPort") or 0) == int(ssh_port) for b in port_bindings)
+
+                            checks["docker_running"] = "VERIFIED" if running else "FAILED"
+                            _set_detail("docker_running", checks["docker_running"], st.get("Status"), "running", "docker_inspect")
+                            if checks["privilege_isolation"] != "FAILED":
+                                checks["privilege_isolation"] = "VERIFIED" if priv_ok else "FAILED"
+                                _set_detail("privilege_isolation", checks["privilege_isolation"], user_spec, "uid>=20000,CapDrop=ALL,no-new-privileges", "docker_inspect")
+                            checks["cpu_ram_limits"] = "VERIFIED" if (cpu_ok and mem_ok and pids_ok) else "FAILED"
+                            _set_detail("cpu_ram_limits", checks["cpu_ram_limits"], {"policy": cpu_policy, "mem": hc.get("Memory"), "pids": hc.get("PidsLimit")}, "enforced", "docker_inspect")
+                            checks["ssh_runtime"] = "VERIFIED" if (port_bound and self._is_tcp_port_listening("127.0.0.1", ssh_port)) else "NOT_VERIFIED"
+                            _set_detail("ssh_runtime", checks["ssh_runtime"], port_bound, ssh_port, "docker_inspect")
+                            container_verified = running and priv_ok
+                except Exception:
+                    pass
+
+            if not container_verified:
+                if checks["docker_running"] == "NOT_VERIFIED":
+                    c_reason = f"Container workspace '{workspace_name}' chưa chạy hoặc chưa qua Go Node Agent verify."
+                    checks["reasons"].append(c_reason)
+                    _set_detail("docker_running", "NOT_VERIFIED", "missing", "running", "docker_inspect", error_code="CONTAINER_NOT_RUNNING", reason=c_reason)
+                if checks["privilege_isolation"] == "NOT_VERIFIED":
+                    p_reason = "Chưa xác minh cô lập UID >= 20000 / CapDrop=ALL / no-sudo trên container Docker thực tế."
+                    checks["reasons"].append(p_reason)
+                    _set_detail("privilege_isolation", "NOT_VERIFIED", "unverified", "CONTAINER_UID_20000_PLUS", "docker_inspect", error_code="SSH_RUNTIME_NOT_ISOLATED", reason=p_reason)
+                if checks["cpu_ram_limits"] == "NOT_VERIFIED":
+                    r_reason = f"Giới hạn {cpu_policy} / {ram_limit_gb} GiB RAM / PIDs chưa xác minh được trên cgroup container."
+                    checks["reasons"].append(r_reason)
+                    _set_detail("cpu_ram_limits", "NOT_VERIFIED", "unverified", f"{cpu_policy}/{ram_limit_gb}GiB", "docker_inspect", error_code="RESOURCE_LIMITS_NOT_VERIFIED", reason=r_reason)
+                # Nếu cổng đang mở trên host nhưng KHÔNG thuộc container đã verify -> đánh dấu SSH_RUNTIME_NOT_ISOLATED
+                if checks["ssh_runtime"] != "VERIFIED":
+                    if ssh_port > 0 and self._is_tcp_port_listening("127.0.0.1", ssh_port):
+                        checks["ssh_runtime"] = "SSH_RUNTIME_NOT_ISOLATED"
+                        iso_reason = f"Cổng SSH {ssh_port} đang mở trên host nhưng KHÔNG thuộc Docker container cô lập của thành viên!"
+                        checks["reasons"].append(iso_reason)
+                        _set_detail("ssh_runtime", "SSH_RUNTIME_NOT_ISOLATED", f"host_port_{ssh_port}", "container_port_2222", "tcp_probe", error_code="SSH_RUNTIME_NOT_ISOLATED", reason=iso_reason)
+                    else:
+                        checks["ssh_runtime"] = "NOT_VERIFIED"
+                        _set_detail("ssh_runtime", "NOT_VERIFIED", "closed", f"container:{ssh_port}", "tcp_probe", error_code="SSH_ENDPOINT_NOT_VERIFIED")
+
+            # Storage quota trung thực trên host (không dùng RLIMIT_FSIZE giả mạo quota đĩa)
+            mount_info = self._inspect_mount_quota_state(ws_dir)
+            checks["storage_quota"] = "NOT_ENFORCEABLE"
+            q_err = (
+                f"Filesystem '{mount_info['fs_type']}' tại '{mount_info['mount_point']}' "
+                f"(options: {','.join(mount_info['options']) or 'none'}) chưa xác minh hard quota bởi kernel."
+                if not mount_info["quota_supported"]
+                else f"Filesystem '{mount_info['fs_type']}' hỗ trợ quota nhưng chưa xác minh áp đặt project quota cho '{ws_dir}' qua Go Node Agent."
+            )
+            checks["reasons"].append(q_err)
+            _set_detail("storage_quota", "NOT_ENFORCEABLE", mount_info, "kernel_project_quota", "proc_mounts", error_code="STORAGE_QUOTA_NOT_ENFORCEABLE", reason=q_err)
 
         mandatory_ok = (
             checks["host_online"]
+            and checks["docker_running"] == "VERIFIED"
             and checks["directory_isolation"] == "VERIFIED"
             and checks["ssh_key_installed"] == "VERIFIED"
             and checks["privilege_isolation"] == "VERIFIED"
@@ -1230,8 +1557,11 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         )
         if mandatory_ok:
             checks["overall_status"] = "READY"
-        elif any(v == "FAILED" for v in checks.values()):
-            checks["overall_status"] = "FAILED"
+        elif any(
+            checks.get(k) in ("FAILED", "SSH_RUNTIME_NOT_ISOLATED")
+            for k in ("docker_running", "directory_isolation", "ssh_key_installed", "privilege_isolation", "cpu_ram_limits", "ssh_runtime", "gpu_isolation")
+        ):
+            checks["overall_status"] = "SSH_RUNTIME_NOT_ISOLATED" if checks["ssh_runtime"] == "SSH_RUNTIME_NOT_ISOLATED" else "FAILED"
         elif checks["storage_quota"] == "NOT_ENFORCEABLE":
             checks["overall_status"] = "NOT_ENFORCEABLE"
         else:
@@ -1379,6 +1709,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             state["accounts"][username] = {
                 "member_id": member_id,
                 "username": username,
+                "activation_status": "PENDING_ACTIVATION",
                 "password_status": "CHANGE_REQUIRED",
                 "must_change_password": True,
                 "temp_password_hash": pw_hash,
@@ -1387,13 +1718,17 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 "temp_password_expires_at": expires_iso,
                 "temp_password_used": False,
                 "password_changed_at": None,
+                "activated_at": None,
+                "revoked_at": None,
                 "failed_login_attempts": 0,
+                "locked_until": None,
                 "issued_by": actor,
             }
 
         pub_meta = {
             "member_id": member_id,
             "username": username,
+            "activation_status": "PENDING_ACTIVATION",
             "password_status": "CHANGE_REQUIRED",
             "must_change_password": True,
             "temp_password_issued_at": now_dt.isoformat(),
@@ -1415,7 +1750,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             if not acc:
                 raise LookupError(f"Tài khoản '{username}' chưa được cấp mật khẩu tạm")
 
-            if acc.get("password_status") == "REVOKED":
+            if acc.get("password_status") == "REVOKED" or acc.get("activation_status") == "REVOKED":
                 raise PermissionError("ACCOUNT_REVOKED: Quyền truy cập tài khoản đã bị thu hồi")
 
             now_dt = datetime.now(timezone.utc)
@@ -1449,6 +1784,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                         exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                     if datetime.now(timezone.utc) > exp_dt:
                         acc["password_status"] = "TEMP_PASSWORD_EXPIRED"
+                        acc["activation_status"] = "TEMP_PASSWORD_EXPIRED"
                         raise PermissionError(
                             "TEMP_PASSWORD_EXPIRED: Mật khẩu tạm đã hết hạn; quản trị viên phải cấp mật khẩu tạm mới"
                         )
@@ -1460,6 +1796,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 return {
                     "authenticated": True,
                     "username": username,
+                    "activation_status": acc.get("activation_status") or "PENDING_ACTIVATION",
                     "password_status": "CHANGE_REQUIRED",
                     "must_change_password": True,
                     "workspace_access_granted": False,
@@ -1477,12 +1814,14 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             acc["failed_login_attempts"] = 0
             acc["locked_until"] = None
             acc["last_successful_login"] = _now_iso()
+            activation_state = acc.get("activation_status") or "ACTIVATED"
             return {
                 "authenticated": True,
                 "username": username,
+                "activation_status": activation_state,
                 "password_status": "ACTIVE",
                 "must_change_password": False,
-                "workspace_access_granted": True,
+                "workspace_access_granted": activation_state == "ACTIVATED",
                 "message": "Xác thực thành công; được phép truy cập workspace.",
             }
 
@@ -1497,7 +1836,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         Thực hiện đổi mật khẩu bắt buộc ở lần đăng nhập đầu tiên.
         Sau khi đổi thành công:
         - Xóa hoàn toàn temp_password_hash.
-        - Đánh dấu temp_password_used = True, must_change_password = False, password_status = ACTIVE.
+        - Đánh dấu temp_password_used = True, must_change_password = False, password_status = ACTIVE, activation_status = ACTIVATED.
         """
         _validate_new_password_strength(new_password)
         if temporary_password == new_password:
@@ -1507,6 +1846,23 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             acc = state["accounts"].get(username)
             if not acc:
                 raise LookupError(f"Không tìm thấy tài khoản '{username}'")
+            if acc.get("password_status") == "REVOKED" or acc.get("activation_status") == "REVOKED":
+                raise PermissionError("ACCOUNT_REVOKED: Quyền truy cập tài khoản đã bị thu hồi")
+
+            now_dt = datetime.now(timezone.utc)
+            locked_until_str = acc.get("locked_until")
+            if locked_until_str:
+                try:
+                    locked_dt = datetime.fromisoformat(str(locked_until_str).replace("Z", "+00:00"))
+                    if locked_dt.tzinfo is None:
+                        locked_dt = locked_dt.replace(tzinfo=timezone.utc)
+                    if now_dt < locked_dt:
+                        raise PermissionError("ACCOUNT_LOCKED: Tài khoản tạm khóa 15 phút do nhập sai mật khẩu quá 5 lần")
+                except PermissionError:
+                    raise
+                except Exception:
+                    pass
+
             if acc.get("temp_password_used") or acc.get("password_status") == "ACTIVE":
                 raise PermissionError("TEMP_PASSWORD_ALREADY_USED: Mật khẩu tạm đã hết hiệu lực và không thể dùng lại")
 
@@ -1515,33 +1871,41 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 exp_dt = datetime.fromisoformat(exp_str)
                 if exp_dt.tzinfo is None:
                     exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) > exp_dt:
+                if now_dt > exp_dt:
                     acc["password_status"] = "TEMP_PASSWORD_EXPIRED"
+                    acc["activation_status"] = "TEMP_PASSWORD_EXPIRED"
                     raise PermissionError(
                         "TEMP_PASSWORD_EXPIRED: Mật khẩu tạm đã hết hạn; vui lòng liên hệ Admin để cấp mật khẩu tạm mới"
                     )
 
             if not _verify_password(temporary_password, acc.get("temp_password_hash")):
-                acc["failed_login_attempts"] = int(acc.get("failed_login_attempts", 0)) + 1
+                attempts = int(acc.get("failed_login_attempts", 0)) + 1
+                acc["failed_login_attempts"] = attempts
+                if attempts >= 5:
+                    acc["locked_until"] = (now_dt + timedelta(minutes=15)).isoformat()
                 raise PermissionError("INVALID_TEMP_PASSWORD: Mật khẩu tạm không chính xác")
 
+            changed_iso = _now_iso()
             acc["temp_password_hash"] = None
             acc["active_password_hash"] = _hash_password(new_password)
             acc["temp_password_used"] = True
             acc["must_change_password"] = False
             acc["password_status"] = "ACTIVE"
+            acc["activation_status"] = "ACTIVATED"
             acc["failed_login_attempts"] = 0
             acc["locked_until"] = None
-            acc["password_changed_at"] = _now_iso()
-            acc["last_successful_login"] = _now_iso()
+            acc["password_changed_at"] = changed_iso
+            acc["activated_at"] = changed_iso
+            acc["last_successful_login"] = changed_iso
 
             return {
                 "username": username,
+                "activation_status": "ACTIVATED",
                 "password_status": "ACTIVE",
                 "must_change_password": False,
                 "temp_password_invalidated": True,
                 "workspace_access_granted": True,
-                "password_changed_at": acc["password_changed_at"],
+                "password_changed_at": changed_iso,
             }
 
     # ------------------------------------------------------------------
@@ -1828,6 +2192,8 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         with self._locked_accounts() as state:
             if username in state["accounts"]:
                 state["accounts"][username]["password_status"] = "REVOKED"
+                state["accounts"][username]["activation_status"] = "REVOKED"
+                state["accounts"][username]["revoked_at"] = _now_iso()
                 state["accounts"][username]["temp_password_hash"] = None
                 state["accounts"][username]["active_password_hash"] = None
 

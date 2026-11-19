@@ -212,7 +212,7 @@ async def rotate_ssh_keypair(
     payload: Optional[Dict[str, Any]] = None,
     p: Principal = Depends(require_admin),
 ) -> Dict[str, Any]:
-    require_passphrase = bool((payload or {}).get("require_passphrase", False))
+    require_passphrase = bool((payload or {}).get("require_passphrase", True))
     try:
         return service.rotate_member_ssh_keypair(
             member_id, actor=p.username, require_passphrase=require_passphrase
@@ -258,6 +258,17 @@ async def terminate_ssh_sessions(
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/ssh-access/{member_id}/verify")
+async def verify_member_workspace_runtime(
+    member_id: str,
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        return service.reverify_member_workspace(member_id, actor=p.username)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/ssh-access/first-login-change-password")

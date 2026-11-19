@@ -225,7 +225,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
         )
         self.assertEqual(m_unverified_quota["ssh_status"], "SSH_ACCESS_DENIED")
         self.assertEqual(m_unverified_quota["runtime_verification"]["directory_isolation"], "VERIFIED")
-        self.assertEqual(m_unverified_quota["runtime_verification"]["ssh_key_installed"], "VERIFIED")
+        self.assertEqual(m_unverified_quota["runtime_verification"]["ssh_key_installed"], "REGISTERED_PENDING_ACTIVATION")
         self.assertEqual(m_unverified_quota["runtime_verification"]["storage_quota"], "NOT_ENFORCEABLE")
 
     def test_03_private_key_passphrase_and_temp_password_never_in_disk_logs_or_audit(self) -> None:
@@ -382,7 +382,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
         self.assertEqual(member["ssh_key_status"], "PENDING_REVOKE")
 
     def test_07_real_canary_sshd_passphrase_key_connect_and_revoke_blocks_new_connections(self) -> None:
-        """[PASS_REAL] Canary sshd thật trên host cục bộ: kết nối bằng private key có passphrase -> READY -> thu hồi -> chặn kết nối mới (VERIFIED_REVOKED)."""
+        """[PASS_REAL] Canary sshd thật: bị CHẶN trước khi đổi mật khẩu lần đầu -> ACTIVATED/READY -> kết nối passphrase -> thu hồi (VERIFIED_REVOKED)."""
         member = self.svc.provision_member_ssh_access({
             "full_name": "Canary Real SSH User",
             "username": "canary_real",
@@ -393,13 +393,35 @@ class TestAdminSshLifecycle(unittest.TestCase):
             "enforce_canary_runtime": True,
             "_actor_id": "admin_root",
         })
-        # Đã qua toàn bộ kiểm tra runtime thực tế trên máy thật -> READY
-        self.assertEqual(member["status"], "READY")
-        self.assertEqual(member["provisioning_state"], "READY")
-        self.assertEqual(member["runtime_verification"]["overall_status"], "READY")
+        # Gate: Chưa đổi mật khẩu lần đầu -> PENDING_ACTIVATION, KHÔNG được READY, authorized_keys còn trống
+        self.assertEqual(member["activation_status"], "PENDING_ACTIVATION")
+        self.assertNotEqual(member["status"], "READY")
+        self.assertNotEqual(member["overall_readiness"], "READY")
+        self.assertFalse(member["authorization_gate"]["ssh_authorized"])
 
         bundle = self.svc.claim_member_key_bundle(member["id"], actor="admin_root")
         secrets_pkg = self.svc.claim_member_secrets(member["id"], actor="admin_root")
+
+        # 0. Thử SSH trước khi kích hoạt tài khoản -> PHẢI BỊ TỪ CHỐI
+        probe_pre_activation = self.svc.ssh_access_manager.verify_canary_ssh_connection(
+            port=int(member["ssh_port"]),
+            encrypted_private_key=bundle["encrypted_private_key"],
+            passphrase=secrets_pkg["key_passphrase"],
+        )
+        self.assertFalse(probe_pre_activation["accepted"], "Cấm cho phép SSH trước khi đổi mật khẩu tạm lần đầu")
+
+        # 0b. Hoàn tất kích hoạt lần đầu -> mở gate và chuyển sang ACTIVATED + READY
+        act = self.svc.change_member_first_login_password(
+            member["username"],
+            secrets_pkg["temporary_password"],
+            "NewStrong#Canary2026!",
+        )
+        self.assertEqual(act["activation_status"], "ACTIVATED")
+        self.assertEqual(member["activation_status"], "ACTIVATED")
+        self.assertEqual(member["status"], "READY")
+        self.assertEqual(member["provisioning_state"], "READY")
+        self.assertEqual(member["runtime_verification"]["overall_status"], "READY")
+        self.assertTrue(member["authorization_gate"]["ssh_authorized"])
 
         # 1. Kết nối SSH thực tế bằng /usr/bin/ssh với private key mã hóa passphrase
         probe_before = self.svc.ssh_access_manager.verify_canary_ssh_connection(
@@ -407,7 +429,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
             encrypted_private_key=bundle["encrypted_private_key"],
             passphrase=secrets_pkg["key_passphrase"],
         )
-        self.assertTrue(probe_before["accepted"], f"Canary SSH phải kết nối thành công trước khi thu hồi: {probe_before}")
+        self.assertTrue(probe_before["accepted"], f"Canary SSH phải kết nối thành công sau khi kích hoạt: {probe_before}")
 
         # 2. Thu hồi quyền SSH và xác minh trực tiếp trên tiến trình sshd đang chạy
         rev = self.svc.revoke_member_ssh_access(
@@ -419,6 +441,8 @@ class TestAdminSshLifecycle(unittest.TestCase):
         self.assertEqual(rev["status"], "VERIFIED_REVOKED")
         self.assertTrue(rev["verified_revoked"])
         self.assertTrue(rev["new_connections_blocked"])
+        self.assertEqual(member["activation_status"], "REVOKED")
+        self.assertFalse(member["authorization_gate"]["ssh_authorized"])
 
         # 3. Thử kết nối mới lần nữa sau khi thu hồi -> bị sshd từ chối (Permission denied)
         probe_after = self.svc.ssh_access_manager.verify_canary_ssh_connection(
@@ -474,7 +498,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
         # 0. Gắn mock wg-easy đã đồng bộ subnet 10.88.40.0/24 & endpoint để test ZIP khi peer đã đăng ký thật
         self._attach_mock_wg_easy()
 
-        # 1. Tạo thành viên mới với SSH key do hệ thống sinh
+        # 1. Tạo thành viên mới với SSH key có passphrase do hệ thống sinh
         created = self.svc.provision_member_ssh_access({
             "full_name": "Canary Zip Member",
             "username": "canary_zip",
@@ -482,18 +506,19 @@ class TestAdminSshLifecycle(unittest.TestCase):
             "cpu_limit_cores": 2,
             "ram_limit_gb": 4,
             "storage_quota_gb": 10,
-            "require_passphrase": False,
+            "require_passphrase": True,
             "_actor_id": "admin_root",
         })
         member_id = created["id"]
         username = created["username"]
+        secrets_pkg = self.svc.claim_member_secrets(member_id, actor="admin_root")
 
         # 2. Xuất gói ZIP lần 1 qua service
         filename, zip_bytes = self.svc.claim_member_access_zip(member_id, actor="admin_root")
         self.assertEqual(filename, f"LabOps_Access_{username}.zip")
         self.assertGreater(len(zip_bytes), 1000)
 
-        # 3. Mở gói ZIP và kiểm tra cấu trúc thư mục
+        # 3. Mở gói ZIP và kiểm tra cấu trúc thư mục + chính sách Separate-Channel Secrets
         with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
             namelist = set(zf.namelist())
             prefix = f"LabOps_Access_{username}"
@@ -512,6 +537,13 @@ class TestAdminSshLifecycle(unittest.TestCase):
             self.assertIn(f"{prefix}/scripts/setup-macos.sh", namelist)
             self.assertIn(f"{prefix}/scripts/setup-linux.sh", namelist)
             self.assertIn(f"{prefix}/scripts/setup-windows.ps1", namelist)
+
+            # Kiểm tra TUYỆT ĐỐI không chứa plaintext passphrase hay temporary_password trong bất kỳ file nào trong ZIP
+            for entry_name in namelist:
+                entry_text = zf.read(entry_name).decode("utf-8", errors="ignore")
+                self.assertNotIn(secrets_pkg["temporary_password"], entry_text)
+                if secrets_pkg.get("key_passphrase"):
+                    self.assertNotIn(secrets_pkg["key_passphrase"], entry_text)
 
             # Kiểm tra nội dung khóa riêng và cấu hình
             priv_content = zf.read(f"{prefix}/ssh/id_ed25519_{username}").decode("utf-8")

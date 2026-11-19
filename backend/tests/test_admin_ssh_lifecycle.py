@@ -203,7 +203,8 @@ class TestAdminSshLifecycle(unittest.TestCase):
             "_actor_id": "admin_root",
         })
         self.assertNotEqual(m_offline["status"], "READY")
-        self.assertEqual(m_offline["provisioning_state"], "NOT_VERIFIED")
+        self.assertIn(m_offline["provisioning_state"], ("NOT_VERIFIED", "AGENT_UNAVAILABLE", "PROVISION_FAILED"))
+        self.assertEqual(m_offline["ssh_status"], "SSH_ACCESS_DENIED")
         self.assertFalse(m_offline["runtime_verification"]["host_online"])
 
         # 2. Host local đang online nhưng chưa bật container/canary runtime và ext4 không hỗ trợ quota thư mục
@@ -218,7 +219,11 @@ class TestAdminSshLifecycle(unittest.TestCase):
             "_actor_id": "admin_root",
         })
         self.assertNotEqual(m_unverified_quota["status"], "READY")
-        self.assertIn(m_unverified_quota["provisioning_state"], ("NOT_ENFORCEABLE", "NOT_VERIFIED"))
+        self.assertIn(
+            m_unverified_quota["provisioning_state"],
+            ("NOT_ENFORCEABLE", "NOT_VERIFIED", "AGENT_UNAVAILABLE", "PROVISION_FAILED"),
+        )
+        self.assertEqual(m_unverified_quota["ssh_status"], "SSH_ACCESS_DENIED")
         self.assertEqual(m_unverified_quota["runtime_verification"]["directory_isolation"], "VERIFIED")
         self.assertEqual(m_unverified_quota["runtime_verification"]["ssh_key_installed"], "VERIFIED")
         self.assertEqual(m_unverified_quota["runtime_verification"]["storage_quota"], "NOT_ENFORCEABLE")

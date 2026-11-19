@@ -1554,20 +1554,33 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         port: int = 0,
         *,
         workspace_dir: Optional[str] = None,
-        listen_address: str = "0.0.0.0",
+        listen_address: str = "127.0.0.1",
         workspace_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Khởi chạy một tiến trình /usr/sbin/sshd không đặc quyền (unprivileged) lắng nghe trên <listen_address>:<port>
-        sử dụng riêng authorized_keys của workspace thành viên và ForceCommand cô lập vào thư mục workspace.
-        - Tuyệt đối KHÔNG chạm vào cổng 22 hay /etc/ssh/sshd_config của host.
-        - Dùng cho workspace SSH thực tế trên host cục bộ và kiểm chứng runtime (PASS_REAL).
+        Khởi chạy tiến trình /usr/sbin/sshd phục vụ RIÊNG kiểm thử tự động trên loopback (127.0.0.1).
+        Bị chặn hoàn toàn trong production và khi có listen_address ngoài loopback.
         """
+        if "PYTEST_CURRENT_TEST" not in os.environ and os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") != "1":
+            raise PermissionError(
+                "HOST_SSHD_FALLBACK_FORBIDDEN_IN_PRODUCTION: Không được phép chạy canary sshd trên host trong production."
+            )
+        if listen_address not in ("127.0.0.1", "localhost"):
+            raise PermissionError(
+                f"CANARY_SSHD_LOOPBACK_ONLY: Canary sshd chỉ được lắng nghe trên 127.0.0.1 (nhận '{listen_address}')."
+            )
         sshd_bin = "/usr/sbin/sshd"
         if not os.path.exists(sshd_bin):
             raise RuntimeError("SSHD_BINARY_MISSING: Không tìm thấy /usr/sbin/sshd")
 
         ws_dir = os.path.abspath(workspace_dir or self.member_workspace_dir(host_id, username))
+        prod_ws_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "data", "workspaces")
+        )
+        if ws_dir == prod_ws_root or ws_dir.startswith(prod_ws_root + os.sep):
+            raise PermissionError(
+                "CANARY_SSHD_FORBIDDEN_IN_PRODUCTION_DATADIR: Không được phép chạy canary sshd trên thư mục workspace production."
+            )
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
         if not os.path.isfile(auth_keys_path):

@@ -1,7 +1,6 @@
 import uuid
 import re
 import base64
-import getpass
 import hashlib
 import os
 import json
@@ -197,15 +196,17 @@ class LabOpsDataService:
                 member["security_isolation_level"] = "NOT_VERIFIED"
                 if isinstance(member.get("privilege_validation"), dict):
                     member["privilege_validation"]["status"] = "NOT_VERIFIED"
+        # Bảo mật P0-1: TUYỆT ĐỐI không tự khởi chạy host SSHD dưới UID quản trị khi khởi động Control Plane.
         if self._is_live_production_data_dir:
             for member in self.members:
-                try:
-                    self._ensure_local_workspace_sshd_running(member)
-                except Exception as exc:
+                pid_file = os.path.join(
+                    str(member.get("workspace_dir") or ""), ".ssh", "canary_sshd.pid"
+                )
+                if pid_file and os.path.isfile(pid_file):
                     logger.warning(
-                        "Không thể tự khởi chạy workspace sshd cho @%s: %s",
+                        "Phát hiện tệp PID host SSHD cũ cho @%s (%s) — từ chối tự khởi chạy; yêu cầu chuyển sang Docker workspace cô lập.",
                         member.get("username"),
-                        exc,
+                        pid_file,
                     )
 
     def _sync_initial_db_state(self) -> None:
@@ -2556,33 +2557,11 @@ class LabOpsDataService:
 
     def _resolve_effective_ssh_login_user(self, username: str, server_id: str) -> str:
         """
-        Xác định tài khoản đăng nhập OpenSSH thực tế cho thành viên:
-        - Nếu container Docker ws-<username> đang chạy hoặc <username> tồn tại trong /etc/passwd: dùng <username>.
-        - Nếu dùng unprivileged workspace sshd trên host cục bộ: dùng OS user chủ tiến trình (vd: aiot-ws1) kết hợp ForceCommand.
+        Trả về đúng Linux username của thành viên bên trong container workspace cô lập.
+        TUYỆT ĐỐI không fallback sang OS user quản trị host (aiot-ws1) hoặc getpass.getuser().
         """
-        if server_id != settings.LOCAL_HOST_ID:
-            return username
-        docker_bin = shutil.which("docker")
-        ws_name = f"ws-{username}"
-        if docker_bin:
-            try:
-                insp = subprocess.run(
-                    [docker_bin, "inspect", "--format", "{{.State.Running}}", ws_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                )
-                if insp.returncode == 0 and insp.stdout.strip().lower() == "true":
-                    return username
-            except Exception:
-                pass
-        try:
-            import pwd
-            pwd.getpwnam(username)
-            return username
-        except KeyError:
-            pass
-        return getpass.getuser()
+        _ = server_id
+        return str(username or "").strip()
 
     def _resolve_member_workspace_dirs(self, member: Dict[str, Any]) -> Tuple[str, str]:
         """Trả về (primary_ws_dir, fallback_ws_dir) có thể ghi thực tế trên host cho thành viên."""
@@ -2602,77 +2581,15 @@ class LabOpsDataService:
 
     def _ensure_local_workspace_sshd_running(self, member: Dict[str, Any], *, restart: bool = False) -> bool:
         """
-        Đảm bảo các thành viên đang hoạt động trên host cục bộ có tiến trình sshd lắng nghe thực tế
-        trên 0.0.0.0:<ssh_port> (khi không có container Docker ws-<username> chạy sẵn).
+        Vô hiệu hóa vĩnh viễn fallback host SSHD (P0-1 Security Hotfix).
+        Không bao giờ khởi chạy /usr/sbin/sshd trên host quản trị cho tài khoản Researcher.
         """
-        if not getattr(self, "_is_live_production_data_dir", False):
-            return False
-        server_id = member.get("assigned_server") or member.get("server_id") or settings.LOCAL_HOST_ID
-        if server_id != settings.LOCAL_HOST_ID:
-            return False
-        if member.get("status") in {"SUSPENDED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETED", "REVOKED"}:
-            return False
-        if member.get("ssh_key_status") != "ACTIVE":
-            return False
-        public_key = str(member.get("ssh_public_key") or "").strip()
-        ssh_port = int(member.get("ssh_port") or 0)
-        username = str(member.get("username") or "").strip()
-        if not username or not public_key or ssh_port < 22000:
-            return False
-
-        primary_dir, fallback_dir = self._resolve_member_workspace_dirs(member)
-        member["workspace_dir"] = primary_dir
-        workspace_name = member.get("workspace_name") or f"ws-{username}"
-
-        for target_dir in dict.fromkeys((primary_dir, fallback_dir)):
-            try:
-                ssh_sub = os.path.join(target_dir, ".ssh")
-                for sub in (
-                    target_dir,
-                    os.path.join(target_dir, "work"),
-                    os.path.join(target_dir, "checkpoints"),
-                    os.path.join(target_dir, "datasets"),
-                    ssh_sub,
-                ):
-                    os.makedirs(sub, mode=0o700, exist_ok=True)
-                    os.chmod(sub, 0o700)
-                ak_path = os.path.join(ssh_sub, "authorized_keys")
-                with open(ak_path, "w", encoding="utf-8") as akf:
-                    akf.write(f"{public_key}\n")
-                os.chmod(ak_path, 0o600)
-            except OSError as exc:
-                logger.warning("Không thể đồng bộ thư mục SSH %s cho @%s: %s", target_dir, username, exc)
-
-        cfg_path = os.path.join(primary_dir, ".ssh", "canary_sshd_config")
-        needs_start = bool(restart) or not self.ssh_access_manager._is_tcp_port_listening("127.0.0.1", ssh_port)
-        if not needs_start and os.path.isfile(cfg_path):
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as cf:
-                    cfg_txt = cf.read()
-                if "ListenAddress 0.0.0.0" not in cfg_txt or "ForceCommand " not in cfg_txt:
-                    needs_start = True
-            except OSError:
-                pass
-
-        if needs_start:
-            try:
-                self.ssh_access_manager.start_canary_sshd_for_workspace(
-                    server_id,
-                    username,
-                    port=ssh_port,
-                    workspace_dir=primary_dir,
-                    listen_address="0.0.0.0",
-                    workspace_name=workspace_name,
-                )
-            except Exception as exc:
-                logger.warning("Không thể khởi chạy sshd workspace cho @%s (port %s): %s", username, ssh_port, exc)
-                return False
-
-        if isinstance(member.get("runtime_verification"), dict):
-            rv = member["runtime_verification"]
-            rv["ssh_runtime"] = "VERIFIED"
-            rv["reasons"] = [r for r in (rv.get("reasons") or []) if "chưa lắng nghe" not in r]
-        return True
+        _ = restart
+        logger.warning(
+            "Từ chối khởi chạy host SSHD fallback cho @%s — yêu cầu Docker workspace container cô lập qua Go Node Agent.",
+            member.get("username"),
+        )
+        return False
 
     @staticmethod
     def _is_pending_placeholder_device(device: Dict[str, Any]) -> bool:
@@ -2887,15 +2804,22 @@ class LabOpsDataService:
         member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
 
         host_online = self._is_host_online(server_id)
-        if enforce_canary_runtime and host_online:
-            canary = self.ssh_access_manager.start_canary_sshd_for_workspace(
-                server_id,
-                username,
-                port=int(member.get("ssh_port") or 0),
-                workspace_dir=ws_fs.get("workspace_dir"),
-                workspace_name=workspace_name,
-            )
-            member["ssh_port"] = canary["port"]
+        if enforce_canary_runtime:
+            is_test_ctx = "PYTEST_CURRENT_TEST" in os.environ or os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") == "1"
+            if self._is_live_production_data_dir or not is_test_ctx:
+                raise PermissionError(
+                    "CANARY_SSHD_FORBIDDEN_IN_PRODUCTION: Không được phép bật host canary SSHD trong môi trường production."
+                )
+            if host_online:
+                canary = self.ssh_access_manager.start_canary_sshd_for_workspace(
+                    server_id,
+                    username,
+                    port=int(member.get("ssh_port") or 0),
+                    workspace_dir=ws_fs.get("workspace_dir"),
+                    listen_address="127.0.0.1",
+                    workspace_name=workspace_name,
+                )
+                member["ssh_port"] = canary["port"]
         else:
             # Ủy quyền cấp phát Docker workspace qua Go Node Agent/Gateway; FastAPI không tự chạy docker run trực tiếp.
             existing_ws = [
@@ -2940,16 +2864,16 @@ class LabOpsDataService:
                     member["workspace_delegation_status"] = "VERIFIED"
                     member["workspace_agent_request_id"] = agent_res.get("request_id")
                 except NodeAgentError as na_err:
-                    member["workspace_delegation_status"] = "PENDING_AGENT_PROVISIONING"
+                    # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent lỗi
+                    delegation_status = (
+                        "AGENT_UNAVAILABLE"
+                        if na_err.code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
+                        else "PROVISION_FAILED"
+                    )
+                    member["workspace_delegation_status"] = delegation_status
                     member["workspace_delegation_reason"] = na_err.message
-                    if (
-                        server_id == settings.LOCAL_HOST_ID
-                        and payload.get("enforce_canary_runtime") is not False
-                        and self._is_live_production_data_dir
-                    ):
-                        self._ensure_local_workspace_sshd_running(member, restart=True)
             else:
-                member["workspace_delegation_status"] = "PENDING_AGENT_PROVISIONING"
+                member["workspace_delegation_status"] = "AGENT_UNAVAILABLE" if not host_online else "PROVISION_FAILED"
 
         known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
             g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
@@ -2977,11 +2901,19 @@ class LabOpsDataService:
         )
 
         overall_state = verification["overall_status"]
+        delegation_state = member.get("workspace_delegation_status")
+        if not enforce_canary_runtime and delegation_state in ("PROVISION_FAILED", "AGENT_UNAVAILABLE") and overall_state != "READY":
+            effective_prov_state = delegation_state
+            effective_ssh_status = "SSH_ACCESS_DENIED"
+        else:
+            effective_prov_state = "READY" if overall_state == "READY" else overall_state
+            effective_ssh_status = "READY" if overall_state == "READY" else "SSH_ACCESS_DENIED"
+
         # Chỉ báo READY khi TẤT CẢ kiểm tra bắt buộc đều VERIFIED
-        member["workspace_status"] = "READY" if overall_state == "READY" else overall_state
-        member["provisioning_state"] = "READY" if overall_state == "READY" else overall_state
+        member["workspace_status"] = effective_prov_state
+        member["provisioning_state"] = effective_prov_state
         member["status"] = "READY" if overall_state == "READY" else "PENDING_PROVISIONING"
-        member["ssh_status"] = "READY" if overall_state == "READY" else overall_state
+        member["ssh_status"] = effective_ssh_status
         member["ssh_key_status"] = "ACTIVE" if host_online else "PENDING_SYNC"
         member["workspace_dir"] = effective_ws_dir
         member["runtime_verification"] = verification
@@ -3200,8 +3132,6 @@ class LabOpsDataService:
             "allow_existing_member": True,
             "_actor_id": actor,
         })
-        if self._is_live_production_data_dir:
-            self._ensure_local_workspace_sshd_running(updated, restart=True)
         self.audit_logs.insert(0, {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
             "actor": actor,
@@ -3269,7 +3199,6 @@ class LabOpsDataService:
         - scripts/ (setup-macos.sh, setup-linux.sh, setup-windows.ps1)
         """
         member = self._find_member(member_id_or_username)
-        self._ensure_local_workspace_sshd_running(member)
         username = member["username"]
         assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or settings.LOCAL_HOST_ID or "workstation"
         effective_ssh_user = self._resolve_effective_ssh_login_user(username, assigned_host)

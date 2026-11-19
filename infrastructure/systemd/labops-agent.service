@@ -11,6 +11,9 @@ Group=aiot-ws1
 SupplementaryGroups=docker
 
 WorkingDirectory=/var/lib/labops-agent
+Environment=LABOPS_WORKSPACE_REGISTRY_PATH=/var/lib/labops/workspace_registry.json
+Environment=LABOPS_WORKSPACE_RUNTIME_DIR=/var/lib/labops-agent/runtime
+Environment=LABOPS_REPO_GUARD_DATA_DIR=/var/lib/labops/repositoryguard
 EnvironmentFile=/etc/labops/agent.env
 ExecStart=/usr/local/bin/labops-agent
 
@@ -21,8 +24,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# Chỉ cho phép Agent ghi registry, file passwd/group/authorized_keys read-only của container và pool dữ liệu duyệt
-ReadWritePaths=/var/lib/labops-agent /mnt/HDD3/labops/users /run/docker.sock
+# Cho phép Agent ghi workspace registry, thư mục runtime ssh_ro/passwd/group, dữ liệu pool đã duyệt (tùy chọn '-'), và Docker socket
+ReadWritePaths=/var/lib/labops /var/lib/labops-agent -/mnt/HDD3/labops/users /run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

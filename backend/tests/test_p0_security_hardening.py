@@ -14,6 +14,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_dir not in sys.path:
@@ -26,7 +27,7 @@ from app.core.config import settings
 from app.services.labops_service import LabOpsDataService
 from app.services.ssh_authorization_gate import evaluate_ssh_authorization_gate
 from app.services.storage_inventory_service import StorageInventoryService
-from app.services.workspace_controller import WorkspaceController
+from app.services.workspace_controller import WorkspaceController, WorkspaceSecurityError
 
 
 def _generate_ed25519_pubkey(tmpdir: str, label: str = "client-key") -> str:
@@ -47,6 +48,21 @@ class TestP0SecurityHardening(unittest.TestCase):
             k: os.environ.get(k)
             for k in ("LABOPS_LOCAL_AGENT_URL", "LABOPS_NODE_AGENT_TOKEN", "LABOPS_ALLOW_TEST_CANARY_SSHD")
         }
+
+        def provision_test_storage(host_id, storage_id, username, quota_gib):
+            root = os.path.join(self.tmpdir.name, "storage")
+            member_path = os.path.join(root, username)
+            os.makedirs(member_path, exist_ok=True)
+            return {
+                "host_storage_root": root,
+                "member_storage_directory": member_path,
+                "quota_backend": "PROJECT_QUOTA",
+                "verification_status": "VERIFIED",
+            }
+
+        self.enterContext(patch.object(
+            StorageInventoryService, "provision_member_storage", side_effect=provision_test_storage
+        ))
 
     def tearDown(self) -> None:
         for k, v in self._saved_env.items():
@@ -92,6 +108,26 @@ class TestP0SecurityHardening(unittest.TestCase):
             if saved_pytest is not None:
                 os.environ["PYTEST_CURRENT_TEST"] = saved_pytest
 
+    def test_reject_invalid_image_reference_and_digest_pairs(self) -> None:
+        wc = WorkspaceController(self.tmpdir.name)
+        digest = "sha256:" + "c" * 64
+        for ref, supplied_digest in (
+            ("labops-workspace:v2", digest),
+            (digest, "sha256:" + "d" * 64),
+            ("repo@" + digest + "-extra", digest),
+            ("repo@" + digest + "\n", digest),
+            ("repo@" + digest, digest + "-extra"),
+        ):
+            with self.subTest(ref=ref, digest=supplied_digest):
+                with self.assertRaisesRegex(WorkspaceSecurityError, "sha256"):
+                    wc.build_provision_workspace_spec(
+                        member={"id": "m-alice", "username": "alice"},
+                        workspace={"id": "ws-alice", "owner": "alice"},
+                        correlation_id="image-validation",
+                        image_ref=ref,
+                        image_digest=supplied_digest,
+                    )
+
     def test_02_agent_unreachable_fail_closed_and_uid_allocation(self) -> None:
         """G4-3: Fail-closed khi thiếu image digest (PROVISION_FAILED) và khi Node Agent không reachable (AGENT_UNAVAILABLE)."""
         wc = WorkspaceController(self.tmpdir.name)
@@ -102,21 +138,31 @@ class TestP0SecurityHardening(unittest.TestCase):
         self.assertEqual(uid_a, gid_a)
         self.assertNotEqual(uid_a, uid_b)
 
-        # (a) Không cấu hình immutable @sha256 digest -> fail-closed PROVISION_FAILED
+        # (a) Không cấu hình immutable @sha256 digest hoặc chỉ truyền mutable tag -> fail-closed PROVISION_FAILED
         no_digest_member = self.svc.provision_member_ssh_access({
             "full_name": "No Digest User",
             "username": "no_digest_u",
             "assigned_server": "workstation",
+            "image_ref": "labops-workspace:v2",
             "cpu_limit_cores": 2,
             "ram_limit_gb": 4,
             "storage_quota_gb": 10,
             "_actor_id": "admin_root",
         })
         self.assertEqual(no_digest_member["workspace_delegation_status"], "PROVISION_FAILED")
-        self.assertIn("@sha256:", str(no_digest_member.get("workspace_delegation_reason") or ""))
+        self.assertIn("sha256:", str(no_digest_member.get("workspace_delegation_reason") or ""))
         self.assertFalse(no_digest_member["authorization_gate"]["ssh_authorized"])
 
-        # (b) Có immutable digest nhưng Node Agent không reachable -> fail-closed AGENT_UNAVAILABLE
+        # (b) Có pure local image ID (sha256:<64hex>) và @sha256: nhưng Node Agent không reachable -> fail-closed AGENT_UNAVAILABLE
+        spec_local = wc.build_provision_workspace_spec(
+            member={"id": "m-loc", "username": "alice", "assigned_server": "workstation", "ssh_port": 22015, "member_storage_directory": os.path.join(self.tmpdir.name, "alice")},
+            workspace={"id": "ws-alice", "name": "ws-alice", "owner": "alice"},
+            correlation_id="corr-loc-id",
+            image_ref=f"sha256:{'c' * 64}",
+        )
+        self.assertEqual(spec_local["image_ref"], f"sha256:{'c' * 64}")
+        self.assertEqual(spec_local["image_digest"], f"sha256:{'c' * 64}")
+
         member = self.svc.provision_member_ssh_access({
             "full_name": "Agent Down User",
             "username": "agent_down_u",

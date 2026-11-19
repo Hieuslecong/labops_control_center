@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -73,22 +74,22 @@ type WorkspaceContainer struct {
 
 // ProvisionRequest mô tả cấu hình workspace an toàn cần tạo qua Docker Controller.
 type ProvisionRequest struct {
-	WorkspaceID        string `json:"workspace_id"`
-	Name               string `json:"name"`
-	MemberID           string `json:"member_id"`
-	MemberUsername     string `json:"member_username"`
-	UID                int    `json:"uid"`
-	GID                int    `json:"gid"`
-	ImageRef           string `json:"image_ref"`
-	ImageDigest        string `json:"image_digest"`
-	StorageRoot        string `json:"storage_root"`
-	MemberStorageDir   string `json:"member_storage_dir,omitempty"`
-	ContainerMountPath string `json:"container_mount_path,omitempty"`
-	ResourceMode       string `json:"resource_mode,omitempty"`
-	CPUWeight          int    `json:"cpu_weight,omitempty"`
-	MemorySafetyMB     int64  `json:"memory_safety_mb,omitempty"`
-	SSHPort            int    `json:"ssh_port"`
-	VPNBindIP          string `json:"vpn_bind_ip"`
+	WorkspaceID        string   `json:"workspace_id"`
+	Name               string   `json:"name"`
+	MemberID           string   `json:"member_id"`
+	MemberUsername     string   `json:"member_username"`
+	UID                int      `json:"uid"`
+	GID                int      `json:"gid"`
+	ImageRef           string   `json:"image_ref"`
+	ImageDigest        string   `json:"image_digest"`
+	StorageRoot        string   `json:"storage_root"`
+	MemberStorageDir   string   `json:"member_storage_dir,omitempty"`
+	ContainerMountPath string   `json:"container_mount_path,omitempty"`
+	ResourceMode       string   `json:"resource_mode,omitempty"`
+	CPUWeight          int      `json:"cpu_weight,omitempty"`
+	MemorySafetyMB     int64    `json:"memory_safety_mb,omitempty"`
+	SSHPort            int      `json:"ssh_port"`
+	VPNBindIP          string   `json:"vpn_bind_ip"`
 	CPULimitCores      int      `json:"cpu_limit_cores"`
 	RAMLimitMB         int64    `json:"ram_limit_mb"`
 	PidsLimit          int64    `json:"pids_limit"`
@@ -398,6 +399,89 @@ func (c *Controller) ListWorkspaces(ctx context.Context) ([]WorkspaceContainer, 
 	return workspaces, nil
 }
 
+func (c *Controller) resolveImageID(ctx context.Context, ref string, local bool) (string, error) {
+	endpoint := "http://localhost/v1.45/images/" + url.PathEscape(ref) + "/json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("IMAGE_INSPECT_FAILED: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("IMAGE_INSPECT_FAILED: Docker returned HTTP %d", resp.StatusCode)
+	}
+	var image struct {
+		ID          string   `json:"Id"`
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&image); err != nil {
+		return "", fmt.Errorf("IMAGE_INSPECT_FAILED: %w", err)
+	}
+	if !imageDigestRegex.MatchString(image.ID) {
+		return "", fmt.Errorf("INVALID_DOCKER_IMAGE_ID: %q", image.ID)
+	}
+	if local {
+		if image.ID != ref {
+			return "", fmt.Errorf("IMAGE_ID_MISMATCH: expected %q, got %q", ref, image.ID)
+		}
+	} else {
+		// Docker records repository digests without the optional tag.
+		repository, digest, _ := strings.Cut(ref, "@")
+		if tag := strings.LastIndex(repository, ":"); tag > strings.LastIndex(repository, "/") {
+			repository = repository[:tag]
+		}
+		if !slices.ContainsFunc(image.RepoDigests, func(repoDigest string) bool {
+			repo, value, ok := strings.Cut(repoDigest, "@")
+			return ok && value == digest && canonicalImageRepository(repo) == canonicalImageRepository(repository)
+		}) {
+			return "", fmt.Errorf("IMAGE_MANIFEST_MISMATCH: Docker did not report %q", repository+"@"+digest)
+		}
+	}
+	return image.ID, nil
+}
+
+// Docker Hub digests can be reported using either familiar or fully qualified names.
+func canonicalImageRepository(repository string) string {
+	domain, path, hasSlash := strings.Cut(repository, "/")
+	if !hasSlash || (domain != "localhost" && !strings.ContainsAny(domain, ".:")) {
+		domain, path = "docker.io", repository
+	}
+	if domain == "index.docker.io" {
+		domain = "docker.io"
+	}
+	if domain == "docker.io" && !strings.Contains(path, "/") {
+		path = "library/" + path
+	}
+	return domain + "/" + path
+}
+
+func (c *Controller) verifyContainerBinding(ctx context.Context, workspaceID string, live *dockerInspectJSON) (*WorkspaceRecord, error) {
+	rec, err := c.registry.verifyContainerIdentity(c.nodeID, workspaceID, live)
+	if err != nil {
+		return nil, err
+	}
+
+	expectedImageID := rec.DockerImageID
+	if expectedImageID == "" {
+		if imageDigestRegex.MatchString(rec.ImageRef) && rec.ImageRef == rec.ImageDigest {
+			expectedImageID = rec.ImageRef
+		} else if match := registryImageRefRegex.FindStringSubmatch(rec.ImageRef); match != nil && match[1] == rec.ImageDigest {
+			// Older records store the manifest digest but have no resolved Docker Image ID.
+			expectedImageID, err = c.resolveImageID(ctx, rec.ImageRef, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !imageDigestRegex.MatchString(expectedImageID) || live.Image != expectedImageID {
+		return nil, fmt.Errorf("IMAGE_ID_MISMATCH: expected '%s', got '%s'", expectedImageID, live.Image)
+	}
+	return rec, nil
+}
+
 func (c *Controller) inspectRaw(ctx context.Context, nameOrID string) (*dockerInspectJSON, int, error) {
 	cleanName := strings.TrimPrefix(strings.TrimSpace(nameOrID), "/")
 	if cleanName == "" || strings.Contains(cleanName, "/") || strings.Contains(cleanName, "..") {
@@ -449,7 +533,7 @@ func (c *Controller) InspectWorkspace(ctx context.Context, nameOrID string) (*Wo
 	var rec *WorkspaceRecord
 	isManaged := raw.Config.Labels["labops.managed"] == "true"
 	if c.registry != nil {
-		rec, err = c.registry.VerifyContainerBinding(c.nodeID, "", raw)
+		rec, err = c.verifyContainerBinding(ctx, "", raw)
 		if err != nil {
 			return nil, err
 		}
@@ -545,15 +629,22 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	if req.PidsLimit <= 0 {
 		req.PidsLimit = 4096
 	}
-	if !IsImmutableImageRef(req.ImageRef) && !IsImmutableImageRef(req.ImageDigest) {
-		return nil, fmt.Errorf("MUTABLE_IMAGE_REJECTED: bắt buộc image pinned theo @sha256: digest")
+	localImage := imageDigestRegex.MatchString(req.ImageRef)
+	approvedDigest := req.ImageRef
+	if !localImage {
+		match := registryImageRefRegex.FindStringSubmatch(req.ImageRef)
+		if match == nil {
+			return nil, fmt.Errorf("MUTABLE_IMAGE_REJECTED: expected an immutable image reference")
+		}
+		approvedDigest = match[1]
 	}
-	if req.ImageDigest == "" && strings.Contains(req.ImageRef, "@sha256:") {
-		parts := strings.SplitN(req.ImageRef, "@", 2)
-		req.ImageDigest = parts[1]
+	if req.ImageDigest != "" && req.ImageDigest != approvedDigest {
+		return nil, fmt.Errorf("IMAGE_DIGEST_MISMATCH: image reference and digest differ")
 	}
-	if !IsImmutableImageRef(req.ImageDigest) {
-		return nil, fmt.Errorf("INVALID_IMAGE_DIGEST: digest '%s' không phải chuẩn sha256:<64hex>", req.ImageDigest)
+	req.ImageDigest = approvedDigest
+	imageID, err := c.resolveImageID(ctx, req.ImageRef, localImage)
+	if err != nil {
+		return nil, err
 	}
 	hostStorageDir := strings.TrimSpace(req.MemberStorageDir)
 	if hostStorageDir == "" {
@@ -635,7 +726,7 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	}
 
 	createBody := map[string]any{
-		"Image": req.ImageRef,
+		"Image": imageID,
 		"User":  fmt.Sprintf("%d:%d", req.UID, req.GID),
 		"Env": []string{
 			fmt.Sprintf("HOME=%s", containerMount),
@@ -697,6 +788,14 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		return nil, fmt.Errorf("INVALID_CREATED_CONTAINER_ID: phản hồi ID không hợp lệ (%q)", createRes.ID)
 	}
 
+	created, _, err := c.inspectRaw(ctx, createRes.ID)
+	if err != nil {
+		return nil, fmt.Errorf("CREATED_CONTAINER_INSPECT_FAILED: %w", err)
+	}
+	if created.ID != createRes.ID || created.Image != imageID {
+		return nil, fmt.Errorf("IMAGE_ID_MISMATCH: created container '%s' failed image verification", createRes.ID)
+	}
+
 	rec := WorkspaceRecord{
 		WorkspaceID:          req.WorkspaceID,
 		Name:                 req.Name,
@@ -707,7 +806,8 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		NodeID:               c.nodeID,
 		CanonicalContainerID: strings.ToLower(createRes.ID),
 		ImageRef:             req.ImageRef,
-		ImageDigest:          strings.ToLower(req.ImageDigest),
+		ImageDigest:          req.ImageDigest,
+		DockerImageID:        imageID,
 		StorageRoot:          hostStorageDir,
 		MemberStorageDir:     hostStorageDir,
 		ContainerMountPath:   containerMount,
@@ -754,6 +854,11 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		_ = c.registry.UpsertRecord(rec)
 		return &rec, fmt.Errorf("POST_START_INSPECT_FAILED: %w", inspectErr)
 	}
+	if live.ID != rec.CanonicalContainerID || live.Image != imageID {
+		rec.ObservedState = "NOT_VERIFIED"
+		_ = c.registry.UpsertRecord(rec)
+		return &rec, fmt.Errorf("IMAGE_ID_MISMATCH: started container failed image verification")
+	}
 	if violations := ValidateContainerSafety(live); len(violations) > 0 {
 		rec.ObservedState = "FAILED_SAFETY_POLICY"
 		_ = c.registry.UpsertRecord(rec)
@@ -787,7 +892,7 @@ func (c *Controller) StopWorkspaceContainer(ctx context.Context, workspaceID, ex
 	if err != nil {
 		return err
 	}
-	rec, err := c.registry.VerifyContainerBinding(c.nodeID, workspaceID, raw)
+	rec, err := c.verifyContainerBinding(ctx, workspaceID, raw)
 	if err != nil {
 		return err
 	}
@@ -834,7 +939,7 @@ func (c *Controller) RemoveStoppedWorkspaceContainer(ctx context.Context, worksp
 	if err != nil {
 		return err
 	}
-	rec, err := c.registry.VerifyContainerBinding(c.nodeID, workspaceID, raw)
+	rec, err := c.verifyContainerBinding(ctx, workspaceID, raw)
 	if err != nil {
 		return err
 	}
@@ -866,12 +971,13 @@ func (c *Controller) RemoveStoppedWorkspaceContainer(ctx context.Context, worksp
 
 // StopContainer dừng một container qua Docker Unix Socket có kiểm tra TrustedRegistry & ghim Canonical ID (AT-07).
 func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
+	ctx := context.Background()
 	containerID = strings.TrimSpace(containerID)
 	if containerID == "" {
 		return fmt.Errorf("container_id không được để trống")
 	}
 
-	raw, _, err := c.inspectRaw(context.Background(), containerID)
+	raw, _, err := c.inspectRaw(ctx, containerID)
 	if err != nil {
 		return fmt.Errorf("từ chối dừng: không thể xác minh metadata container '%s' (%w)", containerID, err)
 	}
@@ -882,11 +988,11 @@ func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
 	}
 
 	if c.registry != nil {
-		rec, bindErr := c.registry.VerifyContainerBinding(c.nodeID, "", raw)
+		rec, bindErr := c.verifyContainerBinding(ctx, "", raw)
 		if bindErr != nil {
 			return fmt.Errorf("từ chối can thiệp: %w", bindErr)
 		}
-		return c.StopWorkspaceContainer(context.Background(), rec.WorkspaceID, rec.CanonicalContainerID, timeoutSec)
+		return c.StopWorkspaceContainer(ctx, rec.WorkspaceID, rec.CanonicalContainerID, timeoutSec)
 	}
 
 	if raw.Config.Labels["labops.managed"] != "true" {
@@ -916,7 +1022,7 @@ func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
 		return fmt.Errorf("Docker daemon trả về lỗi (code %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	afterRaw, _, afterErr := c.inspectRaw(context.Background(), raw.ID)
+	afterRaw, _, afterErr := c.inspectRaw(ctx, raw.ID)
 	if afterErr == nil && afterRaw != nil && (afterRaw.State.Running || afterRaw.State.Status == "running") {
 		return fmt.Errorf("xác minh thất bại: container '%s' vẫn đang ở trạng thái running sau lệnh dừng", raw.ID)
 	}
@@ -1173,7 +1279,7 @@ func (c *Controller) VerifyWorkspaceRuntime(
 	}
 
 	if c.registry != nil {
-		if _, bindErr := c.registry.VerifyContainerBinding(c.nodeID, workspaceID, raw); bindErr != nil {
+		if _, bindErr := c.verifyContainerBinding(ctx, workspaceID, raw); bindErr != nil {
 			return map[string]any{
 				"verified": false,
 				"checks": map[string]VerifyCheck{

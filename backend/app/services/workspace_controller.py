@@ -30,7 +30,13 @@ from app.db.atomic_json import atomic_write_json, safe_load_json
 
 WORKSPACE_UID_MIN = 20000
 WORKSPACE_UID_MAX = 59999
-IMAGE_DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+IMAGE_DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}")
+REGISTRY_IMAGE_REF_RE = re.compile(
+    r"(?:[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)*:[0-9]+/)?"
+    r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+    r"(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@(sha256:[a-f0-9]{64})"
+)
 
 FORBIDDEN_MOUNT_PREFIXES = (
     "/var/run/docker.sock",
@@ -294,24 +300,28 @@ class WorkspaceController:
             or getattr(settings, "LABOPS_WORKSPACE_IMAGE_REF", "")
             or workspace.get("image_ref")
             or ""
-        ).strip()
+        )
         raw_digest = str(
             image_digest
             or os.getenv("LABOPS_WORKSPACE_IMAGE_DIGEST", "")
             or getattr(settings, "LABOPS_WORKSPACE_IMAGE_DIGEST", "")
             or workspace.get("image_digest")
             or ""
-        ).strip().lower()
-        if "@sha256:" in raw_img and not raw_digest:
-            raw_digest = raw_img.split("@", 1)[1].strip().lower()
-        if raw_img and "@sha256:" not in raw_img and IMAGE_DIGEST_RE.match(raw_digest):
-            raw_img = f"{raw_img}@{raw_digest}"
-        if not raw_img or "@sha256:" not in raw_img or not IMAGE_DIGEST_RE.match(raw_digest):
+        )
+        registry_ref = REGISTRY_IMAGE_REF_RE.fullmatch(raw_img)
+        approved_digest = None
+        if IMAGE_DIGEST_RE.fullmatch(raw_img):
+            approved_digest = raw_img
+        elif registry_ref:
+            approved_digest = registry_ref.group(1)
+        if approved_digest is None or (raw_digest and raw_digest != approved_digest):
             raise WorkspaceSecurityError(
                 "IMAGE_DIGEST_NOT_CONFIGURED",
-                "Image workspace bắt buộc được neo cố định theo @sha256:<64hex> (LABOPS_WORKSPACE_IMAGE_REF / DIGEST).",
+                "Image workspace bắt buộc được neo cố định theo sha256:<64hex> hoặc @sha256:<64hex> (LABOPS_WORKSPACE_IMAGE_REF / DIGEST).",
                 400,
             )
+
+        raw_digest = approved_digest
 
         storage_root = str(member.get("host_storage_root") or workspace.get("storage_root") or "").strip()
         member_dir = str(

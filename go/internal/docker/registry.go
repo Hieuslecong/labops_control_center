@@ -19,7 +19,8 @@ var (
 	ErrRegistryUnavailable = errors.New("REGISTRY_UNAVAILABLE: trusted workspace registry is not configured")
 	ErrRegistryCorrupted   = errors.New("REGISTRY_CORRUPTED: trusted workspace registry file is unreadable or corrupted")
 	canonicalCIDRegex      = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	imageDigestRegex       = regexp.MustCompile(`^(?:sha256:[a-f0-9]{64}|.+@sha256:[a-f0-9]{64})$`)
+	imageDigestRegex       = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	registryImageRefRegex  = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:-[a-z0-9]+)*)(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)*:[0-9]+/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@(sha256:[a-f0-9]{64})$`)
 	safeWorkspaceNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{1,62}$`)
 )
 
@@ -30,7 +31,7 @@ func IsCanonicalContainerID(id string) bool {
 
 // IsImmutableImageRef kiểm tra image hoặc image digest phải được neo bất biến theo sha256.
 func IsImmutableImageRef(image string) bool {
-	return imageDigestRegex.MatchString(strings.TrimSpace(strings.ToLower(image)))
+	return imageDigestRegex.MatchString(image) || registryImageRefRegex.MatchString(image)
 }
 
 var forbiddenHostRoots = []string{
@@ -77,35 +78,36 @@ func ValidateSafeStorageRoot(storageRoot string) error {
 
 // WorkspaceRecord là bản ghi nguồn sự thật cho từng Docker workspace trên node.
 type WorkspaceRecord struct {
-	WorkspaceID          string `json:"workspace_id"`
-	Name                 string `json:"name"`
-	MemberID             string `json:"member_id"`
-	MemberUsername       string `json:"member_username"`
-	UID                  int    `json:"uid"`
-	GID                  int    `json:"gid"`
-	NodeID               string `json:"node_id"`
-	CanonicalContainerID string `json:"canonical_container_id"`
-	ImageRef             string `json:"image_ref"`
-	ImageDigest          string `json:"image_digest"`
-	StorageRoot          string `json:"storage_root"`
-	MemberStorageDir     string `json:"member_storage_dir,omitempty"`
-	ContainerMountPath   string `json:"container_mount_path,omitempty"`
-	RuntimeDir           string `json:"runtime_dir,omitempty"`
+	WorkspaceID          string   `json:"workspace_id"`
+	Name                 string   `json:"name"`
+	MemberID             string   `json:"member_id"`
+	MemberUsername       string   `json:"member_username"`
+	UID                  int      `json:"uid"`
+	GID                  int      `json:"gid"`
+	NodeID               string   `json:"node_id"`
+	CanonicalContainerID string   `json:"canonical_container_id"`
+	ImageRef             string   `json:"image_ref"`
+	ImageDigest          string   `json:"image_digest"`
+	DockerImageID        string   `json:"docker_image_id,omitempty"`
+	StorageRoot          string   `json:"storage_root"`
+	MemberStorageDir     string   `json:"member_storage_dir,omitempty"`
+	ContainerMountPath   string   `json:"container_mount_path,omitempty"`
+	RuntimeDir           string   `json:"runtime_dir,omitempty"`
 	GPUUUIDs             []string `json:"gpu_uuids,omitempty"`
-	ResourceMode         string `json:"resource_mode,omitempty"`
-	CPUWeight            int    `json:"cpu_weight,omitempty"`
-	SSHPort              int    `json:"ssh_port"`
-	VPNBindIP            string `json:"vpn_bind_ip"`
-	CPULimitCores        int    `json:"cpu_limit_cores"`
-	RAMLimitMB           int64  `json:"ram_limit_mb"`
-	PidsLimit            int64  `json:"pids_limit"`
-	Generation           uint64 `json:"generation"`
-	DesiredState         string `json:"desired_state"`
-	ObservedState        string `json:"observed_state"`
-	LastVerifiedAt       string `json:"last_verified_at"`
-	UpdatedAt            string `json:"updated_at"`
-	AuditActor           string `json:"audit_actor"`
-	CorrelationID        string `json:"correlation_id"`
+	ResourceMode         string   `json:"resource_mode,omitempty"`
+	CPUWeight            int      `json:"cpu_weight,omitempty"`
+	SSHPort              int      `json:"ssh_port"`
+	VPNBindIP            string   `json:"vpn_bind_ip"`
+	CPULimitCores        int      `json:"cpu_limit_cores"`
+	RAMLimitMB           int64    `json:"ram_limit_mb"`
+	PidsLimit            int64    `json:"pids_limit"`
+	Generation           uint64   `json:"generation"`
+	DesiredState         string   `json:"desired_state"`
+	ObservedState        string   `json:"observed_state"`
+	LastVerifiedAt       string   `json:"last_verified_at"`
+	UpdatedAt            string   `json:"updated_at"`
+	AuditActor           string   `json:"audit_actor"`
+	CorrelationID        string   `json:"correlation_id"`
 }
 
 type registryFileState struct {
@@ -263,8 +265,8 @@ func (r *TrustedRegistry) GetByContainerID(canonicalID string) (*WorkspaceRecord
 	return nil, fmt.Errorf("UNKNOWN_CONTAINER: container '%s' không tồn tại trong trusted registry", canonicalID)
 }
 
-// VerifyContainerBinding xác minh container thực tế khớp 100% metadata bất biến trong TrustedRegistry.
-func (r *TrustedRegistry) VerifyContainerBinding(nodeID, workspaceID string, live *dockerInspectJSON) (*WorkspaceRecord, error) {
+// verifyContainerIdentity checks the container identity and ownership against the trusted registry.
+func (r *TrustedRegistry) verifyContainerIdentity(nodeID, workspaceID string, live *dockerInspectJSON) (*WorkspaceRecord, error) {
 	if r == nil {
 		return nil, ErrRegistryUnavailable
 	}
@@ -323,10 +325,6 @@ func (r *TrustedRegistry) VerifyContainerBinding(nodeID, workspaceID string, liv
 	if labels["labops.generation"] != strconv.FormatUint(rec.Generation, 10) {
 		return nil, fmt.Errorf("GENERATION_MISMATCH: expected %d, got '%s'", rec.Generation, labels["labops.generation"])
 	}
-	if rec.ImageDigest != "" && live.Image != "" && !strings.EqualFold(live.Image, rec.ImageDigest) {
-		return nil, fmt.Errorf("IMAGE_DIGEST_MISMATCH: expected '%s', got '%s'", rec.ImageDigest, live.Image)
-	}
-
 	cp := *rec
 	return &cp, nil
 }

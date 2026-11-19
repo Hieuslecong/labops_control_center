@@ -67,6 +67,7 @@ type fakeDockerDaemon struct {
 	failStart    bool
 	deleteCalls  int
 	tamperUnsafe bool
+	wrongImage   bool
 }
 
 func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
@@ -80,6 +81,17 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 
 	canonicalCreatedID := strings.Repeat("a1", 32)
 	mux := http.NewServeMux()
+	localID := "sha256:" + strings.Repeat("b2", 32)
+	manifestRef := "ghcr.io/aiotlab/workspace@sha256:" + strings.Repeat("c3", 32)
+	mux.HandleFunc("/v1.45/images/", func(w http.ResponseWriter, r *http.Request) {
+		ref := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.45/images/"), "/json")
+		switch ref {
+		case localID, manifestRef, "sha256:" + strings.Repeat("d4", 32):
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": localID, "RepoDigests": []string{manifestRef}})
+		default:
+			http.NotFound(w, r)
+		}
+	})
 	mux.HandleFunc("/v1.45/containers/create", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		var payload struct {
@@ -87,16 +99,16 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 			User       string            `json:"User"`
 			Labels     map[string]string `json:"Labels"`
 			HostConfig struct {
-				Privileged  bool     `json:"Privileged"`
-				Memory      int64    `json:"Memory"`
-				NanoCpus    int64    `json:"NanoCpus"`
-				CpuShares   int64    `json:"CpuShares"`
-				PidsLimit   int64    `json:"PidsLimit"`
-				CapDrop     []string `json:"CapDrop"`
-				SecurityOpt []string `json:"SecurityOpt"`
-				NetworkMode  string              `json:"NetworkMode"`
-				IpcMode      string              `json:"IpcMode"`
-				Binds        []string            `json:"Binds"`
+				Privileged   bool     `json:"Privileged"`
+				Memory       int64    `json:"Memory"`
+				NanoCpus     int64    `json:"NanoCpus"`
+				CpuShares    int64    `json:"CpuShares"`
+				PidsLimit    int64    `json:"PidsLimit"`
+				CapDrop      []string `json:"CapDrop"`
+				SecurityOpt  []string `json:"SecurityOpt"`
+				NetworkMode  string   `json:"NetworkMode"`
+				IpcMode      string   `json:"IpcMode"`
+				Binds        []string `json:"Binds"`
 				PortBindings map[string][]struct {
 					HostIP   string `json:"HostIp"`
 					HostPort string `json:"HostPort"`
@@ -118,8 +130,11 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 		ins := &dockerInspectJSON{
 			ID:      canonicalCreatedID,
 			Name:    "/" + name,
-			Image:   "sha256:" + strings.Repeat("b2", 32),
+			Image:   payload.Image,
 			Created: time.Now().UTC().Format(time.RFC3339),
+		}
+		if daemon.wrongImage {
+			ins.Image = "sha256:" + strings.Repeat("f6", 32)
 		}
 		ins.Config.Image = payload.Image
 		ins.Config.Labels = payload.Labels
@@ -215,7 +230,7 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 
 func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 	ctx := context.Background()
-	validDigest := "sha256:" + strings.Repeat("b2", 32)
+	validDigest := "sha256:" + strings.Repeat("c3", 32)
 	validImage := "ghcr.io/aiotlab/workspace@" + validDigest
 	cidVictim := strings.Repeat("cd", 32)
 	cidFakeWS := strings.Repeat("ef", 32)
@@ -229,9 +244,9 @@ func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 	daemon := &fakeDockerDaemon{
 		containers: map[string]*dockerInspectJSON{
 			cidVictim: {
-				ID:   cidVictim,
-				Name: "/ws-alice",
-				Image: validDigest,
+				ID:    cidVictim,
+				Name:  "/ws-alice",
+				Image: "sha256:" + strings.Repeat("b2", 32),
 				HostConfig: struct {
 					Privileged     bool     `json:"Privileged"`
 					Memory         int64    `json:"Memory"`
@@ -294,6 +309,7 @@ func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 		MemberUsername:       "alice",
 		NodeID:               "workstation",
 		CanonicalContainerID: cidVictim,
+		ImageRef:             validImage,
 		ImageDigest:          validDigest,
 		Generation:           1,
 	}); err != nil {
@@ -463,7 +479,7 @@ func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 
 func TestDockerHardeningAndRuntimeSync(t *testing.T) {
 	ctx := context.Background()
-	validDigest := "sha256:" + strings.Repeat("b2", 32)
+	validDigest := "sha256:" + strings.Repeat("c3", 32)
 	validImage := "ghcr.io/aiotlab/workspace@" + validDigest
 	wsDir := filepath.Join(t.TempDir(), "testacc2-ws")
 	if err := os.MkdirAll(wsDir, 0700); err != nil {
@@ -564,5 +580,50 @@ func TestDockerHardeningAndRuntimeSync(t *testing.T) {
 	if !strings.Contains(strings.Join(viols, ","), "HOST_IPC_FORBIDDEN") {
 		t.Fatalf("Expected HOST_IPC_FORBIDDEN, got %v", viols)
 	}
+
 }
 
+func TestProvisionImageValidation(t *testing.T) {
+	localID := "sha256:" + strings.Repeat("b2", 32)
+	missingID := "sha256:" + strings.Repeat("e5", 32)
+	wrongInspectID := "sha256:" + strings.Repeat("d4", 32)
+	for _, tc := range []struct {
+		name, ref, digest, wantError string
+		wrongImage                   bool
+	}{
+		{"valid-local", localID, localID, "", false},
+		{"mutable-tag", "labops-workspace:v2", localID, "MUTABLE_IMAGE_REJECTED", false},
+		{"different-ids", localID, missingID, "IMAGE_DIGEST_MISMATCH", false},
+		{"missing-image", missingID, missingID, "IMAGE_INSPECT_FAILED", false},
+		{"wrong-inspected-id", wrongInspectID, wrongInspectID, "IMAGE_ID_MISMATCH", false},
+		{"invalid-suffix", "repo@" + localID + "-extra", localID, "MUTABLE_IMAGE_REJECTED", false},
+		{"wrong-container-image", localID, localID, "IMAGE_ID_MISMATCH", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			daemon := &fakeDockerDaemon{containers: make(map[string]*dockerInspectJSON), wrongImage: tc.wrongImage}
+			ctrl := NewControllerWithRegistry(startMockDockerSocket(t, daemon), "workstation", NewInMemoryRegistry())
+			ctrl.SetRuntimeRoot(t.TempDir())
+			rec, err := ctrl.ProvisionWorkspace(context.Background(), ProvisionRequest{
+				WorkspaceID: "ws-local-id", Name: "ws-local-id", MemberID: "mem-local-id", MemberUsername: "localiduser",
+				UID: 20008, GID: 20008, ImageRef: tc.ref, ImageDigest: tc.digest,
+				MemberStorageDir: t.TempDir(), SSHPort: 22014, ResourceMode: "SHARED_WEIGHTED", CPUWeight: 100, RAMLimitMB: 4096, PidsLimit: 1024,
+			})
+			if tc.wantError == "" {
+				if err != nil || rec.DockerImageID != localID || rec.ObservedState != "ACTIVE" {
+					t.Fatalf("local provision: rec=%+v err=%v", rec, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("want %q, got %v", tc.wantError, err)
+			}
+			daemon.mu.Lock()
+			defer daemon.mu.Unlock()
+			for _, container := range daemon.containers {
+				if !tc.wrongImage || container.State.Running {
+					t.Fatalf("unexpected container after image validation: %+v", container)
+				}
+			}
+		})
+	}
+}

@@ -35,31 +35,37 @@ func NewSystemQuotaManager(simulateIfUnsupported bool) *SystemQuotaManager {
 	}
 }
 
-// CheckSupport kiểm tra xem mount point có hỗ trợ project quota không.
+// CheckSupport kiểm tra xem mount point có bật mount options project quota trên kernel hay không.
 func (m *SystemQuotaManager) CheckSupport(mountPoint, fsType string) (bool, QuotaBackend) {
-	fsLower := strings.ToLower(fsType)
-	if strings.Contains(fsLower, "xfs") {
-		// XFS hỗ trợ native project quota
-		return true, QuotaBackendProjectQuota
-	}
+	fsLower := strings.ToLower(strings.TrimSpace(fsType))
 	if strings.Contains(fsLower, "zfs") {
 		return true, QuotaBackendZFS
 	}
 	if strings.Contains(fsLower, "btrfs") {
 		return true, QuotaBackendBtrfs
 	}
-	if strings.Contains(fsLower, "ext4") {
-		// Kiểm tra mount options có prjquota không
+	if strings.Contains(fsLower, "ext4") || strings.Contains(fsLower, "xfs") {
+		cleanTarget := filepath.Clean(mountPoint)
 		if mounts, err := os.ReadFile("/proc/mounts"); err == nil {
+			bestLen := -1
+			var bestOpts []string
 			for _, line := range strings.Split(string(mounts), "\n") {
 				fields := strings.Fields(line)
-				if len(fields) >= 4 && fields[1] == mountPoint {
-					opts := strings.Split(fields[3], ",")
-					for _, opt := range opts {
-						if opt == "prjquota" || opt == "project" {
-							return true, QuotaBackendProjectQuota
-						}
+				if len(fields) < 4 {
+					continue
+				}
+				mnt := filepath.Clean(fields[1])
+				if mnt == "/" || cleanTarget == mnt || strings.HasPrefix(cleanTarget, strings.TrimRight(mnt, "/")+"/") {
+					if len(mnt) > bestLen {
+						bestLen = len(mnt)
+						bestOpts = strings.Split(fields[3], ",")
 					}
+				}
+			}
+			for _, opt := range bestOpts {
+				opt = strings.TrimSpace(opt)
+				if opt == "prjquota" || opt == "pquota" || opt == "project" {
+					return true, QuotaBackendProjectQuota
 				}
 			}
 		}
@@ -176,32 +182,35 @@ func (m *SystemQuotaManager) GetUsage(dirPath string, projectID uint32) (*QuotaU
 	}, nil
 }
 
-// VerifyEnforcement xác minh rằng quota đã được thiết lập và ghi nhận đúng.
+// VerifyEnforcement xác minh rằng hard quota đã được thiết lập và ghi nhận thực tế trên kernel/filesystem.
 func (m *SystemQuotaManager) VerifyEnforcement(dirPath string, expectedQuotaGiB int64) (bool, string) {
 	cleanPath, _ := filepath.Abs(dirPath)
-	m.mu.RLock()
-	usage, ok := m.mockStore[cleanPath]
-	m.mu.RUnlock()
-
-	if ok && usage != nil {
-		if usage.HardLimitGiB == expectedQuotaGiB {
-			return true, fmt.Sprintf("Hard quota %d GiB đã được xác minh trên project %d", expectedQuotaGiB, usage.ProjectID)
-		}
-		return false, fmt.Sprintf("Hard limit không khớp (thực tế: %d GiB, kỳ vọng: %d GiB)", usage.HardLimitGiB, expectedQuotaGiB)
-	}
-
-	// Nếu không có mockStore, thử kiểm tra repquota
-	repquotaBin, err := exec.LookPath("repquota")
-	if err == nil {
-		out, repErr := exec.Command(repquotaBin, "-P", cleanPath).CombinedOutput()
-		if repErr == nil && strings.Contains(string(out), cleanPath) {
-			return true, "Đã xác minh qua repquota"
-		}
-	}
-
 	if m.isSimulated {
+		m.mu.RLock()
+		usage, ok := m.mockStore[cleanPath]
+		m.mu.RUnlock()
+		if ok && usage != nil {
+			if usage.HardLimitGiB == expectedQuotaGiB {
+				return true, fmt.Sprintf("Hard quota %d GiB đã được xác minh trên project %d (simulated)", expectedQuotaGiB, usage.ProjectID)
+			}
+			return false, fmt.Sprintf("Hard limit không khớp (thực tế: %d GiB, kỳ vọng: %d GiB)", usage.HardLimitGiB, expectedQuotaGiB)
+		}
 		return true, "Xác minh qua simulated quota store"
 	}
 
-	return false, "Không thể xác minh hard quota trên runtime"
+	// Non-simulated mode: BẮT BUỘC xác minh trực tiếp qua kernel quota utilities (repquota -P / xfs_quota)
+	if repquotaBin, err := exec.LookPath("repquota"); err == nil {
+		out, repErr := exec.Command(repquotaBin, "-P", cleanPath).CombinedOutput()
+		if repErr == nil && strings.Contains(string(out), cleanPath) {
+			return true, "Đã xác minh qua repquota -P"
+		}
+	}
+	if xfsQuotaBin, err := exec.LookPath("xfs_quota"); err == nil {
+		out, xErr := exec.Command(xfsQuotaBin, "-x", "-c", "report -p -h", cleanPath).CombinedOutput()
+		if xErr == nil && strings.Contains(string(out), cleanPath) {
+			return true, "Đã xác minh qua xfs_quota"
+		}
+	}
+
+	return false, "Không thể xác minh hard quota thực tế trên kernel/filesystem (thiếu prjquota hoặc quyền kernel)"
 }

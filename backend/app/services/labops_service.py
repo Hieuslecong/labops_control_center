@@ -141,12 +141,14 @@ class LabOpsDataService:
             and "pytest" not in sys.modules
         )
         os.makedirs(self.data_dir, exist_ok=True)
-        # Đặt lại bộ đếm giữ chỗ tạm và dọn custom pools mồ côi khi khởi tạo service mới
+        # Đặt lại bộ đếm giữ chỗ tạm và dọn custom pools local không còn tồn tại khi khởi tạo service mới
         storage_service._reservations.clear()
         for h_key, h_pools in list(storage_service._custom_pools.items()):
             kept = [
                 p for p in h_pools
-                if not p.get("mounted", True) or (p.get("mount_point") and os.path.exists(p["mount_point"]))
+                if h_key != settings.LOCAL_HOST_ID
+                or not p.get("mounted", True)
+                or (p.get("mount_point") and os.path.exists(p["mount_point"]))
             ]
             if kept:
                 storage_service._custom_pools[h_key] = kept
@@ -1952,7 +1954,7 @@ class LabOpsDataService:
             pool = pool or next((item for item in inv_pools if item.get("eligible")), None)
             if not pool and server_pools:
                 pool = next((item for item in server_pools if item.get("is_default") and item.get("id") != "pool-root"), None)
-                pool = pool or server_pools[0]
+                pool = pool or next((item for item in server_pools if item.get("id") != "pool-root"), None)
         else:
             pool = next((item for item in self.storage_pools if (item.get("id") == pool_id or item.get("storage_id") == pool_id)), None)
             if not pool:
@@ -1975,27 +1977,31 @@ class LabOpsDataService:
         if pool:
             s_id = pool.get("storage_id") or pool.get("id")
             if not storage_service.get_storage_pool_by_id(server_id, s_id):
+                pool_mnt = pool.get("mount_point", "/mnt/HDD3")
+                pool_fs = pool.get("driver", "ext4")
+                q_supp = bool(pool.get("quota_supported", False))
+                q_enf = bool(pool.get("quota_enforced", False))
                 storage_service.register_custom_pool(server_id, {
                     "host_id": server_id,
                     "storage_id": s_id,
-                    "device": pool.get("disk_identifier", "/dev/sdb1"),
+                    "device": pool.get("disk_identifier", "/dev/sdc"),
                     "filesystem_uuid": hashlib.sha256(f"{server_id}:{s_id}".encode()).hexdigest()[:36],
-                    "mount_point": pool.get("mount_point", "/media/LabOps-Data"),
-                    "filesystem": pool.get("driver", "ext4"),
+                    "mount_point": pool_mnt,
+                    "filesystem": pool_fs,
                     "capacity_gib": float(pool.get("capacity_gb", pool.get("capacity_gib", 1000.0))),
                     "used_gib": float(pool.get("used_gb", pool.get("used_gib", 100.0))),
                     "free_gib": float(pool.get("free_gb", pool.get("free_gib", 900.0))),
                     "allocatable_gib": float(pool.get("free_gb", pool.get("allocatable_gib", 900.0))),
                     "reserved_gib": 100.0,
-                    "quota_backend": "PROJECT_QUOTA",
-                    "quota_supported": True,
-                    "quota_enforced": True,
+                    "quota_backend": "PROJECT_QUOTA" if q_supp else "NONE",
+                    "quota_supported": q_supp,
+                    "quota_enforced": q_enf,
                     "read_only": False,
                     "mounted": True,
-                    "eligible": True,
-                    "ineligibility_reason": None,
+                    "eligible": pool_mnt != "/",
+                    "ineligibility_reason": "Root filesystem bị cấm" if pool_mnt == "/" else None,
                     "last_verified_at": datetime.now(timezone.utc).isoformat(),
-                    "verification_status": "VERIFIED"
+                    "verification_status": "VERIFIED" if q_enf else "QUOTA_NOT_ENFORCEABLE",
                 })
             storage_result = storage_service.provision_member_storage(
                 host_id=server_id,

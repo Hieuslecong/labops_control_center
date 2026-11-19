@@ -22,7 +22,7 @@ type Provisioner struct {
 // NewProvisioner khởi tạo bộ cấp phát thư mục và quota.
 func NewProvisioner(nodeID string, inv *InventoryCollector, qm QuotaManager) *Provisioner {
 	if qm == nil {
-		qm = NewSystemQuotaManager(true)
+		qm = NewSystemQuotaManager(false)
 	}
 	return &Provisioner{
 		nodeID:       nodeID,
@@ -175,7 +175,7 @@ func (p *Provisioner) ProvisionMemberStorage(req MemberStorageRequest) (*MemberS
 	}
 
 	vStatus := StatusVerified
-	if !quotaEnforced && pool.QuotaSupported {
+	if !quotaEnforced {
 		vStatus = StatusQuotaNotEnforced
 	}
 

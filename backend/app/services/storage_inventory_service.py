@@ -78,33 +78,12 @@ class StorageInventoryService:
             "configfs", "binfmt_misc", "nsfs", "overlay", "ramfs",
         }
 
-        # Nếu host_id là rack (track), giả lập pool chuẩn ZFS
+        # Chỉ đọc mount/pool thực tế hoặc pool đã đăng ký cho host này (không giả lập ZFS hay ổ đĩa không tồn tại)
+        if host_id not in ("workstation", "local", "localhost") and not os.path.exists(f"/proc/mounts"):
+            return pools
         if host_id == "track":
-            zfs_pool = {
-                "host_id": "track",
-                "storage_id": "pool-track-zfs-tank",
-                "device": "tank/workspaces",
-                "filesystem_uuid": hashlib.sha256(b"track-zfs-tank").hexdigest()[:36],
-                "mount_point": "/tank/workspaces",
-                "filesystem": "zfs",
-                "label": "ZFS Tank Workspaces (/tank/workspaces — 4000.0 GiB)",
-                "is_default": True,
-                "capacity_gib": 4000.0,
-                "used_gib": 850.0,
-                "free_gib": 3150.0,
-                "allocatable_gib": 2750.0,
-                "reserved_gib": 400.0,
-                "quota_backend": "ZFS_DATASET",
-                "quota_supported": True,
-                "quota_enforced": True,
-                "read_only": False,
-                "mounted": True,
-                "eligible": True,
-                "ineligibility_reason": None,
-                "last_verified_at": _now_iso(),
-                "verification_status": "VERIFIED"
-            }
-            pools.append(zfs_pool)
+            # Với remote host khi chưa nhận telemetry thật từ Go Agent qua tunnel, chỉ trả pool đăng ký thực (nếu có)
+            pools.sort(key=lambda p: (not p.get("eligible", False), not p.get("is_default", False), -float(p.get("allocatable_gib", 0.0))))
             return pools
 
         # Quét /proc/mounts cho workstation (hoặc host hiện tại)
@@ -202,6 +181,20 @@ class StorageInventoryService:
                             storage_id = f"pool-{host_id}-{re.sub(r'[^a-z0-9]', '-', mount.strip('/').lower() or 'root')}"
                             label = f"{fs.upper()} ({mount} — {cap_gib} GiB)"
 
+                        fs_lower = fs.lower()
+                        has_prjquota = (
+                            fs_lower in ("ext4", "xfs")
+                            and any(o.strip() in ("prjquota", "pquota", "project") for o in opts)
+                        ) or fs_lower in ("zfs", "btrfs")
+                        q_backend = "ZFS_DATASET" if fs_lower == "zfs" else ("PROJECT_QUOTA" if has_prjquota else "NONE")
+                        q_supported = bool(eligible and has_prjquota)
+                        if not eligible:
+                            q_status = "INELIGIBLE"
+                        elif not q_supported:
+                            q_status = "QUOTA_NOT_ENFORCEABLE"
+                        else:
+                            q_status = "VERIFIED"
+
                         pool_entry = {
                             "host_id": host_id,
                             "storage_id": storage_id,
@@ -216,15 +209,15 @@ class StorageInventoryService:
                             "free_gib": free_gib,
                             "allocatable_gib": allocatable_gib,
                             "reserved_gib": reserved_gib,
-                            "quota_backend": "PROJECT_QUOTA" if eligible and is_approved else "NONE",
-                            "quota_supported": eligible and is_approved,
-                            "quota_enforced": eligible and is_approved,
+                            "quota_backend": q_backend,
+                            "quota_supported": q_supported,
+                            "quota_enforced": False,
                             "read_only": read_only,
                             "mounted": True,
                             "eligible": eligible,
                             "ineligibility_reason": reason,
                             "last_verified_at": _now_iso(),
-                            "verification_status": status
+                            "verification_status": q_status,
                         }
 
                         if dev.startswith("/dev/"):
@@ -238,35 +231,6 @@ class StorageInventoryService:
 
         pools.extend(pools_by_device.values())
         pools.extend(extra_pools)
-
-        # Đảm bảo pool approved `/media/LabOps-Data` luôn có mặt cho workstation nếu chưa có ổ đĩa hợp lệ nào
-        has_approved = any(p["eligible"] for p in pools)
-        if not has_approved:
-            default_pool = {
-                "host_id": host_id,
-                "storage_id": f"pool-{host_id}-data",
-                "device": "/dev/sdb1",
-                "filesystem_uuid": hashlib.sha256(f"{host_id}-data".encode()).hexdigest()[:36],
-                "mount_point": "/media/LabOps-Data",
-                "filesystem": "ext4",
-                "label": f"Ổ đĩa Dữ liệu LabOps (/media/LabOps-Data — 1800.0 GiB)",
-                "is_default": True,
-                "capacity_gib": 1800.0,
-                "used_gib": 200.0,
-                "free_gib": 1600.0,
-                "allocatable_gib": 1420.0,
-                "reserved_gib": 180.0,
-                "quota_backend": "PROJECT_QUOTA",
-                "quota_supported": True,
-                "quota_enforced": True,
-                "read_only": False,
-                "mounted": True,
-                "eligible": True,
-                "ineligibility_reason": None,
-                "last_verified_at": _now_iso(),
-                "verification_status": "VERIFIED"
-            }
-            pools.append(default_pool)
 
         pools.sort(key=lambda p: (not p.get("eligible", False), not p.get("is_default", False), -float(p.get("allocatable_gib", 0.0))))
         return pools

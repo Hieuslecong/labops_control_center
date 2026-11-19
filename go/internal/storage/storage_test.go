@@ -279,3 +279,44 @@ func TestStorageAdmission_CapacityAndConcurrency(t *testing.T) {
 		t.Errorf("RACE CONDITION: Có %d yêu cầu thành công, vượt quá allocatable capacity", successCount)
 	}
 }
+
+func TestSystemQuotaManager_NonSimulatedFailClosed(t *testing.T) {
+	tempStorageRoot := t.TempDir()
+	qm := NewSystemQuotaManager(false)
+	inv := NewInventoryCollector("workstation", qm)
+
+	pool := &StoragePoolInfo{
+		HostID:             "workstation",
+		StorageID:          "nonsim-ext4-uuid",
+		MountPoint:         tempStorageRoot,
+		Filesystem:         "ext4",
+		FreeGiB:            500,
+		AllocatableGiB:     400,
+		QuotaBackend:       QuotaBackendNone,
+		QuotaSupported:     false,
+		QuotaEnforced:      false,
+		Mounted:            true,
+		Eligible:           true,
+		VerificationStatus: StatusQuotaNotEnforced,
+	}
+	inv.RegisterCustomPool(pool)
+	inv.RegisterApprovedRoot(tempStorageRoot)
+
+	prov := NewProvisioner("workstation", inv, qm)
+	res, err := prov.ProvisionMemberStorage(MemberStorageRequest{
+		MemberID:        "mem-nonsim",
+		MemberUsername:  "nonsim_user",
+		HostID:          "workstation",
+		StorageID:       pool.StorageID,
+		StorageQuotaGiB: 50,
+	})
+	if err != nil {
+		t.Fatalf("ProvisionMemberStorage lỗi bất ngờ: %v", err)
+	}
+	if res.QuotaEnforced {
+		t.Fatalf("LỖI TRUNG THỰC QUOTA: QuotaEnforced phải là false khi không có kernel prjquota")
+	}
+	if res.VerificationStatus != StatusQuotaNotEnforced {
+		t.Fatalf("VerificationStatus kỳ vọng %s, nhận %s", StatusQuotaNotEnforced, res.VerificationStatus)
+	}
+}

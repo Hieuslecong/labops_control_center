@@ -24,7 +24,7 @@ type InventoryCollector struct {
 // NewInventoryCollector khởi tạo bộ thu thập inventory.
 func NewInventoryCollector(nodeID string, quotaMgr QuotaManager) *InventoryCollector {
 	if quotaMgr == nil {
-		quotaMgr = NewSystemQuotaManager(true)
+		quotaMgr = NewSystemQuotaManager(false)
 	}
 	c := &InventoryCollector{
 		nodeID:      nodeID,
@@ -190,7 +190,7 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 				ReservedGiB:        safetyReserve,
 				QuotaBackend:       quotaBackend,
 				QuotaSupported:     quotaSupported,
-				QuotaEnforced:      quotaSupported,
+				QuotaEnforced:      false,
 				ReadOnly:           isReadOnly,
 				Mounted:            true,
 				LastVerifiedAt:     nowISO(),
@@ -202,6 +202,8 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 			pool.IneligibilityReason = reason
 			if !eligible {
 				pool.VerificationStatus = StatusIneligible
+			} else if !quotaSupported {
+				pool.VerificationStatus = StatusQuotaNotEnforced
 			}
 
 			seenMounts[mountPoint] = true

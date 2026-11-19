@@ -3023,18 +3023,26 @@ class LabOpsDataService:
 
         if getattr(settings, "WG_EASY_ENABLED", True):
             try:
+                gw_status = self.vpn_manager.wg_easy.get_connection_status()
+                if gw_status.get("status") == "UNAVAILABLE":
+                    raise RuntimeError(gw_status.get("error") or "VPN_PROVIDER_UNAVAILABLE")
+                if gw_status.get("service_health") == "VPN_ROUTING_MISCONFIGURED" or gw_status.get("routing_issues"):
+                    raise RuntimeError(
+                        f"VPN_ROUTING_MISCONFIGURED: {'; '.join(gw_status.get('routing_issues') or [])}"
+                    )
                 wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính")
-                raw_conf = self.vpn_manager.get_device_configuration(str(wg_dev.get("external_id") or wg_dev["id"]))
-                if raw_conf and "[Interface]" in raw_conf:
+                profile_res = self.vpn_manager.build_dynamic_client_profile(
+                    actor={"username": username, "role": member.get("role", "RESEARCHER")},
+                    member=member,
+                    device=wg_dev,
+                    workspaces=matching_workspaces,
+                )
+                custom_conf = profile_res.get("wireguard_conf", "")
+                if custom_conf and "[Interface]" in custom_conf:
                     wg_registered_on_gateway = True
-                    wg_client_ip = wg_dev.get("vpn_ip") or "10.88.40.2"
-                    wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
-                    # Thay thế AllowedIPs động theo đúng máy chủ được cấp
-                    if re.search(r"AllowedIPs\s*=", raw_conf):
-                        custom_conf = re.sub(r"AllowedIPs\s*=\s*[^\r\n]+", f"AllowedIPs = {dynamic_allowed_ips}", raw_conf)
-                    else:
-                        custom_conf = raw_conf.replace("[Peer]\n", f"[Peer]\nAllowedIPs = {dynamic_allowed_ips}\n")
-
+                    wg_client_ip = profile_res.get("vpn_ip") or wg_dev.get("vpn_ip") or ""
+                    wg_server_endpoint = profile_res.get("server_endpoint") or ""
+                    dynamic_allowed_ips = profile_res.get("allowed_ips") or dynamic_allowed_ips
                     wg_profile = {
                         "wireguard_conf": custom_conf,
                         "client_ip": wg_client_ip,
@@ -3056,7 +3064,7 @@ class LabOpsDataService:
                         "vpn_ip": wg_client_ip,
                         "public_key": wg_dev.get("public_key"),
                         "server_id": target_server_id,
-                        "server_public_key": wg_dev.get("server_public_key") or self.vpn_manager.get_server_public_key(),
+                        "server_public_key": profile_res.get("server_public_key") or self.vpn_manager.get_server_public_key(),
                         "server_endpoint": wg_server_endpoint,
                         "allowed_subnets": dynamic_allowed_ips,
                         "status": "ACTIVE",
@@ -3070,35 +3078,21 @@ class LabOpsDataService:
                 logger.error(f"Lỗi tạo peer wg-easy tự động: {e}")
 
         if wg_profile is None or not (wg_profile.get("wireguard_conf") and "[Interface]" in wg_profile["wireguard_conf"]):
-            wg_client_ip = self._allocate_unique_wg_client_ip(member)
             if not wg_gateway_error and not getattr(settings, "WG_EASY_ENABLED", True):
                 wg_gateway_error = "WG_EASY_DISABLED: Tính năng wg-easy đang tắt trên hệ thống."
-            try:
-                wg_server_endpoint = self.vpn_manager.wg_easy.public_endpoint
-                wg_server_pubkey = self._resolve_wg_server_public_key(member)
-                wg_profile = self.ssh_access_manager.generate_wireguard_client_profile(
-                    username=username,
-                    client_ip=wg_client_ip,
-                    server_endpoint=wg_server_endpoint,
-                    server_public_key=wg_server_pubkey,
-                    allowed_ips=dynamic_allowed_ips,
-                )
-                wg_profile["wireguard_conf"] = self._annotate_unregistered_wg_conf(
-                    wg_profile["wireguard_conf"],
-                    username,
-                    wg_gateway_error,
-                )
-            except Exception as e:
-                logger.warning(f"Không thể khởi tạo dự phòng WireGuard profile cho {username}: {e}")
-                wg_gateway_error = wg_gateway_error or str(e)
-                wg_profile = {
-                    "wireguard_conf": "",
-                    "client_ip": wg_client_ip,
-                    "wg_public_key": "",
-                    "server_endpoint": self.vpn_manager.wg_easy.public_endpoint,
-                    "allowed_ips": dynamic_allowed_ips,
-                    "status": "PENDING_PROVISIONING",
-                }
+            wg_status_label = (
+                "VPN_ROUTING_MISCONFIGURED"
+                if wg_gateway_error and "VPN_ROUTING_MISCONFIGURED" in wg_gateway_error
+                else "PENDING_PROVISIONING"
+            )
+            wg_profile = {
+                "wireguard_conf": "",
+                "client_ip": "",
+                "wg_public_key": "",
+                "server_endpoint": "",
+                "allowed_ips": dynamic_allowed_ips,
+                "status": wg_status_label,
+            }
         existing_devices = (member.get("wireguard") or {}).get("devices") or []
         has_active_gateway_dev = any(
             d.get("status") == "ACTIVE" and not self._is_pending_placeholder_device(d)
@@ -3111,7 +3105,11 @@ class LabOpsDataService:
             "public_key": wg_profile["wg_public_key"],
             "server_endpoint": wg_profile["server_endpoint"],
             "allowed_subnets": wg_profile["allowed_ips"],
-            "status": "ACTIVE" if (wg_registered_on_gateway or has_active_gateway_dev) else "PENDING_PROVISIONING",
+            "status": (
+                "ACTIVE"
+                if (wg_registered_on_gateway or has_active_gateway_dev)
+                else wg_profile.get("status", "PENDING_PROVISIONING")
+            ),
             "registered_on_gateway": wg_registered_on_gateway or has_active_gateway_dev,
             "gateway_error": None if (wg_registered_on_gateway or has_active_gateway_dev) else wg_gateway_error,
         }
@@ -3310,9 +3308,9 @@ class LabOpsDataService:
         wg_client_ip = (
             bundle.get("wireguard_client_ip")
             or self._is_valid_vpn_client_ip((member.get("wireguard") or {}).get("client_ip"))
-            or self._allocate_unique_wg_client_ip(member)
+            or ""
         )
-        wg_ep = bundle.get("wireguard_server_endpoint") or (member.get("wireguard") or {}).get("server_endpoint")
+        wg_ep = bundle.get("wireguard_server_endpoint") or (member.get("wireguard") or {}).get("server_endpoint") or ""
 
         if not wg_conf:
             # 1. Thử lấy cấu hình từ thiết bị wg-easy đã đăng ký qua WireGuardConfigBuilder
@@ -3355,29 +3353,17 @@ class LabOpsDataService:
                     wg_fallback_err = str(e)
                     logger.warning(f"wg-easy chưa khả dụng khi tự động nâng cấp VPN cho {username}: {e}")
 
-            # 2. Nếu chưa có cấu hình từ wg-easy, sinh profile dự phòng kèm cảnh báo rõ ràng
+            # 2. Tuyệt đối KHÔNG tự sinh file .conf giả chưa đăng ký trên wg-easy Gateway
             if not wg_conf:
-                wg_server_pubkey = self._resolve_wg_server_public_key(member)
-                try:
-                    prof = self.ssh_access_manager.generate_wireguard_client_profile(
-                        username=username,
-                        client_ip=str(wg_client_ip).split("/")[0],
-                        server_endpoint=wg_ep or self.vpn_manager.wg_easy.public_endpoint,
-                        server_public_key=wg_server_pubkey,
-                        allowed_ips=resolved_route.allowed_ips,
-                    )
-                    wg_conf = self._annotate_unregistered_wg_conf(
-                        prof["wireguard_conf"],
-                        username,
-                        wg_fallback_err,
-                    )
-                    wg_client_ip = prof["client_ip"]
-                    wg_state = member.setdefault("wireguard", {"status": "PENDING_PROVISIONING", "devices": []})
-                    wg_state["registered_on_gateway"] = False
-                    if wg_fallback_err:
-                        wg_state["gateway_error"] = wg_fallback_err
-                except Exception as e:
-                    logger.warning(f"Không thể sinh hồ sơ WireGuard dự phòng khi đóng gói ZIP cho {username}: {e}")
+                wg_state = member.setdefault("wireguard", {"status": "PENDING_PROVISIONING", "devices": []})
+                wg_state["registered_on_gateway"] = False
+                wg_state["status"] = (
+                    "VPN_ROUTING_MISCONFIGURED"
+                    if wg_fallback_err and "VPN_ROUTING_MISCONFIGURED" in wg_fallback_err
+                    else "PENDING_PROVISIONING"
+                )
+                if wg_fallback_err:
+                    wg_state["gateway_error"] = wg_fallback_err
 
         zip_bytes = self.ssh_access_manager.build_access_zip_package(
             username=username,
@@ -3625,6 +3611,9 @@ class LabOpsDataService:
         try:
             live_wg_clients = {str(c["id"]): c for c in self.vpn_manager.wg_easy.list_devices()}
             for d in devices:
+                if self._is_pending_placeholder_device(d):
+                    d["gateway_sync_state"] = "PENDING_PROVISIONING"
+                    continue
                 ext_id = str(d.get("external_id") or d.get("id"))
                 if ext_id in live_wg_clients:
                     live = live_wg_clients[ext_id]
@@ -3633,7 +3622,15 @@ class LabOpsDataService:
                     d["last_handshake"] = live.get("last_handshake")
                     d["transfer_rx"] = live.get("transfer_rx", 0)
                     d["transfer_tx"] = live.get("transfer_tx", 0)
+                    has_hs = bool(live.get("last_handshake")) and bool(live.get("enabled", True))
+                    d["gateway_sync_state"] = "VPN_HANDSHAKE_VERIFIED" if has_hs else "VPN_PEER_REGISTERED"
+                else:
+                    d["gateway_sync_state"] = "UNREGISTERED_ON_GATEWAY"
         except Exception as e:
+            for d in devices:
+                d["gateway_sync_state"] = (
+                    "PENDING_PROVISIONING" if self._is_pending_placeholder_device(d) else "CACHED_GATEWAY_OFFLINE"
+                )
             logger.debug(f"Không thể đồng bộ live handshake từ wg-easy: {e}")
         return devices
 

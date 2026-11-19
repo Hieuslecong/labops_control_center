@@ -47,6 +47,72 @@ class TestAdminSshLifecycle(unittest.TestCase):
             self.svc.ssh_access_manager.stop_canary_sshd_for_workspace(u)
         self.tmpdir.cleanup()
 
+    def _attach_mock_wg_easy(self) -> list[dict]:
+        """Gắn mock wg-easy v15 API cho các test kiểm tra gói ZIP/key bundle đã đăng ký peer thật."""
+        clients: list[dict] = []
+        wg = self.svc.vpn_manager.wg_easy
+        wg.password = "mock-wg-easy-pass"
+        wg.public_endpoint = "118.70.169.236:2204"
+        wg.vpn_subnet = "10.88.40.0/24"
+
+        def fake_request(path: str, method: str = "GET", data: dict | None = None, is_text_response: bool = False):
+            norm = path.lstrip("/")
+            if norm == "api/admin/interface" and method == "GET":
+                return {
+                    "name": "wg0",
+                    "enabled": True,
+                    "ipv4Cidr": "10.88.40.0/24",
+                    "ipv6Cidr": "fdcc:ad94:bacf:61a4::cafe:0/112",
+                    "port": 2204,
+                    "publicKey": "TA7sUCFRsPHfg52B/Gh4w7vnu3SpzaxH4A1HS6N3bDk=",
+                }
+            if norm == "api/admin/hooks" and method == "GET":
+                return {
+                    "id": "wg0",
+                    "postUp": "iptables -t nat -A POSTROUTING -s 10.88.40.0/24 -d 192.168.167.250/31 -o eth0 -j MASQUERADE;",
+                }
+            if norm == "api/admin/userconfig" and method == "GET":
+                return {"host": "118.70.169.236", "port": 2204}
+            if norm == "api/client" and method == "GET":
+                return list(clients)
+            if norm == "api/client" and method == "POST":
+                cid = len(clients) + 1
+                ip = f"10.88.40.{cid + 1}"
+                rec = {
+                    "id": cid,
+                    "name": (data or {}).get("name") or f"client-{cid}",
+                    "ipv4Address": ip,
+                    "enabled": True,
+                    "publicKey": f"PeerPubKey{cid}00000000000000000000000000000000=",
+                    "latestHandshakeAt": None,
+                    "transferRx": 0,
+                    "transferTx": 0,
+                }
+                clients.append(rec)
+                return {"clientId": cid, "ipv4Address": ip}
+            if norm.startswith("api/client/") and norm.endswith("/configuration") and method == "GET":
+                cid = norm.split("/")[2]
+                c = next((item for item in clients if str(item["id"]) == str(cid)), None)
+                if not c:
+                    raise RuntimeError(f"Missing mock client {cid}")
+                return (
+                    "[Interface]\n"
+                    "PrivateKey = MOCK_WIREGUARD_PRIVATE_KEY_DO_NOT_USE_IN_PROD\n"
+                    f"Address = {c['ipv4Address']}/32\n"
+                    "DNS = 1.1.1.1\n\n"
+                    "[Peer]\n"
+                    "PublicKey = TA7sUCFRsPHfg52B/Gh4w7vnu3SpzaxH4A1HS6N3bDk=\n"
+                    "Endpoint = 118.70.169.236:2204\n"
+                    "AllowedIPs = 10.88.40.0/24\n"
+                    "PersistentKeepalive = 25\n"
+                )
+            if norm.startswith("api/client/") and method in ("POST", "DELETE"):
+                return {"success": True}
+            return {}
+
+        wg._request = fake_request  # type: ignore[method-assign]
+        return clients
+
     def test_01_researcher_blocked_from_admin_ssh_endpoints_and_scoped_to_self(self) -> None:
         """[PASS_AUTOMATED] Researcher không gọi được API tạo/thu hồi/lấy gói key của Admin và không xem/đổi được mật khẩu người khác."""
         import app.main as main_mod
@@ -200,6 +266,7 @@ class TestAdminSshLifecycle(unittest.TestCase):
 
     def test_04_one_time_key_bundle_and_separate_channel_secrets_policy(self) -> None:
         """[PASS_AUTOMATED] Chỉ tải được gói key và passphrase/mật khẩu tạm đúng 1 lần; cấp lại khóa sẽ thu hồi khóa cũ."""
+        self._attach_mock_wg_easy()
         member = self.svc.provision_member_ssh_access({
             "full_name": "One Time User",
             "username": "onetime_u",
@@ -394,10 +461,13 @@ class TestAdminSshLifecycle(unittest.TestCase):
         self.assertTrue(self.svc.ssh_access_manager._verify_rlimit_enforcement_canary(ws_a, 2, 4, 10))
 
     def test_09_zip_package_download_and_structure(self) -> None:
-        """[PASS_REAL] Tải trọn gói kết nối .zip, kiểm tra cấu trúc thư mục chuẩn, claim-once và endpoint HTTP."""
+        """[PASS_REAL] Tải trọn gói kết nối .zip, kiểm tra cấu trúc thư mục chuẩn, claim-once, fail-closed và endpoint HTTP."""
         import io
         import zipfile
         import app.main as main_mod
+
+        # 0. Gắn mock wg-easy đã đồng bộ subnet 10.88.40.0/24 & endpoint để test ZIP khi peer đã đăng ký thật
+        self._attach_mock_wg_easy()
 
         # 1. Tạo thành viên mới với SSH key do hệ thống sinh
         created = self.svc.provision_member_ssh_access({
@@ -498,6 +568,26 @@ class TestAdminSshLifecycle(unittest.TestCase):
         # 7. Kiểm tra audit log đã ghi nhận sự kiện tải ZIP
         audit_actions = [log["action"] for log in self.svc.audit_logs]
         self.assertIn("ACCESS_ZIP_PACKAGE_DOWNLOADED", audit_actions)
+
+        # 8. Fail-closed check: khi wg-easy offline / chưa đăng ký peer thật, tuyệt đối KHÔNG sinh fake wireguard/labops.conf
+        self.svc.vpn_manager.wg_easy.password = ""
+        self.svc.vpn_manager.wg_easy._request = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("wg-easy offline"))  # type: ignore[method-assign]
+        offline_member = self.svc.provision_member_ssh_access({
+            "full_name": "Offline WG Member",
+            "username": "canary_offwg",
+            "assigned_server": "workstation",
+            "cpu_limit_cores": 2,
+            "ram_limit_gb": 4,
+            "storage_quota_gb": 10,
+            "require_passphrase": False,
+            "_actor_id": "admin_root",
+        })
+        _, offline_zip = self.svc.claim_member_access_zip(offline_member["id"], actor="admin_root")
+        with zipfile.ZipFile(io.BytesIO(offline_zip), "r") as zf_off:
+            off_names = set(zf_off.namelist())
+            off_prefix = f"LabOps_Access_{offline_member['username']}"
+            self.assertNotIn(f"{off_prefix}/wireguard/labops.conf", off_names)
+            self.assertIn(f"{off_prefix}/wireguard/WIREGUARD_PENDING.md", off_names)
 
 
 if __name__ == "__main__":

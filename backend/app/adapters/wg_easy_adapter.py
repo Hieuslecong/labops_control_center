@@ -10,9 +10,13 @@ Cung cấp toàn bộ tính năng quản trị WireGuard VPN tự động:
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -32,13 +36,19 @@ class WgEasyAdapter(VPNProvider):
         password: Optional[str] = None,
         public_endpoint: Optional[str] = None,
         vpn_subnet: Optional[str] = None,
+        container_name: Optional[str] = None,
         timeout: int = 5,
     ) -> None:
         self.base_url = (base_url or getattr(settings, "WG_EASY_API_URL", "http://127.0.0.1:51821")).rstrip("/")
         self.username = username or getattr(settings, "WG_EASY_ADMIN_USER", "admin")
         self.password = password if password is not None else getattr(settings, "WG_EASY_ADMIN_PASSWORD", "")
-        self.public_endpoint = public_endpoint or getattr(settings, "WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
+        self.public_endpoint = (
+            public_endpoint
+            if public_endpoint is not None
+            else getattr(settings, "WG_EASY_PUBLIC_ENDPOINT", "")
+        )
         self.vpn_subnet = vpn_subnet or getattr(settings, "WG_EASY_VPN_SUBNET", "10.88.40.0/24")
+        self.container_name = container_name or getattr(settings, "WG_EASY_CONTAINER_NAME", "labops-wg-easy")
         self.timeout = timeout
         self._circuit_open_until = 0.0
         self._failure_count = 0
@@ -106,19 +116,44 @@ class WgEasyAdapter(VPNProvider):
                 self._circuit_open_until = time.time() + 15.0
             raise VPNProviderError(f"Không thể kết nối tới wg-easy tại {self.base_url}: {e}") from e
 
-    def ensure_subnet_configured(self) -> None:
-        """Đảm bảo CIDR mạng WireGuard trong wg-easy khớp với 10.88.40.0/24."""
+    def restart_interface(self) -> Dict[str, Any]:
+        """Khởi động lại WireGuard interface trong wg-easy qua API chính thức để đồng bộ CIDR/route/hooks."""
+        res = self._request("api/admin/interface/restart", method="POST", data={})
+        return res if isinstance(res, dict) else {"success": True}
+
+    def get_hooks(self) -> Dict[str, Any]:
+        res = self._request("api/admin/hooks", method="GET")
+        return res if isinstance(res, dict) else {}
+
+    def update_hooks(self, hooks: Dict[str, Any]) -> Dict[str, Any]:
+        res = self._request("api/admin/hooks", method="POST", data=hooks)
+        return res if isinstance(res, dict) else {"success": True}
+
+    def get_userconfig(self) -> Dict[str, Any]:
+        res = self._request("api/admin/userconfig", method="GET")
+        return res if isinstance(res, dict) else {}
+
+    def ensure_subnet_configured(self, restart_on_change: bool = False) -> None:
+        """Đồng bộ persisted CIDR (giữ nguyên IPv6 hiện hữu); chỉ restart khi được gọi tường minh."""
         try:
             iface = self._request("api/admin/interface", method="GET")
             if isinstance(iface, dict):
                 current_cidr = iface.get("ipv4Cidr", "")
+                ipv6_cidr = iface.get("ipv6Cidr") or "fdcc:ad94:bacf:61a4::cafe:0/112"
                 if current_cidr != self.vpn_subnet:
-                    logger.info(f"Cập nhật subnet WireGuard wg-easy từ {current_cidr} sang {self.vpn_subnet}")
+                    logger.info(
+                        "Cập nhật persisted subnet WireGuard wg-easy từ %s sang %s (restart=%s)",
+                        current_cidr,
+                        self.vpn_subnet,
+                        restart_on_change,
+                    )
                     self._request(
                         "api/admin/interface/cidr",
                         method="POST",
-                        data={"ipv4Cidr": self.vpn_subnet, "ipv6Cidr": "fdcc:ad94:bacf:61a4::cafe:0/112"},
+                        data={"ipv4Cidr": self.vpn_subnet, "ipv6Cidr": ipv6_cidr},
                     )
+                    if restart_on_change:
+                        self.restart_interface()
         except Exception as e:
             logger.warning(f"Không thể kiểm tra/cập nhật subnet WireGuard trên wg-easy: {e}")
 
@@ -158,7 +193,7 @@ class WgEasyAdapter(VPNProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Tạo client trên wg-easy v15. Tự động cấp IP và sinh keypair nếu chưa có."""
-        self.ensure_subnet_configured()
+        # Không tự đổi CIDR khi tạo peer: đổi CIDR chỉ được thực hiện có kiểm soát (kèm restart interface).
         payload = {"name": name, "expiresAt": expires_at}
         res = self._request("api/client", method="POST", data=payload)
         client_id = res.get("clientId") or res.get("id")
@@ -206,28 +241,221 @@ class WgEasyAdapter(VPNProvider):
             conf_text = re.sub(r"Endpoint\s*=\s*[^\r\n]+", f"Endpoint = {self.public_endpoint}", conf_text)
         return conf_text
 
+    def inspect_runtime_network(self, interface_name: str = "wg0") -> Dict[str, Any]:
+        """Kiểm tra wg0 IPv4 CIDR, kernel route và NAT POSTROUTING thực tế trong container khi docker.sock khả dụng."""
+        docker_bin = shutil.which("docker")
+        sock_path = "/var/run/docker.sock"
+        if not docker_bin or not os.path.exists(sock_path) or not os.access(sock_path, os.R_OK | os.W_OK):
+            return {"inspected": False, "reason": "DOCKER_SOCKET_UNAVAILABLE"}
+        try:
+            addr_p = subprocess.run(
+                [docker_bin, "exec", self.container_name, "ip", "-4", "-o", "addr", "show", "dev", interface_name],
+                capture_output=True, text=True, timeout=4,
+            )
+            route_p = subprocess.run(
+                [docker_bin, "exec", self.container_name, "ip", "-4", "route", "show", "dev", interface_name],
+                capture_output=True, text=True, timeout=4,
+            )
+            nat_p = subprocess.run(
+                [docker_bin, "exec", self.container_name, "iptables", "-t", "nat", "-S", "POSTROUTING"],
+                capture_output=True, text=True, timeout=4,
+            )
+            if addr_p.returncode != 0:
+                return {"inspected": False, "reason": f"DOCKER_EXEC_FAILED: {addr_p.stderr.strip()}"}
+
+            runtime_wg_cidr = ""
+            m_addr = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", addr_p.stdout)
+            if m_addr:
+                runtime_wg_cidr = str(ipaddress.ip_network(m_addr.group(1), strict=False))
+
+            runtime_routes = [ln.strip().split()[0] for ln in route_p.stdout.splitlines() if ln.strip()]
+            nat_subnets = re.findall(r"-s\s+(\d+\.\d+\.\d+\.\d+/\d+).*?-j\s+MASQUERADE", nat_p.stdout)
+            return {
+                "inspected": True,
+                "runtime_wg_cidr": runtime_wg_cidr,
+                "runtime_routes": runtime_routes,
+                "nat_subnets": nat_subnets,
+            }
+        except Exception as exc:
+            return {"inspected": False, "reason": f"RUNTIME_PROBE_ERROR: {exc}"}
+
+    def detect_routing_inconsistencies(
+        self,
+        persisted_cidr: str,
+        clients: List[Dict[str, Any]],
+        hooks: Optional[Dict[str, Any]] = None,
+        runtime_probe: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """So khớp configured CIDR, persisted CIDR, runtime wg0/route/NAT, hooks và IP từng peer."""
+        issues: List[str] = []
+        state_flags: Dict[str, bool] = {
+            "VPN_API_HEALTHY": True,
+            "VPN_INTERFACE_MISMATCH": False,
+            "VPN_ROUTE_MISMATCH": False,
+            "VPN_NAT_MISMATCH": False,
+            "VPN_PEER_REGISTERED": len(clients) > 0,
+            "VPN_HANDSHAKE_VERIFIED": any(
+                bool(c.get("last_handshake")) and c.get("status") == "ACTIVE" for c in clients
+            ),
+            "VPN_DATA_PATH_VERIFIED": False,
+            "VPN_SSH_REACHABLE": False,
+        }
+        try:
+            configured = ipaddress.ip_network(self.vpn_subnet, strict=False)
+        except ValueError:
+            state_flags["VPN_INTERFACE_MISMATCH"] = True
+            return {
+                "issues": [f"CONFIGURED_CIDR_INVALID: {self.vpn_subnet}"],
+                "state_flags": state_flags,
+            }
+
+        effective_net = configured
+        if persisted_cidr:
+            try:
+                persisted_net = ipaddress.ip_network(persisted_cidr, strict=False)
+                effective_net = persisted_net
+                if persisted_net != configured:
+                    state_flags["VPN_INTERFACE_MISMATCH"] = True
+                    issues.append(f"VPN_INTERFACE_MISMATCH: configured={configured} persisted={persisted_net}")
+            except ValueError:
+                state_flags["VPN_INTERFACE_MISMATCH"] = True
+                issues.append(f"PERSISTED_CIDR_INVALID: {persisted_cidr}")
+
+        probe = runtime_probe or {}
+        if probe.get("inspected"):
+            rt_cidr = str(probe.get("runtime_wg_cidr") or "")
+            if not rt_cidr:
+                state_flags["VPN_INTERFACE_MISMATCH"] = True
+                issues.append("VPN_INTERFACE_MISMATCH: runtime wg0 has no IPv4 address")
+            else:
+                rt_net = ipaddress.ip_network(rt_cidr, strict=False)
+                if rt_net != configured or (persisted_cidr and rt_net != ipaddress.ip_network(persisted_cidr, strict=False)):
+                    state_flags["VPN_INTERFACE_MISMATCH"] = True
+                    issues.append(f"VPN_INTERFACE_MISMATCH: runtime_wg0={rt_net} expected={configured}")
+
+            rt_routes = [str(r) for r in (probe.get("runtime_routes") or [])]
+            if str(configured) not in rt_routes:
+                state_flags["VPN_ROUTE_MISMATCH"] = True
+                issues.append(f"VPN_ROUTE_MISMATCH: missing {configured} in wg0 routes ({rt_routes})")
+
+            nat_subnets = [str(s) for s in (probe.get("nat_subnets") or [])]
+            if str(configured) not in nat_subnets:
+                state_flags["VPN_NAT_MISMATCH"] = True
+                issues.append(f"VPN_NAT_MISMATCH: POSTROUTING MASQUERADE missing {configured} ({nat_subnets})")
+
+        if isinstance(hooks, dict) and "postUp" in hooks:
+            post_up = str(hooks.get("postUp") or "")
+            if "MASQUERADE" not in post_up:
+                state_flags["VPN_NAT_MISMATCH"] = True
+                issues.append("VPN_NAT_MISMATCH: persisted postUp hook missing MASQUERADE")
+            else:
+                for add_match in re.findall(r"-A\s+POSTROUTING\s+[^\n;]*?-s\s+(\d+\.\d+\.\d+\.\d+/\d+)", post_up):
+                    try:
+                        if ipaddress.ip_network(add_match, strict=False) != configured:
+                            state_flags["VPN_NAT_MISMATCH"] = True
+                            issues.append(f"VPN_NAT_MISMATCH: postUp hardcodes {add_match} != {configured}")
+                    except ValueError:
+                        pass
+
+        for c in clients:
+            ip = str(c.get("vpn_ip") or "")
+            if not ip:
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+                if addr not in configured or addr not in effective_net:
+                    issues.append(f"PEER_IP_OUTSIDE_SUBNET: {c.get('name')} {ip} not in {configured}")
+            except ValueError:
+                issues.append(f"PEER_IP_INVALID: {c.get('name')} {ip}")
+
+        if (
+            probe.get("inspected")
+            and not issues
+            and state_flags["VPN_PEER_REGISTERED"]
+            and state_flags["VPN_HANDSHAKE_VERIFIED"]
+        ):
+            state_flags["VPN_DATA_PATH_VERIFIED"] = True
+
+        return {"issues": issues, "state_flags": state_flags}
+
     def get_connection_status(self) -> Dict[str, Any]:
         try:
             iface = self._request("api/admin/interface", method="GET")
             clients = self.list_devices()
+            hooks: Optional[Dict[str, Any]] = None
+            userconfig: Dict[str, Any] = {}
+            try:
+                h = self._request("api/admin/hooks", method="GET")
+                if isinstance(h, dict):
+                    hooks = h
+            except Exception:
+                hooks = None
+            try:
+                uc = self._request("api/admin/userconfig", method="GET")
+                if isinstance(uc, dict):
+                    userconfig = uc
+            except Exception:
+                userconfig = {}
+
+            iface_name = str(iface.get("name") or "wg0") if isinstance(iface, dict) else "wg0"
+            runtime_probe = self.inspect_runtime_network(iface_name)
             active_handshakes = sum(
                 1 for c in clients if c.get("last_handshake") and c.get("status") == "ACTIVE"
             )
             total_rx = sum(int(c.get("transfer_rx", 0)) for c in clients)
             total_tx = sum(int(c.get("transfer_tx", 0)) for c in clients)
             server_pub = iface.get("publicKey") if isinstance(iface, dict) else ""
+            persisted_cidr = iface.get("ipv4Cidr", "") if isinstance(iface, dict) else ""
+
+            live_host = str(userconfig.get("host") or "").strip()
+            live_port = userconfig.get("port") or (iface.get("port") if isinstance(iface, dict) else None)
+            live_endpoint = f"{live_host}:{live_port}" if live_host and live_port else self.public_endpoint
+
+            diag = self.detect_routing_inconsistencies(
+                persisted_cidr, clients, hooks=hooks, runtime_probe=runtime_probe
+            )
+            routing_issues = diag["issues"]
+            state_flags = diag["state_flags"]
+            inspected = bool(runtime_probe.get("inspected"))
+
+            if routing_issues:
+                status = "VPN_ROUTING_MISCONFIGURED"
+                service_health = "VPN_ROUTING_MISCONFIGURED"
+            elif inspected:
+                status = "ACTIVE"
+                service_health = "HEALTHY"
+            else:
+                status = "VPN_API_HEALTHY"
+                service_health = "VPN_API_HEALTHY"
+
+            active_states = [k for k, v in state_flags.items() if v]
+            if routing_issues and "VPN_ROUTING_MISCONFIGURED" not in active_states:
+                active_states.append("VPN_ROUTING_MISCONFIGURED")
+
+            runtime_wg_cidr = str(runtime_probe.get("runtime_wg_cidr") or "")
+            effective_subnet = runtime_wg_cidr or persisted_cidr or self.vpn_subnet
+
             return {
                 "provider": self.name,
-                "service_health": "HEALTHY",
-                "status": "ACTIVE",
+                "service_health": service_health,
+                "routing_state": "VPN_ROUTING_MISCONFIGURED" if routing_issues else ("HEALTHY" if inspected else "VPN_API_HEALTHY"),
+                "states": active_states,
+                "state_flags": state_flags,
+                "routing_issues": routing_issues,
+                "configured_cidr": self.vpn_subnet,
+                "persisted_cidr": persisted_cidr,
+                "runtime_wg_cidr": runtime_wg_cidr,
+                "nat_subnets": runtime_probe.get("nat_subnets", []),
+                "runtime_inspection_status": "VERIFIED" if inspected else str(runtime_probe.get("reason") or "UNVERIFIED"),
+                "status": status,
                 "container_running": True,
-                "public_endpoint": self.public_endpoint,
-                "vpn_subnet": iface.get("ipv4Cidr", self.vpn_subnet) if isinstance(iface, dict) else self.vpn_subnet,
-                "interface_name": "wg0 (wg-easy)",
+                "public_endpoint": live_endpoint,
+                "vpn_subnet": effective_subnet,
+                "interface_name": f"{iface_name} (wg-easy)",
                 "server_public_key": server_pub,
                 "total_clients": len(clients),
                 "active_handshakes": active_handshakes,
-                "tunnel_traffic_verified": active_handshakes > 0,
+                "tunnel_traffic_verified": state_flags["VPN_DATA_PATH_VERIFIED"],
                 "total_rx_bytes": total_rx,
                 "total_tx_bytes": total_tx,
                 "version": "15.x",
@@ -239,6 +467,18 @@ class WgEasyAdapter(VPNProvider):
                 "provider": self.name,
                 "service_health": "UNAVAILABLE",
                 "status": "UNAVAILABLE",
+                "states": [],
+                "state_flags": {
+                    "VPN_API_HEALTHY": False,
+                    "VPN_INTERFACE_MISMATCH": False,
+                    "VPN_ROUTE_MISMATCH": False,
+                    "VPN_NAT_MISMATCH": False,
+                    "VPN_PEER_REGISTERED": False,
+                    "VPN_HANDSHAKE_VERIFIED": False,
+                    "VPN_DATA_PATH_VERIFIED": False,
+                    "VPN_SSH_REACHABLE": False,
+                },
+                "routing_issues": [],
                 "container_running": False,
                 "public_endpoint": self.public_endpoint,
                 "vpn_subnet": self.vpn_subnet,

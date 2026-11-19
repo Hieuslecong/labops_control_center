@@ -59,13 +59,29 @@ class VPNManager:
         """Tổng hợp trạng thái của hệ thống VPN wg-easy duy nhất."""
         wg_easy_status = self.wg_easy.get_connection_status()
         active_provider = self.primary_provider.name
-        is_healthy = wg_easy_status.get("status") == "ACTIVE" and wg_easy_status.get("service_health") == "HEALTHY"
+        svc_health = wg_easy_status.get("service_health", "UNAVAILABLE")
+        if svc_health == "HEALTHY":
+            overview_status = "HEALTHY"
+        elif svc_health == "VPN_API_HEALTHY":
+            overview_status = "VPN_API_HEALTHY"
+        elif svc_health == "VPN_ROUTING_MISCONFIGURED":
+            overview_status = "VPN_ROUTING_MISCONFIGURED"
+        else:
+            overview_status = "UNAVAILABLE"
 
         return {
             "primary_provider": active_provider,
             "active_provider": active_provider,
-            "status": "HEALTHY" if is_healthy else "UNAVAILABLE",
-            "service_health": "HEALTHY" if is_healthy else "UNAVAILABLE",
+            "status": overview_status,
+            "service_health": svc_health,
+            "states": wg_easy_status.get("states", []),
+            "state_flags": wg_easy_status.get("state_flags", {}),
+            "routing_issues": wg_easy_status.get("routing_issues", []),
+            "configured_cidr": wg_easy_status.get("configured_cidr") or self.wg_easy.vpn_subnet,
+            "persisted_cidr": wg_easy_status.get("persisted_cidr") or "",
+            "runtime_wg_cidr": wg_easy_status.get("runtime_wg_cidr") or "",
+            "nat_subnets": wg_easy_status.get("nat_subnets", []),
+            "runtime_inspection_status": wg_easy_status.get("runtime_inspection_status", "UNVERIFIED"),
             "public_endpoint": wg_easy_status.get("public_endpoint") or self.wg_easy.public_endpoint,
             "cidr": wg_easy_status.get("vpn_subnet") or self.wg_easy.vpn_subnet,
             "vpn_subnet": wg_easy_status.get("vpn_subnet") or self.wg_easy.vpn_subnet,

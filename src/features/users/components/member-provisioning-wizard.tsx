@@ -1162,7 +1162,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
 
             <Card
               className={`p-3 text-xs space-y-1 ${
-                vpnOverview?.status === 'HEALTHY'
+                vpnOverview?.status === 'HEALTHY' || vpnOverview?.status === 'VPN_API_HEALTHY'
                   ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-800 dark:text-emerald-200'
                   : 'border-amber-500/40 bg-amber-500/5 text-amber-900 dark:text-amber-200'
               }`}
@@ -1173,17 +1173,17 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   {vpnOverview?.status || 'ĐANG KIỂM TRA...'}
                 </Badge>
               </div>
-              {vpnOverview?.status === 'HEALTHY' ? (
+              {vpnOverview?.status === 'HEALTHY' || vpnOverview?.status === 'VPN_API_HEALTHY' ? (
                 <p>
-                  WireGuard Gateway (wg-easy): ONLINE ({vpnOverview.public_endpoint}) — sẽ tự động
-                  cấp peer VPN theo đúng máy chủ (
+                  WireGuard Gateway (wg-easy): {vpnOverview.status} ({vpnOverview.public_endpoint})
+                  — sẽ tự động cấp peer VPN theo đúng máy chủ (
                   {serverId === 'workstation' ? '192.168.167.251/32' : '192.168.167.250/32'}).
                 </p>
               ) : (
                 <p>
-                  WireGuard Gateway (wg-easy) đang OFFLINE — tài khoản vẫn tạo SSH thành công để kết
-                  nối trực tiếp trong mạng LAN; VPN từ xa sẽ ở trạng thái chờ (PENDING_PROVISIONING)
-                  cho đến khi khởi động container <code>labops-wg-easy</code>.
+                  WireGuard Gateway (wg-easy): {vpnOverview?.status || 'OFFLINE'} — tài khoản vẫn
+                  tạo SSH thành công để kết nối trực tiếp trong mạng LAN; VPN từ xa chưa cấp file{' '}
+                  <code>.conf</code> cho đến khi gateway sẵn sàng và nhất quán định tuyến.
                 </p>
               )}
             </Card>
@@ -1524,9 +1524,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     </Badge>
                   </div>
                   <p className='text-muted-foreground'>
-                    {vpnOverview?.status === 'HEALTHY'
+                    {vpnOverview?.status === 'HEALTHY' || vpnOverview?.status === 'VPN_API_HEALTHY'
                       ? `Tự động cấp peer VPN qua wg-easy (${vpnOverview.public_endpoint}).`
-                      : 'wg-easy đang OFFLINE — SSH LAN vẫn hoạt động ngay; VPN từ xa sẽ chờ kích hoạt.'}
+                      : `wg-easy ở trạng thái ${vpnOverview?.status || 'OFFLINE'} — SSH LAN vẫn hoạt động ngay; VPN từ xa sẽ chờ kích hoạt.`}
                   </p>
                 </div>
 

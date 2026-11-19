@@ -121,6 +121,8 @@ class VPNRouteResolver:
         actor_role: str,
         workspaces: Optional[List[Dict[str, Any]]] = None,
         requested_host_id: Optional[str] = None,
+        vpn_subnet: Optional[str] = None,
+        host_online: Optional[bool] = None,
     ) -> ResolvedRoute:
         """
         Phân giải toàn diện danh sách AllowedIPs và SSH connection info cho thành viên:
@@ -214,9 +216,9 @@ class VPNRouteResolver:
                 is_workspace_ssh = True
                 resolved_workspace_id = str(chosen_ws.get("id") or chosen_ws.get("name") or "")
 
-        # 2. Xây dựng AllowedIPs động
-        # Luôn bao gồm VPN Subnet: 10.88.40.0/24
-        cidr_set: Set[str] = {self.vpn_subnet}
+        # 2. Xây dựng AllowedIPs động từ subnet thực tế của gateway
+        effective_subnet = (vpn_subnet or self.vpn_subnet).strip()
+        cidr_set: Set[str] = {effective_subnet}
 
         for h in target_host_records:
             if not h.lan_ip:
@@ -241,6 +243,11 @@ class VPNRouteResolver:
             )
             resolved_ssh_port = int(member.get("ssh_port") or 22011)
 
+        route_verified = (
+            host_online is not False
+            and all(h.verification_state == "VERIFIED" for h in target_host_records)
+        )
+
         return ResolvedRoute(
             member_id=member_id,
             username=username,
@@ -252,5 +259,5 @@ class VPNRouteResolver:
             ssh_port=resolved_ssh_port,
             is_workspace_ssh=is_workspace_ssh,
             workspace_id=resolved_workspace_id,
-            verification_state="VERIFIED",
+            verification_state="VERIFIED" if route_verified else "HOST_OFFLINE_UNVERIFIED",
         )

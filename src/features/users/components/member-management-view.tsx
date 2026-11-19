@@ -544,7 +544,8 @@ export function MemberManagementView() {
     }
   };
 
-  const vpnHealthy = vpnOverview?.status === 'HEALTHY';
+  const vpnHealthy = vpnOverview?.status === 'HEALTHY' || vpnOverview?.status === 'VPN_API_HEALTHY';
+  const vpnMisconfigured = vpnOverview?.status === 'VPN_ROUTING_MISCONFIGURED';
   const wgPort = parseUdpPort(vpnOverview?.public_endpoint);
 
   return (
@@ -601,11 +602,13 @@ export function MemberManagementView() {
               <Badge
                 variant='outline'
                 className={
-                  vpnHealthy
+                  vpnOverview?.status === 'HEALTHY'
                     ? 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30 text-xs'
-                    : vpnOverview
-                      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/40 text-xs'
-                      : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-xs'
+                    : vpnOverview?.status === 'VPN_API_HEALTHY'
+                      ? 'bg-amber-500/10 text-amber-800 dark:text-amber-200 border-amber-500/30 text-xs'
+                      : vpnOverview
+                        ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/40 text-xs'
+                        : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-xs'
                 }
               >
                 Trạng thái: {vpnOverview ? vpnOverview.status : 'ĐANG KIỂM TRA...'}
@@ -627,7 +630,29 @@ export function MemberManagementView() {
             </div>
           </div>
 
-          {vpnOverview && !vpnHealthy && (
+          {vpnOverview && vpnMisconfigured && (
+            <div className='rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-800 dark:text-rose-200 space-y-1'>
+              <p className='font-semibold'>
+                ⚠️ Lỗi cấu hình định tuyến VPN (VPN_ROUTING_MISCONFIGURED)
+              </p>
+              <p>
+                {(vpnOverview.routing_issues || []).join('; ') ||
+                  'Phát hiện sai lệch subnet/route/NAT giữa LabOps và wg-easy.'}{' '}
+                — Cần đồng bộ lại CIDR/hooks trước khi cấp cấu hình VPN.
+              </p>
+            </div>
+          )}
+
+          {vpnOverview && vpnOverview.status === 'VPN_API_HEALTHY' && (
+            <div className='rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200'>
+              API wg-easy đang hoạt động (Persisted CIDR:{' '}
+              <code>{vpnOverview.persisted_cidr || vpnOverview.cidr}</code>), nhưng Backend chưa thể
+              kiểm chứng trực tiếp kernel <code>wg0</code>/NAT trong container (
+              <code>{vpnOverview.runtime_inspection_status || 'UNVERIFIED'}</code>).
+            </div>
+          )}
+
+          {vpnOverview && !vpnHealthy && !vpnMisconfigured && (
             <div className='rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-800 dark:text-rose-200 space-y-1'>
               <p className='font-semibold'>
                 ⚠️ wg-easy VPN Gateway hiện đang ngoại tuyến ({vpnOverview.status})

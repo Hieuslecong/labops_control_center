@@ -781,8 +781,8 @@ class SshAccessManager:
         host_alias = f"labops-{username}"
         effective_ssh_user = (ssh_login_user or username).strip() or username
         has_priv = bool(private_key and private_key.strip())
-        wg_ip = wireguard_client_ip or "10.88.40.x"
-        wg_ep = wireguard_endpoint or "118.70.169.236:2205"
+        wg_ip = wireguard_client_ip or "CHƯA CẤP"
+        wg_ep = wireguard_endpoint or "CHƯA XÁC MINH"
 
         ssh_config_content = _build_ssh_config_snippet(
             username=username,
@@ -956,6 +956,14 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             # 2. WireGuard
             if wireguard_conf:
                 zf.writestr(f"{root}/wireguard/labops.conf", wireguard_conf)
+            else:
+                zf.writestr(
+                    f"{root}/wireguard/WIREGUARD_PENDING.md",
+                    "# WIREGUARD CHƯA ĐƯỢC CẤP PHÁT\n"
+                    "- Gói kết nối này KHÔNG tạo file `.conf` giả khi gateway `wg-easy` chưa xác minh hoặc đang ngoại tuyến.\n"
+                    "- Nếu đang ở mạng LAN phòng Lab, kết nối thẳng bằng SSH: `ssh labops-" + username + "`.\n"
+                    "- Để nhận WireGuard `.conf` hợp lệ, Admin cần kiểm tra `wg-easy` và cấp thiết bị qua Dashboard.\n"
+                )
             zf.writestr(
                 f"{root}/wireguard/SETUP.md",
                 "# CẤU HÌNH WIREGUARD VPN\n"

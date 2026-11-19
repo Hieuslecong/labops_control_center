@@ -420,8 +420,22 @@ export interface WireGuardDevice {
 
 export interface WireGuardVpnOverview {
   active_provider: string;
-  status: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNAVAILABLE' | string;
+  status:
+    | 'HEALTHY'
+    | 'VPN_API_HEALTHY'
+    | 'VPN_ROUTING_MISCONFIGURED'
+    | 'DEGRADED'
+    | 'UNHEALTHY'
+    | 'UNAVAILABLE'
+    | string;
   service_health?: string;
+  states?: string[];
+  state_flags?: Record<string, boolean>;
+  routing_issues?: string[];
+  configured_cidr?: string;
+  persisted_cidr?: string;
+  runtime_wg_cidr?: string;
+  runtime_inspection_status?: string;
   public_endpoint: string;
   cidr: string;
   total_clients: number;

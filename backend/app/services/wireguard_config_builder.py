@@ -10,6 +10,7 @@ Tuân thủ nghiêm ngặt Master Prompt V2:
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import time
@@ -95,7 +96,7 @@ class WireGuardConfigBuilder:
                 http_status=400,
             )
 
-        # Lấy trạng thái runtime gateway để kiểm tra PublicKey và Endpoint
+        # Lấy trạng thái runtime gateway để kiểm tra PublicKey, CIDR nhất quán và Endpoint
         gw_status = self.wg_easy.get_connection_status()
         if gw_status.get("status") == "UNAVAILABLE":
             raise ConfigBuilderError(
@@ -105,14 +106,73 @@ class WireGuardConfigBuilder:
             )
 
         server_pubkey = gw_status.get("server_public_key")
-        public_endpoint = gw_status.get("public_endpoint") or self.wg_easy.public_endpoint
-
         if not server_pubkey:
             raise ConfigBuilderError(
                 "GATEWAY_KEY_UNVERIFIED",
                 "Không thể xác minh khóa công khai của wg-easy Gateway.",
                 http_status=502,
             )
+
+        if gw_status.get("service_health") == "VPN_ROUTING_MISCONFIGURED" or gw_status.get("routing_issues"):
+            raise ConfigBuilderError(
+                "VPN_ROUTING_MISCONFIGURED",
+                f"Cấu hình định tuyến VPN đang không nhất quán: {'; '.join(gw_status.get('routing_issues') or [])}",
+                http_status=503,
+            )
+
+        # Xác minh peer thực sự đã đăng ký trên wg-easy và IP nằm trong subnet của gateway
+        try:
+            live_clients = self.wg_easy.list_devices()
+        except VPNProviderError as e:
+            raise ConfigBuilderError("VPN_PROVIDER_UNAVAILABLE", str(e), http_status=503) from e
+
+        matched_peer = next(
+            (
+                c
+                for c in live_clients
+                if str(c.get("id")) == ext_device_id
+                or str(c.get("external_id")) == ext_device_id
+                or (device.get("public_key") and c.get("public_key") == device.get("public_key"))
+            ),
+            None,
+        )
+        if not matched_peer:
+            raise ConfigBuilderError(
+                "PEER_NOT_REGISTERED_ON_GATEWAY",
+                f"Thiết bị '{ext_device_id}' không tồn tại trên wg-easy Gateway.",
+                http_status=404,
+            )
+
+        effective_cidr = str(
+            gw_status.get("runtime_wg_cidr")
+            or gw_status.get("persisted_cidr")
+            or gw_status.get("vpn_subnet")
+            or ""
+        ).strip()
+        peer_vpn_ip = str(matched_peer.get("vpn_ip") or device.get("vpn_ip") or "").split("/")[0].strip()
+        if effective_cidr and peer_vpn_ip:
+            try:
+                if ipaddress.ip_address(peer_vpn_ip) not in ipaddress.ip_network(effective_cidr, strict=False):
+                    raise ConfigBuilderError(
+                        "PEER_IP_OUTSIDE_SUBNET",
+                        f"IP của peer ({peer_vpn_ip}) nằm ngoài subnet gateway ({effective_cidr}).",
+                        http_status=409,
+                    )
+            except ValueError as e:
+                raise ConfigBuilderError("PEER_IP_INVALID", f"Địa chỉ IP peer không hợp lệ: {peer_vpn_ip}", http_status=400) from e
+
+        # Phân giải lại AllowedIPs dùng subnet thực tế của gateway
+        if effective_cidr:
+            try:
+                resolved_route = self.route_resolver.resolve_routes_for_member(
+                    member=member,
+                    actor_role=actor_role,
+                    workspaces=workspaces,
+                    requested_host_id=target_host_id,
+                    vpn_subnet=effective_cidr,
+                )
+            except RouteResolutionError as e:
+                raise ConfigBuilderError(e.code, e.message, http_status=e.http_status) from e
 
         # Lấy file conf thô từ wg-easy
         try:
@@ -121,6 +181,18 @@ class WireGuardConfigBuilder:
             raise ConfigBuilderError(
                 "CONFIG_DOWNLOAD_FAILED",
                 f"Lỗi khi tải cấu hình từ wg-easy: {e}",
+                http_status=502,
+            )
+
+        public_endpoint = str(gw_status.get("public_endpoint") or self.wg_easy.public_endpoint or "").strip()
+        if not public_endpoint:
+            ep_match = re.search(r"^Endpoint\s*=\s*([^\r\n]+)", raw_conf, flags=re.MULTILINE)
+            if ep_match:
+                public_endpoint = ep_match.group(1).strip()
+        if not public_endpoint:
+            raise ConfigBuilderError(
+                "GATEWAY_ENDPOINT_UNVERIFIED",
+                "Không xác minh được public endpoint của wg-easy Gateway.",
                 http_status=502,
             )
 

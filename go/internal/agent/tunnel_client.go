@@ -22,6 +22,8 @@ import (
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/pki"
 	"github.com/Hieuslecong/labops_control_center/go/internal/process"
+	"github.com/Hieuslecong/labops_control_center/go/internal/resources"
+	"github.com/Hieuslecong/labops_control_center/go/internal/storage"
 	pb "github.com/Hieuslecong/labops_control_center/go/proto/labops/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -508,28 +510,33 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 			gid, _ := strconv.Atoi(req.Parameters["gid"])
 			port, _ := strconv.Atoi(req.Parameters["ssh_port"])
 			cpuCores, _ := strconv.Atoi(req.Parameters["cpu_limit_cores"])
+			cpuWeight, _ := strconv.Atoi(req.Parameters["cpu_weight"])
 			ramMB, _ := strconv.ParseInt(req.Parameters["ram_limit_mb"], 10, 64)
 			pidsLim, _ := strconv.ParseInt(req.Parameters["pids_limit"], 10, 64)
 			gen, _ := strconv.ParseUint(req.Parameters["generation"], 10, 64)
 			provReq = docker.ProvisionRequest{
-				WorkspaceID:     req.Parameters["workspace_id"],
-				Name:            req.Parameters["name"],
-				MemberID:        req.Parameters["member_id"],
-				MemberUsername:  req.Parameters["owner"],
-				UID:             uid,
-				GID:             gid,
-				ImageRef:        req.Parameters["image_ref"],
-				ImageDigest:     req.Parameters["image_digest"],
-				StorageRoot:     req.Parameters["storage_root"],
-				SSHPort:         port,
-				VPNBindIP:       req.Parameters["vpn_bind_ip"],
-				CPULimitCores:   cpuCores,
-				RAMLimitMB:      ramMB,
-				PidsLimit:       pidsLim,
-				Generation:      gen,
-				NetworkIsolated: req.Parameters["network_isolated"] == "true",
-				AuditActor:      actorScope,
-				CorrelationID:   req.RequestId,
+				WorkspaceID:        req.Parameters["workspace_id"],
+				Name:               req.Parameters["name"],
+				MemberID:           req.Parameters["member_id"],
+				MemberUsername:     req.Parameters["owner"],
+				UID:                uid,
+				GID:                gid,
+				ImageRef:           req.Parameters["image_ref"],
+				ImageDigest:        req.Parameters["image_digest"],
+				StorageRoot:        req.Parameters["storage_root"],
+				MemberStorageDir:   req.Parameters["member_storage_dir"],
+				ContainerMountPath: req.Parameters["container_mount_path"],
+				ResourceMode:       req.Parameters["resource_mode"],
+				CPUWeight:          cpuWeight,
+				SSHPort:            port,
+				VPNBindIP:          req.Parameters["vpn_bind_ip"],
+				CPULimitCores:      cpuCores,
+				RAMLimitMB:         ramMB,
+				PidsLimit:          pidsLim,
+				Generation:         gen,
+				NetworkIsolated:    req.Parameters["network_isolated"] == "true",
+				AuditActor:         actorScope,
+				CorrelationID:      req.RequestId,
 			}
 		}
 		rec, provErr := c.dockerCtrl.ProvisionWorkspace(context.Background(), provReq)
@@ -588,6 +595,101 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 			b, _ := json.Marshal(map[string]any{"removed": cid, "workspace_id": wsID, "status": "deleted"})
 			resp.ResultPayload = b
 		}
+
+	case "LIST_STORAGE_POOLS":
+		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
+		pools := collector.CollectStoragePools()
+		resp.Status = pb.CommandResponse_SUCCESS
+		b, _ := json.Marshal(pools)
+		resp.ResultPayload = b
+
+	case "INSPECT_STORAGE_POOL":
+		storageID := req.Parameters["storage_id"]
+		mountPoint := req.Parameters["mount_point"]
+		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
+		pools := collector.CollectStoragePools()
+		var found *storage.StoragePoolInfo
+		for _, p := range pools {
+			if (storageID != "" && p.StorageID == storageID) || (mountPoint != "" && p.MountPoint == mountPoint) {
+				found = p
+				break
+			}
+		}
+		if found == nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "STORAGE_POOL_NOT_FOUND"
+			resp.ErrorMessage = "Storage pool không tồn tại hoặc không đủ điều kiện"
+		} else {
+			resp.Status = pb.CommandResponse_SUCCESS
+			b, _ := json.Marshal(found)
+			resp.ResultPayload = b
+		}
+
+	case "VALIDATE_STORAGE_ALLOCATION":
+		storageID := req.Parameters["storage_id"]
+		requestedQuotaGiB, _ := strconv.ParseInt(req.Parameters["requested_quota_gib"], 10, 64)
+		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
+		provisioner := storage.NewProvisioner(c.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+		pool, err := provisioner.ValidateAllocation(storageID, requestedQuotaGiB)
+		if err != nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "STORAGE_ALLOCATION_INVALID"
+			resp.ErrorMessage = err.Error()
+		} else {
+			resp.Status = pb.CommandResponse_SUCCESS
+			b, _ := json.Marshal(map[string]any{"valid": true, "storage_id": storageID, "quota_gib": requestedQuotaGiB, "mount_point": pool.MountPoint})
+			resp.ResultPayload = b
+		}
+
+	case "PROVISION_MEMBER_STORAGE":
+		var memberReq storage.MemberStorageRequest
+		if rawJSON, ok := req.Parameters["spec_json"]; ok && rawJSON != "" {
+			if err := json.Unmarshal([]byte(rawJSON), &memberReq); err != nil {
+				resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
+				resp.ErrorCode = "INVALID_STORAGE_SPEC"
+				resp.ErrorMessage = err.Error()
+				break
+			}
+		} else {
+			uid, _ := strconv.Atoi(req.Parameters["uid"])
+			gid, _ := strconv.Atoi(req.Parameters["gid"])
+			quota, _ := strconv.ParseInt(req.Parameters["quota_gib"], 10, 64)
+			memberReq = storage.MemberStorageRequest{
+				MemberID:           req.Parameters["member_id"],
+				MemberUsername:     req.Parameters["member_username"],
+				HostID:             c.cfg.ServerID,
+				StorageID:          req.Parameters["storage_id"],
+				StorageQuotaGiB:    quota,
+				ContainerMountPath: "/workspace",
+				UID:                uid,
+				GID:                gid,
+				CorrelationID:      req.RequestId,
+				AuditActor:         actorScope,
+			}
+		}
+		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
+		provisioner := storage.NewProvisioner(c.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+		res, err := provisioner.ProvisionMemberStorage(memberReq)
+		if err != nil {
+			resp.Status = pb.CommandResponse_FAILED
+			resp.ErrorCode = "MEMBER_STORAGE_PROVISION_FAILED"
+			resp.ErrorMessage = err.Error()
+			if res != nil {
+				b, _ := json.Marshal(res)
+				resp.ResultPayload = b
+			}
+		} else {
+			resp.Status = pb.CommandResponse_SUCCESS
+			b, _ := json.Marshal(res)
+			resp.ResultPayload = b
+		}
+
+	case "GET_RESOURCE_PROFILE":
+		memMgr := resources.NewMemoryPolicyManager(c.cfg.ServerID, 20.0)
+		prof := memMgr.EvaluateHostProfile()
+		b, _ := json.Marshal(prof)
+		resp.Status = pb.CommandResponse_SUCCESS
+		resp.ResultPayload = b
 
 	default:
 		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED

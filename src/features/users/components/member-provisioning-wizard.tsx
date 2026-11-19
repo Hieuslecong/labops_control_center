@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -16,7 +16,15 @@ import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Icons } from '@/components/icons';
 import { useLabOpsStore } from '@/features/labops/store';
-import { GpuAllocationMode, MemberRole, ServerId } from '@/types/labops';
+import {
+  GpuAllocationMode,
+  MemberRole,
+  ServerId,
+  HostResourceProfile,
+  StoragePoolInfo,
+  QuotaBackend,
+  StorageVerificationStatus
+} from '@/types/labops';
 import { toast } from 'sonner';
 
 interface MemberProvisioningWizardProps {
@@ -49,9 +57,20 @@ function generateSampleOpenSshPublicKey(username: string): string {
   return `ssh-ed25519 ${b64} ${username || 'researcher'}@labops-client`;
 }
 
+function downloadTextFile(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvisioningWizardProps) {
   const servers = useLabOpsStore((state) => state.servers);
-  const storagePools = useLabOpsStore((state) => state.storagePools);
   const gpus = useLabOpsStore((state) => state.gpus);
   const [step, setStep] = useState(1);
   const [fullName, setFullName] = useState('');
@@ -62,14 +81,15 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [expiresAt, setExpiresAt] = useState('');
   const [serverId, setServerId] = useState<ServerId>('track');
   const [storagePoolId, setStoragePoolId] = useState('');
+  const [hostStoragePools, setHostStoragePools] = useState<StoragePoolInfo[]>([]);
+  const [loadingPools, setLoadingPools] = useState(false);
+  const [selectedDrive, setSelectedDrive] = useState<StoragePoolInfo | null>(null);
+  const [resourceProfile, setResourceProfile] = useState<HostResourceProfile | null>(null);
   const [workspaceName, setWorkspaceName] = useState('');
-  const [mountPath, setMountPath] = useState('/workspace');
   const [storageQuotaGb, setStorageQuotaGb] = useState(100);
   const [backupPolicy, setBackupPolicy] = useState<'DAILY_SNAPSHOT' | 'WEEKLY_SYNC' | 'NONE'>(
     'DAILY_SNAPSHOT'
   );
-  const [cpuLimitCores, setCpuLimitCores] = useState(4);
-  const [ramLimitGb, setRamLimitGb] = useState(16);
   const [selectedGpu, setSelectedGpu] = useState('NONE');
   const [gpuAllocationMode, setGpuAllocationMode] = useState<GpuAllocationMode>('EXCLUSIVE');
   const [vramQuotaGb, setVramQuotaGb] = useState(24);
@@ -135,8 +155,99 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     : username
       ? `${username}@lab.ai.vn`
       : '';
-  const assignedPools = storagePools.filter((pool) => pool.serverId === serverId);
   const assignedGpus = gpus.filter((gpu) => gpu.serverId === serverId);
+
+  useEffect(() => {
+    let isMounted = true;
+    Promise.resolve().then(() => {
+      if (isMounted) {
+        setLoadingPools(true);
+        setSelectedDrive(null);
+      }
+    });
+
+    fetch(`/api/labops/storage-pools?host_id=${serverId}`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (!isMounted) return;
+        if (Array.isArray(data)) {
+          const pools: StoragePoolInfo[] = data.map((item) => {
+            const d = item as Record<string, unknown>;
+            return {
+              hostId: (d.hostId || d.host_id || serverId) as ServerId,
+              storageId: String(d.storageId || d.storage_id || d.id || ''),
+              device: String(d.device || d.diskIdentifier || d.disk_identifier || ''),
+              filesystemUuid: String(d.filesystemUuid || d.filesystem_uuid || ''),
+              mountPoint: String(d.mountPoint || d.mount_point || ''),
+              filesystem: String(d.filesystem || d.driver || 'ext4'),
+              capacityGib: Number(d.capacityGib ?? d.capacity_gib ?? d.capacityGb ?? 0),
+              usedGib: Number(d.usedGib ?? d.used_gib ?? d.usedGb ?? 0),
+              freeGib: Number(d.freeGib ?? d.free_gib ?? d.freeGb ?? 0),
+              allocatableGib: Number(d.allocatableGib ?? d.allocatable_gib ?? d.freeGib ?? 0),
+              reservedGib: Number(d.reservedGib ?? d.reserved_gib ?? 0),
+              quotaBackend: (d.quotaBackend || d.quota_backend || 'PROJECT_QUOTA') as QuotaBackend,
+              quotaSupported: Boolean(d.quotaSupported ?? d.quota_supported ?? true),
+              quotaEnforced: Boolean(d.quotaEnforced ?? d.quota_enforced ?? true),
+              readOnly: Boolean(d.readOnly ?? d.read_only ?? false),
+              mounted: Boolean(d.mounted ?? true),
+              eligible: d.eligible !== false,
+              ineligibilityReason: d.ineligibilityReason
+                ? String(d.ineligibilityReason)
+                : undefined,
+              lastVerifiedAt: String(d.lastVerifiedAt || d.last_verified_at || ''),
+              verificationStatus: (d.verificationStatus ||
+                d.verification_status ||
+                'VERIFIED') as StorageVerificationStatus
+            };
+          });
+          setHostStoragePools(pools);
+          const eligible = pools.find((p) => p.eligible);
+          if (eligible) {
+            setSelectedDrive(eligible);
+            setStoragePoolId(eligible.storageId);
+          } else {
+            setSelectedDrive(null);
+            setStoragePoolId('');
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (isMounted) setLoadingPools(false);
+      });
+
+    fetch(`/api/labops/resources/profile?host_id=${serverId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted && data) {
+          setResourceProfile({
+            hostId: (data.hostId || data.host_id || serverId) as ServerId,
+            totalCores: Number(data.totalCores ?? data.total_cores ?? 16),
+            cpuSchedulingMode:
+              data.cpuSchedulingMode || data.cpu_scheduling_mode || 'SHARED_WEIGHTED',
+            defaultCpuWeight: Number(data.defaultCpuWeight ?? data.default_cpu_weight ?? 100),
+            pidsLimit: Number(data.pidsLimit ?? data.pids_limit ?? 4096),
+            totalRamBytes: Number(
+              data.totalRamBytes ?? data.total_ram_bytes ?? 128 * 1024 * 1024 * 1024
+            ),
+            hostReserveBytes: Number(
+              data.hostReserveBytes ?? data.host_reserve_bytes ?? 25.6 * 1024 * 1024 * 1024
+            ),
+            sharedBudgetBytes: Number(
+              data.sharedBudgetBytes ?? data.shared_budget_bytes ?? 102.4 * 1024 * 1024 * 1024
+            ),
+            memoryProtectionMode:
+              data.memoryProtectionMode || data.memory_protection_mode || 'SHARED_HOST_PROTECTED',
+            memoryPressure: data.memoryPressure || data.memory_pressure
+          });
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [serverId]);
 
   const createAccessRequest = async () => {
     if (DEMO_MODE) {
@@ -157,15 +268,31 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
           role,
           researchGroup: researchGroup || 'AI Research Lab',
           assignedServer: serverId,
-          storagePoolId: storagePoolId || null,
+          storagePoolId: selectedDrive?.storageId || storagePoolId || null,
+          storageId: selectedDrive?.storageId || storagePoolId || null,
+          hostStorageRoot: selectedDrive?.mountPoint || null,
+          memberStorageDirectory: selectedDrive
+            ? `${selectedDrive.mountPoint}/labops/users/${username}`
+            : null,
+          containerMountPath: '/workspace',
           workspaceName: workspaceName || `ws-${username}`,
-          mountPath,
+          mountPath: '/workspace',
           storageQuotaGb,
           backupPolicy,
-          cpuLimitCores,
-          ramLimitGb,
+          cpuPolicy: 'SHARED_WEIGHTED',
+          cpuWeight: 100,
+          cpuLimitCores: 8,
+          memoryPolicy: 'SHARED_HOST_PROTECTED',
+          ramLimitGb: 32,
           gpuPermissions: selectedGpu === 'NONE' ? [] : [selectedGpu],
-          vramQuotaGb,
+          vramPolicy:
+            selectedGpu === 'NONE'
+              ? 'None'
+              : gpuAllocationMode === 'EXCLUSIVE'
+                ? 'Dedicated Full VRAM'
+                : `Quota ${vramQuotaGb}GB (Shared)`,
+          vramQuotaGb:
+            selectedGpu === 'NONE' ? 0 : gpuAllocationMode === 'EXCLUSIVE' ? 24 : vramQuotaGb,
           gpuAllocationMode,
           expiresAt: expiresAt || null,
           provisionSshAccess: autoGenerateSsh,
@@ -204,18 +331,6 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const downloadTextFile = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
   };
 
   const handleDownloadZip = async () => {
@@ -456,10 +571,15 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     type='button'
                     onClick={() => {
                       setServerId(server.id);
+                      setSelectedDrive(null);
                       setStoragePoolId('');
                       setSelectedGpu('NONE');
                     }}
-                    className={`rounded-md border p-3 text-left ${serverId === server.id ? 'border-primary bg-primary/10' : 'border-border'}`}
+                    className={`rounded-md border p-3 text-left transition-all ${
+                      serverId === server.id
+                        ? 'border-primary bg-primary/10 shadow-sm'
+                        : 'border-border hover:border-primary/40'
+                    }`}
                   >
                     <span className='block font-semibold'>{server.name}</span>
                     <span className='text-xs text-muted-foreground'>
@@ -473,6 +593,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 ))}
               </div>
             </div>
+
             <div className='space-y-1.5'>
               <Label htmlFor='workspace-name'>Tên Workspace</Label>
               <Input
@@ -481,128 +602,349 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 onChange={(event) => setWorkspaceName(event.target.value)}
               />
             </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor='storage-pool'>Storage pool</Label>
-              <select
-                id='storage-pool'
-                className='h-9 w-full rounded-md border bg-background px-3 text-sm'
-                value={storagePoolId}
-                onChange={(event) => setStoragePoolId(event.target.value)}
-              >
-                <option value=''>Backend chọn pool mặc định</option>
-                {assignedPools.map((pool) => (
-                  <option key={pool.id} value={pool.id}>
-                    {pool.label} · còn {pool.freeGb} GB
-                  </option>
-                ))}
-              </select>
+
+            <div className='space-y-2'>
+              <div className='flex items-center justify-between'>
+                <Label>
+                  Chọn Ổ đĩa / Phân vùng lưu trữ trên{' '}
+                  {serverId === 'workstation' ? 'Workstation (aiot-ws1)' : 'Rack (aiotlab-rack)'}
+                </Label>
+                {loadingPools && (
+                  <span className='text-xs text-muted-foreground animate-pulse'>
+                    Đang quét thiết bị...
+                  </span>
+                )}
+              </div>
+
+              {hostStoragePools.length === 0 && !loadingPools ? (
+                <Card className='p-4 text-center text-sm text-muted-foreground border-dashed'>
+                  Không tìm thấy ổ đĩa nào hoặc Node Agent trên máy chủ chưa kích hoạt.
+                </Card>
+              ) : (
+                <div className='grid gap-2.5 max-h-[220px] overflow-y-auto pr-1'>
+                  {hostStoragePools.map((drive) => {
+                    const isSelected = selectedDrive?.storageId === drive.storageId;
+                    const usedPct = Math.min(
+                      100,
+                      Math.round((drive.usedGib / (drive.capacityGib || 1)) * 100)
+                    );
+                    const freePct = Math.min(
+                      100,
+                      Math.round((drive.freeGib / (drive.capacityGib || 1)) * 100)
+                    );
+
+                    return (
+                      <button
+                        type='button'
+                        key={drive.storageId}
+                        onClick={() => {
+                          if (drive.eligible) {
+                            setSelectedDrive(drive);
+                            setStoragePoolId(drive.storageId);
+                          } else {
+                            toast.error(
+                              `Ổ đĩa này không đủ điều kiện: ${drive.ineligibilityReason}`
+                            );
+                          }
+                        }}
+                        className={`w-full text-left rounded-lg border p-3 cursor-pointer transition-all ${
+                          !drive.eligible
+                            ? 'opacity-60 bg-muted/30 border-dashed cursor-not-allowed'
+                            : isSelected
+                              ? 'border-primary bg-primary/10 ring-1 ring-primary shadow-sm'
+                              : 'border-border hover:border-primary/40 bg-card'
+                        }`}
+                      >
+                        <div className='flex items-start justify-between gap-2 mb-1.5'>
+                          <div>
+                            <div className='flex items-center gap-2'>
+                              <span className='font-semibold text-sm'>{drive.mountPoint}</span>
+                              <Badge
+                                variant='secondary'
+                                className='text-[10px] font-mono uppercase'
+                              >
+                                {drive.filesystem} · {drive.device}
+                              </Badge>
+                            </div>
+                            <p className='text-xs text-muted-foreground mt-0.5'>
+                              {drive.quotaSupported ? (
+                                <span className='text-emerald-700 dark:text-emerald-400 font-medium'>
+                                  🛡️ {drive.quotaBackend} (Cưỡng chế cứng)
+                                </span>
+                              ) : (
+                                <span className='text-amber-700 dark:text-amber-400'>
+                                  ⚠️ Không hỗ trợ quota filesystem
+                                </span>
+                              )}
+                            </p>
+                          </div>
+                          <div>
+                            {drive.eligible ? (
+                              <Badge
+                                variant='outline'
+                                className='border-emerald-500/40 text-emerald-600 bg-emerald-500/10 text-xs'
+                              >
+                                Đủ điều kiện
+                              </Badge>
+                            ) : (
+                              <Badge variant='destructive' className='text-xs'>
+                                {drive.ineligibilityReason || 'Không khả dụng'}
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Visual capacity progress bar */}
+                        <div className='space-y-1 mt-2'>
+                          <div className='flex justify-between text-xs text-muted-foreground'>
+                            <span>
+                              Đã dùng: <strong>{drive.usedGib} GiB</strong> ({usedPct}%)
+                            </span>
+                            <span>
+                              Khả dụng:{' '}
+                              <strong className='text-emerald-600'>
+                                {drive.allocatableGib} GiB
+                              </strong>
+                            </span>
+                            <span>Tổng: {drive.capacityGib} GiB</span>
+                          </div>
+                          <div className='w-full h-2 rounded-full bg-muted overflow-hidden flex'>
+                            <div style={{ width: `${usedPct}%` }} className='bg-primary/70' />
+                            <div style={{ width: `${freePct}%` }} className='bg-emerald-500/60' />
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
+
             <div className='grid gap-3 sm:grid-cols-2'>
               <div className='space-y-1.5'>
-                <Label htmlFor='mount-path'>Mount path</Label>
-                <select
-                  id='mount-path'
-                  className='h-9 w-full rounded-md border bg-background px-3 text-sm'
-                  value={mountPath}
-                  onChange={(event) => setMountPath(event.target.value)}
-                >
-                  <option value='/workspace'>/workspace</option>
-                  <option value={`/home/${username}`}>/home/{username || 'username'}</option>
-                  <option value='/data'>/data</option>
-                </select>
-              </div>
-              <div className='space-y-1.5'>
-                <Label htmlFor='storage-quota'>Storage quota (GB)</Label>
+                <Label htmlFor='storage-quota'>Dung lượng hạn ngạch cấp phát (GiB)</Label>
                 <Input
                   id='storage-quota'
                   type='number'
                   min={1}
+                  max={
+                    selectedDrive?.allocatableGib
+                      ? Math.floor(selectedDrive.allocatableGib)
+                      : undefined
+                  }
                   value={storageQuotaGb}
                   onChange={(event) => setStorageQuotaGb(Number(event.target.value))}
                 />
+                {selectedDrive && storageQuotaGb > selectedDrive.allocatableGib && (
+                  <p className='text-xs text-destructive font-medium'>
+                    ❌ Vượt quá dung lượng có thể cấp phát của ổ đĩa này (tối đa{' '}
+                    {selectedDrive.allocatableGib} GiB).
+                  </p>
+                )}
+              </div>
+
+              <div className='space-y-1.5'>
+                <Label htmlFor='backup-policy'>Chính sách sao lưu</Label>
+                <select
+                  id='backup-policy'
+                  className='h-9 w-full rounded-md border bg-background px-3 text-sm'
+                  value={backupPolicy}
+                  onChange={(event) => setBackupPolicy(event.target.value as typeof backupPolicy)}
+                >
+                  <option value='DAILY_SNAPSHOT'>Daily snapshot (Tự động hằng ngày)</option>
+                  <option value='WEEKLY_SYNC'>Weekly sync (Đồng bộ hàng tuần)</option>
+                  <option value='NONE'>Không sao lưu (None)</option>
+                </select>
               </div>
             </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor='backup-policy'>Backup policy</Label>
-              <select
-                id='backup-policy'
-                className='h-9 w-full rounded-md border bg-background px-3 text-sm'
-                value={backupPolicy}
-                onChange={(event) => setBackupPolicy(event.target.value as typeof backupPolicy)}
-              >
-                <option value='DAILY_SNAPSHOT'>Daily snapshot</option>
-                <option value='WEEKLY_SYNC'>Weekly sync</option>
-                <option value='NONE'>None</option>
-              </select>
-            </div>
+
+            {/* Auto-calculated paths preview */}
+            <Card className='p-3.5 bg-muted/30 border-dashed space-y-2 text-xs'>
+              <div className='flex items-center justify-between'>
+                <span className='font-semibold text-muted-foreground uppercase tracking-wider text-[11px]'>
+                  Đường dẫn thư mục riêng trên Host:
+                </span>
+                <Badge variant='outline' className='text-[10px] text-primary border-primary/30'>
+                  Quyền cách ly: 0700
+                </Badge>
+              </div>
+              <code className='block p-2 rounded bg-background font-mono text-xs text-emerald-800 dark:text-emerald-300 break-all border'>
+                {selectedDrive ? selectedDrive.mountPoint : '/media/LabOps-Data'}/labops/users/
+                {username || 'username'}
+              </code>
+              <div className='flex items-center gap-2 pt-1'>
+                <span className='text-muted-foreground'>Gắn vào container (Mount path):</span>
+                <Badge variant='secondary' className='font-mono text-xs'>
+                  /workspace (Cố định an toàn)
+                </Badge>
+              </div>
+            </Card>
           </div>
         )}
 
         {step === 3 && (
-          <div className='grid gap-4 sm:grid-cols-2'>
-            <div className='space-y-1.5'>
-              <Label htmlFor='cpu-limit'>CPU cores</Label>
-              <Input
-                id='cpu-limit'
-                type='number'
-                min={1}
-                value={cpuLimitCores}
-                onChange={(event) => setCpuLimitCores(Number(event.target.value))}
-              />
-            </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor='ram-limit'>RAM (GB)</Label>
-              <Input
-                id='ram-limit'
-                type='number'
-                min={1}
-                value={ramLimitGb}
-                onChange={(event) => setRamLimitGb(Number(event.target.value))}
-              />
-            </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor='gpu-choice'>GPU</Label>
-              <select
-                id='gpu-choice'
-                className='h-9 w-full rounded-md border bg-background px-3 text-sm'
-                value={selectedGpu}
-                onChange={(event) => setSelectedGpu(event.target.value)}
-              >
-                <option value='NONE'>Chỉ CPU</option>
-                {assignedGpus.map((gpu) => (
-                  <option key={gpu.id} value={gpu.id}>
-                    {gpu.displayLabel} · {gpu.model}
-                  </option>
-                ))}
-              </select>
-              {!assignedGpus.length && (
-                <p className='text-xs text-muted-foreground'>
-                  Chưa có GPU telemetry xác minh cho server này.
+          <div className='grid gap-4'>
+            {/* Host Overview Header */}
+            <Card className='p-3.5 bg-primary/5 border-primary/20 flex flex-wrap items-center justify-between gap-3 text-xs'>
+              <div>
+                <p className='font-semibold text-sm'>
+                  Tài nguyên máy chủ:{' '}
+                  {serverId === 'workstation'
+                    ? 'Workstation (aiot-ws1)'
+                    : 'Rack Cluster (aiotlab-rack)'}
                 </p>
+                <p className='text-muted-foreground'>
+                  Mô hình tài nguyên động: CPU Shared Weighted & RAM Host Protected
+                </p>
+              </div>
+              <div className='flex gap-2'>
+                <Badge variant='outline' className='border-primary/40 bg-background'>
+                  {resourceProfile?.totalCores || 16} CPU Cores
+                </Badge>
+                <Badge variant='outline' className='border-primary/40 bg-background'>
+                  {Math.round((resourceProfile?.totalRamBytes || 0) / 1024 ** 3)} GiB RAM
+                </Badge>
+              </div>
+            </Card>
+
+            {/* Block 1: Shared Weighted CPU */}
+            <Card className='p-4 border-border space-y-2'>
+              <div className='flex items-center justify-between'>
+                <div className='flex items-center gap-2'>
+                  <Icons.cpu className='size-4 text-primary' />
+                  <span className='font-semibold text-sm'>
+                    Chính sách CPU: Dùng chung có trọng số
+                  </span>
+                </div>
+                <Badge variant='secondary' className='font-mono text-xs font-semibold text-primary'>
+                  SHARED_WEIGHTED
+                </Badge>
+              </div>
+              <p className='text-xs text-muted-foreground leading-relaxed'>
+                Không gán cứng số core cố định. Thành viên được tự do tăng tốc (burst) lên toàn bộ{' '}
+                <strong>{resourceProfile?.totalCores || 16} CPU cores</strong> khi cụm máy nhàn rỗi.
+                Khi xảy ra tranh chấp tải, cgroup tự động phân bổ tỷ lệ công bằng theo trọng số (CPU
+                Shares: 100 / 1024).
+              </p>
+              <div className='flex items-center gap-2 pt-1 text-xs text-emerald-800 dark:text-emerald-400'>
+                <Icons.check className='size-3.5 shrink-0' />
+                <span>
+                  Bảo vệ hệ thống: Giới hạn <strong>4,096 tiến trình (PIDs limit)</strong> để triệt
+                  tiêu nguy cơ Fork-Bomb.
+                </span>
+              </div>
+            </Card>
+
+            {/* Block 2: Shared Host-Protected RAM */}
+            <Card className='p-4 border-border space-y-2'>
+              <div className='flex items-center justify-between'>
+                <div className='flex items-center gap-2'>
+                  <Icons.activity className='size-4 text-emerald-600' />
+                  <span className='font-semibold text-sm'>
+                    Chính sách RAM: Bộ nhớ dùng chung có bảo vệ Host
+                  </span>
+                </div>
+                <Badge
+                  variant='secondary'
+                  className='font-mono text-xs font-semibold text-emerald-600'
+                >
+                  SHARED_HOST_PROTECTED
+                </Badge>
+              </div>
+              <div className='grid grid-cols-3 gap-2 py-1 text-center text-xs'>
+                <div className='rounded bg-muted/40 p-2'>
+                  <span className='block text-muted-foreground text-[10px] uppercase'>
+                    Tổng RAM Host
+                  </span>
+                  <span className='font-semibold text-sm'>
+                    {Math.round((resourceProfile?.totalRamBytes || 0) / 1024 ** 3)} GiB
+                  </span>
+                </div>
+                <div className='rounded bg-amber-500/10 p-2 border border-amber-500/20'>
+                  <span className='block text-amber-700 dark:text-amber-300 text-[10px] uppercase font-medium'>
+                    Dự trữ an toàn OS
+                  </span>
+                  <span className='font-semibold text-sm text-amber-700 dark:text-amber-300'>
+                    {Math.round((resourceProfile?.hostReserveBytes || 0) / 1024 ** 3)} GiB (20%)
+                  </span>
+                </div>
+                <div className='rounded bg-emerald-500/10 p-2 border border-emerald-500/20'>
+                  <span className='block text-emerald-700 dark:text-emerald-300 text-[10px] uppercase font-medium'>
+                    Ngân sách Containers
+                  </span>
+                  <span className='font-semibold text-sm text-emerald-700 dark:text-emerald-300'>
+                    {Math.round((resourceProfile?.sharedBudgetBytes || 0) / 1024 ** 3)} GiB
+                  </span>
+                </div>
+              </div>
+              <p className='text-xs text-muted-foreground leading-relaxed'>
+                Bộ nhớ được phân bổ linh hoạt trong Ngân sách Dùng chung. Cgroup cưỡng chế bảo vệ
+                vùng Dự trữ Hệ thống, đảm bảo an toàn tuyệt đối cho Debian OS, PostgreSQL, SSH và
+                Docker daemon, không bao giờ bị OOM Crash.
+              </p>
+            </Card>
+
+            {/* Block 3: GPU & VRAM Allocation */}
+            <div className='grid gap-3 sm:grid-cols-2'>
+              <div className='space-y-1.5'>
+                <Label htmlFor='gpu-choice'>Lựa chọn GPU</Label>
+                <select
+                  id='gpu-choice'
+                  className='h-9 w-full rounded-md border bg-background px-3 text-sm'
+                  value={selectedGpu}
+                  onChange={(event) => setSelectedGpu(event.target.value)}
+                >
+                  <option value='NONE'>Chỉ CPU (Không dùng GPU)</option>
+                  {assignedGpus.map((gpu) => (
+                    <option key={gpu.id} value={gpu.id}>
+                      {gpu.displayLabel} · {gpu.model} (24 GB VRAM)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className='space-y-1.5'>
+                <Label htmlFor='gpu-mode'>Chế độ cấp phát GPU</Label>
+                <select
+                  id='gpu-mode'
+                  disabled={selectedGpu === 'NONE'}
+                  className='h-9 w-full rounded-md border bg-background px-3 text-sm disabled:opacity-50'
+                  value={gpuAllocationMode}
+                  onChange={(event) =>
+                    setGpuAllocationMode(event.target.value as GpuAllocationMode)
+                  }
+                >
+                  <option value='EXCLUSIVE'>Độc quyền toàn bộ GPU (Khuyến nghị V2)</option>
+                  <option value='SHARED'>Dùng chung có hạn ngạch (Shared)</option>
+                </select>
+              </div>
+
+              {selectedGpu !== 'NONE' && (
+                <div className='space-y-1.5 sm:col-span-2'>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='vram-quota'>Hạn ngạch VRAM (GB)</Label>
+                    <Badge variant='outline' className='text-xs text-muted-foreground'>
+                      {gpuAllocationMode === 'EXCLUSIVE'
+                        ? '100% VRAM Độc quyền (24 GB)'
+                        : 'Chính sách giám sát (Policy-Monitored)'}
+                    </Badge>
+                  </div>
+                  <Input
+                    id='vram-quota'
+                    type='number'
+                    min={0}
+                    max={24}
+                    value={gpuAllocationMode === 'EXCLUSIVE' ? 24 : vramQuotaGb}
+                    disabled={gpuAllocationMode === 'EXCLUSIVE'}
+                    onChange={(event) => setVramQuotaGb(Number(event.target.value))}
+                  />
+                  <p className='text-xs text-muted-foreground'>
+                    {gpuAllocationMode === 'EXCLUSIVE'
+                      ? 'Container được gán riêng biệt GPU A30 qua device passthrough (NVIDIA_VISIBLE_DEVICES).'
+                      : 'Hạn mức VRAM được hệ thống theo dõi và báo cáo giám sát liên tục (Policy / Telemetry Monitored).'}
+                  </p>
+                </div>
               )}
-            </div>
-            <div className='space-y-1.5'>
-              <Label htmlFor='gpu-mode'>GPU mode</Label>
-              <select
-                id='gpu-mode'
-                className='h-9 w-full rounded-md border bg-background px-3 text-sm'
-                value={gpuAllocationMode}
-                onChange={(event) => setGpuAllocationMode(event.target.value as GpuAllocationMode)}
-              >
-                <option value='EXCLUSIVE'>Full GPU Exclusive (Khuyến nghị V2)</option>
-                <option value='SHARED'>Shared</option>
-              </select>
-            </div>
-            <div className='space-y-1.5 sm:col-span-2'>
-              <Label htmlFor='vram-quota'>VRAM quota (GB)</Label>
-              <Input
-                id='vram-quota'
-                type='number'
-                min={0}
-                value={selectedGpu === 'NONE' ? 0 : vramQuotaGb}
-                disabled={selectedGpu === 'NONE'}
-                onChange={(event) => setVramQuotaGb(Number(event.target.value))}
-              />
             </div>
           </div>
         )}
@@ -942,39 +1284,89 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 </Card>
               </div>
             ) : (
-              <Card className='space-y-2 p-4 text-sm'>
-                <p className='font-semibold'>Xem lại thông tin cấp phát quyền truy cập SSH</p>
-                <p>
-                  {fullName} · @{username} · {effectiveEmail} · {role}
+              <Card className='space-y-3 p-4 text-sm'>
+                <p className='font-semibold text-base border-b pb-2'>
+                  Xem lại thông tin cấp phát tài nguyên & SSH
                 </p>
-                <p>
-                  Host: <strong>{serverId}</strong> · Workspace:{' '}
-                  <code>{workspaceName || `ws-${username}`}</code>
-                </p>
-                <p>
-                  Storage:{' '}
-                  {assignedPools.find((pool) => pool.id === storagePoolId)?.label ||
-                    'Pool mặc định'}{' '}
-                  · {storageQuotaGb} GB · {mountPath} · {backupPolicy}
-                </p>
-                <p>
-                  CPU: {cpuLimitCores} cores · RAM: {ramLimitGb} GB · GPU: {selectedGpu}
-                </p>
-                <p>
-                  Chế độ khóa SSH:{' '}
-                  {autoGenerateSsh ? (
-                    <span className='font-medium text-emerald-700 dark:text-emerald-300'>
-                      Hệ thống tự động tạo cặp khóa Ed25519 (mã hóa Passphrase) + Mật khẩu tạm lần
-                      đầu
-                    </span>
-                  ) : sshPublicKey.trim() ? (
-                    <code className='text-xs text-emerald-600'>
-                      {sshPublicKey.trim().slice(0, 44)}...
-                    </code>
-                  ) : (
-                    <span className='text-amber-600'>Chưa nhập khóa</span>
-                  )}
-                </p>
+                <div className='grid gap-2 text-xs sm:grid-cols-2'>
+                  <div>
+                    <span className='text-muted-foreground'>Thành viên:</span>{' '}
+                    <strong>{fullName}</strong> (@{username})
+                  </div>
+                  <div>
+                    <span className='text-muted-foreground'>Email / Vai trò:</span> {effectiveEmail}{' '}
+                    ({role})
+                  </div>
+                  <div>
+                    <span className='text-muted-foreground'>Máy chủ:</span>{' '}
+                    <strong>
+                      {serverId === 'workstation'
+                        ? 'Workstation (aiot-ws1)'
+                        : 'Rack Cluster (aiotlab-rack)'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className='text-muted-foreground'>Workspace:</span>{' '}
+                    <code>{workspaceName || `ws-${username}`}</code>
+                  </div>
+                </div>
+
+                <div className='rounded-md border p-2.5 bg-muted/20 space-y-1.5 text-xs'>
+                  <div className='flex items-center justify-between'>
+                    <span className='font-semibold text-foreground'>Ổ đĩa & Hạn ngạch:</span>
+                    <Badge variant='outline' className='text-[10px] font-mono'>
+                      {selectedDrive?.quotaBackend || 'CƯỠNG CHẾ CỨNG'}
+                    </Badge>
+                  </div>
+                  <p>
+                    Ổ đĩa:{' '}
+                    <strong>
+                      {selectedDrive
+                        ? `${selectedDrive.mountPoint} (${selectedDrive.device})`
+                        : 'Mặc định'}
+                    </strong>{' '}
+                    · Hạn ngạch: <strong className='text-primary'>{storageQuotaGb} GiB</strong>
+                  </p>
+                  <p className='text-muted-foreground font-mono text-[11px] break-all'>
+                    Host dir: {selectedDrive ? selectedDrive.mountPoint : '/media/LabOps-Data'}
+                    /labops/users/{username || 'username'} → Container: /workspace
+                  </p>
+                </div>
+
+                <div className='rounded-md border p-2.5 bg-muted/20 space-y-1 text-xs'>
+                  <span className='font-semibold text-foreground'>Chính sách CPU / RAM / GPU:</span>
+                  <div className='flex flex-wrap gap-1.5 pt-0.5'>
+                    <Badge variant='secondary' className='text-[10px]'>
+                      CPU: SHARED_WEIGHTED (Trọng số 100/1024 · 4096 PIDs)
+                    </Badge>
+                    <Badge variant='secondary' className='text-[10px]'>
+                      RAM: SHARED_HOST_PROTECTED (Bảo vệ 20% Host OS)
+                    </Badge>
+                    <Badge variant='secondary' className='text-[10px]'>
+                      GPU:{' '}
+                      {selectedGpu === 'NONE' ? 'Chỉ CPU' : `${selectedGpu} (${gpuAllocationMode})`}
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className='text-xs space-y-1 pt-1'>
+                  <p className='font-semibold'>Chế độ khóa SSH & Xác thực:</p>
+                  <p className='text-muted-foreground'>
+                    {autoGenerateSsh ? (
+                      <span className='font-medium text-emerald-700 dark:text-emerald-300'>
+                        ⚡ Tự động sinh cặp khóa Ed25519{' '}
+                        {requirePassphrase ? '(Có Passphrase)' : '(Không Passphrase, 1 chạm)'} + Mật
+                        khẩu tạm lần đầu
+                      </span>
+                    ) : sshPublicKey.trim() ? (
+                      <code className='text-xs text-emerald-600'>
+                        {sshPublicKey.trim().slice(0, 44)}...
+                      </code>
+                    ) : (
+                      <span className='text-amber-600'>Chưa nhập khóa</span>
+                    )}
+                  </p>
+                </div>
               </Card>
             )}
           </div>
@@ -990,8 +1382,13 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             <Button
               type='button'
               disabled={
-                step === 1 &&
-                (!fullName.trim() || !usernameIsValid || !effectiveEmail.includes('@'))
+                (step === 1 &&
+                  (!fullName.trim() || !usernameIsValid || !effectiveEmail.includes('@'))) ||
+                (step === 2 &&
+                  (!selectedDrive ||
+                    !selectedDrive.eligible ||
+                    storageQuotaGb < 1 ||
+                    storageQuotaGb > selectedDrive.allocatableGib))
               }
               onClick={() => setStep(step + 1)}
             >
@@ -1012,9 +1409,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 !fullName.trim() ||
                 !usernameIsValid ||
                 !effectiveEmail.includes('@') ||
+                !selectedDrive ||
+                !selectedDrive.eligible ||
                 storageQuotaGb < 1 ||
-                cpuLimitCores < 1 ||
-                ramLimitGb < 1
+                storageQuotaGb > selectedDrive.allocatableGib
               }
               onClick={createAccessRequest}
             >

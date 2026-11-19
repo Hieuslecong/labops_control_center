@@ -16,6 +16,8 @@ import (
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/process"
 	"github.com/Hieuslecong/labops_control_center/go/internal/repositoryguard"
+	"github.com/Hieuslecong/labops_control_center/go/internal/resources"
+	"github.com/Hieuslecong/labops_control_center/go/internal/storage"
 )
 
 // Server quản lý HTTP API cục bộ của Node Agent
@@ -66,6 +68,9 @@ func NewServer(
 	mux.HandleFunc("/api/v1/agent/processes/kill", s.handleProcessKill)
 	mux.HandleFunc("/api/v1/agent/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("/api/v1/agent/telemetry/full", s.handleFullTelemetry)
+	mux.HandleFunc("/api/v1/agent/storage", s.handleStorage)
+	mux.HandleFunc("/api/v1/agent/storage/validate", s.handleStorageValidate)
+	mux.HandleFunc("/api/v1/agent/resources/profile", s.handleResourceProfile)
 
 	if repoGuardSvc != nil {
 		repoHandler := repositoryguard.NewHTTPHandlerWithConfig(
@@ -318,6 +323,102 @@ func (s *Server) handleFullTelemetry(w http.ResponseWriter, r *http.Request) {
 		"gpus":             gpuTel,
 		"workspaces":       workspaces,
 		"workspaces_count": len(workspaces),
+	})
+}
+
+// handleStorage cung cấp danh sách ổ đĩa và cấp phát thư mục thành viên theo filesystem quota
+func (s *Server) handleStorage(w http.ResponseWriter, r *http.Request) {
+	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(true))
+	if r.Method == http.MethodGet {
+		pools := collector.CollectStoragePools()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"source":        "labops-go-agent",
+			"node_id":       s.cfg.ServerID,
+			"storage_pools": pools,
+			"count":         len(pools),
+		})
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req storage.MemberStorageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "Invalid JSON payload: "+err.Error())
+			return
+		}
+		if req.HostID == "" {
+			req.HostID = s.cfg.ServerID
+		}
+		provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+		res, err := provisioner.ProvisionMemberStorage(req)
+		if err != nil {
+			s.logger.Warn("Lỗi cấp phát lưu trữ cho member", "err", err, "req", req)
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "ADMISSION_REJECTED") || strings.Contains(err.Error(), "SECURITY_VIOLATION") || strings.Contains(err.Error(), "không hợp lệ") {
+				status = http.StatusBadRequest
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":  err.Error(),
+				"status": "FAILED",
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+		return
+	}
+	http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+}
+
+// handleStorageValidate kiểm tra tính hợp lệ và dung lượng khả dụng của pool trước khi cấp phát
+func (s *Server) handleStorageValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		StorageID string `json:"storage_id"`
+		QuotaGiB  int64  `json:"quota_gib"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid JSON payload: "+err.Error())
+		return
+	}
+	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(true))
+	provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+	pool, err := provisioner.ValidateAllocation(req.StorageID, req.QuotaGiB)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"valid": false,
+			"error": err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"valid":           true,
+		"storage_id":      req.StorageID,
+		"quota_gib":       req.QuotaGiB,
+		"allocatable_gib": pool.AllocatableGiB,
+		"mount_point":     pool.MountPoint,
+	})
+}
+
+// handleResourceProfile trả về thông tin Host Resource Profile và áp lực bộ nhớ (PSI)
+func (s *Server) handleResourceProfile(w http.ResponseWriter, r *http.Request) {
+	memMgr := resources.NewMemoryPolicyManager(s.cfg.ServerID, 20.0)
+	prof := memMgr.EvaluateHostProfile()
+	psi := memMgr.ReadMemoryPressure()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"source":          "labops-go-agent",
+		"node_id":         s.cfg.ServerID,
+		"profile":         prof,
+		"memory_pressure": psi,
 	})
 }
 

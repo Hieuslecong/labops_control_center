@@ -159,6 +159,11 @@ class WorkspaceController:
         privileged: bool = False,
         mount_docker_socket: bool = False,
         extra_mounts: Optional[List[str]] = None,
+        storage_path: Optional[str] = None,
+        member_storage_dir: Optional[str] = None,
+        container_mount_path: Optional[str] = None,
+        resource_mode: str = "SHARED_WEIGHTED",
+        cpu_weight: int = 100,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._locked() as state:
@@ -183,6 +188,9 @@ class WorkspaceController:
 
             # Trong môi trường không có quyền chạm Docker daemon thực tế, giữ ở trạng thái
             # NOT_VERIFIED / PENDING_RETRY thay vì báo ACTIVE giả.
+            final_storage_path = storage_path or member_storage_dir or (f"/media/LabOps-Data/labops/users/{owner}" if host_id == "workstation" else f"/tank/workspaces/{owner}")
+            final_container_mount = container_mount_path or "/workspace"
+
             ws = {
                 "id": f"ws-{uuid.uuid4().hex[:10]}",
                 "name": f"ws-{owner}",
@@ -196,7 +204,11 @@ class WorkspaceController:
                 "ram_mb_limit": int(ram_mb),
                 "pids_limit": int(pids_limit),
                 "storage_quota_gb": int(storage_quota_gb),
-                "storage_path": f"/tank/workspaces/{owner}",
+                "storage_path": final_storage_path,
+                "member_storage_dir": final_storage_path,
+                "container_mount_path": final_container_mount,
+                "resource_mode": resource_mode,
+                "cpu_weight": int(cpu_weight),
                 "gpu_uuid": gpu_uuid,
                 "non_privileged": True,
                 "docker_socket_mounted": False,

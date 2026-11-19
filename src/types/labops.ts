@@ -150,6 +150,82 @@ export interface StoragePool {
   isDefault: boolean;
 }
 
+export type QuotaBackend =
+  | 'PROJECT_QUOTA'
+  | 'ZFS_DATASET'
+  | 'BTRFS_QGROUP'
+  | 'MOCK_VERIFIED'
+  | 'NONE';
+export type StorageVerificationStatus =
+  | 'VERIFIED'
+  | 'NOT_VERIFIED'
+  | 'INELIGIBLE'
+  | 'QUOTA_NOT_ENFORCEABLE';
+
+export interface StoragePoolInfo {
+  hostId: ServerId;
+  storageId: string;
+  device: string;
+  filesystemUuid: string;
+  mountPoint: string;
+  filesystem: string;
+  capacityGib: number;
+  usedGib: number;
+  freeGib: number;
+  allocatableGib: number;
+  reservedGib: number;
+  quotaBackend: QuotaBackend;
+  quotaSupported: boolean;
+  quotaEnforced: boolean;
+  readOnly: boolean;
+  mounted: boolean;
+  eligible: boolean;
+  ineligibilityReason?: string | null;
+  lastVerifiedAt: string;
+  verificationStatus: StorageVerificationStatus;
+}
+
+export interface StorageValidateRequest {
+  hostId: ServerId;
+  storageId: string;
+  requestedQuotaGib: number;
+}
+
+export interface StorageValidateResponse {
+  valid: boolean;
+  hostId: ServerId;
+  storageId: string;
+  requestedQuotaGib: number;
+  allocatableGib?: number;
+  mountPoint?: string;
+  memberStorageDirPreview?: string;
+  error?: string;
+}
+
+export interface MemoryPressureTelemetry {
+  someAvg10: number;
+  someAvg60: number;
+  someAvg300: number;
+  fullAvg10: number;
+  fullAvg60: number;
+  fullAvg300: number;
+  pressureLevel: 'NONE' | 'ELEVATED' | 'CRITICAL';
+  isHighPressure: boolean;
+}
+
+export interface HostResourceProfile {
+  hostId: ServerId;
+  totalCores: number;
+  cpuSchedulingMode: 'SHARED_WEIGHTED' | 'EXCLUSIVE';
+  defaultCpuWeight: number;
+  pidsLimit: number;
+  totalRamBytes: number;
+  hostReserveBytes: number;
+  sharedBudgetBytes: number;
+  memoryProtectionMode: 'SHARED_HOST_PROTECTED';
+  memoryPressure?: MemoryPressureTelemetry;
+}
+
 export interface StorageAllocation {
   id: string;
   memberId: string;
@@ -333,6 +409,12 @@ export interface LabMember {
   // Storage Details
   storagePoolId: string;
   storagePoolLabel: string;
+  storageId?: string;
+  hostStorageRoot?: string;
+  memberStorageDirectory?: string;
+  containerMountPath?: string;
+  storageQuotaBackend?: QuotaBackend;
+  storageQuotaEnforcement?: StorageVerificationStatus;
   mountPath: string; // approved path, default /workspace
   storageQuotaGb: number;
   storageUsedGb: number;
@@ -360,6 +442,10 @@ export interface LabMember {
   // Hardware Quotas
   cpuLimitCores: number;
   ramLimitGb: number;
+  cpuPolicy?: 'SHARED_WEIGHTED' | 'EXCLUSIVE';
+  cpuWeight?: number;
+  memoryPolicy?: 'SHARED_HOST_PROTECTED';
+  vramEnforcementStatus?: string;
   gpuPermissions: string[];
   vramPolicy: string;
   vramQuotaGb?: number;

@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     admin_members,
     access,
     storage_pools,
+    resources,
     ssh_endpoints,
     monitoring,
     workspaces,
@@ -33,6 +34,7 @@ api_router.include_router(users.router, dependencies=[Depends(require_admin)], p
 api_router.include_router(admin_members.router, dependencies=[Depends(require_admin)], prefix="/admin/members", tags=["Admin Members"])
 api_router.include_router(access.router, dependencies=[Depends(require_admin)], prefix="/access", tags=["Access"])
 api_router.include_router(storage_pools.router, dependencies=[Depends(require_admin)], prefix="/storage-pools", tags=["Storage Pools"])
+api_router.include_router(resources.router, dependencies=[Depends(require_user)], prefix="/resources", tags=["Host Resources"])
 api_router.include_router(ssh_endpoints.router, dependencies=[Depends(require_admin)], prefix="/ssh", tags=["SSH Endpoints"])
 api_router.include_router(jobs.router, dependencies=[Depends(require_user)], prefix="/jobs", tags=["Jobs"])
 api_router.include_router(security.router, dependencies=[Depends(require_user)], prefix="/security", tags=["Security"])

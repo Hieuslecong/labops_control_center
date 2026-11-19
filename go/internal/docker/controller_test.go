@@ -90,6 +90,7 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 				Privileged  bool     `json:"Privileged"`
 				Memory      int64    `json:"Memory"`
 				NanoCpus    int64    `json:"NanoCpus"`
+				CpuShares   int64    `json:"CpuShares"`
 				PidsLimit   int64    `json:"PidsLimit"`
 				CapDrop     []string `json:"CapDrop"`
 				SecurityOpt []string `json:"SecurityOpt"`
@@ -122,6 +123,7 @@ func startMockDockerSocket(t *testing.T, daemon *fakeDockerDaemon) string {
 		ins.HostConfig.Privileged = daemon.tamperUnsafe || payload.HostConfig.Privileged
 		ins.HostConfig.Memory = payload.HostConfig.Memory
 		ins.HostConfig.NanoCPUs = payload.HostConfig.NanoCpus
+		ins.HostConfig.CpuShares = payload.HostConfig.CpuShares
 		ins.HostConfig.PidsLimit = &pids
 		ins.HostConfig.CapDrop = payload.HostConfig.CapDrop
 		ins.HostConfig.SecurityOpt = payload.HostConfig.SecurityOpt
@@ -224,6 +226,7 @@ func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 					Memory         int64    `json:"Memory"`
 					MemorySwap     int64    `json:"MemorySwap"`
 					NanoCPUs       int64    `json:"NanoCpus"`
+					CpuShares      int64    `json:"CpuShares"`
 					PidsLimit      *int64   `json:"PidsLimit"`
 					CapDrop        []string `json:"CapDrop"`
 					CapAdd         []string `json:"CapAdd"`
@@ -413,6 +416,34 @@ func TestTrustedRegistryAndDockerProvisioningMatrix(t *testing.T) {
 	})
 	if okErr != nil || okRec.ObservedState != "ACTIVE" {
 		t.Fatalf("11b: Clean hardened provision failed: err=%v rec=%+v", okErr, okRec)
+	}
+
+	// 12. Shared Weighted CPU & Dynamic Storage Provisioning
+	daemon.mu.Lock()
+	delete(daemon.containers, strings.Repeat("a1", 32))
+	daemon.mu.Unlock()
+	sharedRec, sharedErr := ctrl.ProvisionWorkspace(ctx, ProvisionRequest{
+		WorkspaceID:        "ws-shared",
+		Name:               "ws-shared",
+		MemberID:           "mem-dave",
+		MemberUsername:     "dave",
+		UID:                1007,
+		GID:                1007,
+		ImageRef:           validImage,
+		ImageDigest:        validDigest,
+		MemberStorageDir:   bobDir,
+		ContainerMountPath: "/workspace",
+		ResourceMode:       "SHARED_WEIGHTED",
+		CPUWeight:          100,
+		RAMLimitMB:         8192,
+		PidsLimit:          4096,
+		SSHPort:            22011,
+	})
+	if sharedErr != nil || sharedRec.ObservedState != "ACTIVE" {
+		t.Fatalf("12: Shared weighted provision failed: err=%v rec=%+v", sharedErr, sharedRec)
+	}
+	if sharedRec.ResourceMode != "SHARED_WEIGHTED" || sharedRec.CPUWeight != 100 {
+		t.Fatalf("12: ResourceMode or CPUWeight mismatch: rec=%+v", sharedRec)
 	}
 }
 

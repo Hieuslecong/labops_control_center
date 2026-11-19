@@ -61,24 +61,29 @@ type WorkspaceContainer struct {
 
 // ProvisionRequest mô tả cấu hình workspace an toàn cần tạo qua Docker Controller.
 type ProvisionRequest struct {
-	WorkspaceID     string `json:"workspace_id"`
-	Name            string `json:"name"`
-	MemberID        string `json:"member_id"`
-	MemberUsername  string `json:"member_username"`
-	UID             int    `json:"uid"`
-	GID             int    `json:"gid"`
-	ImageRef        string `json:"image_ref"`
-	ImageDigest     string `json:"image_digest"`
-	StorageRoot     string `json:"storage_root"`
-	SSHPort         int    `json:"ssh_port"`
-	VPNBindIP       string `json:"vpn_bind_ip"`
-	CPULimitCores   int    `json:"cpu_limit_cores"`
-	RAMLimitMB      int64  `json:"ram_limit_mb"`
-	PidsLimit       int64  `json:"pids_limit"`
-	Generation      uint64 `json:"generation"`
-	NetworkIsolated bool   `json:"network_isolated"`
-	AuditActor      string `json:"audit_actor"`
-	CorrelationID   string `json:"correlation_id"`
+	WorkspaceID        string `json:"workspace_id"`
+	Name               string `json:"name"`
+	MemberID           string `json:"member_id"`
+	MemberUsername     string `json:"member_username"`
+	UID                int    `json:"uid"`
+	GID                int    `json:"gid"`
+	ImageRef           string `json:"image_ref"`
+	ImageDigest        string `json:"image_digest"`
+	StorageRoot        string `json:"storage_root"`
+	MemberStorageDir   string `json:"member_storage_dir,omitempty"`
+	ContainerMountPath string `json:"container_mount_path,omitempty"`
+	ResourceMode       string `json:"resource_mode,omitempty"`
+	CPUWeight          int    `json:"cpu_weight,omitempty"`
+	MemorySafetyMB     int64  `json:"memory_safety_mb,omitempty"`
+	SSHPort            int    `json:"ssh_port"`
+	VPNBindIP          string `json:"vpn_bind_ip"`
+	CPULimitCores      int    `json:"cpu_limit_cores"`
+	RAMLimitMB         int64  `json:"ram_limit_mb"`
+	PidsLimit          int64  `json:"pids_limit"`
+	Generation         uint64 `json:"generation"`
+	NetworkIsolated    bool   `json:"network_isolated"`
+	AuditActor         string `json:"audit_actor"`
+	CorrelationID      string `json:"correlation_id"`
 }
 
 // Controller quản lý giao tiếp Docker Engine qua Unix Socket kèm TrustedRegistry.
@@ -150,6 +155,7 @@ type dockerInspectJSON struct {
 		Memory         int64    `json:"Memory"`
 		MemorySwap     int64    `json:"MemorySwap"`
 		NanoCPUs       int64    `json:"NanoCpus"`
+		CpuShares      int64    `json:"CpuShares"`
 		PidsLimit      *int64   `json:"PidsLimit"`
 		CapDrop        []string `json:"CapDrop"`
 		CapAdd         []string `json:"CapAdd"`
@@ -221,7 +227,7 @@ func ValidateContainerSafety(raw *dockerInspectJSON) []string {
 	if !hasNoNewPrivs {
 		violations = append(violations, "NO_NEW_PRIVILEGES_REQUIRED")
 	}
-	if raw.HostConfig.NanoCPUs <= 0 {
+	if raw.HostConfig.NanoCPUs <= 0 && raw.HostConfig.CpuShares <= 0 {
 		violations = append(violations, "CPU_LIMIT_REQUIRED")
 	}
 	if raw.HostConfig.Memory <= 0 {
@@ -467,8 +473,15 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	if req.UID < 1000 || req.GID < 1000 {
 		return nil, fmt.Errorf("ROOT_USER_FORBIDDEN: workspace bắt buộc UID/GID >= 1000 (nhận %d:%d)", req.UID, req.GID)
 	}
-	if req.CPULimitCores <= 0 || req.RAMLimitMB <= 0 || req.PidsLimit <= 0 {
-		return nil, fmt.Errorf("RESOURCE_LIMITS_REQUIRED: CPU, RAM và PIDs limits phải > 0")
+	isSharedMode := strings.EqualFold(req.ResourceMode, "SHARED") || strings.EqualFold(req.ResourceMode, "SHARED_WEIGHTED")
+	if !isSharedMode && req.CPULimitCores <= 0 {
+		return nil, fmt.Errorf("RESOURCE_LIMITS_REQUIRED: CPU limit phải > 0")
+	}
+	if req.RAMLimitMB <= 0 {
+		return nil, fmt.Errorf("RESOURCE_LIMITS_REQUIRED: RAM limit phải > 0")
+	}
+	if req.PidsLimit <= 0 {
+		req.PidsLimit = 4096
 	}
 	if !IsImmutableImageRef(req.ImageRef) && !IsImmutableImageRef(req.ImageDigest) {
 		return nil, fmt.Errorf("MUTABLE_IMAGE_REJECTED: bắt buộc image pinned theo @sha256: digest")
@@ -480,8 +493,19 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	if !IsImmutableImageRef(req.ImageDigest) {
 		return nil, fmt.Errorf("INVALID_IMAGE_DIGEST: digest '%s' không phải chuẩn sha256:<64hex>", req.ImageDigest)
 	}
-	if err := ValidateSafeStorageRoot(req.StorageRoot); err != nil {
+	hostStorageDir := strings.TrimSpace(req.MemberStorageDir)
+	if hostStorageDir == "" {
+		hostStorageDir = strings.TrimSpace(req.StorageRoot)
+	}
+	if hostStorageDir == "" {
+		return nil, fmt.Errorf("STORAGE_DIRECTORY_REQUIRED: thiếu member_storage_dir hoặc storage_root")
+	}
+	if err := ValidateSafeStorageRoot(hostStorageDir); err != nil {
 		return nil, err
+	}
+	containerMount := strings.TrimSpace(req.ContainerMountPath)
+	if containerMount == "" {
+		containerMount = "/workspace"
 	}
 
 	// KHÔNG BAO GIỜ tự xóa container cũ khi trùng tên!
@@ -501,27 +525,41 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		req.Generation = 1
 	}
 
+	var nanoCPUs int64
+	var cpuShares int64 = 100
+	if isSharedMode {
+		nanoCPUs = 0
+		if req.CPUWeight > 0 {
+			cpuShares = int64(req.CPUWeight)
+		}
+	} else {
+		nanoCPUs = int64(req.CPULimitCores) * 1000000000
+		cpuShares = 1024
+	}
+
 	createBody := map[string]any{
 		"Image": req.ImageRef,
 		"User":  fmt.Sprintf("%d:%d", req.UID, req.GID),
 		"Labels": map[string]string{
-			"labops.managed":      "true",
-			"labops.workspace_id": req.WorkspaceID,
-			"labops.member_id":    req.MemberID,
-			"labops.member":       req.MemberUsername,
-			"labops.node_id":      c.nodeID,
-			"labops.generation":   strconv.FormatUint(req.Generation, 10),
+			"labops.managed":       "true",
+			"labops.workspace_id":  req.WorkspaceID,
+			"labops.member_id":     req.MemberID,
+			"labops.member":        req.MemberUsername,
+			"labops.node_id":       c.nodeID,
+			"labops.generation":    strconv.FormatUint(req.Generation, 10),
+			"labops.resource_mode": req.ResourceMode,
 		},
 		"HostConfig": map[string]any{
 			"Privileged":     false,
 			"CapDrop":        []string{"ALL"},
 			"SecurityOpt":    []string{"no-new-privileges:true"},
 			"NetworkMode":    netMode,
-			"NanoCpus":       int64(req.CPULimitCores) * 1000000000,
+			"NanoCpus":       nanoCPUs,
+			"CpuShares":      cpuShares,
 			"Memory":         req.RAMLimitMB * 1024 * 1024,
 			"MemorySwap":     req.RAMLimitMB * 1024 * 1024,
 			"PidsLimit":      req.PidsLimit,
-			"Binds":          []string{fmt.Sprintf("%s:/workspace:rw", req.StorageRoot)},
+			"Binds":          []string{fmt.Sprintf("%s:%s:rw", hostStorageDir, containerMount)},
 			"ReadonlyRootfs": false,
 		},
 	}
@@ -579,7 +617,11 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		CanonicalContainerID: strings.ToLower(createRes.ID),
 		ImageRef:             req.ImageRef,
 		ImageDigest:          strings.ToLower(req.ImageDigest),
-		StorageRoot:          req.StorageRoot,
+		StorageRoot:          hostStorageDir,
+		MemberStorageDir:     hostStorageDir,
+		ContainerMountPath:   containerMount,
+		ResourceMode:         req.ResourceMode,
+		CPUWeight:            int(cpuShares),
 		SSHPort:              req.SSHPort,
 		VPNBindIP:            bindIP,
 		CPULimitCores:        req.CPULimitCores,

@@ -365,10 +365,23 @@ class SshAccessManager:
         rec.pop("active_password_hash", None)
         return rec
 
-    def member_workspace_dir(self, host_id: str, username: str) -> str:
+    def member_workspace_dir(self, host_id: str, username: str, storage_root: Optional[str] = None) -> str:
         if not SAFE_USERNAME_RE.match(username) or username in RESERVED_USERNAMES:
             raise ValueError(f"Username '{username}' không hợp lệ hoặc thuộc danh sách hệ thống cấm")
         safe_host = re.sub(r"[^a-z0-9_-]", "", host_id.lower()) or "track"
+
+        if storage_root:
+            clean_root = os.path.abspath(storage_root)
+            expected_base = os.path.join(clean_root, "labops", "users")
+            user_dir = os.path.join(expected_base, username)
+            if not user_dir.startswith(expected_base + os.sep):
+                raise ValueError(f"SECURITY_VIOLATION: Path traversal in storage_root: {user_dir}")
+            os.makedirs(user_dir, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(user_dir, 0o700)
+            except OSError:
+                pass
+            return user_dir
 
         # Mặc định ưu tiên tuyệt đối phân bổ không gian lưu trữ người dùng vào ổ đĩa /media/LabOps-Data/users
         from app.core.config import settings
@@ -907,10 +920,11 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         ram_limit_gb: int,
         storage_quota_gb: int,
         gpu_permissions: List[str],
+        storage_root: Optional[str] = None,
         extra_mounts: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Tạo thư mục workspace riêng cho thành viên (0700), thư mục con work/ (0700),
+        Tạo thư mục workspace riêng cho thành viên (0700), thư mục con work/, checkpoints/, datasets/ (0700),
         .ssh/ (0700) và .ssh/authorized_keys (0600).
         Kiểm tra chống mount đường dẫn nhạy cảm hoặc thư mục của thành viên khác.
         """
@@ -919,24 +933,20 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             if any(norm == p or norm.startswith(p + "/") for p in FORBIDDEN_MOUNT_PREFIXES):
                 raise WorkspaceSecurityError("MOUNT_PATH_FORBIDDEN", f"Đường dẫn mount '{norm}' bị cấm.", 403)
 
-        ws_dir = self.member_workspace_dir(host_id, username)
+        ws_dir = self.member_workspace_dir(host_id, username, storage_root=storage_root)
         work_dir = os.path.join(ws_dir, "work")
+        checkpoints_dir = os.path.join(ws_dir, "checkpoints")
+        datasets_dir = os.path.join(ws_dir, "datasets")
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
         meta_path = os.path.join(ws_dir, ".workspace_meta.json")
 
-        os.makedirs(ws_dir, mode=0o700, exist_ok=True)
-        os.makedirs(work_dir, mode=0o700, exist_ok=True)
-        os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
-        for _p in (ws_dir, work_dir):
+        for _d in (ws_dir, work_dir, checkpoints_dir, datasets_dir, ssh_dir):
+            os.makedirs(_d, mode=0o700, exist_ok=True)
             try:
-                os.chmod(_p, 0o700)
+                os.chmod(_d, 0o700)
             except OSError:
                 pass
-        try:
-            os.chmod(ssh_dir, 0o700)
-        except OSError:
-            pass
 
         # Ghi authorized_keys với tùy chọn hạn chế port-forwarding nhạy cảm và chỉ cho phép khóa này
         clean_key = public_key.strip()

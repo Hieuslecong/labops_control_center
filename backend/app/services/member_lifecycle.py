@@ -85,6 +85,13 @@ class MemberLifecycleManager:
         env_user_dir = (os.getenv("LABOPS_USER_DATA_DIR") or "").strip()
         if env_user_dir:
             roots.append(os.path.realpath(env_user_dir))
+        for p in getattr(self.service, "storage_pools", []):
+            mp = p.get("mount_point")
+            if mp and os.path.exists(mp):
+                roots.append(os.path.realpath(mp))
+        for extra in ["/media/LabOps-Data", "/tank/workspaces", "/mnt/labops-data", "/data"]:
+            if os.path.exists(extra):
+                roots.append(os.path.realpath(extra))
         return roots
 
     def _resolve_confined_workspace_dir(self, member: Dict[str, Any]) -> Optional[str]:

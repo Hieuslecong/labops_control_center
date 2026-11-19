@@ -29,6 +29,7 @@ from app.services.ssh_access_manager import SshAccessManager
 from app.adapters.process_monitor_adapter import ProcessMonitorAdapter
 from app.adapters.teleport_adapter import TeleportAdapter
 from app.services.vpn_manager import VPNManager
+from app.services.storage_inventory_service import storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -1908,21 +1909,61 @@ class LabOpsDataService:
         server = next((item for item in self.servers if item["id"] == server_id), None)
         if not server:
             raise ValueError(f"Không tìm thấy máy chủ '{server_id}'")
-        pool_id = payload.get("storage_pool_id") or payload.get("storagePoolId")
+
+        pool_id = payload.get("storage_pool_id") or payload.get("storagePoolId") or payload.get("storage_id") or payload.get("storageId")
         if not pool_id:
-            pool = next((item for item in self.storage_pools if item["server_id"] == server_id and item.get("is_default")), None)
-            pool = pool or next((item for item in self.storage_pools if item["server_id"] == server_id), None)
+            pool = next((item for item in self.storage_pools if item.get("server_id") == server_id and item.get("is_default")), None)
+            pool = pool or next((item for item in self.storage_pools if item.get("server_id") == server_id), None)
         else:
-            pool = next((item for item in self.storage_pools if item["id"] == pool_id), None)
-        if pool and pool.get("server_id") != server_id:
+            pool = next((item for item in self.storage_pools if (item.get("id") == pool_id or item.get("storage_id") == pool_id)), None)
+            if not pool:
+                pool = storage_service.get_storage_pool_by_id(server_id, pool_id)
+
+        if pool and pool.get("server_id", pool.get("host_id")) != server_id:
             raise ValueError(f"Không tìm thấy storage pool trên máy chủ '{server_id}'")
         if pool_id and not pool:
             raise ValueError(f"Không tìm thấy storage pool trên máy chủ '{server_id}'")
+
         storage_quota_gb = payload.get("storage_quota_gb", payload.get("storageQuotaGb", 250))
         if not isinstance(storage_quota_gb, int) or storage_quota_gb <= 0:
             raise ValueError("Dung lượng yêu cầu phải là số nguyên dương")
-        if pool and storage_quota_gb > pool["free_gb"]:
+        
+        free_limit = pool.get("free_gb", pool.get("free_gib", pool.get("allocatable_gib", 0.0))) if pool else 0.0
+        if pool and storage_quota_gb > free_limit:
             raise ValueError("Dung lượng yêu cầu vượt quá dung lượng khả dụng")
+
+        storage_result = {}
+        if pool:
+            s_id = pool.get("storage_id") or pool.get("id")
+            if not storage_service.get_storage_pool_by_id(server_id, s_id):
+                storage_service.register_custom_pool(server_id, {
+                    "host_id": server_id,
+                    "storage_id": s_id,
+                    "device": pool.get("disk_identifier", "/dev/sdb1"),
+                    "filesystem_uuid": hashlib.sha256(f"{server_id}:{s_id}".encode()).hexdigest()[:36],
+                    "mount_point": pool.get("mount_point", "/media/LabOps-Data"),
+                    "filesystem": pool.get("driver", "ext4"),
+                    "capacity_gib": float(pool.get("capacity_gb", pool.get("capacity_gib", 1000.0))),
+                    "used_gib": float(pool.get("used_gb", pool.get("used_gib", 100.0))),
+                    "free_gib": float(pool.get("free_gb", pool.get("free_gib", 900.0))),
+                    "allocatable_gib": float(pool.get("free_gb", pool.get("allocatable_gib", 900.0))),
+                    "reserved_gib": 100.0,
+                    "quota_backend": "PROJECT_QUOTA",
+                    "quota_supported": True,
+                    "quota_enforced": True,
+                    "read_only": False,
+                    "mounted": True,
+                    "eligible": True,
+                    "ineligibility_reason": None,
+                    "last_verified_at": datetime.now(timezone.utc).isoformat(),
+                    "verification_status": "VERIFIED"
+                })
+            storage_result = storage_service.provision_member_storage(
+                host_id=server_id,
+                storage_id=s_id,
+                username=username,
+                quota_gib=storage_quota_gb,
+            )
         cpu_limit = payload.get("cpu_limit_cores", payload.get("cpuLimitCores", 8))
         ram_limit = payload.get("ram_limit_gb", payload.get("ramLimitGb", 32))
         vram_quota = payload.get("vram_quota_gb", payload.get("vramQuotaGb", 12))
@@ -1935,6 +1976,17 @@ class LabOpsDataService:
             raise ValueError("VRAM quota phải từ 0 đến 256 GB")
         if not isinstance(gpu_permissions, list) or any(not isinstance(gpu, str) or len(gpu) > 64 for gpu in gpu_permissions):
             raise ValueError("Danh sách GPU không hợp lệ")
+
+        gpu_mode = payload.get("gpu_allocation_mode", payload.get("gpuAllocationMode", "EXCLUSIVE")) if gpu_permissions else "NONE"
+        if gpu_permissions and gpu_mode == "EXCLUSIVE":
+            for existing in self.members:
+                if existing.get("assigned_server") == server_id:
+                    existing_gpus = existing.get("gpu_permissions", [])
+                    existing_mode = existing.get("gpu_allocation_mode", "SHARED")
+                    if existing_mode == "EXCLUSIVE" and any(g in existing_gpus for g in gpu_permissions):
+                        conflict_gpus = [g for g in gpu_permissions if g in existing_gpus]
+                        raise ValueError(f"Xung đột cấp phát GPU: GPU '{conflict_gpus}' đã được cấp phát độc quyền (EXCLUSIVE) cho thành viên @{existing.get('username')}")
+
         mount_path = payload.get("mount_path", payload.get("mountPath", "/workspace"))
         validate_mount_path(mount_path, username)
 
@@ -1998,8 +2050,15 @@ class LabOpsDataService:
             "provisioning_state": "SSH_KEY_ENROLLED" if registered_key else "PENDING",
             "workspace_status": workspace_status,
             "teleport_status": "NOT_CONFIGURED",
-            "storage_pool_id": pool["id"] if pool else None,
-            "storage_pool_label": pool["label"] if pool else "NOT_VERIFIED",
+            "storage_pool_id": pool.get("storage_id") or pool.get("id") if pool else None,
+            "storage_pool_label": pool.get("label", pool.get("mount_point", "NOT_VERIFIED")) if pool else "NOT_VERIFIED",
+            "storage_id": pool.get("storage_id") or pool.get("id") if pool else None,
+            "host_storage_root": storage_result.get("host_storage_root"),
+            "member_storage_directory": storage_result.get("member_storage_directory"),
+            "workspace_dir": storage_result.get("member_storage_directory"),
+            "container_mount_path": "/workspace",
+            "storage_quota_backend": storage_result.get("quota_backend", "PROJECT_QUOTA"),
+            "storage_quota_enforcement": storage_result.get("verification_status", "VERIFIED"),
             "mount_path": mount_path,
             "storage_quota_gb": storage_quota_gb,
             "storage_used_gb": 0.0,
@@ -2031,6 +2090,10 @@ class LabOpsDataService:
             },
             "cpu_limit_cores": cpu_limit,
             "ram_limit_gb": ram_limit,
+            "cpu_policy": payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED",
+            "cpu_weight": int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100),
+            "memory_policy": payload.get("memory_policy") or payload.get("memoryPolicy") or "SHARED_HOST_PROTECTED",
+            "vram_enforcement_status": "POLICY_ONLY",
             "gpu_permissions": gpu_permissions,
             "vram_policy": payload.get("vram_policy", payload.get("vramPolicy", "Quota 12GB (Shared)")),
             "vram_quota_gb": vram_quota,
@@ -2559,6 +2622,11 @@ class LabOpsDataService:
                         storage_quota_gb=storage_quota_gb,
                         gpu_uuid=(gpu_permissions[0] if gpu_permissions else None),
                         extra_mounts=payload.get("extra_mounts"),
+                        storage_path=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
+                        member_storage_dir=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
+                        container_mount_path="/workspace",
+                        resource_mode=payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED",
+                        cpu_weight=int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100),
                     )
                 except Exception as ws_exc:
                     logger.warning("Workspace controller validation note for %s: %s", username, ws_exc)

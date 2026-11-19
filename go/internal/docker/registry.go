@@ -88,6 +88,10 @@ type WorkspaceRecord struct {
 	ImageRef             string `json:"image_ref"`
 	ImageDigest          string `json:"image_digest"`
 	StorageRoot          string `json:"storage_root"`
+	MemberStorageDir     string `json:"member_storage_dir,omitempty"`
+	ContainerMountPath   string `json:"container_mount_path,omitempty"`
+	ResourceMode         string `json:"resource_mode,omitempty"`
+	CPUWeight            int    `json:"cpu_weight,omitempty"`
 	SSHPort              int    `json:"ssh_port"`
 	VPNBindIP            string `json:"vpn_bind_ip"`
 	CPULimitCores        int    `json:"cpu_limit_cores"`

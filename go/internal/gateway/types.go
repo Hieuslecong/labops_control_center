@@ -22,6 +22,11 @@ var AllowedActions = map[string]bool{
 	"KILL_PROCESS":                    true,
 	"REPO_DECISION":                   true,
 	"REPO_DELIVER":                    true,
+	"LIST_STORAGE_POOLS":              true,
+	"INSPECT_STORAGE_POOL":            true,
+	"VALIDATE_STORAGE_ALLOCATION":     true,
+	"PROVISION_MEMBER_STORAGE":        true,
+	"GET_RESOURCE_PROFILE":            true,
 }
 
 // NodeSession đại diện cho một phiên kết nối gRPC streaming của Compute Node

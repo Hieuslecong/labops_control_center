@@ -1,0 +1,28 @@
+[Unit]
+Description=LabOps Workstation Node Agent
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=aiot-ws1
+Group=aiot-ws1
+# Cấp quyền truy cập Docker Unix socket cho Node Agent để điều phối container workspace
+SupplementaryGroups=docker
+
+WorkingDirectory=/var/lib/labops-agent
+EnvironmentFile=/etc/labops/agent.env
+ExecStart=/usr/local/bin/labops-agent
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Chỉ cho phép Agent ghi registry, file passwd/group/authorized_keys read-only của container và pool dữ liệu duyệt
+ReadWritePaths=/var/lib/labops-agent /mnt/HDD3/labops/users /run/docker.sock
+
+[Install]
+WantedBy=multi-user.target

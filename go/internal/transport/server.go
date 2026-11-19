@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Hieuslecong/labops_control_center/go/internal/agent"
 	"github.com/Hieuslecong/labops_control_center/go/internal/config"
 	"github.com/Hieuslecong/labops_control_center/go/internal/docker"
+	"github.com/Hieuslecong/labops_control_center/go/internal/gateway"
 	"github.com/Hieuslecong/labops_control_center/go/internal/gpu"
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/process"
@@ -28,6 +30,7 @@ type Server struct {
 	procCol    *process.Collector
 	procCtrl   *process.Controller
 	dockerCtrl *docker.Controller
+	executor   *agent.CommandExecutor
 	repoGuard  *repositoryguard.GuardService
 	httpSrv    *http.Server
 	logger     *slog.Logger
@@ -47,19 +50,24 @@ func NewServer(
 		logger.Error("Không thể khởi tạo RepositoryGuard service", "err", err)
 	}
 
+	procCtrl := process.NewController(procCol)
+	exec := agent.NewCommandExecutor(cfg, hostCol, gpuCol, procCol, procCtrl, dockerCtrl, gateway.NewReplayGuard(), logger)
 	s := &Server{
 		cfg:        cfg,
 		hostCol:    hostCol,
 		gpuCol:     gpuCol,
 		procCol:    procCol,
-		procCtrl:   process.NewController(procCol),
+		procCtrl:   procCtrl,
 		dockerCtrl: dockerCtrl,
+		executor:   exec,
 		repoGuard:  repoGuardSvc,
 		logger:     logger,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/agent/execute", s.handleExecute)
+	mux.HandleFunc("/v1/execute", s.handleExecute)
 	mux.HandleFunc("/api/v1/agent/host", s.handleHostTelemetry)
 	mux.HandleFunc("/api/v1/agent/gpus", s.handleGPUTelemetry)
 	mux.HandleFunc("/api/v1/agent/processes", s.handleProcessTelemetry)
@@ -328,7 +336,8 @@ func (s *Server) handleFullTelemetry(w http.ResponseWriter, r *http.Request) {
 
 // handleStorage cung cấp danh sách ổ đĩa và cấp phát thư mục thành viên theo filesystem quota
 func (s *Server) handleStorage(w http.ResponseWriter, r *http.Request) {
-	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(true))
+	// Production tuyệt đối không giả lập quota
+	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(false))
 	if r.Method == http.MethodGet {
 		pools := collector.CollectStoragePools()
 		w.Header().Set("Content-Type", "application/json")
@@ -349,7 +358,7 @@ func (s *Server) handleStorage(w http.ResponseWriter, r *http.Request) {
 		if req.HostID == "" {
 			req.HostID = s.cfg.ServerID
 		}
-		provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+		provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(false))
 		res, err := provisioner.ProvisionMemberStorage(req)
 		if err != nil {
 			s.logger.Warn("Lỗi cấp phát lưu trữ cho member", "err", err, "req", req)
@@ -386,8 +395,8 @@ func (s *Server) handleStorageValidate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "Invalid JSON payload: "+err.Error())
 		return
 	}
-	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(true))
-	provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
+	collector := storage.NewInventoryCollector(s.cfg.ServerID, storage.NewSystemQuotaManager(false))
+	provisioner := storage.NewProvisioner(s.cfg.ServerID, collector, storage.NewSystemQuotaManager(false))
 	pool, err := provisioner.ValidateAllocation(req.StorageID, req.QuotaGiB)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -420,6 +429,81 @@ func (s *Server) handleResourceProfile(w http.ResponseWriter, r *http.Request) {
 		"profile":         prof,
 		"memory_pressure": psi,
 	})
+}
+
+// handleExecute xử lý thống nhất mọi hành động allowlisted qua HTTP authenticated từ Control Plane.
+func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct {
+		CommandID            string         `json:"command_id"`
+		RequestID            string         `json:"request_id"`
+		NodeID               string         `json:"node_id"`
+		ActorID              string         `json:"actor_id"`
+		Action               string         `json:"action"`
+		Params               map[string]any `json:"params"`
+		Parameters           map[string]any `json:"parameters"`
+		AuthorizationContext string         `json:"authorization_context"`
+		IdempotencyKey       string         `json:"idempotency_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid JSON payload: "+err.Error())
+		return
+	}
+	if payload.RequestID == "" {
+		payload.RequestID = strings.TrimSpace(r.Header.Get("X-Request-Id"))
+	}
+	if payload.IdempotencyKey == "" {
+		payload.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	rawParams := payload.Parameters
+	if len(rawParams) == 0 {
+		rawParams = payload.Params
+	}
+	strParams := make(map[string]string, len(rawParams))
+	for k, v := range rawParams {
+		if v == nil {
+			continue
+		}
+		switch val := v.(type) {
+		case string:
+			strParams[k] = val
+		default:
+			if b, err := json.Marshal(val); err == nil {
+				strParams[k] = string(b)
+			}
+		}
+	}
+
+	execRes := s.executor.Execute(r.Context(), &agent.ExecuteCommandRequest{
+		CommandID:            payload.CommandID,
+		RequestID:            payload.RequestID,
+		NodeID:               payload.NodeID,
+		ActorID:              payload.ActorID,
+		Action:               payload.Action,
+		Parameters:           strParams,
+		AuthorizationContext: payload.AuthorizationContext,
+		IdempotencyKey:       payload.IdempotencyKey,
+	})
+
+	status := http.StatusOK
+	if !execRes.Success {
+		switch execRes.ErrorCode {
+		case "NODE_MISMATCH", "DELEGATION_INVALID", "ACTION_UNAUTHORIZED", "REPLAY_DETECTED", "UNSUPPORTED_ACTION":
+			status = http.StatusForbidden
+		case "IDEMPOTENCY_CONFLICT", "INVALID_PROCESS_REF", "INVALID_PROVISION_SPEC", "INVALID_CONTAINER_ID", "INVALID_CANONICAL_WORKSPACE", "INVALID_KEYS_JSON", "INVALID_STORAGE_SPEC":
+			status = http.StatusBadRequest
+		case "COMMAND_EXPIRED":
+			status = http.StatusRequestTimeout
+		default:
+			status = http.StatusConflict
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(execRes)
 }
 
 // Start khởi chạy HTTP server

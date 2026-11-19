@@ -16,15 +16,21 @@ Tuân thủ nghiêm ngặt Mục 14 của prompt.md:
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.config import settings
 from app.db.atomic_json import atomic_write_json, safe_load_json
+
+WORKSPACE_UID_MIN = 20000
+WORKSPACE_UID_MAX = 59999
+IMAGE_DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 FORBIDDEN_MOUNT_PREFIXES = (
     "/var/run/docker.sock",
@@ -188,18 +194,26 @@ class WorkspaceController:
 
             # Trong môi trường không có quyền chạm Docker daemon thực tế, giữ ở trạng thái
             # NOT_VERIFIED / PENDING_RETRY thay vì báo ACTIVE giả.
+            uid, gid = self.allocate_uid_gid(owner, state=state)
             final_storage_path = storage_path or member_storage_dir or (f"/media/LabOps-Data/labops/users/{owner}" if host_id == "workstation" else f"/tank/workspaces/{owner}")
             final_container_mount = container_mount_path or "/workspace"
+            default_bind_ip = (
+                getattr(settings, "LABOPS_WORKSPACE_BIND_IP", "192.168.167.251")
+                if host_id == "workstation"
+                else "192.168.167.250"
+            )
 
             ws = {
                 "id": f"ws-{uuid.uuid4().hex[:10]}",
                 "name": f"ws-{owner}",
                 "owner": owner,
+                "uid": uid,
+                "gid": gid,
                 "host_id": host_id,
                 "runtime_type": "DOCKER",
                 "image_ref": image_ref,
                 "ssh_host_port": ssh_port,
-                "vpn_bind_ip": "10.200.0.2" if host_id == "workstation" else "10.200.0.1",
+                "vpn_bind_ip": default_bind_ip,
                 "cpu_cores_limit": int(cpu_cores),
                 "ram_mb_limit": int(ram_mb),
                 "pids_limit": int(pids_limit),
@@ -224,4 +238,134 @@ class WorkspaceController:
             if idempotency_key:
                 state["idempotency"][idempotency_key] = ws["id"]
             return ws
+
+    def allocate_uid_gid(self, owner: str, *, state: Optional[Dict[str, Any]] = None) -> Tuple[int, int]:
+        """Cấp phát UID/GID cách ly trong dải 20000-59999 (tuyệt đối tránh root 0 và admin host 1000)."""
+        clean_owner = (owner or "").strip().lower()
+        data = state if state is not None else self._load()
+        workspaces = data.get("workspaces", [])
+        used_uids = set()
+        for w in workspaces:
+            w_uid = w.get("uid")
+            if isinstance(w_uid, int) and WORKSPACE_UID_MIN <= w_uid <= WORKSPACE_UID_MAX:
+                if w.get("owner") == clean_owner:
+                    w_gid = w.get("gid")
+                    if isinstance(w_gid, int) and WORKSPACE_UID_MIN <= w_gid <= WORKSPACE_UID_MAX:
+                        return w_uid, w_gid
+                    return w_uid, w_uid
+                used_uids.add(w_uid)
+
+        span = WORKSPACE_UID_MAX - WORKSPACE_UID_MIN + 1
+        digest_int = int(hashlib.sha256(clean_owner.encode("utf-8")).hexdigest()[:8], 16)
+        candidate = WORKSPACE_UID_MIN + (digest_int % span)
+        for offset in range(span):
+            uid = WORKSPACE_UID_MIN + ((candidate - WORKSPACE_UID_MIN + offset) % span)
+            if uid not in used_uids:
+                return uid, uid
+        raise WorkspaceSecurityError("UID_SPACE_EXHAUSTED", "Hết dải UID/GID cô lập khả dụng.", 507)
+
+    def build_provision_workspace_spec(
+        self,
+        *,
+        member: Dict[str, Any],
+        workspace: Dict[str, Any],
+        correlation_id: str,
+        actor: str = "admin",
+        image_ref: Optional[str] = None,
+        image_digest: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Tạo và xác thực nghiêm ngặt hợp đồng ProvisionWorkspaceSpec gửi tới Go Node Agent."""
+        username = str(member.get("username") or workspace.get("owner") or "").strip().lower()
+        ws_id = str(workspace.get("id") or "").strip()
+        ws_name = str(workspace.get("name") or f"ws-{username}").strip()
+        if not ws_id or not username:
+            raise WorkspaceSecurityError("INVALID_PROVISION_SPEC", "Thiếu workspace_id hoặc username hợp lệ.", 400)
+        if workspace.get("owner") and str(workspace.get("owner")).strip().lower() != username:
+            raise WorkspaceSecurityError("OWNER_MISMATCH", "Chủ sở hữu workspace không khớp với thành viên.", 400)
+
+        uid = int(member.get("uid") or workspace.get("uid") or 0)
+        gid = int(member.get("gid") or workspace.get("gid") or 0)
+        if uid < WORKSPACE_UID_MIN or uid > WORKSPACE_UID_MAX or gid < WORKSPACE_UID_MIN or gid > WORKSPACE_UID_MAX:
+            uid, gid = self.allocate_uid_gid(username)
+
+        raw_img = str(
+            image_ref
+            or os.getenv("LABOPS_WORKSPACE_IMAGE_REF", "")
+            or getattr(settings, "LABOPS_WORKSPACE_IMAGE_REF", "")
+            or workspace.get("image_ref")
+            or ""
+        ).strip()
+        raw_digest = str(
+            image_digest
+            or os.getenv("LABOPS_WORKSPACE_IMAGE_DIGEST", "")
+            or getattr(settings, "LABOPS_WORKSPACE_IMAGE_DIGEST", "")
+            or workspace.get("image_digest")
+            or ""
+        ).strip().lower()
+        if "@sha256:" in raw_img and not raw_digest:
+            raw_digest = raw_img.split("@", 1)[1].strip().lower()
+        if raw_img and "@sha256:" not in raw_img and IMAGE_DIGEST_RE.match(raw_digest):
+            raw_img = f"{raw_img}@{raw_digest}"
+        if not raw_img or "@sha256:" not in raw_img or not IMAGE_DIGEST_RE.match(raw_digest):
+            raise WorkspaceSecurityError(
+                "IMAGE_DIGEST_NOT_CONFIGURED",
+                "Image workspace bắt buộc được neo cố định theo @sha256:<64hex> (LABOPS_WORKSPACE_IMAGE_REF / DIGEST).",
+                400,
+            )
+
+        storage_root = str(member.get("host_storage_root") or workspace.get("storage_root") or "").strip()
+        member_dir = str(
+            member.get("member_storage_directory")
+            or workspace.get("member_storage_dir")
+            or workspace.get("storage_path")
+            or member.get("workspace_dir")
+            or ""
+        ).strip()
+        if not member_dir or ".." in member_dir or not os.path.isabs(member_dir):
+            raise WorkspaceSecurityError("INVALID_STORAGE_PATH", f"Đường dẫn storage '{member_dir}' không hợp lệ.", 400)
+        norm_dir = os.path.normpath(member_dir)
+        if any(norm_dir == p or norm_dir.startswith(p + "/") for p in FORBIDDEN_MOUNT_PREFIXES):
+            raise WorkspaceSecurityError("MOUNT_PATH_FORBIDDEN", f"Đường dẫn '{norm_dir}' thuộc vùng cấm hệ thống.", 403)
+        if not storage_root:
+            storage_root = os.path.dirname(os.path.dirname(norm_dir)) if f"/users/{username}" in norm_dir else os.path.dirname(norm_dir)
+
+        ssh_port = int(member.get("ssh_port") or workspace.get("ssh_host_port") or 0)
+        if ssh_port < 22000 or ssh_port > 65000:
+            raise WorkspaceSecurityError("INVALID_SSH_PORT", f"Cổng SSH workspace '{ssh_port}' nằm ngoài dải cho phép.", 400)
+
+        host_id = str(member.get("assigned_server") or workspace.get("host_id") or settings.LOCAL_HOST_ID)
+        bind_ip = str(
+            workspace.get("vpn_bind_ip")
+            or (getattr(settings, "LABOPS_WORKSPACE_BIND_IP", "192.168.167.251") if host_id == "workstation" else "192.168.167.250")
+        ).strip()
+        gpu_uuids = [str(g) for g in (member.get("gpu_permissions") or []) if g]
+        if not gpu_uuids and workspace.get("gpu_uuid"):
+            gpu_uuids = [str(workspace["gpu_uuid"])]
+
+        return {
+            "workspace_id": ws_id,
+            "name": ws_name,
+            "member_id": str(member.get("id") or ""),
+            "member_username": username,
+            "owner": username,
+            "uid": uid,
+            "gid": gid,
+            "image_ref": raw_img,
+            "image_digest": raw_digest,
+            "storage_root": storage_root,
+            "member_storage_dir": norm_dir,
+            "container_mount_path": str(workspace.get("container_mount_path") or "/workspace"),
+            "ssh_port": ssh_port,
+            "vpn_bind_ip": bind_ip,
+            "resource_mode": str(workspace.get("resource_mode") or "SHARED_WEIGHTED"),
+            "cpu_weight": int(workspace.get("cpu_weight") or 100),
+            "cpu_limit_cores": int(member.get("cpu_limit_cores") or workspace.get("cpu_cores_limit") or 4),
+            "ram_limit_mb": int((member.get("ram_limit_gb") or 8) * 1024),
+            "pids_limit": int(workspace.get("pids_limit") or 4096),
+            "gpu_uuids": gpu_uuids,
+            "network_isolated": False,
+            "generation": int(workspace.get("generation") or 1),
+            "audit_actor": actor,
+            "correlation_id": correlation_id,
+        }
 

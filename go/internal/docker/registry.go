@@ -90,6 +90,8 @@ type WorkspaceRecord struct {
 	StorageRoot          string `json:"storage_root"`
 	MemberStorageDir     string `json:"member_storage_dir,omitempty"`
 	ContainerMountPath   string `json:"container_mount_path,omitempty"`
+	RuntimeDir           string `json:"runtime_dir,omitempty"`
+	GPUUUIDs             []string `json:"gpu_uuids,omitempty"`
 	ResourceMode         string `json:"resource_mode,omitempty"`
 	CPUWeight            int    `json:"cpu_weight,omitempty"`
 	SSHPort              int    `json:"ssh_port"`
@@ -327,4 +329,28 @@ func (r *TrustedRegistry) VerifyContainerBinding(nodeID, workspaceID string, liv
 
 	cp := *rec
 	return &cp, nil
+}
+
+// CheckSSHPortAvailable từ chối cấp phát nếu cổng SSH đã được gán cho một workspace khác trên cùng node.
+func (r *TrustedRegistry) CheckSSHPortAvailable(nodeID string, sshPort int, excludeWorkspaceID string) error {
+	if sshPort <= 0 {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.checkHealthyLocked(); err != nil {
+		return err
+	}
+	for _, rec := range r.records {
+		if rec == nil || rec.NodeID != nodeID || rec.WorkspaceID == excludeWorkspaceID {
+			continue
+		}
+		if rec.DesiredState == "DELETED" || rec.ObservedState == "DELETED" {
+			continue
+		}
+		if rec.SSHPort == sshPort {
+			return fmt.Errorf("SSH_PORT_COLLISION: cổng SSH %d đã được cấp cho workspace '%s' (%s)", sshPort, rec.Name, rec.WorkspaceID)
+		}
+	}
+	return nil
 }

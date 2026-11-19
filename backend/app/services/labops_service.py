@@ -2850,28 +2850,50 @@ class LabOpsDataService:
 
             if ws_rec is not None and host_online:
                 try:
+                    spec = self.workspace_controller.build_provision_workspace_spec(
+                        member=member,
+                        workspace=ws_rec,
+                        correlation_id=f"prov-{uuid.uuid4().hex[:12]}",
+                        actor=actor_id,
+                        image_ref=payload.get("image_ref") or payload.get("imageRef"),
+                        image_digest=payload.get("image_digest") or payload.get("imageDigest"),
+                    )
+                    member["uid"] = spec["uid"]
+                    member["gid"] = spec["gid"]
+                    member["workspace_id"] = spec["workspace_id"]
                     agent_res = self.node_agent.dispatch(
                         server,
                         "PROVISION_DOCKER_WORKSPACE",
                         params={
-                            "workspace_id": ws_rec["id"],
-                            "username": username,
-                            "host_dir": ws_fs.get("workspace_dir") or "",
-                            "ssh_port": str(member.get("ssh_port") or ws_rec.get("ssh_host_port") or 22001),
+                            "spec_json": json.dumps(spec),
+                            "workspace_id": spec["workspace_id"],
+                            "name": spec["name"],
+                            "owner": username,
+                            "member_id": member["id"],
+                            "ssh_port": str(spec["ssh_port"]),
                         },
-                        idempotency_key=f"ws-prov-{ws_rec['id']}",
+                        idempotency_key=f"ws-prov-{spec['workspace_id']}-gen{spec['generation']}",
+                        actor_id=actor_id,
+                        actor_role="ADMIN",
                     )
-                    member["workspace_delegation_status"] = "VERIFIED"
+                    agent_rec = agent_res.get("result") or {}
+                    member["workspace_delegation_status"] = (
+                        "VERIFIED" if agent_rec.get("observed_state") == "ACTIVE" else "PARTIAL_PROVISIONING"
+                    )
                     member["workspace_agent_request_id"] = agent_res.get("request_id")
-                except NodeAgentError as na_err:
-                    # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent lỗi
+                    if agent_rec.get("canonical_container_id"):
+                        member["container_id"] = agent_rec["canonical_container_id"]
+                except Exception as prov_err:
+                    # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent hoặc Spec lỗi
+                    err_code = getattr(prov_err, "code", "")
+                    err_msg = getattr(prov_err, "message", str(prov_err))
                     delegation_status = (
                         "AGENT_UNAVAILABLE"
-                        if na_err.code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
+                        if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
                         else "PROVISION_FAILED"
                     )
                     member["workspace_delegation_status"] = delegation_status
-                    member["workspace_delegation_reason"] = na_err.message
+                    member["workspace_delegation_reason"] = err_msg
             else:
                 member["workspace_delegation_status"] = "AGENT_UNAVAILABLE" if not host_online else "PROVISION_FAILED"
 

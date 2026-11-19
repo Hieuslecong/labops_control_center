@@ -9,10 +9,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const (
+	MinWorkspaceUID       = 20000
+	MaxWorkspaceUID       = 59999
+	ContainerSSHDPort     = 2222
+	DefaultRuntimeRootDir = "/var/lib/labops-agent/runtime"
+)
+
+var validOpenSSHPubKeyRegex = regexp.MustCompile(`^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa)\s+[A-Za-z0-9+/=]+(?:\s+[^\r\n]+)?$`)
 
 // ProtectedSystemContainers danh sách container hệ thống tuyệt đối không được xóa hoặc can thiệp
 var ProtectedSystemContainers = map[string]bool{
@@ -77,21 +89,23 @@ type ProvisionRequest struct {
 	MemorySafetyMB     int64  `json:"memory_safety_mb,omitempty"`
 	SSHPort            int    `json:"ssh_port"`
 	VPNBindIP          string `json:"vpn_bind_ip"`
-	CPULimitCores      int    `json:"cpu_limit_cores"`
-	RAMLimitMB         int64  `json:"ram_limit_mb"`
-	PidsLimit          int64  `json:"pids_limit"`
-	Generation         uint64 `json:"generation"`
-	NetworkIsolated    bool   `json:"network_isolated"`
-	AuditActor         string `json:"audit_actor"`
-	CorrelationID      string `json:"correlation_id"`
+	CPULimitCores      int      `json:"cpu_limit_cores"`
+	RAMLimitMB         int64    `json:"ram_limit_mb"`
+	PidsLimit          int64    `json:"pids_limit"`
+	GPUUUIDs           []string `json:"gpu_uuids,omitempty"`
+	Generation         uint64   `json:"generation"`
+	NetworkIsolated    bool     `json:"network_isolated"`
+	AuditActor         string   `json:"audit_actor"`
+	CorrelationID      string   `json:"correlation_id"`
 }
 
 // Controller quản lý giao tiếp Docker Engine qua Unix Socket kèm TrustedRegistry.
 type Controller struct {
-	socketPath string
-	nodeID     string
-	registry   *TrustedRegistry
-	client     *http.Client
+	socketPath  string
+	nodeID      string
+	runtimeRoot string
+	registry    *TrustedRegistry
+	client      *http.Client
 }
 
 // NewController khởi tạo Docker Controller cơ bản (dùng khi kiểm tra telemetry cục bộ).
@@ -107,6 +121,10 @@ func NewControllerWithRegistry(socketPath, nodeID string, registry *TrustedRegis
 	if strings.TrimSpace(nodeID) == "" {
 		nodeID = "workstation"
 	}
+	runtimeRoot := strings.TrimSpace(os.Getenv("LABOPS_WORKSPACE_RUNTIME_DIR"))
+	if runtimeRoot == "" {
+		runtimeRoot = DefaultRuntimeRootDir
+	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, proto, addr string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
@@ -114,13 +132,21 @@ func NewControllerWithRegistry(socketPath, nodeID string, registry *TrustedRegis
 		DisableKeepAlives: false,
 	}
 	return &Controller{
-		socketPath: socketPath,
-		nodeID:     nodeID,
-		registry:   registry,
+		socketPath:  socketPath,
+		nodeID:      nodeID,
+		runtimeRoot: runtimeRoot,
+		registry:    registry,
 		client: &http.Client{
 			Transport: tr,
 			Timeout:   15 * time.Second,
 		},
+	}
+}
+
+// SetRuntimeRoot cấu hình thư mục runtime cô lập (passwd/group/sshd read-only) cho môi trường deploy/test.
+func (c *Controller) SetRuntimeRoot(dir string) {
+	if strings.TrimSpace(dir) != "" {
+		c.runtimeRoot = filepath.Clean(dir)
 	}
 }
 
@@ -161,6 +187,7 @@ type dockerInspectJSON struct {
 		CapAdd         []string `json:"CapAdd"`
 		SecurityOpt    []string `json:"SecurityOpt"`
 		PidMode        string   `json:"PidMode"`
+		IpcMode        string   `json:"IpcMode"`
 		NetworkMode    string   `json:"NetworkMode"`
 		ReadonlyRootfs bool     `json:"ReadonlyRootfs"`
 		PortBindings   map[string][]struct {
@@ -193,8 +220,14 @@ func ValidateContainerSafety(raw *dockerInspectJSON) []string {
 	if strings.EqualFold(raw.HostConfig.PidMode, "host") {
 		violations = append(violations, "HOST_PID_FORBIDDEN")
 	}
+	if strings.EqualFold(raw.HostConfig.IpcMode, "host") {
+		violations = append(violations, "HOST_IPC_FORBIDDEN")
+	}
 	if strings.EqualFold(raw.HostConfig.NetworkMode, "host") {
 		violations = append(violations, "HOST_NETWORK_FORBIDDEN")
+	}
+	if err := validateNonRootUserSpec(raw.Config.User); err != nil {
+		violations = append(violations, err.Error())
 	}
 	hasCapDropAll := false
 	for _, capName := range raw.HostConfig.CapDrop {
@@ -250,8 +283,34 @@ func ValidateContainerSafety(raw *dockerInspectJSON) []string {
 				violations = append(violations, "FORBIDDEN_HOST_PREFIX_"+pref)
 			}
 		}
+		if (dst == "/etc/passwd" || dst == "/etc/group" || dst == "/etc/labops-ssh") && m.RW {
+			violations = append(violations, "READONLY_CONFIG_MOUNT_REQUIRED_"+dst)
+		}
 	}
 	return violations
+}
+
+func validateNonRootUserSpec(userSpec string) error {
+	clean := strings.TrimSpace(userSpec)
+	if clean == "" || strings.EqualFold(clean, "root") || clean == "0" || strings.HasPrefix(clean, "0:") {
+		return fmt.Errorf("ROOT_USER_FORBIDDEN")
+	}
+	parts := strings.Split(clean, ":")
+	uid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return fmt.Errorf("NON_NUMERIC_USER_FORBIDDEN")
+	}
+	gid := uid
+	if len(parts) > 1 {
+		gid, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return fmt.Errorf("NON_NUMERIC_GROUP_FORBIDDEN")
+		}
+	}
+	if uid < MinWorkspaceUID || uid > MaxWorkspaceUID || gid < MinWorkspaceUID || gid > MaxWorkspaceUID {
+		return fmt.Errorf("UNSAFE_UID_GID_FORBIDDEN")
+	}
+	return nil
 }
 
 // ListWorkspaces liệt kê các workspace đã được xác minh (chỉ tin label/registry, KHÔNG tin prefix ws- đơn lẻ).
@@ -313,7 +372,7 @@ func (c *Controller) ListWorkspaces(ctx context.Context) ([]WorkspaceContainer, 
 				PublicPort:  p.PublicPort,
 				Type:        p.Type,
 			})
-			if p.PrivatePort == 22 && p.PublicPort > 0 {
+			if (p.PrivatePort == ContainerSSHDPort || p.PrivatePort == 22) && p.PublicPort > 0 {
 				sshPort = p.PublicPort
 			}
 		}
@@ -401,7 +460,7 @@ func (c *Controller) InspectWorkspace(ctx context.Context, nameOrID string) (*Wo
 
 	sshPort := 0
 	for portKey, bindings := range raw.HostConfig.PortBindings {
-		if strings.HasPrefix(portKey, "22/") && len(bindings) > 0 {
+		if (strings.HasPrefix(portKey, "2222/") || strings.HasPrefix(portKey, "22/")) && len(bindings) > 0 {
 			var p int
 			_, _ = fmt.Sscanf(bindings[0].HostPort, "%d", &p)
 			if p > 0 {
@@ -470,8 +529,11 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	if strings.TrimSpace(req.MemberID) == "" || strings.TrimSpace(req.MemberUsername) == "" {
 		return nil, fmt.Errorf("INVALID_MEMBER: thiếu member_id hoặc member_username")
 	}
-	if req.UID < 1000 || req.GID < 1000 {
-		return nil, fmt.Errorf("ROOT_USER_FORBIDDEN: workspace bắt buộc UID/GID >= 1000 (nhận %d:%d)", req.UID, req.GID)
+	if req.UID < MinWorkspaceUID || req.UID > MaxWorkspaceUID || req.GID < MinWorkspaceUID || req.GID > MaxWorkspaceUID {
+		return nil, fmt.Errorf("UNSAFE_UID_GID_REJECTED: workspace bắt buộc UID/GID riêng trong dải %d-%d (nhận %d:%d, cấm root 0 và admin host 1000)", MinWorkspaceUID, MaxWorkspaceUID, req.UID, req.GID)
+	}
+	if err := c.registry.CheckSSHPortAvailable(c.nodeID, req.SSHPort, req.WorkspaceID); err != nil {
+		return nil, err
 	}
 	isSharedMode := strings.EqualFold(req.ResourceMode, "SHARED") || strings.EqualFold(req.ResourceMode, "SHARED_WEIGHTED")
 	if !isSharedMode && req.CPULimitCores <= 0 {
@@ -537,9 +599,50 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		cpuShares = 1024
 	}
 
+	rtFiles, rtErr := c.prepareWorkspaceRuntimeDir(req.WorkspaceID, req.MemberUsername, req.UID, req.GID, containerMount)
+	if rtErr != nil {
+		return nil, rtErr
+	}
+
+	binds := []string{
+		fmt.Sprintf("%s:%s:rw", hostStorageDir, containerMount),
+		fmt.Sprintf("%s:/etc/passwd:ro", rtFiles.passwdPath),
+		fmt.Sprintf("%s:/etc/group:ro", rtFiles.groupPath),
+		fmt.Sprintf("%s:/etc/labops-ssh:ro", rtFiles.sshDir),
+	}
+
+	hostCfg := map[string]any{
+		"Privileged":     false,
+		"CapDrop":        []string{"ALL"},
+		"SecurityOpt":    []string{"no-new-privileges:true"},
+		"NetworkMode":    netMode,
+		"NanoCpus":       nanoCPUs,
+		"CpuShares":      cpuShares,
+		"Memory":         req.RAMLimitMB * 1024 * 1024,
+		"MemorySwap":     req.RAMLimitMB * 1024 * 1024,
+		"PidsLimit":      req.PidsLimit,
+		"Binds":          binds,
+		"ReadonlyRootfs": false,
+	}
+	if len(req.GPUUUIDs) > 0 {
+		hostCfg["DeviceRequests"] = []map[string]any{
+			{
+				"Driver":       "nvidia",
+				"DeviceIDs":    req.GPUUUIDs,
+				"Capabilities": [][]string{{"gpu"}},
+			},
+		}
+	}
+
 	createBody := map[string]any{
 		"Image": req.ImageRef,
 		"User":  fmt.Sprintf("%d:%d", req.UID, req.GID),
+		"Env": []string{
+			fmt.Sprintf("HOME=%s", containerMount),
+			fmt.Sprintf("USER=%s", req.MemberUsername),
+			fmt.Sprintf("LOGNAME=%s", req.MemberUsername),
+			fmt.Sprintf("LABOPS_WORKSPACE=%s", req.Name),
+		},
 		"Labels": map[string]string{
 			"labops.managed":       "true",
 			"labops.workspace_id":  req.WorkspaceID,
@@ -549,25 +652,13 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 			"labops.generation":    strconv.FormatUint(req.Generation, 10),
 			"labops.resource_mode": req.ResourceMode,
 		},
-		"HostConfig": map[string]any{
-			"Privileged":     false,
-			"CapDrop":        []string{"ALL"},
-			"SecurityOpt":    []string{"no-new-privileges:true"},
-			"NetworkMode":    netMode,
-			"NanoCpus":       nanoCPUs,
-			"CpuShares":      cpuShares,
-			"Memory":         req.RAMLimitMB * 1024 * 1024,
-			"MemorySwap":     req.RAMLimitMB * 1024 * 1024,
-			"PidsLimit":      req.PidsLimit,
-			"Binds":          []string{fmt.Sprintf("%s:%s:rw", hostStorageDir, containerMount)},
-			"ReadonlyRootfs": false,
-		},
+		"HostConfig": hostCfg,
 	}
 	if req.SSHPort > 0 && !req.NetworkIsolated {
-		createBody["ExposedPorts"] = map[string]any{"22/tcp": struct{}{}}
-		hc := createBody["HostConfig"].(map[string]any)
-		hc["PortBindings"] = map[string]any{
-			"22/tcp": []map[string]string{
+		portKey := fmt.Sprintf("%d/tcp", ContainerSSHDPort)
+		createBody["ExposedPorts"] = map[string]any{portKey: struct{}{}}
+		hostCfg["PortBindings"] = map[string]any{
+			portKey: []map[string]string{
 				{"HostIp": bindIP, "HostPort": strconv.Itoa(req.SSHPort)},
 			},
 		}
@@ -620,6 +711,8 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		StorageRoot:          hostStorageDir,
 		MemberStorageDir:     hostStorageDir,
 		ContainerMountPath:   containerMount,
+		RuntimeDir:           rtFiles.baseDir,
+		GPUUUIDs:             append([]string(nil), req.GPUUUIDs...),
 		ResourceMode:         req.ResourceMode,
 		CPUWeight:            int(cpuShares),
 		SSHPort:              req.SSHPort,
@@ -854,4 +947,350 @@ func VerifySSHReachability(host string, port int, timeout time.Duration) (bool, 
 		return false, fmt.Sprintf("Phản hồi trên port %d không phải giao thức SSH: %s", port, banner)
 	}
 	return true, banner
+}
+
+type workspaceRuntimeFiles struct {
+	baseDir    string
+	sshDir     string
+	passwdPath string
+	groupPath  string
+	sshdCfg    string
+	authKeys   string
+}
+
+func (c *Controller) prepareWorkspaceRuntimeDir(workspaceID, memberUsername string, uid, gid int, containerHome string) (*workspaceRuntimeFiles, error) {
+	root := strings.TrimSpace(c.runtimeRoot)
+	if root == "" {
+		root = DefaultRuntimeRootDir
+	}
+	cleanWSID := filepath.Base(strings.TrimSpace(workspaceID))
+	if cleanWSID == "" || cleanWSID == "." || cleanWSID == ".." || strings.Contains(workspaceID, "/") {
+		return nil, fmt.Errorf("INVALID_WORKSPACE_ID: '%s'", workspaceID)
+	}
+	baseDir := filepath.Join(root, cleanWSID)
+	sshDir := filepath.Join(baseDir, "ssh_ro")
+	if err := os.MkdirAll(sshDir, 0755); err != nil {
+		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
+	}
+	_ = os.Chmod(baseDir, 0755)
+	_ = os.Chmod(sshDir, 0755)
+
+	passwdContent := fmt.Sprintf(
+		"root:x:0:0:root:/root:/usr/sbin/nologin\n"+
+			"sshd:x:100:65534::/run/sshd:/usr/sbin/nologin\n"+
+			"nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\n"+
+			"%s:x:%d:%d:LabOps Workspace:%s:/bin/bash\n",
+		memberUsername, uid, gid, containerHome,
+	)
+	groupContent := fmt.Sprintf(
+		"root:x:0:\nnogroup:x:65534:\n%s:x:%d:\n",
+		memberUsername, gid,
+	)
+	sshdCfgContent := fmt.Sprintf(
+		"Port %d\n"+
+			"ListenAddress 0.0.0.0\n"+
+			"HostKey /tmp/ssh_host_ed25519_key\n"+
+			"PidFile /tmp/sshd.pid\n"+
+			"PermitRootLogin no\n"+
+			"PasswordAuthentication no\n"+
+			"KbdInteractiveAuthentication no\n"+
+			"ChallengeResponseAuthentication no\n"+
+			"UsePAM no\n"+
+			"PubkeyAuthentication yes\n"+
+			"AuthorizedKeysFile /etc/labops-ssh/authorized_keys\n"+
+			"StrictModes no\n"+
+			"AllowUsers %s\n"+
+			"AllowTcpForwarding no\n"+
+			"X11Forwarding no\n"+
+			"Subsystem sftp internal-sftp\n",
+		ContainerSSHDPort, memberUsername,
+	)
+
+	rf := &workspaceRuntimeFiles{
+		baseDir:    baseDir,
+		sshDir:     sshDir,
+		passwdPath: filepath.Join(baseDir, "passwd"),
+		groupPath:  filepath.Join(baseDir, "group"),
+		sshdCfg:    filepath.Join(sshDir, "sshd_config"),
+		authKeys:   filepath.Join(sshDir, "authorized_keys"),
+	}
+	if err := writeAtomicFile(rf.passwdPath, []byte(passwdContent), 0644); err != nil {
+		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
+	}
+	if err := writeAtomicFile(rf.groupPath, []byte(groupContent), 0644); err != nil {
+		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
+	}
+	if err := writeAtomicFile(rf.sshdCfg, []byte(sshdCfgContent), 0644); err != nil {
+		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
+	}
+	// Mặc định authorized_keys RỖNG cho tới khi vượt qua authorization gate sau activation lần đầu
+	if err := writeAtomicFile(rf.authKeys, []byte(""), 0644); err != nil {
+		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
+	}
+	return rf, nil
+}
+
+func writeAtomicFile(targetPath string, content []byte, perm os.FileMode) error {
+	tmp := targetPath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, targetPath)
+}
+
+// SyncAuthorizedKeys đồng bộ nguyên tử danh sách public key vào mount read-only của container workspace.
+// Khi keys rỗng, tệp được xóa trắng và xác minh đọc lại rỗng (khóa SSH hoàn toàn).
+func (c *Controller) SyncAuthorizedKeys(ctx context.Context, workspaceID, memberUsername string, keys []string) (map[string]any, error) {
+	if c.registry == nil {
+		return nil, ErrRegistryUnavailable
+	}
+	rec, err := c.registry.GetByWorkspaceID(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if memberUsername != "" && !strings.EqualFold(rec.MemberUsername, memberUsername) {
+		return nil, fmt.Errorf("OWNER_MISMATCH: workspace '%s' thuộc '@%s', không phải '@%s'", workspaceID, rec.MemberUsername, memberUsername)
+	}
+	runtimeDir := rec.RuntimeDir
+	if strings.TrimSpace(runtimeDir) == "" {
+		runtimeDir = filepath.Join(c.runtimeRoot, rec.WorkspaceID)
+	}
+	sshDir := filepath.Join(runtimeDir, "ssh_ro")
+	if err := os.MkdirAll(sshDir, 0755); err != nil {
+		return nil, fmt.Errorf("SYNC_AUTHORIZED_KEYS_FAILED: %w", err)
+	}
+	cleanKeys := make([]string, 0, len(keys))
+	for _, k := range keys {
+		trimmed := strings.TrimSpace(k)
+		if trimmed == "" {
+			continue
+		}
+		if strings.ContainsAny(trimmed, "\r\n") || !validOpenSSHPubKeyRegex.MatchString(trimmed) {
+			return nil, fmt.Errorf("INVALID_SSH_PUBLIC_KEY: khóa công khai không hợp lệ")
+		}
+		cleanKeys = append(cleanKeys, trimmed)
+	}
+	payload := ""
+	if len(cleanKeys) > 0 {
+		payload = strings.Join(cleanKeys, "\n") + "\n"
+	}
+	authPath := filepath.Join(sshDir, "authorized_keys")
+	if err := writeAtomicFile(authPath, []byte(payload), 0644); err != nil {
+		return nil, fmt.Errorf("SYNC_AUTHORIZED_KEYS_FAILED: %w", err)
+	}
+	readBack, err := os.ReadFile(authPath)
+	if err != nil {
+		return nil, fmt.Errorf("SYNC_AUTHORIZED_KEYS_READBACK_FAILED: %w", err)
+	}
+	if string(readBack) != payload {
+		return nil, fmt.Errorf("SYNC_AUTHORIZED_KEYS_READBACK_MISMATCH: nội dung đọc lại không khớp")
+	}
+	return map[string]any{
+		"synced":               true,
+		"workspace_id":         rec.WorkspaceID,
+		"member_username":      rec.MemberUsername,
+		"authorized_keys_path": authPath,
+		"keys_count":           len(cleanKeys),
+		"empty":                len(cleanKeys) == 0,
+		"verified_at":          time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// VerifyCheck mô tả kết quả xác minh một điều kiện hạ tầng kèm bằng chứng thực tế.
+type VerifyCheck struct {
+	Status        string `json:"status"`
+	ObservedValue any    `json:"observed_value"`
+	ExpectedValue any    `json:"expected_value"`
+	Source        string `json:"source"`
+	VerifiedAt    string `json:"verified_at"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+// VerifyWorkspaceRuntime kiểm tra toàn diện container Docker, UID/GID, CPU/RAM/PIDs, cô lập và cổng SSH thực tế.
+func (c *Controller) VerifyWorkspaceRuntime(
+	ctx context.Context,
+	workspaceID string,
+	nameOrID string,
+	expectedUID int,
+	expectedGID int,
+	expectedSSHPort int,
+	resourceMode string,
+	bindIP string,
+) (map[string]any, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	target := strings.TrimSpace(nameOrID)
+	if target == "" && c.registry != nil && workspaceID != "" {
+		if rec, err := c.registry.GetByWorkspaceID(workspaceID); err == nil {
+			target = rec.CanonicalContainerID
+			if expectedUID == 0 {
+				expectedUID = rec.UID
+			}
+			if expectedGID == 0 {
+				expectedGID = rec.GID
+			}
+			if expectedSSHPort == 0 {
+				expectedSSHPort = rec.SSHPort
+			}
+			if resourceMode == "" {
+				resourceMode = rec.ResourceMode
+			}
+			if bindIP == "" {
+				bindIP = rec.VPNBindIP
+			}
+		}
+	}
+	if target == "" {
+		return nil, fmt.Errorf("CONTAINER_NOT_FOUND: thiếu container_id hoặc workspace không tồn tại")
+	}
+
+	raw, _, err := c.inspectRaw(ctx, target)
+	if err != nil {
+		return map[string]any{
+			"verified": false,
+			"checks": map[string]VerifyCheck{
+				"docker_running": {
+					Status: "FAILED", ObservedValue: "MISSING", ExpectedValue: "running",
+					Source: "docker_inspect", VerifiedAt: now, ErrorCode: "CONTAINER_NOT_RUNNING", Reason: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	if c.registry != nil {
+		if _, bindErr := c.registry.VerifyContainerBinding(c.nodeID, workspaceID, raw); bindErr != nil {
+			return map[string]any{
+				"verified": false,
+				"checks": map[string]VerifyCheck{
+					"docker_running": {
+						Status: "FAILED", ObservedValue: raw.ID, ExpectedValue: workspaceID,
+						Source: "trusted_registry", VerifiedAt: now, ErrorCode: "CONTAINER_BINDING_FAILED", Reason: bindErr.Error(),
+					},
+				},
+			}, nil
+		}
+	}
+
+	violations := ValidateContainerSafety(raw)
+	uidExpected := ""
+	if expectedUID > 0 && expectedGID > 0 {
+		uidExpected = fmt.Sprintf("%d:%d", expectedUID, expectedGID)
+	}
+	if uidExpected != "" && strings.TrimSpace(raw.Config.User) != uidExpected {
+		violations = append(violations, fmt.Sprintf("UID_GID_MISMATCH: expected %s got %s", uidExpected, raw.Config.User))
+	}
+
+	dockerRunningCheck := VerifyCheck{
+		Status: "VERIFIED", ObservedValue: raw.State.Status, ExpectedValue: "running",
+		Source: "docker_inspect", VerifiedAt: now,
+	}
+	if !raw.State.Running {
+		dockerRunningCheck.Status = "FAILED"
+		dockerRunningCheck.ErrorCode = "CONTAINER_NOT_RUNNING"
+		dockerRunningCheck.Reason = fmt.Sprintf("Container state='%s'", raw.State.Status)
+	}
+
+	privCheck := VerifyCheck{
+		Status: "VERIFIED", ObservedValue: raw.Config.User, ExpectedValue: uidExpected,
+		Source: "docker_inspect", VerifiedAt: now,
+	}
+	if len(violations) > 0 {
+		privCheck.Status = "FAILED"
+		privCheck.ErrorCode = "PRIVILEGE_ISOLATION_VIOLATION"
+		privCheck.Reason = strings.Join(violations, "; ")
+	}
+
+	isShared := strings.EqualFold(resourceMode, "SHARED") || strings.EqualFold(resourceMode, "SHARED_WEIGHTED")
+	var pidsVal int64
+	if raw.HostConfig.PidsLimit != nil {
+		pidsVal = *raw.HostConfig.PidsLimit
+	}
+	resOK := raw.HostConfig.Memory > 0 && pidsVal > 0 &&
+		((isShared && raw.HostConfig.CpuShares > 0) || (!isShared && raw.HostConfig.NanoCPUs > 0))
+	resStatus := "VERIFIED"
+	resCode := ""
+	resReason := ""
+	if !resOK {
+		resStatus = "FAILED"
+		resCode = "RESOURCE_LIMITS_UNENFORCED"
+		resReason = fmt.Sprintf("mode=%s nanoCpus=%d cpuShares=%d mem=%d pids=%d",
+			resourceMode, raw.HostConfig.NanoCPUs, raw.HostConfig.CpuShares, raw.HostConfig.Memory, pidsVal)
+	}
+	resCheck := VerifyCheck{
+		Status: resStatus,
+		ObservedValue: map[string]any{
+			"resource_mode": resourceMode,
+			"nano_cpus":     raw.HostConfig.NanoCPUs,
+			"cpu_shares":    raw.HostConfig.CpuShares,
+			"memory_bytes":  raw.HostConfig.Memory,
+			"pids_limit":    pidsVal,
+		},
+		ExpectedValue: map[string]any{"resource_mode": resourceMode, "memory_gt_0": true, "pids_gt_0": true},
+		Source:        "docker_hostconfig",
+		VerifiedAt:    now,
+		ErrorCode:     resCode,
+		Reason:        resReason,
+	}
+
+	boundPort := 0
+	for portKey, bindings := range raw.HostConfig.PortBindings {
+		if (strings.HasPrefix(portKey, "2222/") || strings.HasPrefix(portKey, "22/")) && len(bindings) > 0 {
+			_, _ = fmt.Sscanf(bindings[0].HostPort, "%d", &boundPort)
+		}
+	}
+	sshStatus := "FAILED"
+	sshCode := "SSH_PORT_NOT_BOUND_TO_CONTAINER"
+	sshReason := fmt.Sprintf("Container không ánh xạ cổng SSH %d", expectedSSHPort)
+	if boundPort > 0 && (expectedSSHPort == 0 || boundPort == expectedSSHPort) {
+		probeIP := strings.TrimSpace(bindIP)
+		if probeIP == "" || probeIP == "0.0.0.0" {
+			probeIP = "127.0.0.1"
+		}
+		reachable, banner := VerifySSHReachability(probeIP, boundPort, 2*time.Second)
+		if reachable {
+			sshStatus = "VERIFIED"
+			sshCode = ""
+			sshReason = banner
+		} else {
+			sshStatus = "NOT_VERIFIED"
+			sshCode = "SSH_CONTAINER_UNREACHABLE"
+			sshReason = banner
+		}
+	}
+	sshCheck := VerifyCheck{
+		Status:        sshStatus,
+		ObservedValue: boundPort,
+		ExpectedValue: expectedSSHPort,
+		Source:        "docker_port_bindings_and_tcp_banner",
+		VerifiedAt:    now,
+		ErrorCode:     sshCode,
+		Reason:        sshReason,
+	}
+
+	allOK := dockerRunningCheck.Status == "VERIFIED" && privCheck.Status == "VERIFIED" && resCheck.Status == "VERIFIED" && sshCheck.Status == "VERIFIED"
+	return map[string]any{
+		"verified":     allOK,
+		"container_id": raw.ID,
+		"checks": map[string]VerifyCheck{
+			"docker_running":       dockerRunningCheck,
+			"privilege_isolation":  privCheck,
+			"resource_enforcement": resCheck,
+			"ssh_runtime":          sshCheck,
+		},
+	}, nil
 }

@@ -15,6 +15,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 import uuid
@@ -30,7 +31,20 @@ ALLOWED_AGENT_ACTIONS = frozenset({
     "VERIFY_PROCESS_PID",
     "PROVISION_DOCKER_WORKSPACE",
     "STOP_DOCKER_WORKSPACE",
+    "ARCHIVE_REMOVE_DOCKER_WORKSPACE",
     "SYNC_SSH_AUTHORIZED_KEYS",
+    "VERIFY_DOCKER_WORKSPACE",
+    "INSPECT_WIREGUARD_PEERS",
+    "LIST_STORAGE_POOLS",
+    "INSPECT_STORAGE_POOL",
+    "VALIDATE_STORAGE_ALLOCATION",
+    "PROVISION_MEMBER_STORAGE",
+})
+
+READ_ONLY_LOCAL_FALLBACK_ACTIONS = frozenset({
+    "INSPECT_HOST",
+    "INSPECT_GPUS",
+    "VERIFY_PROCESS_PID",
     "INSPECT_WIREGUARD_PEERS",
 })
 
@@ -197,97 +211,169 @@ class NodeAgentClient:
         params: Optional[Dict[str, Any]] = None,
         *,
         idempotency_key: Optional[str] = None,
+        actor_id: str = "fastapi-controller",
+        actor_role: str = "ADMIN",
     ) -> Dict[str, Any]:
         if action not in ALLOWED_AGENT_ACTIONS:
             raise NodeAgentError("ACTION_NOT_ALLOWLISTED", f"Thao tác '{action}' bị từ chối bởi allowlist.", 403)
         request_id = f"req-{uuid.uuid4().hex[:12]}"
-        if host.get("id") == self.local_host_id:
-            return self.local_executor.execute(
-                action, params, request_id=request_id, idempotency_key=idempotency_key
-            )
+        node_id = str(host.get("id") or "")
+        is_local = node_id == self.local_host_id
 
-        # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel)
-        gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "http://127.0.0.1:9444")
-        control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "").strip()
+        # Chuẩn hóa parameters thành string map cho chữ ký DelegationToken & Go Executor
+        str_params: Dict[str, str] = {}
+        for k, v in (params or {}).items():
+            if v is None:
+                continue
+            str_params[k] = v if isinstance(v, str) else json.dumps(v)
+
         delegation_secret = os.getenv("LABOPS_DELEGATION_SECRET", "").strip()
-        gw_headers = {"Content-Type": "application/json"}
-        if control_secret:
-            gw_headers["Authorization"] = f"Bearer {control_secret}"
-        str_params = {k: str(v) for k, v in (params or {}).items()}
-        dispatch_body: Dict[str, Any] = {
-            "node_id": host.get("id"),
-            "action": action,
-            "parameters": str_params,
-            "timeout_seconds": 15,
-            "idempotency_key": idempotency_key or "",
-            "actor_id": "fastapi-controller",
-        }
+        auth_ctx = ""
         if delegation_secret:
             from app.core.delegation import build_delegation_context
-            dispatch_body["authorization_context"] = build_delegation_context(
+            auth_ctx = build_delegation_context(
                 secret=delegation_secret,
                 command_id=request_id,
-                actor="fastapi-controller",
-                role="ADMIN",
-                node_id=str(host.get("id") or ""),
+                actor=actor_id,
+                role=actor_role,
+                node_id=node_id,
                 action=action,
                 workspace_id=str(str_params.get("workspace_id") or str_params.get("workspace") or ""),
                 parameters=str_params,
             )
-        try:
-            gw_req = urllib.request.Request(
-                f"{gateway_http_url.rstrip('/')}/api/v1/gateway/dispatch",
-                data=json.dumps(dispatch_body).encode("utf-8"),
-                headers=gw_headers,
+
+        # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel) nếu được cấu hình
+        gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "").strip()
+        control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "").strip()
+        if gateway_http_url and control_secret:
+            gw_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {control_secret}"}
+            dispatch_body: Dict[str, Any] = {
+                "node_id": node_id,
+                "action": action,
+                "parameters": str_params,
+                "timeout_seconds": 15,
+                "idempotency_key": idempotency_key or "",
+                "actor_id": actor_id,
+            }
+            if auth_ctx:
+                dispatch_body["authorization_context"] = auth_ctx
+            try:
+                gw_req = urllib.request.Request(
+                    f"{gateway_http_url.rstrip('/')}/api/v1/gateway/dispatch",
+                    data=json.dumps(dispatch_body).encode("utf-8"),
+                    headers=gw_headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(gw_req, timeout=15) as resp:
+                    gw_data = json.loads(resp.read().decode("utf-8"))
+                    if gw_data.get("success"):
+                        return {
+                            "request_id": gw_data.get("command_id", request_id),
+                            "host_id": node_id,
+                            "agent_version": AGENT_VERSION,
+                            "action": action,
+                            "executed_at": _now(),
+                            "result": gw_data.get("result", {}),
+                        }
+                    if gw_data.get("error_code") == "ACTION_NOT_ALLOWED":
+                        raise NodeAgentError("ACTION_NOT_ALLOWLISTED", gw_data.get("error_message", ""), 403)
+                    if gw_data.get("error_code") != "NODE_OFFLINE":
+                        raise NodeAgentError(
+                            gw_data.get("error_code", "GATEWAY_ERROR"),
+                            gw_data.get("error_message", "Lỗi điều khiển từ xa"),
+                            500,
+                        )
+            except NodeAgentError:
+                raise
+            except Exception:
+                pass
+
+        # 2. Gửi thống nhất tới Go Node Agent HTTP endpoint có xác thực (cho cả local Workstation lẫn remote Rack)
+        agent_url = str(host.get("agent_url") or "").strip()
+        if not agent_url and is_local:
+            agent_url = os.getenv("LABOPS_LOCAL_AGENT_URL", "").strip()
+            if not agent_url and not ("PYTEST_CURRENT_TEST" in os.environ or "unittest" in sys.modules):
+                from app.core.config import settings
+                agent_url = getattr(settings, "LABOPS_LOCAL_AGENT_URL", "").strip()
+
+        token = (
+            os.getenv("LABOPS_NODE_AGENT_TOKEN", "").strip()
+            or os.getenv("LABOPS_AGENT_SECRET", "").strip()
+        )
+        if not token and not ("PYTEST_CURRENT_TEST" in os.environ or "unittest" in sys.modules):
+            from app.core.config import settings
+            token = (
+                getattr(settings, "LABOPS_NODE_AGENT_TOKEN", "").strip()
+                or getattr(settings, "LABOPS_AGENT_SECRET", "").strip()
+            )
+
+        if agent_url and token:
+            exec_body: Dict[str, Any] = {
+                "request_id": request_id,
+                "node_id": node_id,
+                "actor_id": actor_id,
+                "action": action,
+                "parameters": str_params,
+                "idempotency_key": idempotency_key or "",
+            }
+            if auth_ctx:
+                exec_body["authorization_context"] = auth_ctx
+            req = urllib.request.Request(
+                f"{agent_url.rstrip('/')}/api/v1/agent/execute",
+                data=json.dumps(exec_body).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-LabOps-Agent-Secret": token,
+                    "Authorization": f"Bearer {token}",
+                    "X-Request-Id": request_id,
+                    **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
+                },
                 method="POST",
             )
-            with urllib.request.urlopen(gw_req, timeout=15) as resp:
-                gw_data = json.loads(resp.read().decode("utf-8"))
-                if gw_data.get("success"):
-                    return {
-                        "request_id": gw_data.get("command_id", request_id),
-                        "host_id": host.get("id"),
-                        "agent_version": AGENT_VERSION,
-                        "action": action,
-                        "executed_at": _now(),
-                        "result": gw_data.get("result", {}),
-                    }
-                if gw_data.get("error_code") == "ACTION_NOT_ALLOWED":
-                    raise NodeAgentError("ACTION_NOT_ALLOWLISTED", gw_data.get("error_message", ""), 403)
-                if gw_data.get("error_code") != "NODE_OFFLINE":
-                    raise NodeAgentError(gw_data.get("error_code", "GATEWAY_ERROR"), gw_data.get("error_message", "Lỗi điều khiển từ xa"), 500)
-        except NodeAgentError:
-            raise
-        except Exception:
-            # Fallback sang kết nối trực tiếp agent_url nếu Gateway chưa bật hoặc node offline
-            pass
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    res_data = json.loads(resp.read().decode("utf-8"))
+                    if not res_data.get("success", False):
+                        raise NodeAgentError(
+                            str(res_data.get("error_code") or "AGENT_EXECUTION_FAILED"),
+                            str(res_data.get("error_message") or "Node Agent từ chối hoặc thực thi thất bại"),
+                            409,
+                        )
+                    return res_data
+            except urllib.error.HTTPError as http_err:
+                raw_err = http_err.read().decode("utf-8", errors="replace") if hasattr(http_err, "read") else ""
+                err_code = "AGENT_REJECTED"
+                err_msg = f"Node Agent HTTP {http_err.code}"
+                try:
+                    parsed_err = json.loads(raw_err)
+                    if isinstance(parsed_err, dict):
+                        err_code = str(parsed_err.get("error_code") or err_code)
+                        err_msg = str(parsed_err.get("error_message") or parsed_err.get("error") or err_msg)
+                except Exception:
+                    if raw_err:
+                        err_msg = f"{err_msg}: {raw_err[:200]}"
+                raise NodeAgentError(err_code, err_msg, http_err.code) from http_err
+            except NodeAgentError:
+                raise
+            except Exception as exc:
+                if is_local and action in READ_ONLY_LOCAL_FALLBACK_ACTIONS:
+                    return self.local_executor.execute(
+                        action, params, request_id=request_id, idempotency_key=idempotency_key
+                    )
+                raise NodeAgentError(
+                    "AGENT_UNREACHABLE",
+                    f"Không thể kết nối Node Agent tại {agent_url}: {exc}",
+                    503,
+                ) from exc
 
-        agent_url = host.get("agent_url")
-        token = os.getenv("LABOPS_NODE_AGENT_TOKEN", "")
-        if not agent_url or not token:
-            raise NodeAgentError(
-                "AGENT_NOT_CONFIGURED",
-                f"Node Agent cho máy chủ '{host.get('id')}' chưa cấu hình URL hoặc LABOPS_NODE_AGENT_TOKEN.",
-                503,
+        # Chỉ cho phép fallback đọc telemetry cục bộ; mọi thao tác Docker/SSH/Storage PHẢI đi qua Go Node Agent
+        if is_local and action in READ_ONLY_LOCAL_FALLBACK_ACTIONS:
+            return self.local_executor.execute(
+                action, params, request_id=request_id, idempotency_key=idempotency_key
             )
-        req = urllib.request.Request(
-            f"{agent_url.rstrip('/')}/v1/execute",
-            data=json.dumps({"action": action, "params": params or {}, "request_id": request_id}).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "X-Request-Id": request_id,
-                **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
-            },
-            method="POST",
+        raise NodeAgentError(
+            "AGENT_NOT_CONFIGURED",
+            f"Node Agent cho máy chủ '{node_id}' chưa cấu hình agent_url/LABOPS_NODE_AGENT_TOKEN cho thao tác '{action}'.",
+            503,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            raise NodeAgentError(
-                "AGENT_UNREACHABLE",
-                f"Không thể kết nối Node Agent tại {agent_url}: {exc}",
-                503,
-            )
 

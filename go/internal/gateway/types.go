@@ -16,6 +16,7 @@ var AllowedActions = map[string]bool{
 	"STOP_DOCKER_WORKSPACE":           true,
 	"ARCHIVE_REMOVE_DOCKER_WORKSPACE": true,
 	"SYNC_SSH_AUTHORIZED_KEYS":        true,
+	"VERIFY_DOCKER_WORKSPACE":         true,
 	"INSPECT_WIREGUARD_PEERS":         true,
 	"COLLECT_TELEMETRY":               true,
 	"TERMINATE_PROCESS":               true,

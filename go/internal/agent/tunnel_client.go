@@ -3,14 +3,12 @@ package agent
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +20,6 @@ import (
 	"github.com/Hieuslecong/labops_control_center/go/internal/host"
 	"github.com/Hieuslecong/labops_control_center/go/internal/pki"
 	"github.com/Hieuslecong/labops_control_center/go/internal/process"
-	"github.com/Hieuslecong/labops_control_center/go/internal/resources"
-	"github.com/Hieuslecong/labops_control_center/go/internal/storage"
 	pb "github.com/Hieuslecong/labops_control_center/go/proto/labops/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -38,6 +34,7 @@ type TunnelClient struct {
 	procCtrl    *process.Controller
 	dockerCtrl  *docker.Controller
 	replayGuard *gateway.ReplayGuard
+	executor    *CommandExecutor
 	logger      *slog.Logger
 }
 
@@ -53,6 +50,7 @@ func NewTunnelClient(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	rg := gateway.NewReplayGuard()
 	return &TunnelClient{
 		cfg:         cfg,
 		hostCol:     hostCol,
@@ -60,7 +58,8 @@ func NewTunnelClient(
 		procCol:     procCol,
 		procCtrl:    procCtrl,
 		dockerCtrl:  dockerCtrl,
-		replayGuard: gateway.NewReplayGuard(),
+		replayGuard: rg,
+		executor:    NewCommandExecutor(cfg, hostCol, gpuCol, procCol, procCtrl, dockerCtrl, rg, logger),
 		logger:      logger,
 	}
 }
@@ -367,349 +366,29 @@ func (c *TunnelClient) handleCommandRequest(sender *safeStreamSender, req *pb.Co
 	)
 
 	start := time.Now()
+	execRes := c.executor.Execute(context.Background(), &ExecuteCommandRequest{
+		CommandID:            req.CommandId,
+		RequestID:            req.RequestId,
+		NodeID:               req.NodeId,
+		ActorID:              req.ActorId,
+		Action:               req.Action,
+		Parameters:           req.Parameters,
+		AuthorizationContext: req.AuthorizationContext,
+		IdempotencyKey:       req.IdempotencyKey,
+		IssuedAtUnix:         req.IssuedAtUnix,
+		DeadlineSeconds:      req.DeadlineSeconds,
+	})
 	resp := &pb.CommandResponse{
-		CommandId:      req.CommandId,
-		RequestId:      req.RequestId,
-		NodeId:         c.cfg.ServerID,
-		ExecutedAtUnix: time.Now().Unix(),
+		CommandId:        execRes.CommandID,
+		RequestId:        execRes.RequestID,
+		NodeId:           execRes.NodeID,
+		Status:           execRes.ProtoStatus,
+		IdempotentReplay: execRes.IdempotentReplay,
+		ErrorCode:        execRes.ErrorCode,
+		ErrorMessage:     execRes.ErrorMessage,
+		ResultPayload:    execRes.ResultPayload,
+		ExecutedAtUnix:   execRes.ExecutedAtUnix,
 	}
-
-	// 1. Kiểm tra mục tiêu NodeID khớp chính xác Node đang chạy
-	if strings.TrimSpace(req.NodeId) != "" && !strings.EqualFold(req.NodeId, c.cfg.ServerID) {
-		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
-		resp.ErrorCode = "NODE_MISMATCH"
-		resp.ErrorMessage = fmt.Sprintf("Lệnh nhắm tới node '%s' nhưng agent hiện tại là '%s'", req.NodeId, c.cfg.ServerID)
-		c.sendCommandResponse(sender, resp, start)
-		return
-	}
-
-	// 2. Kiểm tra hạn dùng lệnh (deadline enforcement)
-	if req.IssuedAtUnix > 0 && req.DeadlineSeconds > 0 && time.Now().Unix() > req.IssuedAtUnix+req.DeadlineSeconds {
-		resp.Status = pb.CommandResponse_REJECTED_DEADLINE_EXCEEDED
-		resp.ErrorCode = "COMMAND_EXPIRED"
-		resp.ErrorMessage = "Lệnh đã quá thời hạn thực thi"
-		c.sendCommandResponse(sender, resp, start)
-		return
-	}
-
-	// 3. Xác thực DelegationToken + Action authorization + Replay/Idempotency tại Agent (Defense-in-Depth)
-	actorScope := strings.TrimSpace(req.ActorId)
-	paramsHash := gateway.ComputeParamsHash(req.Parameters)
-	if strings.TrimSpace(c.cfg.DelegationSecret) != "" || strings.TrimSpace(req.AuthorizationContext) != "" {
-		claims, err := gateway.VerifyDelegationToken(c.cfg.DelegationSecret, req.AuthorizationContext, time.Now())
-		if err != nil {
-			resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
-			resp.ErrorCode = "DELEGATION_INVALID"
-			resp.ErrorMessage = err.Error()
-			c.sendCommandResponse(sender, resp, start)
-			return
-		}
-		if err := gateway.ActionAuthorizationCheck(claims, c.cfg.ServerID, req.Action, req.Parameters); err != nil {
-			resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
-			resp.ErrorCode = "ACTION_UNAUTHORIZED"
-			resp.ErrorMessage = err.Error()
-			c.sendCommandResponse(sender, resp, start)
-			return
-		}
-		if c.replayGuard != nil {
-			if err := c.replayGuard.ReserveNonce(claims.Nonce, time.Unix(claims.ExpiresAt, 0)); err != nil {
-				resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
-				resp.ErrorCode = "REPLAY_DETECTED"
-				resp.ErrorMessage = err.Error()
-				c.sendCommandResponse(sender, resp, start)
-				return
-			}
-		}
-		actorScope = claims.ActorID
-	}
-
-	if req.IdempotencyKey != "" && c.replayGuard != nil {
-		if cached, hit, idempErr := c.replayGuard.CheckIdempotency(actorScope, req.Action, req.IdempotencyKey, paramsHash); idempErr != nil {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "IDEMPOTENCY_CONFLICT"
-			resp.ErrorMessage = idempErr.Error()
-			c.sendCommandResponse(sender, resp, start)
-			return
-		} else if hit && cached != nil {
-			resp.Status = pb.CommandResponse_SUCCESS
-			resp.IdempotentReplay = true
-			if cached.Result != nil {
-				b, _ := json.Marshal(cached.Result)
-				resp.ResultPayload = b
-			}
-			c.sendCommandResponse(sender, resp, start)
-			return
-		}
-	}
-
-	switch req.Action {
-	case "INSPECT_HOST":
-		h := c.hostCol.GetLatest()
-		b, _ := json.Marshal(h)
-		resp.Status = pb.CommandResponse_SUCCESS
-		resp.ResultPayload = b
-
-	case "INSPECT_GPUS":
-		g := c.gpuCol.GetLatest()
-		b, _ := json.Marshal(g)
-		resp.Status = pb.CommandResponse_SUCCESS
-		resp.ResultPayload = b
-
-	case "COLLECT_TELEMETRY":
-		snapshot := map[string]any{
-			"host":       c.hostCol.GetLatest(),
-			"gpu":        c.gpuCol.GetLatest(),
-			"processes":  c.procCol.Collect("all"),
-			"workspaces": nil,
-		}
-		if ws, err := c.dockerCtrl.ListWorkspaces(context.Background()); err == nil {
-			snapshot["workspaces"] = ws
-		}
-		b, _ := json.Marshal(snapshot)
-		resp.Status = pb.CommandResponse_SUCCESS
-		resp.ResultPayload = b
-
-	case "TERMINATE_PROCESS":
-		ref := req.Parameters["ref"]
-		if ref == "" && strings.TrimSpace(c.cfg.DelegationSecret) == "" {
-			pidStr := req.Parameters["pid"]
-			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-				if pInfo, pErr := c.procCol.GetProcessByPID(pid); pErr == nil && pInfo != nil {
-					ref = pInfo.Ref
-				}
-			}
-		}
-		if ref == "" {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "INVALID_PROCESS_REF"
-			resp.ErrorMessage = "Thiếu tham số ref chuẩn (cần ref có starttime ticks)"
-		} else {
-			res, termErr := c.procCtrl.TerminateProcess(ref, 10, true)
-			if termErr != nil {
-				resp.Status = pb.CommandResponse_FAILED
-				resp.ErrorCode = "TERMINATE_FAILED"
-				resp.ErrorMessage = termErr.Error()
-			} else {
-				resp.Status = pb.CommandResponse_SUCCESS
-				b, _ := json.Marshal(res)
-				resp.ResultPayload = b
-			}
-		}
-
-	case "PROVISION_DOCKER_WORKSPACE":
-		var provReq docker.ProvisionRequest
-		if rawJSON, ok := req.Parameters["spec_json"]; ok && rawJSON != "" {
-			if err := json.Unmarshal([]byte(rawJSON), &provReq); err != nil {
-				resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-				resp.ErrorCode = "INVALID_PROVISION_SPEC"
-				resp.ErrorMessage = fmt.Sprintf("spec_json không hợp lệ: %v", err)
-				break
-			}
-		} else {
-			uid, _ := strconv.Atoi(req.Parameters["uid"])
-			gid, _ := strconv.Atoi(req.Parameters["gid"])
-			port, _ := strconv.Atoi(req.Parameters["ssh_port"])
-			cpuCores, _ := strconv.Atoi(req.Parameters["cpu_limit_cores"])
-			cpuWeight, _ := strconv.Atoi(req.Parameters["cpu_weight"])
-			ramMB, _ := strconv.ParseInt(req.Parameters["ram_limit_mb"], 10, 64)
-			pidsLim, _ := strconv.ParseInt(req.Parameters["pids_limit"], 10, 64)
-			gen, _ := strconv.ParseUint(req.Parameters["generation"], 10, 64)
-			provReq = docker.ProvisionRequest{
-				WorkspaceID:        req.Parameters["workspace_id"],
-				Name:               req.Parameters["name"],
-				MemberID:           req.Parameters["member_id"],
-				MemberUsername:     req.Parameters["owner"],
-				UID:                uid,
-				GID:                gid,
-				ImageRef:           req.Parameters["image_ref"],
-				ImageDigest:        req.Parameters["image_digest"],
-				StorageRoot:        req.Parameters["storage_root"],
-				MemberStorageDir:   req.Parameters["member_storage_dir"],
-				ContainerMountPath: req.Parameters["container_mount_path"],
-				ResourceMode:       req.Parameters["resource_mode"],
-				CPUWeight:          cpuWeight,
-				SSHPort:            port,
-				VPNBindIP:          req.Parameters["vpn_bind_ip"],
-				CPULimitCores:      cpuCores,
-				RAMLimitMB:         ramMB,
-				PidsLimit:          pidsLim,
-				Generation:         gen,
-				NetworkIsolated:    req.Parameters["network_isolated"] == "true",
-				AuditActor:         actorScope,
-				CorrelationID:      req.RequestId,
-			}
-		}
-		rec, provErr := c.dockerCtrl.ProvisionWorkspace(context.Background(), provReq)
-		if provErr != nil {
-			resp.Status = pb.CommandResponse_FAILED
-			resp.ErrorCode = "PROVISION_FAILED"
-			resp.ErrorMessage = provErr.Error()
-			if rec != nil {
-				b, _ := json.Marshal(rec)
-				resp.ResultPayload = b
-			}
-		} else {
-			resp.Status = pb.CommandResponse_SUCCESS
-			b, _ := json.Marshal(rec)
-			resp.ResultPayload = b
-		}
-
-	case "STOP_DOCKER_WORKSPACE":
-		cid := req.Parameters["container_id"]
-		wsID := req.Parameters["workspace_id"]
-		if cid == "" {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "INVALID_CONTAINER_ID"
-			resp.ErrorMessage = "Thiếu tham số container_id"
-		} else {
-			var stopErr error
-			if wsID != "" && docker.IsCanonicalContainerID(cid) {
-				stopErr = c.dockerCtrl.StopWorkspaceContainer(context.Background(), wsID, cid, 10)
-			} else {
-				stopErr = c.dockerCtrl.StopContainer(cid, 10)
-			}
-			if stopErr != nil {
-				resp.Status = pb.CommandResponse_FAILED
-				resp.ErrorCode = "STOP_CONTAINER_FAILED"
-				resp.ErrorMessage = stopErr.Error()
-			} else {
-				resp.Status = pb.CommandResponse_SUCCESS
-				b, _ := json.Marshal(map[string]any{"stopped": cid, "status": "exited"})
-				resp.ResultPayload = b
-			}
-		}
-
-	case "ARCHIVE_REMOVE_DOCKER_WORKSPACE":
-		cid := req.Parameters["container_id"]
-		wsID := req.Parameters["workspace_id"]
-		if wsID == "" || !docker.IsCanonicalContainerID(cid) {
-			resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-			resp.ErrorCode = "INVALID_CANONICAL_WORKSPACE"
-			resp.ErrorMessage = "Yêu cầu workspace_id và container_id 64-hex chuẩn"
-		} else if remErr := c.dockerCtrl.RemoveStoppedWorkspaceContainer(context.Background(), wsID, cid); remErr != nil {
-			resp.Status = pb.CommandResponse_FAILED
-			resp.ErrorCode = "REMOVE_CONTAINER_FAILED"
-			resp.ErrorMessage = remErr.Error()
-		} else {
-			resp.Status = pb.CommandResponse_SUCCESS
-			b, _ := json.Marshal(map[string]any{"removed": cid, "workspace_id": wsID, "status": "deleted"})
-			resp.ResultPayload = b
-		}
-
-	case "LIST_STORAGE_POOLS":
-		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
-		pools := collector.CollectStoragePools()
-		resp.Status = pb.CommandResponse_SUCCESS
-		b, _ := json.Marshal(pools)
-		resp.ResultPayload = b
-
-	case "INSPECT_STORAGE_POOL":
-		storageID := req.Parameters["storage_id"]
-		mountPoint := req.Parameters["mount_point"]
-		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
-		pools := collector.CollectStoragePools()
-		var found *storage.StoragePoolInfo
-		for _, p := range pools {
-			if (storageID != "" && p.StorageID == storageID) || (mountPoint != "" && p.MountPoint == mountPoint) {
-				found = p
-				break
-			}
-		}
-		if found == nil {
-			resp.Status = pb.CommandResponse_FAILED
-			resp.ErrorCode = "STORAGE_POOL_NOT_FOUND"
-			resp.ErrorMessage = "Storage pool không tồn tại hoặc không đủ điều kiện"
-		} else {
-			resp.Status = pb.CommandResponse_SUCCESS
-			b, _ := json.Marshal(found)
-			resp.ResultPayload = b
-		}
-
-	case "VALIDATE_STORAGE_ALLOCATION":
-		storageID := req.Parameters["storage_id"]
-		requestedQuotaGiB, _ := strconv.ParseInt(req.Parameters["requested_quota_gib"], 10, 64)
-		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
-		provisioner := storage.NewProvisioner(c.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
-		pool, err := provisioner.ValidateAllocation(storageID, requestedQuotaGiB)
-		if err != nil {
-			resp.Status = pb.CommandResponse_FAILED
-			resp.ErrorCode = "STORAGE_ALLOCATION_INVALID"
-			resp.ErrorMessage = err.Error()
-		} else {
-			resp.Status = pb.CommandResponse_SUCCESS
-			b, _ := json.Marshal(map[string]any{"valid": true, "storage_id": storageID, "quota_gib": requestedQuotaGiB, "mount_point": pool.MountPoint})
-			resp.ResultPayload = b
-		}
-
-	case "PROVISION_MEMBER_STORAGE":
-		var memberReq storage.MemberStorageRequest
-		if rawJSON, ok := req.Parameters["spec_json"]; ok && rawJSON != "" {
-			if err := json.Unmarshal([]byte(rawJSON), &memberReq); err != nil {
-				resp.Status = pb.CommandResponse_REJECTED_INVALID_PARAMS
-				resp.ErrorCode = "INVALID_STORAGE_SPEC"
-				resp.ErrorMessage = err.Error()
-				break
-			}
-		} else {
-			uid, _ := strconv.Atoi(req.Parameters["uid"])
-			gid, _ := strconv.Atoi(req.Parameters["gid"])
-			quota, _ := strconv.ParseInt(req.Parameters["quota_gib"], 10, 64)
-			memberReq = storage.MemberStorageRequest{
-				MemberID:           req.Parameters["member_id"],
-				MemberUsername:     req.Parameters["member_username"],
-				HostID:             c.cfg.ServerID,
-				StorageID:          req.Parameters["storage_id"],
-				StorageQuotaGiB:    quota,
-				ContainerMountPath: "/workspace",
-				UID:                uid,
-				GID:                gid,
-				CorrelationID:      req.RequestId,
-				AuditActor:         actorScope,
-			}
-		}
-		collector := storage.NewInventoryCollector(c.cfg.ServerID, storage.NewSystemQuotaManager(true))
-		provisioner := storage.NewProvisioner(c.cfg.ServerID, collector, storage.NewSystemQuotaManager(true))
-		res, err := provisioner.ProvisionMemberStorage(memberReq)
-		if err != nil {
-			resp.Status = pb.CommandResponse_FAILED
-			resp.ErrorCode = "MEMBER_STORAGE_PROVISION_FAILED"
-			resp.ErrorMessage = err.Error()
-			if res != nil {
-				b, _ := json.Marshal(res)
-				resp.ResultPayload = b
-			}
-		} else {
-			resp.Status = pb.CommandResponse_SUCCESS
-			b, _ := json.Marshal(res)
-			resp.ResultPayload = b
-		}
-
-	case "GET_RESOURCE_PROFILE":
-		memMgr := resources.NewMemoryPolicyManager(c.cfg.ServerID, 20.0)
-		prof := memMgr.EvaluateHostProfile()
-		b, _ := json.Marshal(prof)
-		resp.Status = pb.CommandResponse_SUCCESS
-		resp.ResultPayload = b
-
-	default:
-		resp.Status = pb.CommandResponse_REJECTED_UNAUTHORIZED
-		resp.ErrorCode = "UNSUPPORTED_ACTION"
-		resp.ErrorMessage = fmt.Sprintf("Hành động '%s' không được hỗ trợ trên node", req.Action)
-	}
-
-	if req.IdempotencyKey != "" && resp.Status == pb.CommandResponse_SUCCESS && c.replayGuard != nil {
-		var parsed any
-		if len(resp.ResultPayload) > 0 {
-			_ = json.Unmarshal(resp.ResultPayload, &parsed)
-		}
-		c.replayGuard.RecordIdempotency(actorScope, req.Action, req.IdempotencyKey, paramsHash, &gateway.DispatchResponse{
-			Success: true,
-			NodeID:  c.cfg.ServerID,
-			Status:  "SUCCESS",
-			Result:  parsed,
-		}, 10*time.Minute)
-	}
-
 	c.sendCommandResponse(sender, resp, start)
 }
 

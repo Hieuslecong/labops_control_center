@@ -84,6 +84,8 @@ class TestStorageAndSharedResourcesT01ToT18(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.storage_service._custom_pools.clear()
+        self.storage_service._reservations.clear()
         self.temp_dir.cleanup()
 
     # T01: Storage inventory returns correct drives per host (Workstation vs Track)

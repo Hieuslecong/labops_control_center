@@ -25,6 +25,7 @@ Thực thi đầy đủ các yêu cầu:
 """
 from __future__ import annotations
 
+import base64
 import fcntl
 import getpass
 import hashlib
@@ -33,7 +34,9 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -112,6 +115,141 @@ def _validate_new_password_strength(new_password: str) -> None:
         raise ValueError("Mật khẩu mới phải chứa ít nhất 1 ký tự đặc biệt")
 
 
+def _build_ssh_config_snippet(
+    *,
+    username: str,
+    ssh_host: str,
+    ssh_port: int,
+    ssh_login_user: Optional[str] = None,
+) -> str:
+    """Sinh block OpenSSH client config thống nhất cho gói cài đặt thành viên."""
+    host_alias = f"labops-{username}"
+    effective_user = (ssh_login_user or username).strip() or username
+    return (
+        f"# Cấu hình OpenSSH LabOps Control Center cho @{username} (Workspace Account: User {username})\n"
+        f"# Lưu vào ~/.ssh/config (macOS/Linux) hoặc %USERPROFILE%\\.ssh\\config (Windows)\n"
+        f"Host {host_alias}\n"
+        f"    HostName {ssh_host}\n"
+        f"    Port {ssh_port}\n"
+        f"    User {effective_user}\n"
+        f"    IdentityFile ~/.ssh/id_ed25519_{username}\n"
+        f"    IdentitiesOnly yes\n"
+        f"    StrictHostKeyChecking accept-new\n"
+        f"    UserKnownHostsFile ~/.ssh/known_hosts_labops\n"
+        f"    ServerAliveInterval 60\n"
+        f"    ServerAliveCountMax 3\n"
+    )
+
+
+def _build_ssh_config_upsert_shell(host_alias: str) -> str:
+    """Sinh đoạn bash+awk xóa block Host cũ (nếu có) trước khi ghi block mới vào ~/.ssh/config."""
+    return (
+        f"awk -v target=\"Host {host_alias}\" '\n"
+        "BEGIN { skip = 0 }\n"
+        "/^[ \\t]*(Host|Match)[ \\t]+/ {\n"
+        "    if ($0 ~ \"^[ \\t]*\" target \"([ \\t]|$)\") {\n"
+        "        skip = 1\n"
+        "        next\n"
+        "    } else {\n"
+        "        skip = 0\n"
+        "    }\n"
+        "}\n"
+        "!skip { print }\n"
+        "' \"$HOME/.ssh/config\" > \"$HOME/.ssh/config.labops.tmp\" && mv \"$HOME/.ssh/config.labops.tmp\" \"$HOME/.ssh/config\"\n"
+        "chmod 600 \"$HOME/.ssh/config\"\n"
+    )
+
+
+def _build_posix_setup_script(
+    *,
+    os_label: str,
+    username: str,
+    ssh_host: str,
+    ssh_port: int,
+    ssh_config_snippet: Optional[str] = None,
+    embedded_private_key: Optional[str] = None,
+) -> str:
+    """Sinh script cài đặt tự động ~/.ssh/config + khóa riêng + kiểm tra TCP tới workspace cho macOS/Linux."""
+    host_alias = f"labops-{username}"
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"echo \"=== Cài đặt SSH LabOps cho {os_label} (@{username}) ===\"",
+        "mkdir -p \"$HOME/.ssh\"",
+        "chmod 700 \"$HOME/.ssh\"",
+    ]
+    if embedded_private_key is not None:
+        lines.extend([
+            f"KEY_PATH=\"$HOME/.ssh/id_ed25519_{username}\"",
+            "cat > \"$KEY_PATH\" <<'EOF_KEY'",
+            embedded_private_key.rstrip(),
+            "EOF_KEY",
+            "chmod 600 \"$KEY_PATH\"",
+        ])
+    else:
+        lines.extend([
+            "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"",
+            "PKG_ROOT=\"$(dirname \"$SCRIPT_DIR\")\"",
+            f"if [ -f \"$PKG_ROOT/ssh/id_ed25519_{username}\" ]; then",
+            f"    cp -f \"$PKG_ROOT/ssh/id_ed25519_{username}\" \"$HOME/.ssh/id_ed25519_{username}\"",
+            f"    chmod 600 \"$HOME/.ssh/id_ed25519_{username}\"",
+            f"    echo \"✅ Đã cài đặt khóa SSH: ~/.ssh/id_ed25519_{username}\"",
+            "fi",
+        ])
+
+    lines.extend([
+        "touch \"$HOME/.ssh/config\"",
+        "chmod 600 \"$HOME/.ssh/config\"",
+        f"HAD_EXISTING=0",
+        f"if grep -qE \"^[ \\t]*Host[ \\t]+{host_alias}([ \\t]|$)\" \"$HOME/.ssh/config\" 2>/dev/null; then",
+        "    HAD_EXISTING=1",
+        "fi",
+        _build_ssh_config_upsert_shell(host_alias).rstrip("\n"),
+        "printf \"\\n\" >> \"$HOME/.ssh/config\"",
+    ])
+
+    if ssh_config_snippet is not None:
+        lines.extend([
+            "cat >> \"$HOME/.ssh/config\" <<'EOF_CFG'",
+            ssh_config_snippet.rstrip(),
+            "EOF_CFG",
+        ])
+    else:
+        lines.append("cat \"$PKG_ROOT/ssh/config\" >> \"$HOME/.ssh/config\"")
+
+    lines.extend([
+        "chmod 600 \"$HOME/.ssh/config\"",
+        "if [ \"$HAD_EXISTING\" -eq 1 ]; then",
+        f"    echo \"✅ Đã cập nhật cấu hình Host {host_alias} mới nhất trong ~/.ssh/config\"",
+        "else",
+        f"    echo \"✅ Đã thêm cấu hình Host {host_alias} vào ~/.ssh/config\"",
+        "fi",
+        "TCP_OK=0",
+        "if command -v nc >/dev/null 2>&1; then",
+        f"    if nc -z -w 3 \"{ssh_host}\" \"{ssh_port}\" >/dev/null 2>&1; then",
+        "        TCP_OK=1",
+        "    fi",
+        "elif command -v python3 >/dev/null 2>&1; then",
+        f"    if python3 -c \"import socket; s=socket.socket(); s.settimeout(3); s.connect(('{ssh_host}', {ssh_port})); s.close()\" 2>/dev/null; then",
+        "        TCP_OK=1",
+        "    fi",
+        "fi",
+        "echo \"\"",
+        "echo \"🎉 Hoàn tất cài đặt!\"",
+        "if [ \"$TCP_OK\" -eq 1 ]; then",
+        f"    echo \"✅ Kết nối TCP tới {ssh_host}:{ssh_port} thông suốt. Chạy ngay:\"",
+        f"    echo \"   ssh {host_alias}\"",
+        "else",
+        f"    echo \"⚠️  Chưa kết nối được TCP tới {ssh_host}:{ssh_port}!\"",
+        "    echo \"   • Nếu bạn đang ở cùng mạng LAN phòng Lab và đã BẬT WireGuard nhưng không thấy 'Latest handshake' (Data received = 0 B):\"",
+        f"    echo \"     Hãy BẤM TẮT (Deactivate) tunnel WireGuard trong ứng dụng WireGuard để kết nối trực tiếp qua LAN tới {ssh_host}:{ssh_port}.\"",
+        "    echo \"   • Nếu bạn kết nối từ bên ngoài Internet: Hãy kiểm tra WireGuard đã có handshake hợp lệ từ máy chủ VPN Gateway.\"",
+        f"    echo \"👉 Sau khi kiểm tra mạng, kết nối bằng lệnh: ssh {host_alias}\"",
+        "fi",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 class OneTimeSecretVault:
     """
     Kho lưu tạm một lần trong bộ nhớ RAM (không bao giờ ghi xuống đĩa).
@@ -154,6 +292,7 @@ class OneTimeSecretVault:
         ssh_config_snippet: Optional[str] = None,
         quick_setup_script: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
+        ssh_login_user: Optional[str] = None,
     ) -> Dict[str, Any]:
         self._purge_expired()
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
@@ -162,42 +301,24 @@ class OneTimeSecretVault:
         bundle_id = f"bnd-{uuid.uuid4().hex[:12]}"
         secret_id = f"sec-{uuid.uuid4().hex[:12]}"
         host_alias = f"labops-{username}"
+        effective_ssh_user = (ssh_login_user or username).strip() or username
 
         if not ssh_config_snippet:
-            ssh_config_snippet = (
-                f"# Cấu hình OpenSSH tự động cho @{username} (LabOps Control Center V2)\n"
-                f"# Dán vào ~/.ssh/config để gõ trực tiếp: ssh {host_alias}\n"
-                f"Host {host_alias}\n"
-                f"    HostName {ssh_host}\n"
-                f"    Port {ssh_port}\n"
-                f"    User {username}\n"
-                f"    IdentityFile ~/.ssh/id_ed25519_{username}\n"
-                f"    IdentitiesOnly yes\n"
-                f"    ServerAliveInterval 60\n"
-                f"    ServerAliveCountMax 3\n"
+            ssh_config_snippet = _build_ssh_config_snippet(
+                username=username,
+                ssh_host=ssh_host,
+                ssh_port=ssh_port,
+                ssh_login_user=effective_ssh_user,
             )
 
         if not quick_setup_script:
-            quick_setup_script = (
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                f"# Script cài đặt tự động SSH Key & Config cho @{username} (LabOps V2)\n"
-                "mkdir -p \"$HOME/.ssh\"\n"
-                "chmod 700 \"$HOME/.ssh\"\n"
-                f"KEY_PATH=\"$HOME/.ssh/id_ed25519_{username}\"\n"
-                "cat > \"$KEY_PATH\" <<'EOF_KEY'\n"
-                f"{encrypted_private_key.rstrip()}\n"
-                "EOF_KEY\n"
-                "chmod 600 \"$KEY_PATH\"\n"
-                "touch \"$HOME/.ssh/config\"\n"
-                "chmod 600 \"$HOME/.ssh/config\"\n"
-                f"if ! grep -q \"^Host {host_alias}$\" \"$HOME/.ssh/config\" 2>/dev/null; then\n"
-                "cat >> \"$HOME/.ssh/config\" <<'EOF_CFG'\n\n"
-                f"{ssh_config_snippet.rstrip()}\n"
-                "EOF_CFG\n"
-                "fi\n"
-                f"echo \"✅ Đã cài đặt khóa riêng ($KEY_PATH) và cấu hình SSH ({host_alias}).\"\n"
-                f"echo \"👉 Kết nối ngay bằng lệnh: ssh {host_alias}\"\n"
+            quick_setup_script = _build_posix_setup_script(
+                os_label="macOS / Linux",
+                username=username,
+                ssh_host=ssh_host,
+                ssh_port=ssh_port,
+                ssh_config_snippet=ssh_config_snippet,
+                embedded_private_key=encrypted_private_key,
             )
 
         self._key_bundles[member_id] = {
@@ -207,6 +328,7 @@ class OneTimeSecretVault:
             "host_alias": host_alias,
             "ssh_host": ssh_host,
             "ssh_port": ssh_port,
+            "ssh_login_user": effective_ssh_user,
             "workspace_name": workspace_name,
             "workspace_path": workspace_path,
             "fingerprint": fingerprint,
@@ -218,7 +340,7 @@ class OneTimeSecretVault:
             "wireguard_public_key": wireguard_public_key or "",
             "wireguard_server_endpoint": wireguard_server_endpoint or "",
             "vpn_guide": vpn_guide,
-            "ssh_command": f"ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {username}@{ssh_host}",
+            "ssh_command": f"ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {effective_ssh_user}@{ssh_host}",
             "ssh_alias_command": f"ssh {host_alias}",
             "created_at": _now_iso(),
             "expires_at": exp_iso,
@@ -625,6 +747,7 @@ class SshAccessManager:
         key_passphrase: Optional[str] = None,
         temporary_password: Optional[str] = None,
         temp_password_expires_at: Optional[str] = None,
+        ssh_login_user: Optional[str] = None,
     ) -> bytes:
         """
         Đóng gói toàn bộ thông tin cấu hình, script cài đặt và tài liệu vào 1 file ZIP:
@@ -656,24 +779,23 @@ class SshAccessManager:
         root = f"LabOps_Access_{username}"
         buf = io.BytesIO()
         host_alias = f"labops-{username}"
+        effective_ssh_user = (ssh_login_user or username).strip() or username
         has_priv = bool(private_key and private_key.strip())
         wg_ip = wireguard_client_ip or "10.88.40.x"
         wg_ep = wireguard_endpoint or "118.70.169.236:2205"
 
-        ssh_config_content = (
-            f"# Cấu hình OpenSSH LabOps Control Center cho @{username}\n"
-            f"# Lưu vào ~/.ssh/config (macOS/Linux) hoặc %USERPROFILE%\\.ssh\\config (Windows)\n"
-            f"Host {host_alias}\n"
-            f"    HostName {ssh_host}\n"
-            f"    Port {ssh_port}\n"
-            f"    User {username}\n"
-            f"    IdentityFile ~/.ssh/id_ed25519_{username}\n"
-            f"    IdentitiesOnly yes\n"
-            f"    ServerAliveInterval 60\n"
-            f"    ServerAliveCountMax 3\n"
+        ssh_config_content = _build_ssh_config_snippet(
+            username=username,
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+            ssh_login_user=effective_ssh_user,
         )
 
-        ssh_cmd_text = f"ssh {host_alias}\n# Hoặc kết nối trực tiếp:\nssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {username}@{ssh_host}\n"
+        ssh_cmd_text = (
+            f"ssh {host_alias}\n"
+            f"# Hoặc kết nối trực tiếp:\n"
+            f"ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {effective_ssh_user}@{ssh_host}\n"
+        )
 
         readme_content = f"""# HƯỚNG DẪN KẾT NỐI HỆ THỐNG LABOPS CONTROL CENTER V2
 Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
@@ -681,8 +803,9 @@ Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
 ---
 
 ## 1. THÔNG TIN TRUY CẬP ĐƯỢC CẤP
-- **Tên đăng nhập (Linux Username)**: `{username}`
-- **Máy chủ SSH (qua VPN WireGuard)**: `{ssh_host}`
+- **Tên tài khoản Workspace**: `{username}`
+- **SSH Transport User**: `{effective_ssh_user}`
+- **Máy chủ SSH**: `{ssh_host}`
 - **Cổng SSH Container/Workspace**: `{ssh_port}`
 - **Địa chỉ VPN WireGuard của bạn**: `{wg_ip}`
 - **Endpoint VPN Server**: `{wg_ep}`
@@ -692,16 +815,15 @@ Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
 
 ---
 
-## 2. QUY TRÌNH KẾT NỐI 2 BƯỚC
+## 2. QUY TRÌNH KẾT NỐI
 
-### BƯỚC 1: KẾT NỐI MẠNG RIÊNG WIREGUARD VPN
-1. Tải và cài đặt ứng dụng WireGuard:
-   - Windows / macOS: https://www.wireguard.com/install/
-   - iOS (App Store) / Android (Google Play): Tìm kiếm "WireGuard".
-2. Mở ứng dụng WireGuard $\\rightarrow$ Chọn **Add Tunnel** $\\rightarrow$ **Import tunnel(s) from file**.
-3. Chọn tệp `wireguard/labops.conf` trong thư mục này.
-4. Bấm **Activate** để kích hoạt kết nối VPN.
-5. Kiểm tra: Ping thử IP server `{ssh_host}` để đảm bảo kết nối thông suốt.
+### BƯỚC 1: KIỂM TRA MẠNG (LAN PHÒNG LAB HOẶC WIREGUARD VPN)
+- **Nếu bạn đang ở cùng mạng LAN phòng Lab (ví dụ cùng mạng `192.168.167.x`)**:
+  KHÔNG cần bật WireGuard (hãy bấm **Deactivate** nếu đang bật tunnel mà thấy `Data received` trống / chưa có `Latest handshake`, vì bật tunnel chết sẽ làm `Operation timed out` tới `{ssh_host}`).
+- **Nếu bạn kết nối từ xa qua Internet**:
+  1. Cài đặt WireGuard từ https://www.wireguard.com/install/
+  2. Mở ứng dụng WireGuard -> **Add Tunnel** -> **Import tunnel(s) from file** -> chọn `wireguard/labops.conf`.
+  3. Bấm **Activate** và kiểm tra phải có dòng `Latest handshake` + `Data received > 0 B`.
 
 ---
 
@@ -727,7 +849,7 @@ Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
    ```bash
    chmod 600 ~/.ssh/id_ed25519_{username}
    ```
-3. Nối nội dung tệp `ssh/config` vào tệp `~/.ssh/config`.
+3. Cập nhật nội dung tệp `ssh/config` vào tệp `~/.ssh/config`.
 4. Mở Terminal và kết nối:
    ```bash
    ssh {host_alias}
@@ -741,65 +863,19 @@ Dành cho thành viên: **@{username}** | Workspace: **{workspace_name}**
 - Mọi thắc mắc hoặc cần cấp lại khóa, vui lòng liên hệ Quản trị viên phòng Lab (Admin).
 """
 
-        setup_macos_sh = f"""#!/usr/bin/env bash
-set -euo pipefail
-echo "=== Cài đặt SSH LabOps cho macOS (@{username}) ==="
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
+        setup_macos_sh = _build_posix_setup_script(
+            os_label="macOS",
+            username=username,
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+        )
 
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-PKG_ROOT="$(dirname "$SCRIPT_DIR")"
-
-if [ -f "$PKG_ROOT/ssh/id_ed25519_{username}" ]; then
-    cp -f "$PKG_ROOT/ssh/id_ed25519_{username}" "$HOME/.ssh/id_ed25519_{username}"
-    chmod 600 "$HOME/.ssh/id_ed25519_{username}"
-    echo "✅ Đã cài đặt khóa SSH: ~/.ssh/id_ed25519_{username}"
-fi
-
-touch "$HOME/.ssh/config"
-chmod 600 "$HOME/.ssh/config"
-if ! grep -q "^Host {host_alias}$" "$HOME/.ssh/config" 2>/dev/null; then
-    cat "$PKG_ROOT/ssh/config" >> "$HOME/.ssh/config"
-    echo "✅ Đã thêm cấu hình Host {host_alias} vào ~/.ssh/config"
-else
-    echo "ℹ️ Cấu hình Host {host_alias} đã tồn tại trong ~/.ssh/config"
-fi
-
-echo ""
-echo "🎉 Hoàn tất cài đặt!"
-echo "👉 Hãy đảm bảo WireGuard VPN đã BẬT, sau đó kết nối bằng lệnh:"
-echo "   ssh {host_alias}"
-"""
-
-        setup_linux_sh = f"""#!/usr/bin/env bash
-set -euo pipefail
-echo "=== Cài đặt SSH LabOps cho Linux (@{username}) ==="
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-PKG_ROOT="$(dirname "$SCRIPT_DIR")"
-
-if [ -f "$PKG_ROOT/ssh/id_ed25519_{username}" ]; then
-    cp -f "$PKG_ROOT/ssh/id_ed25519_{username}" "$HOME/.ssh/id_ed25519_{username}"
-    chmod 600 "$HOME/.ssh/id_ed25519_{username}"
-    echo "✅ Đã cài đặt khóa SSH: ~/.ssh/id_ed25519_{username}"
-fi
-
-touch "$HOME/.ssh/config"
-chmod 600 "$HOME/.ssh/config"
-if ! grep -q "^Host {host_alias}$" "$HOME/.ssh/config" 2>/dev/null; then
-    cat "$PKG_ROOT/ssh/config" >> "$HOME/.ssh/config"
-    echo "✅ Đã thêm cấu hình Host {host_alias} vào ~/.ssh/config"
-else
-    echo "ℹ️ Cấu hình Host {host_alias} đã tồn tại trong ~/.ssh/config"
-fi
-
-echo ""
-echo "🎉 Hoàn tất cài đặt!"
-echo "👉 Hãy đảm bảo WireGuard VPN đã BẬT, sau đó kết nối bằng lệnh:"
-echo "   ssh {host_alias}"
-"""
+        setup_linux_sh = _build_posix_setup_script(
+            os_label="Linux",
+            username=username,
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+        )
 
         setup_windows_ps1 = f"""# Cài đặt SSH LabOps cho Windows PowerShell (@{username})
 $ErrorActionPreference = "Stop"
@@ -822,33 +898,37 @@ if (Test-Path $keySrc) {{
 }}
 
 $configFile = Join-Path $sshDir "config"
-$configSnippet = Get-Content (Join-Path $pkgRoot "ssh\\config") -Raw
+$configSnippet = (Get-Content (Join-Path $pkgRoot "ssh\\config") -Raw).TrimEnd()
 
 if (Test-Path $configFile) {{
     $current = Get-Content $configFile -Raw
-    if ($current -notmatch "Host {host_alias}") {{
-        Add-Content -Path $configFile -Value "`n$configSnippet"
-        Write-Host "✅ Đã bổ sung cấu hình vào $configFile" -ForegroundColor Green
+    if ($current -match "(?m)^[ \\t]*Host[ \\t]+{host_alias}([ \\t]*\\r?$|\\s)") {{
+        $cleaned = [regex]::Replace($current, "(?ms)^[ \\t]*Host[ \\t]+{host_alias}(?=[ \\t]*\\r?$).*?(?=^[ \\t]*(?:Host|Match)[ \\t]+|\\z)", "").TrimEnd()
+        Set-Content -Path $configFile -Value ($cleaned + "`n`n" + $configSnippet + "`n")
+        Write-Host "✅ Đã cập nhật cấu hình Host {host_alias} trong $configFile" -ForegroundColor Green
     }} else {{
-        Write-Host "ℹ️ Cấu hình Host {host_alias} đã có sẵn." -ForegroundColor Yellow
+        Add-Content -Path $configFile -Value ("`n" + $configSnippet)
+        Write-Host "✅ Đã bổ sung cấu hình vào $configFile" -ForegroundColor Green
     }}
 }} else {{
-    Set-Content -Path $configFile -Value $configSnippet
+    Set-Content -Path $configFile -Value ($configSnippet + "`n")
     Write-Host "✅ Đã tạo tệp cấu hình $configFile" -ForegroundColor Green
 }}
 
 Write-Host "`n🎉 Hoàn tất cài đặt!" -ForegroundColor Cyan
-Write-Host "👉 Hãy đảm bảo WireGuard VPN đã Activate, sau đó mở Terminal gõ:" -ForegroundColor White
-Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
+Write-Host "👉 Nếu bạn đang ở cùng mạng LAN phòng Lab, hãy tắt (Deactivate) WireGuard nếu chưa có Latest handshake." -ForegroundColor Gray
+Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundColor Yellow
 """
 
         conn_info_dict = {
             "username": username,
+            "ssh_login_user": effective_ssh_user,
             "workspace_name": workspace_name,
             "ssh_host": ssh_host,
             "ssh_port": ssh_port,
             "ssh_alias": host_alias,
             "ssh_command": f"ssh {host_alias}",
+            "direct_ssh_command": f"ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {effective_ssh_user}@{ssh_host}",
             "wireguard_client_ip": wg_ip,
             "wireguard_endpoint": wg_ep,
             "has_private_key": has_priv,
@@ -859,8 +939,9 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         conn_info_txt = (
             f"=== THÔNG TIN KẾT NỐI LABOPS V2 ===\n"
             f"Thành viên        : @{username}\n"
+            f"SSH User          : {effective_ssh_user}\n"
             f"Workspace         : {workspace_name}\n"
-            f"SSH Host (VPN)    : {ssh_host}\n"
+            f"SSH Host          : {ssh_host}\n"
             f"SSH Port          : {ssh_port}\n"
             f"SSH Alias         : {host_alias}\n"
             f"Lệnh kết nối      : ssh {host_alias}\n"
@@ -878,9 +959,11 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             zf.writestr(
                 f"{root}/wireguard/SETUP.md",
                 "# CẤU HÌNH WIREGUARD VPN\n"
-                "1. Cài đặt WireGuard từ https://www.wireguard.com/install/\n"
-                "2. Mở WireGuard -> Add Tunnel -> Import tunnel(s) from file -> Chọn file `labops.conf`.\n"
-                "3. Bấm Activate để kết nối.\n"
+                "- **Nếu đang ở cùng mạng LAN phòng Lab**: KHÔNG cần bật WireGuard (hãy bấm Deactivate nếu đang bật tunnel mà chưa có `Latest handshake` / `Data received = 0 B`).\n"
+                "- **Nếu kết nối từ xa qua Internet**:\n"
+                "  1. Cài đặt WireGuard từ https://www.wireguard.com/install/\n"
+                "  2. Mở WireGuard -> Add Tunnel -> Import tunnel(s) from file -> Chọn file `labops.conf`.\n"
+                "  3. Bấm Activate để kết nối và kiểm tra phải thấy dòng `Latest handshake`.\n"
             )
 
             # 3. SSH
@@ -996,6 +1079,7 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         gpu_permissions: List[str],
         known_gpu_ids: Optional[List[str]] = None,
         enforce_canary_runtime: bool = False,
+        workspace_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Kiểm tra thực tế tại runtime:
@@ -1007,7 +1091,7 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         6. SSH daemon / listener cho workspace có hoạt động và chấp nhận đúng public key không?
         Chỉ trả về overall_status = "READY" khi TẤT CẢ các kiểm tra bắt buộc đều VERIFIED.
         """
-        ws_dir = self.member_workspace_dir(host_id, username)
+        ws_dir = workspace_dir or self.member_workspace_dir(host_id, username)
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
 
@@ -1455,28 +1539,38 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
     # ------------------------------------------------------------------
     # Canary Unprivileged OpenSSH Daemon (Kiểm thử thực tế trên máy thật)
     # ------------------------------------------------------------------
-    def start_canary_sshd_for_workspace(self, host_id: str, username: str, port: int = 0) -> Dict[str, Any]:
+    def start_canary_sshd_for_workspace(
+        self,
+        host_id: str,
+        username: str,
+        port: int = 0,
+        *,
+        workspace_dir: Optional[str] = None,
+        listen_address: str = "0.0.0.0",
+        workspace_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Khởi chạy một tiến trình /usr/sbin/sshd không đặc quyền (unprivileged) lắng nghe trên 127.0.0.1:<port>
-        sử dụng riêng authorized_keys của workspace thành viên.
+        Khởi chạy một tiến trình /usr/sbin/sshd không đặc quyền (unprivileged) lắng nghe trên <listen_address>:<port>
+        sử dụng riêng authorized_keys của workspace thành viên và ForceCommand cô lập vào thư mục workspace.
         - Tuyệt đối KHÔNG chạm vào cổng 22 hay /etc/ssh/sshd_config của host.
-        - Dùng để kiểm chứng runtime thực tế (PASS_REAL) việc kết nối bằng khóa có passphrase và thu hồi khóa.
+        - Dùng cho workspace SSH thực tế trên host cục bộ và kiểm chứng runtime (PASS_REAL).
         """
         sshd_bin = "/usr/sbin/sshd"
         if not os.path.exists(sshd_bin):
             raise RuntimeError("SSHD_BINARY_MISSING: Không tìm thấy /usr/sbin/sshd")
 
-        ws_dir = self.member_workspace_dir(host_id, username)
+        ws_dir = os.path.abspath(workspace_dir or self.member_workspace_dir(host_id, username))
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
         if not os.path.isfile(auth_keys_path):
             raise RuntimeError("Authorized keys của workspace chưa được khởi tạo")
 
-        self.stop_canary_sshd_for_workspace(username)
+        self.stop_canary_sshd_for_workspace(username, workspace_dir=ws_dir)
 
         if port <= 0:
+            bind_host = "127.0.0.1" if listen_address in ("127.0.0.1", "localhost") else "0.0.0.0"
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", 0))
+                s.bind((bind_host, 0))
                 port = s.getsockname()[1]
 
         host_key_path = os.path.join(ssh_dir, "canary_host_ed25519_key")
@@ -1488,13 +1582,44 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             )
             os.chmod(host_key_path, 0o600)
 
+        ws_label = (workspace_name or f"ws-{username}").strip() or f"ws-{username}"
+        shell_script_path = os.path.join(ssh_dir, "workspace_shell.sh")
+        q_ws_dir = shlex.quote(ws_dir)
+        q_username = shlex.quote(username)
+        q_ws_label = shlex.quote(ws_label)
+        with open(shell_script_path, "w", encoding="utf-8") as sf:
+            sf.write(
+                "#!/usr/bin/env bash\n"
+                f"export HOME={q_ws_dir}\n"
+                f"export USER={q_username}\n"
+                f"export LOGNAME={q_username}\n"
+                f"export LABOPS_WORKSPACE={q_ws_label}\n"
+                f"cd {q_ws_dir} || exit 1\n"
+                "if [ -n \"${SSH_ORIGINAL_COMMAND:-}\" ]; then\n"
+                "    exec /bin/bash -c \"$SSH_ORIGINAL_COMMAND\"\n"
+                "else\n"
+                "    echo \"==================================================================\"\n"
+                f"    echo \"🚀 LabOps Control Center V2 — Workspace: {ws_label} (@{username})\"\n"
+                f"    echo \"   Thư mục làm việc (HOME): {ws_dir}\"\n"
+                "    echo \"==================================================================\"\n"
+                f"    export PS1=\"{username}@{ws_label}:\\w\\$ \"\n"
+                "    exec /bin/bash --noprofile --norc -i\n"
+                "fi\n"
+            )
+        os.chmod(shell_script_path, 0o700)
+
         pid_file = os.path.join(ssh_dir, "canary_sshd.pid")
         cfg_path = os.path.join(ssh_dir, "canary_sshd_config")
         os_user = getpass.getuser()
+        sftp_line = (
+            "Subsystem sftp /usr/lib/openssh/sftp-server\n"
+            if os.path.exists("/usr/lib/openssh/sftp-server")
+            else ""
+        )
         with open(cfg_path, "w", encoding="utf-8") as cf:
             cf.write(
                 f"Port {port}\n"
-                f"ListenAddress 127.0.0.1\n"
+                f"ListenAddress {listen_address}\n"
                 f"HostKey {host_key_path}\n"
                 f"AuthorizedKeysFile {auth_keys_path}\n"
                 f"PasswordAuthentication no\n"
@@ -1507,6 +1632,8 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
                 f"PermitRootLogin no\n"
                 f"AllowTcpForwarding no\n"
                 f"X11Forwarding no\n"
+                f"{sftp_line}"
+                f"ForceCommand {shlex.quote(shell_script_path)}\n"
                 f"LogLevel QUIET\n"
             )
         os.chmod(cfg_path, 0o600)
@@ -1519,21 +1646,29 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             [sshd_bin, "-D", "-f", cfg_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
             text=True,
         )
         self._canary_daemons[username] = proc
 
-        # Đợi cổng lắng nghe
+        check_host = "127.0.0.1" if listen_address in ("0.0.0.0", "127.0.0.1", "localhost") else listen_address
         deadline = time.time() + 3.0
         while time.time() < deadline:
-            if self._is_tcp_port_listening("127.0.0.1", port):
-                return {"running": True, "port": port, "pid": proc.pid, "os_user": os_user}
+            if self._is_tcp_port_listening(check_host, port):
+                return {
+                    "running": True,
+                    "port": port,
+                    "pid": proc.pid,
+                    "os_user": os_user,
+                    "listen_address": listen_address,
+                    "workspace_dir": ws_dir,
+                }
             time.sleep(0.05)
 
-        self.stop_canary_sshd_for_workspace(username)
+        self.stop_canary_sshd_for_workspace(username, workspace_dir=ws_dir)
         raise RuntimeError(f"Canary sshd không thể lắng nghe trên cổng {port}")
 
-    def stop_canary_sshd_for_workspace(self, username: str) -> int:
+    def stop_canary_sshd_for_workspace(self, username: str, *, workspace_dir: Optional[str] = None) -> int:
         proc = self._canary_daemons.pop(username, None)
         stopped = 0
         if proc and proc.poll() is None:
@@ -1543,6 +1678,34 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
             except subprocess.TimeoutExpired:
                 proc.kill()
             stopped += 1
+
+        # Dọn thêm tiến trình sshd mồ côi theo canary_sshd.pid (ví dụ sau khi backend reload)
+        candidate_dirs = []
+        if workspace_dir:
+            candidate_dirs.append(os.path.abspath(workspace_dir))
+        candidate_dirs.append(os.path.join(self.workspaces_root, self.local_host_id, username))
+        for ws_dir in dict.fromkeys(candidate_dirs):
+            pid_file = os.path.join(ws_dir, ".ssh", "canary_sshd.pid")
+            cfg_path = os.path.join(ws_dir, ".ssh", "canary_sshd_config")
+            if not os.path.isfile(pid_file):
+                continue
+            try:
+                with open(pid_file, "r", encoding="utf-8") as pf:
+                    old_pid = int(pf.read().strip() or "0")
+                if old_pid > 1 and (proc is None or old_pid != proc.pid):
+                    cmdline_file = f"/proc/{old_pid}/cmdline"
+                    if os.path.isfile(cmdline_file):
+                        with open(cmdline_file, "rb") as cf:
+                            cmdline = cf.read().decode("utf-8", errors="ignore")
+                        if "sshd" in cmdline and cfg_path in cmdline:
+                            os.kill(old_pid, signal.SIGTERM)
+                            for _ in range(20):
+                                if not os.path.exists(f"/proc/{old_pid}"):
+                                    break
+                                time.sleep(0.05)
+                            stopped += 1
+            except Exception:
+                pass
         return stopped
 
     @staticmethod
@@ -1621,6 +1784,7 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         actor: str,
         encrypted_private_key_for_probe: Optional[str] = None,
         passphrase_for_probe: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Thu hồi quyền SSH của thành viên:
@@ -1667,19 +1831,25 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
                 "timestamp": _now_iso(),
             }
 
-        ws_dir = self.member_workspace_dir(host_id, username)
-        auth_keys_path = os.path.join(ws_dir, ".ssh", "authorized_keys")
+        ws_dir = workspace_dir or member.get("workspace_dir") or self.member_workspace_dir(host_id, username)
+        fallback_ws_dir = self.member_workspace_dir(host_id, username)
+        auth_keys_paths = [os.path.join(d, ".ssh", "authorized_keys") for d in dict.fromkeys((ws_dir, fallback_ws_dir))]
         try:
-            if os.path.exists(auth_keys_path):
-                with open(auth_keys_path, "w", encoding="utf-8") as akf:
-                    akf.write("")
-                os.chmod(auth_keys_path, 0o600)
+            for ak_path in auth_keys_paths:
+                if os.path.exists(ak_path):
+                    with open(ak_path, "w", encoding="utf-8") as akf:
+                        akf.write("")
+                    os.chmod(ak_path, 0o600)
 
-            # Kiểm tra lại authorized_keys thực sự rỗng
+            # Kiểm tra lại các tệp authorized_keys thực sự rỗng
             remaining = ""
-            if os.path.exists(auth_keys_path):
-                with open(auth_keys_path, "r", encoding="utf-8") as akf:
-                    remaining = akf.read().strip()
+            for ak_path in auth_keys_paths:
+                if os.path.exists(ak_path):
+                    with open(ak_path, "r", encoding="utf-8") as akf:
+                        content = akf.read().strip()
+                        if content:
+                            remaining = content
+                            break
             if remaining:
                 return {
                     "operation_id": operation_id,
@@ -1764,7 +1934,7 @@ Write-Host "   ssh {host_alias}" -ForegroundColor Yellow
         của đúng thành viên đó, tuyệt đối không đụng tới sshd cổng 22 của host hay các job nghiên cứu).
         """
         username = member["username"]
-        stopped = self.stop_canary_sshd_for_workspace(username)
+        stopped = self.stop_canary_sshd_for_workspace(username, workspace_dir=member.get("workspace_dir"))
         member["ssh_sessions_count"] = 0
         return {
             "operation_id": f"op-term-{uuid.uuid4().hex[:12]}",

@@ -35,7 +35,7 @@ func IsImmutableImageRef(image string) bool {
 
 var forbiddenHostRoots = []string{
 	"/etc", "/proc", "/sys", "/var/run", "/run", "/dev", "/boot", "/root",
-	"/bin", "/sbin", "/usr", "/lib", "/lib64", "/var/lib/docker", "/mnt/HDD3",
+	"/bin", "/sbin", "/usr", "/lib", "/lib64", "/var/lib/docker",
 }
 
 // ValidateSafeStorageRoot kiểm tra thư mục storage của workspace không trỏ tới vùng hệ thống hoặc chứa symlink.
@@ -49,8 +49,8 @@ func ValidateSafeStorageRoot(storageRoot string) error {
 			return fmt.Errorf("FORBIDDEN_STORAGE_ROOT: đường dẫn '%s' nằm trong vùng hệ thống bị cấm (%s)", clean, pref)
 		}
 	}
-	if clean == "/home" {
-		return fmt.Errorf("FORBIDDEN_STORAGE_ROOT: cấm mount trực tiếp /home")
+	if clean == "/home" || clean == "/mnt/HDD3" || clean == "/media" || clean == "/mnt" {
+		return fmt.Errorf("FORBIDDEN_STORAGE_ROOT: cấm mount trực tiếp thư mục gốc '%s'", clean)
 	}
 
 	// Kiểm tra từng thành phần đang tồn tại không phải symlink (chống symlink traversal)

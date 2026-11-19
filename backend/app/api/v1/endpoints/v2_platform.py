@@ -1,9 +1,12 @@
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from app.adapters.vpn_provider import VPNProviderError
 from app.api.dependencies import require_admin, require_agent, require_user
 from app.core.security import AuthError, Principal, verify_step_up_token
 from app.services.labops_service import service
 from app.services.member_lifecycle import LifecyclePreconditionError
+from app.services.vpn_route_resolver import RouteResolutionError
+from app.services.wireguard_config_builder import ConfigBuilderError
 from app.services.workspace_controller import WorkspaceSecurityError
 
 router = APIRouter()
@@ -159,9 +162,14 @@ async def get_ssh_access_status(member_id: str, p: Principal = Depends(require_u
 @router.get("/ssh-access/{member_id}/download-zip")
 async def download_ssh_access_zip(member_id: str, p: Principal = Depends(require_user)) -> Response:
     try:
-        status = service.get_member_ssh_access_status(member_id)
-        if not p.is_admin and status["username"] != p.username:
+        member = service._find_member(member_id)
+        if not p.is_admin and member.get("username") != p.username:
             raise HTTPException(status_code=403, detail="Chỉ admin hoặc chủ sở hữu tài khoản mới có quyền tải bộ kết nối")
+        if member.get("status") in {"SUSPENDED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETED"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Tài khoản @{member.get('username')} đang ở trạng thái {member.get('status')}; không thể tải gói kết nối SSH/VPN."
+            )
         filename, zip_bytes = service.claim_member_access_zip(member_id, actor=p.username)
         return Response(
             content=zip_bytes,
@@ -172,6 +180,10 @@ async def download_ssh_access_zip(member_id: str, p: Principal = Depends(require
                 "Pragma": "no-cache",
             },
         )
+    except HTTPException:
+        raise
+    except RouteResolutionError as e:
+        raise HTTPException(status_code=409, detail=f"Không thể cấp gói kết nối: {e}")
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -326,6 +338,14 @@ async def add_member_device(
         return service.add_member_device(member_id, device_name, actor=p.username)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except VPNProviderError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigBuilderError as e:
+        err_str = str(e)
+        code = 503 if ("UNAVAILABLE" in err_str or "GATEWAY" in err_str) else 409
+        raise HTTPException(status_code=code, detail=err_str)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -336,9 +356,10 @@ async def get_member_device_config(
     device_id: str,
     p: Principal = Depends(require_user),
 ) -> Response:
-    member = service._find_member(member_id)
-    if not member:
-        raise HTTPException(status_code=404, detail="Không tìm thấy thành viên")
+    try:
+        member = service._find_member(member_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     if not p.is_admin and member.get("username") != p.username:
         raise HTTPException(status_code=403, detail="Chỉ admin hoặc chủ sở hữu mới có quyền lấy cấu hình")
     try:
@@ -356,6 +377,16 @@ async def get_member_device_config(
                 "Cache-Control": "no-store",
             },
         )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except VPNProviderError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigBuilderError as e:
+        err_str = str(e)
+        code = 503 if ("UNAVAILABLE" in err_str or "GATEWAY" in err_str) else e.http_status
+        raise HTTPException(status_code=code, detail=err_str)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -455,6 +486,14 @@ async def revoke_member_device_v2(
         return service.revoke_member_device_v2(member_id, device_id, actor=p.username)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except VPNProviderError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigBuilderError as e:
+        err_str = str(e)
+        code = 503 if ("UNAVAILABLE" in err_str or "GATEWAY" in err_str) else 409
+        raise HTTPException(status_code=code, detail=err_str)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -471,6 +510,14 @@ async def toggle_member_device(
         return service.toggle_member_device(member_id, device_id, enable=enable, actor=p.username)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except VPNProviderError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigBuilderError as e:
+        err_str = str(e)
+        code = 503 if ("UNAVAILABLE" in err_str or "GATEWAY" in err_str) else 409
+        raise HTTPException(status_code=code, detail=err_str)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

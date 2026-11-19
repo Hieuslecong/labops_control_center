@@ -14,25 +14,63 @@ import { toast } from 'sonner';
 
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
-type AccessHealth = {
-  wireguard?: { status?: string; live?: boolean; peers_count?: number };
-  teleport?: { status?: string; version?: string | null };
-  workspace_agents?: string;
-  network_policy?: string;
-};
+type MemberFilterTab = 'ALL' | 'ACTIVE_PENDING' | 'WORKSTATION' | 'RACK' | 'INACTIVE';
 
-function generateSampleOpenSshPublicKey(username: string): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  const header = [0, 0, 0, 11, 115, 115, 104, 45, 101, 100, 50, 53, 53, 49, 57, 0, 0, 0, 32];
-  const combined = new Uint8Array(header.length + bytes.length);
-  combined.set(header, 0);
-  combined.set(bytes, header.length);
-  let binary = '';
-  for (let i = 0; i < combined.length; i++) {
-    binary += String.fromCharCode(combined[i]);
+const INACTIVE_STATUSES = new Set([
+  'SUSPENDED',
+  'ARCHIVED',
+  'DELETE_ELIGIBLE',
+  'DELETED',
+  'VERIFIED_REVOKED'
+]);
+
+function downloadTextFile(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function resolveMemberHostIp(member: LabMember): string {
+  return (
+    member.sshIp ||
+    (member.assignedServer === 'workstation' ? '192.168.167.251' : '192.168.167.250')
+  );
+}
+
+function resolveMemberSshUser(member: LabMember): string {
+  return member.sshLoginUser || member.username;
+}
+
+function parseUdpPort(endpoint?: string): string {
+  if (!endpoint) return '2204';
+  const parts = endpoint.trim().split(':');
+  const last = parts[parts.length - 1];
+  return last && /^\d+$/.test(last) ? last : '2204';
+}
+
+function getMemberWireGuardStatus(member: LabMember, devices: WireGuardDevice[]): string {
+  if (
+    devices.some(
+      (d) => d.status === 'ACTIVE' && d.enabled && !d.deviceId.startsWith('dev-pending-')
+    )
+  ) {
+    return 'ACTIVE';
   }
-  return `ssh-ed25519 ${btoa(binary)} ${username || 'researcher'}@labops-client`;
+  if (
+    devices.some(
+      (d) => d.status === 'PENDING_PROVISIONING' || d.deviceId.startsWith('dev-pending-')
+    ) ||
+    member.wireguard?.status === 'PENDING_PROVISIONING'
+  ) {
+    return 'PENDING_PROVISIONING';
+  }
+  return devices[0]?.status || member.wireguard?.status || 'NOT_CONFIGURED';
 }
 
 function statusBadge(status?: string) {
@@ -80,17 +118,13 @@ export function MemberManagementView() {
   const members = useLabOpsStore((state) => state.members);
   const memberSyncError = useLabOpsStore((state) => state.memberSyncError);
   const fetchAccessMembers = useLabOpsStore((state) => state.fetchAccessMembers);
-  const [health, setHealth] = useState<AccessHealth | null>(null);
   const [vpnOverview, setVpnOverview] = useState<WireGuardVpnOverview | null>(null);
   const [devicesByUser, setDevicesByUser] = useState<Record<string, WireGuardDevice[]>>({});
   const [newDeviceNames, setNewDeviceNames] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<MemberFilterTab>('ALL');
   const [wizardOpen, setWizardOpen] = useState(false);
   const [managedUser, setManagedUser] = useState<string | null>(null);
-  const [deviceName, setDeviceName] = useState('');
-  const [publicKey, setPublicKey] = useState('');
-  const [sshLabel, setSshLabel] = useState('Laptop cá nhân');
-  const [sshKeyInput, setSshKeyInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [claimedSecretsByUser, setClaimedSecretsByUser] = useState<
     Record<
@@ -128,18 +162,10 @@ export function MemberManagementView() {
     if (DEMO_MODE) return;
     await fetchAccessMembers();
     try {
-      const healthResponse = await fetch('/api/access/health', { cache: 'no-store' });
-      setHealth(healthResponse.ok ? await healthResponse.json() : null);
-    } catch {
-      setHealth(null);
-    }
-    try {
       const vpnRes = await fetch('/api/labops/v2/vpn/overview', { cache: 'no-store' });
-      if (vpnRes.ok) {
-        setVpnOverview(await vpnRes.json());
-      }
+      setVpnOverview(vpnRes.ok ? await vpnRes.json() : null);
     } catch {
-      // ignore
+      setVpnOverview(null);
     }
     const rows = useLabOpsStore.getState().members;
     const results = await Promise.all(
@@ -154,19 +180,28 @@ export function MemberManagementView() {
           if (v2Res.ok) {
             const rawDevices = await v2Res.json();
             if (Array.isArray(rawDevices) && rawDevices.length > 0) {
-              const normalized: WireGuardDevice[] = rawDevices.map((d: any) => ({
-                deviceId: String(d.device_id || d.deviceId || d.id),
-                id: String(d.id || d.device_id || ''),
-                name: d.name || 'Thiết bị VPN',
-                clientIp: d.address || d.clientIp || d.vpn_ip || '',
-                publicKey: d.public_key || d.publicKey || '',
-                status: (d.status ||
-                  (d.enabled !== false ? 'ACTIVE' : 'DISABLED')) as WireGuardDevice['status'],
-                enabled: d.enabled !== false,
-                lastHandshake: d.last_handshake || d.lastHandshake || null,
-                transferRx: Number(d.transfer_rx || d.transferRx || 0),
-                transferTx: Number(d.transfer_tx || d.transferTx || 0)
-              }));
+              const normalized: WireGuardDevice[] = rawDevices.map((item: unknown) => {
+                const d = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+                const enabled = d.enabled !== false;
+                return {
+                  deviceId: String(d.device_id || d.deviceId || d.id || ''),
+                  id: String(d.id || d.device_id || ''),
+                  name: String(d.name || 'Thiết bị VPN'),
+                  clientIp: String(d.address || d.clientIp || d.vpn_ip || ''),
+                  publicKey: String(d.public_key || d.publicKey || ''),
+                  allowedSubnets: String(d.allowed_subnets || d.allowedSubnets || ''),
+                  status: String(
+                    d.status || (enabled ? 'ACTIVE' : 'DISABLED')
+                  ) as WireGuardDevice['status'],
+                  enabled,
+                  lastHandshake: (d.last_handshake || d.lastHandshake || null) as
+                    | string
+                    | number
+                    | null,
+                  transferRx: Number(d.transfer_rx || d.transferRx || 0),
+                  transferTx: Number(d.transfer_tx || d.transferTx || 0)
+                };
+              });
               return [member.id, normalized] as const;
             }
           }
@@ -197,9 +232,22 @@ export function MemberManagementView() {
   }, [refresh]);
   /* oxlint-enable react/set-state-in-effect */
 
+  const summaryStats = useMemo(() => {
+    const total = members.length;
+    const workstation = members.filter((m) => m.assignedServer === 'workstation').length;
+    const track = members.filter((m) => m.assignedServer === 'track').length;
+    const inactive = members.filter((m) => INACTIVE_STATUSES.has(m.status)).length;
+    const active = total - inactive;
+    return { total, workstation, track, active, inactive };
+  }, [members]);
+
   const visibleMembers = useMemo(
     () =>
       members.filter((member) => {
+        if (statusFilter === 'ACTIVE_PENDING' && INACTIVE_STATUSES.has(member.status)) return false;
+        if (statusFilter === 'INACTIVE' && !INACTIVE_STATUSES.has(member.status)) return false;
+        if (statusFilter === 'WORKSTATION' && member.assignedServer !== 'workstation') return false;
+        if (statusFilter === 'RACK' && member.assignedServer !== 'track') return false;
         const query = filter.toLowerCase();
         return (
           !query ||
@@ -208,7 +256,7 @@ export function MemberManagementView() {
           )
         );
       }),
-    [filter, members]
+    [filter, members, statusFilter]
   );
 
   const runAction = async (path: string, method: string, body?: unknown) => {
@@ -316,42 +364,6 @@ export function MemberManagementView() {
     }
   };
 
-  const registerDevice = async (member: LabMember) => {
-    if (!publicKey.trim() || !deviceName.trim()) return;
-    const result = await runAction(
-      `/api/access/users/${encodeURIComponent(member.id)}/wireguard/devices`,
-      'POST',
-      {
-        name: deviceName.trim(),
-        publicKey: publicKey.trim()
-      }
-    );
-    if (result) {
-      setPublicKey('');
-      setDeviceName('');
-    }
-  };
-
-  const enrollMemberSshKey = async (member: LabMember) => {
-    if (!sshKeyInput.trim()) {
-      toast.error('Vui lòng dán khóa công khai OpenSSH (ssh-ed25519 / ssh-rsa) trước khi cấp.');
-      return;
-    }
-    const result = await runAction('/api/labops/v2/ssh-keys', 'POST', {
-      username: member.username,
-      label: sshLabel.trim() || 'Khóa SSH cá nhân',
-      public_key: sshKeyInput.trim()
-    });
-    if (result) {
-      setSshKeyInput('');
-      toast.success(
-        result.ssh_endpoint
-          ? `Đã cấp khóa SSH! Lệnh kết nối: ${result.ssh_endpoint}`
-          : `Đã đăng ký khóa SSH (${result.fingerprint}) cho @${member.username}`
-      );
-    }
-  };
-
   const rotateMemberSshKeypair = async (member: LabMember, requirePassphrase = false) => {
     const result = await runAction(
       `/api/labops/v2/ssh-access/${encodeURIComponent(member.id)}/rotate-key`,
@@ -376,18 +388,6 @@ export function MemberManagementView() {
         `Đã cấp lại mật khẩu tạm mới cho @${member.username} (mật khẩu tạm cũ đã bị hủy hiệu lực).`
       );
     }
-  };
-
-  const downloadTextFile = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
   };
 
   const downloadMemberAccessZip = async (member: LabMember) => {
@@ -544,6 +544,9 @@ export function MemberManagementView() {
     }
   };
 
+  const vpnHealthy = vpnOverview?.status === 'HEALTHY';
+  const wgPort = parseUdpPort(vpnOverview?.public_endpoint);
+
   return (
     <div className='space-y-5'>
       <div className='flex flex-wrap items-center justify-between gap-3'>
@@ -578,7 +581,13 @@ export function MemberManagementView() {
       )}
 
       {/* WIREGUARD VPN SYSTEM OVERVIEW */}
-      <Card className='border-primary/30 bg-card/60 backdrop-blur-sm shadow-sm'>
+      <Card
+        className={`backdrop-blur-sm shadow-sm ${
+          vpnOverview && !vpnHealthy
+            ? 'border-rose-500/40 bg-rose-500/5'
+            : 'border-primary/30 bg-card/60'
+        }`}
+      >
         <CardContent className='p-4 space-y-3'>
           <div className='flex flex-wrap items-center justify-between gap-2 border-b pb-2'>
             <div className='flex items-center gap-2'>
@@ -589,15 +598,24 @@ export function MemberManagementView() {
               >
                 Docker wg-easy v15 (Duy nhất)
               </Badge>
-              <Badge variant='outline' className='text-xs'>
-                Trạng thái: {vpnOverview?.status || 'HEALTHY'}
+              <Badge
+                variant='outline'
+                className={
+                  vpnHealthy
+                    ? 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30 text-xs'
+                    : vpnOverview
+                      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/40 text-xs'
+                      : 'bg-amber-500/10 text-amber-800 border-amber-500/30 text-xs'
+                }
+              >
+                Trạng thái: {vpnOverview ? vpnOverview.status : 'ĐANG KIỂM TRA...'}
               </Badge>
             </div>
             <div className='text-xs text-muted-foreground flex flex-wrap items-center gap-3'>
               <span>
                 Public Endpoint:{' '}
                 <strong className='text-foreground font-mono'>
-                  {vpnOverview?.public_endpoint || '118.70.169.236:2205'}
+                  {vpnOverview?.public_endpoint || 'Chưa cấu hình Endpoint'}
                 </strong>
               </span>
               <span>
@@ -609,17 +627,35 @@ export function MemberManagementView() {
             </div>
           </div>
 
+          {vpnOverview && !vpnHealthy && (
+            <div className='rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-800 dark:text-rose-200 space-y-1'>
+              <p className='font-semibold'>
+                ⚠️ wg-easy VPN Gateway hiện đang ngoại tuyến ({vpnOverview.status})
+              </p>
+              <p>
+                {vpnOverview.wg_easy?.error ||
+                  'Không thể kết nối API quản trị wg-easy tại cổng nội bộ.'}{' '}
+                — SSH trực tiếp trong mạng LAN vẫn hoạt động bình thường; cần khởi động container{' '}
+                <code>labops-wg-easy</code> để cấp hoặc kích hoạt peer VPN từ xa qua Internet.
+              </p>
+            </div>
+          )}
+
           <div className='grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs'>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Cổng UDP & Chuyển tiếp</div>
-              <div className='font-mono font-medium text-sm mt-0.5'>UDP 2205 (wg-easy)</div>
+              <div className='font-mono font-medium text-sm mt-0.5'>UDP {wgPort} (wg-easy)</div>
               <div className='text-xs text-muted-foreground mt-0.5'>
-                {vpnOverview?.public_endpoint || '118.70.169.236:2205'}
+                {vpnOverview?.public_endpoint || 'Chưa cấu hình Endpoint'}
               </div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Thiết bị VPN / Kết nối</div>
-              <div className='font-mono font-medium text-sm mt-0.5 text-emerald-600 dark:text-emerald-400'>
+              <div
+                className={`font-mono font-medium text-sm mt-0.5 ${
+                  vpnHealthy ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'
+                }`}
+              >
                 {vpnOverview?.active_clients ?? 0} / {vpnOverview?.total_clients ?? 0} online
               </div>
               <div className='text-xs text-muted-foreground mt-0.5'>Xác minh Handshake thực tế</div>
@@ -650,7 +686,7 @@ export function MemberManagementView() {
           <CardContent className='space-y-2 p-4'>
             <h2 className='font-medium'>Legacy Host SSH (Cổng 22)</h2>
             <div className='flex flex-wrap gap-2'>
-              <Badge variant='outline'>Bảo toàn nguyên trạng trên aiotlab-rack</Badge>
+              <Badge variant='outline'>Bảo toàn nguyên trạng trên Workstation &amp; Rack</Badge>
               <Badge variant='outline'>Không tự động chỉnh sửa</Badge>
             </div>
             <p className='text-xs text-muted-foreground'>
@@ -673,14 +709,69 @@ export function MemberManagementView() {
         </Card>
       </div>
 
+      {/* ACCOUNT SUMMARY STRIP & FILTER TABS */}
+      <div className='grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs'>
+        <div className='rounded-lg border bg-card p-3'>
+          <div className='text-muted-foreground'>Tổng tài khoản</div>
+          <div className='text-lg font-bold font-mono mt-0.5'>{summaryStats.total}</div>
+        </div>
+        <div className='rounded-lg border bg-card p-3'>
+          <div className='text-muted-foreground'>Workstation (aiot-ws1)</div>
+          <div className='text-lg font-bold font-mono mt-0.5 text-primary'>
+            {summaryStats.workstation}
+          </div>
+        </div>
+        <div className='rounded-lg border bg-card p-3'>
+          <div className='text-muted-foreground'>Rack (aiotlab-rack)</div>
+          <div className='text-lg font-bold font-mono mt-0.5'>{summaryStats.track}</div>
+        </div>
+        <div className='rounded-lg border bg-card p-3'>
+          <div className='text-muted-foreground'>Hoạt động / Chờ runtime</div>
+          <div className='text-lg font-bold font-mono mt-0.5 text-emerald-600 dark:text-emerald-400'>
+            {summaryStats.active}
+          </div>
+        </div>
+        <div className='rounded-lg border bg-card p-3'>
+          <div className='text-muted-foreground'>Tạm ngưng / Chờ xóa</div>
+          <div className='text-lg font-bold font-mono mt-0.5 text-amber-700 dark:text-amber-300'>
+            {summaryStats.inactive}
+          </div>
+        </div>
+      </div>
+
       <Card>
         <CardContent className='space-y-4 p-4'>
-          <Input
-            aria-label='Tìm tài khoản'
-            placeholder='Tìm username, tên, email hoặc workspace'
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-          />
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div className='flex flex-wrap gap-1.5'>
+              {(
+                [
+                  { id: 'ALL', label: `Tất cả (${summaryStats.total})` },
+                  { id: 'ACTIVE_PENDING', label: `Hoạt động / Chờ (${summaryStats.active})` },
+                  { id: 'WORKSTATION', label: `Workstation (${summaryStats.workstation})` },
+                  { id: 'RACK', label: `Rack (${summaryStats.track})` },
+                  { id: 'INACTIVE', label: `Tạm ngưng / Chờ xóa (${summaryStats.inactive})` }
+                ] as const
+              ).map((tab) => (
+                <Button
+                  key={tab.id}
+                  type='button'
+                  size='sm'
+                  variant={statusFilter === tab.id ? 'default' : 'outline'}
+                  className='h-8 text-xs'
+                  onClick={() => setStatusFilter(tab.id)}
+                >
+                  {tab.label}
+                </Button>
+              ))}
+            </div>
+            <Input
+              aria-label='Tìm tài khoản'
+              placeholder='Tìm username, tên, email hoặc workspace'
+              className='max-w-xs'
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+            />
+          </div>
           <div className='overflow-x-auto'>
             <table className='w-full min-w-[900px] text-left text-sm'>
               <thead>
@@ -698,10 +789,10 @@ export function MemberManagementView() {
                 {visibleMembers.map((member) => {
                   const devices = devicesByUser[member.id] || member.wireguard?.devices || [];
                   const expanded = managedUser === member.id;
-                  const canEnroll =
-                    !DEMO_MODE &&
-                    member.workspaceStatus === 'VERIFIED' &&
-                    health?.network_policy === 'VERIFIED';
+                  const resolvedHostIp = resolveMemberHostIp(member);
+                  const resolvedSshUser = resolveMemberSshUser(member);
+                  const wgStatus = getMemberWireGuardStatus(member, devices);
+                  const wgIp = member.wireguard?.clientIp || devices[0]?.clientIp;
                   return (
                     <Fragment key={member.id}>
                       <tr className='border-b align-top'>
@@ -713,27 +804,34 @@ export function MemberManagementView() {
                         </td>
                         <td className='p-3'>{member.role}</td>
                         <td className='p-3'>
-                          <span className='font-mono uppercase'>{member.assignedServer}</span>
+                          <div className='font-mono uppercase text-xs font-semibold'>
+                            {member.assignedServer} · {resolvedHostIp}
+                          </div>
                           <div className='text-xs text-muted-foreground'>
                             {member.workspaceName}
                           </div>
                         </td>
                         <td className='p-3'>
                           {statusBadge(member.sshKeyStatus || 'NOT_CONFIGURED')}
-                          <div className='text-xs font-mono text-muted-foreground mt-1'>
-                            {member.sshPort
-                              ? `ssh -p ${member.sshPort} ${member.username}@${member.sshIp || '192.168.167.250'}`
-                              : 'Chưa cấp khóa SSH'}
+                          <div className='text-xs font-mono text-muted-foreground mt-1 space-y-0.5'>
+                            {member.sshPort ? (
+                              <>
+                                <div className='text-foreground font-semibold'>
+                                  ssh labops-{member.username}
+                                </div>
+                                <div>
+                                  -p {member.sshPort} {resolvedSshUser}@{resolvedHostIp}
+                                </div>
+                              </>
+                            ) : (
+                              'Chưa cấp khóa SSH'
+                            )}
                           </div>
                         </td>
                         <td className='p-3'>
-                          {statusBadge(
-                            devices.some((device) => device.status === 'ACTIVE')
-                              ? 'ACTIVE'
-                              : devices[0]?.status || 'NOT_CONFIGURED'
-                          )}
-                          <div className='text-xs text-muted-foreground'>
-                            {devices.length} thiết bị
+                          {statusBadge(wgStatus)}
+                          <div className='text-xs text-muted-foreground font-mono mt-0.5'>
+                            {devices.length} thiết bị{wgIp ? ` · ${wgIp}` : ''}
                           </div>
                         </td>
                         <td className='p-3'>
@@ -855,34 +953,44 @@ export function MemberManagementView() {
                                         <div className='text-muted-foreground text-xs'>
                                           Đường dẫn thư mục riêng trên máy chủ:
                                         </div>
-                                        <div className='font-mono font-bold text-xs select-all text-foreground'>
-                                          /media/LabOps-Data/{member.username}
+                                        <div className='font-mono font-bold text-xs select-all break-all text-foreground'>
+                                          {member.memberStorageDirectory ||
+                                            member.workspaceDir ||
+                                            member.mountPath ||
+                                            'Chưa cấp phát'}
                                         </div>
                                         <p className='text-xs text-muted-foreground'>
-                                          Thư mục cô lập, chỉ tài khoản này và admin có quyền truy
-                                          xuất.
+                                          Thư mục cô lập (0700), chỉ tài khoản này và admin có quyền
+                                          truy xuất.
                                         </p>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5 pt-1'>
                                         <span className='text-muted-foreground'>
-                                          Hạn mức CPU (vCPU):
+                                          Chính sách CPU:
                                         </span>
-                                        <span className='font-semibold'>
-                                          {member.cpuLimitCores || 8} vCPU
+                                        <span className='font-mono font-semibold'>
+                                          {member.cpuPolicy || 'SHARED_WEIGHTED'} (Trọng số{' '}
+                                          {member.cpuWeight ?? 100})
                                         </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>
-                                        <span className='text-muted-foreground'>Hạn mức RAM:</span>
-                                        <span className='font-semibold'>
-                                          {member.ramLimitGb || 32} GB
+                                        <span className='text-muted-foreground'>
+                                          Chính sách RAM:
+                                        </span>
+                                        <span className='font-mono font-semibold'>
+                                          {member.memoryPolicy || 'SHARED_HOST_PROTECTED'}
                                         </span>
                                       </div>
-                                      <div className='flex justify-between'>
-                                        <span className='text-muted-foreground'>
-                                          Hạn mức Lưu trữ (Storage):
+                                      <div className='flex justify-between gap-2'>
+                                        <span className='text-muted-foreground shrink-0'>
+                                          Ổ đĩa &amp; Lưu trữ:
                                         </span>
-                                        <span className='font-semibold'>
-                                          {member.storageQuotaGb || 100} GB
+                                        <span className='font-semibold text-right'>
+                                          {member.storagePoolLabel ||
+                                            member.hostStorageRoot ||
+                                            'Mặc định'}{' '}
+                                          · {member.storageQuotaGb || 0} GiB (
+                                          {member.storageQuotaEnforcement || 'NOT_VERIFIED'})
                                         </span>
                                       </div>
                                     </div>
@@ -908,11 +1016,25 @@ export function MemberManagementView() {
                                           Endpoint SSH đã cấp:
                                         </p>
                                         <p>
-                                          <code>
-                                            ssh -i id_ed25519_{member.username} -p {member.sshPort}{' '}
-                                            {member.username}@{member.sshIp || '192.168.167.250'}
+                                          1 chạm:{' '}
+                                          <code className='font-bold select-all'>
+                                            ssh labops-{member.username}
                                           </code>
                                         </p>
+                                        <p>
+                                          Trực tiếp:{' '}
+                                          <code className='select-all'>
+                                            ssh -i ~/.ssh/id_ed25519_{member.username} -p{' '}
+                                            {member.sshPort} {resolvedSshUser}@{resolvedHostIp}
+                                          </code>
+                                        </p>
+                                        {resolvedSshUser !== member.username && (
+                                          <p className='text-[11px] font-sans text-muted-foreground'>
+                                            Tài khoản sshd host dùng <code>{resolvedSshUser}</code>{' '}
+                                            với ForceCommand cô lập vào workspace của @
+                                            {member.username}.
+                                          </p>
+                                        )}
                                         {member.sshFingerprint && (
                                           <p className='text-xs text-muted-foreground'>
                                             Fingerprint: {member.sshFingerprint}
@@ -966,7 +1088,22 @@ export function MemberManagementView() {
                                           type='button'
                                           size='sm'
                                           className='font-bold'
-                                          disabled={busy || DEMO_MODE}
+                                          disabled={
+                                            busy ||
+                                            DEMO_MODE ||
+                                            member.status === 'SUSPENDED' ||
+                                            member.status === 'ARCHIVED' ||
+                                            member.status === 'DELETE_ELIGIBLE' ||
+                                            member.status === 'DELETED'
+                                          }
+                                          title={
+                                            member.status === 'SUSPENDED' ||
+                                            member.status === 'ARCHIVED' ||
+                                            member.status === 'DELETE_ELIGIBLE' ||
+                                            member.status === 'DELETED'
+                                              ? 'Tài khoản đã bị tạm ngưng/niêm phong, không thể tải gói kết nối'
+                                              : 'Tải bộ kết nối SSH & WireGuard (.zip)'
+                                          }
                                           onClick={() => void downloadMemberAccessZip(member)}
                                         >
                                           📦 Tải bộ kết nối (.zip)
@@ -1195,94 +1332,135 @@ export function MemberManagementView() {
 
                                     {devices.length ? (
                                       <div className='space-y-2 max-h-[360px] overflow-y-auto pr-1'>
-                                        {devices.map((device) => (
-                                          <div
-                                            key={device.deviceId}
-                                            className='rounded-md border p-3 text-xs space-y-2 bg-card'
-                                          >
-                                            <div className='flex flex-wrap items-center justify-between gap-1'>
-                                              <div className='flex items-center gap-2'>
-                                                <span className='font-semibold text-sm'>
-                                                  {device.name}
+                                        {devices.map((device) => {
+                                          const isPendingDev =
+                                            device.status === 'PENDING_PROVISIONING' ||
+                                            device.deviceId.startsWith('dev-pending-');
+                                          const badgeLabel = isPendingDev
+                                            ? 'PENDING_PROVISIONING'
+                                            : device.enabled && device.status === 'ACTIVE'
+                                              ? 'ACTIVE'
+                                              : device.status || 'PAUSED';
+                                          const allowedRoutes =
+                                            device.allowedSubnets ||
+                                            member.wireguard?.allowedSubnets ||
+                                            'Chưa phân giải';
+                                          return (
+                                            <div
+                                              key={device.deviceId}
+                                              className='rounded-md border p-3 text-xs space-y-2 bg-card'
+                                            >
+                                              <div className='flex flex-wrap items-center justify-between gap-1'>
+                                                <div className='flex items-center gap-2'>
+                                                  <span className='font-semibold text-sm'>
+                                                    {device.name}
+                                                  </span>
+                                                  <Badge
+                                                    variant='outline'
+                                                    className={
+                                                      device.enabled &&
+                                                      device.status === 'ACTIVE' &&
+                                                      !isPendingDev
+                                                        ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
+                                                        : 'bg-amber-500/10 text-amber-700 border-amber-500/30'
+                                                    }
+                                                  >
+                                                    {badgeLabel}
+                                                  </Badge>
+                                                </div>
+                                                <div className='font-mono text-muted-foreground'>
+                                                  IP:{' '}
+                                                  <strong className='text-foreground'>
+                                                    {device.clientIp || '10.88.40.x'}
+                                                  </strong>
+                                                </div>
+                                              </div>
+
+                                              <div className='text-xs text-muted-foreground font-mono'>
+                                                AllowedIPs:{' '}
+                                                <span className='text-foreground'>
+                                                  {allowedRoutes}
                                                 </span>
-                                                <Badge
+                                              </div>
+
+                                              <div className='grid grid-cols-2 gap-2 text-xs text-muted-foreground'>
+                                                <div>
+                                                  Handshake:{' '}
+                                                  <span className='text-foreground'>
+                                                    {device.lastHandshake
+                                                      ? typeof device.lastHandshake === 'number'
+                                                        ? new Date(
+                                                            device.lastHandshake * 1000
+                                                          ).toLocaleString()
+                                                        : String(device.lastHandshake)
+                                                      : 'Chưa có kết nối'}
+                                                  </span>
+                                                </div>
+                                                <div>
+                                                  Lưu lượng:{' '}
+                                                  <span className='text-foreground font-mono'>
+                                                    ↓ {formatBytes(device.transferRx)} · ↑{' '}
+                                                    {formatBytes(device.transferTx)}
+                                                  </span>
+                                                </div>
+                                              </div>
+
+                                              <div className='flex flex-wrap items-center gap-2 pt-1 border-t'>
+                                                <Button
+                                                  type='button'
+                                                  size='sm'
                                                   variant='outline'
-                                                  className={
-                                                    device.enabled && device.status === 'ACTIVE'
-                                                      ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30'
-                                                      : 'bg-amber-500/10 text-amber-700 border-amber-500/30'
+                                                  disabled={
+                                                    busy || DEMO_MODE || isPendingDev || !vpnHealthy
+                                                  }
+                                                  title={
+                                                    isPendingDev
+                                                      ? 'Thiết bị chờ chưa đăng ký trên wg-easy Gateway'
+                                                      : !vpnHealthy
+                                                        ? 'wg-easy Gateway đang ngoại tuyến'
+                                                        : 'Tải cấu hình .conf động theo host'
+                                                  }
+                                                  onClick={() =>
+                                                    void downloadDeviceConfigFile(member, device)
                                                   }
                                                 >
-                                                  {device.enabled ? 'ACTIVE' : 'PAUSED'}
-                                                </Badge>
-                                              </div>
-                                              <div className='font-mono text-muted-foreground'>
-                                                IP:{' '}
-                                                <strong className='text-foreground'>
-                                                  {device.clientIp || '10.88.40.x'}
-                                                </strong>
+                                                  📥 Tải .conf
+                                                </Button>
+                                                <Button
+                                                  type='button'
+                                                  size='sm'
+                                                  variant='outline'
+                                                  disabled={
+                                                    busy || DEMO_MODE || isPendingDev || !vpnHealthy
+                                                  }
+                                                  title={
+                                                    isPendingDev
+                                                      ? 'Thiết bị chờ chưa đăng ký trên wg-easy Gateway'
+                                                      : !vpnHealthy
+                                                        ? 'wg-easy Gateway đang ngoại tuyến'
+                                                        : 'Bật/tắt peer trên wg-easy'
+                                                  }
+                                                  onClick={() =>
+                                                    void toggleDeviceState(member, device)
+                                                  }
+                                                >
+                                                  {device.enabled ? '⏸ Tạm dừng' : '▶ Kích hoạt'}
+                                                </Button>
+                                                <Button
+                                                  type='button'
+                                                  size='sm'
+                                                  variant='destructive'
+                                                  disabled={busy || DEMO_MODE}
+                                                  onClick={() =>
+                                                    void revokeDeviceV2Action(member, device)
+                                                  }
+                                                >
+                                                  {isPendingDev ? 'Xóa bản ghi chờ' : 'Thu hồi'}
+                                                </Button>
                                               </div>
                                             </div>
-
-                                            <div className='grid grid-cols-2 gap-2 text-xs text-muted-foreground'>
-                                              <div>
-                                                Handshake:{' '}
-                                                <span className='text-foreground'>
-                                                  {device.lastHandshake
-                                                    ? typeof device.lastHandshake === 'number'
-                                                      ? new Date(
-                                                          device.lastHandshake * 1000
-                                                        ).toLocaleString()
-                                                      : String(device.lastHandshake)
-                                                    : 'Chưa có kết nối'}
-                                                </span>
-                                              </div>
-                                              <div>
-                                                Lưu lượng:{' '}
-                                                <span className='text-foreground font-mono'>
-                                                  ↓ {formatBytes(device.transferRx)} · ↑{' '}
-                                                  {formatBytes(device.transferTx)}
-                                                </span>
-                                              </div>
-                                            </div>
-
-                                            <div className='flex flex-wrap items-center gap-2 pt-1 border-t'>
-                                              <Button
-                                                type='button'
-                                                size='sm'
-                                                variant='outline'
-                                                disabled={busy || DEMO_MODE}
-                                                onClick={() =>
-                                                  void downloadDeviceConfigFile(member, device)
-                                                }
-                                              >
-                                                📥 Tải .conf
-                                              </Button>
-                                              <Button
-                                                type='button'
-                                                size='sm'
-                                                variant='outline'
-                                                disabled={busy || DEMO_MODE}
-                                                onClick={() =>
-                                                  void toggleDeviceState(member, device)
-                                                }
-                                              >
-                                                {device.enabled ? '⏸ Tạm dừng' : '▶ Kích hoạt'}
-                                              </Button>
-                                              <Button
-                                                type='button'
-                                                size='sm'
-                                                variant='destructive'
-                                                disabled={busy || DEMO_MODE}
-                                                onClick={() =>
-                                                  void revokeDeviceV2Action(member, device)
-                                                }
-                                              >
-                                                Thu hồi
-                                              </Button>
-                                            </div>
-                                          </div>
-                                        ))}
+                                          );
+                                        })}
                                       </div>
                                     ) : (
                                       <div className='rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground'>
@@ -1296,10 +1474,17 @@ export function MemberManagementView() {
                                       <p className='text-xs font-semibold'>
                                         ⚡ Cấp thiết bị WireGuard mới (1-chạm tự sinh Key & Config)
                                       </p>
+                                      {!vpnHealthy && (
+                                        <p className='text-xs text-rose-700 dark:text-rose-300'>
+                                          wg-easy Gateway đang OFFLINE — không thể cấp peer mới cho
+                                          đến khi khởi động container <code>labops-wg-easy</code>.
+                                        </p>
+                                      )}
                                       <div className='flex gap-2'>
                                         <Input
                                           aria-label='Tên thiết bị mới'
                                           placeholder='VD: MacBook M3, iPhone, Máy trạm cá nhân...'
+                                          disabled={!vpnHealthy || busy || DEMO_MODE}
                                           value={newDeviceNames[member.id] || ''}
                                           onChange={(e) =>
                                             setNewDeviceNames((prev) => ({
@@ -1320,6 +1505,7 @@ export function MemberManagementView() {
                                           disabled={
                                             busy ||
                                             DEMO_MODE ||
+                                            !vpnHealthy ||
                                             !(newDeviceNames[member.id] || '').trim()
                                           }
                                           onClick={() => void quickAddMemberDevice(member)}
@@ -1329,39 +1515,10 @@ export function MemberManagementView() {
                                       </div>
                                       <p className='text-xs text-muted-foreground'>
                                         Hệ thống wg-easy tự động cấp IP riêng trong subnet{' '}
-                                        <code>10.88.40.0/24</code> và tải ngay file cấu hình{' '}
-                                        <code>.conf</code>.
+                                        <code>{vpnOverview?.cidr || '10.88.40.0/24'}</code> và tải
+                                        ngay file cấu hình <code>.conf</code>.
                                       </p>
                                     </div>
-
-                                    {/* NÂNG CAO: TỰ NHẬP PUBLIC KEY */}
-                                    <details className='text-xs text-muted-foreground cursor-pointer'>
-                                      <summary className='font-medium text-primary hover:underline py-0.5'>
-                                        ▶ Nâng cao: Đăng ký bằng WireGuard Public Key tự sinh
-                                      </summary>
-                                      <div className='mt-2 space-y-2 pl-2 border-l-2 border-muted'>
-                                        <Input
-                                          aria-label='Tên thiết bị'
-                                          placeholder='Tên thiết bị'
-                                          value={deviceName}
-                                          onChange={(event) => setDeviceName(event.target.value)}
-                                        />
-                                        <Input
-                                          aria-label='WireGuard public key'
-                                          placeholder='WireGuard public key (Base64 44 ký tự)'
-                                          value={publicKey}
-                                          onChange={(event) => setPublicKey(event.target.value)}
-                                        />
-                                        <Button
-                                          size='sm'
-                                          variant='outline'
-                                          disabled={busy || !deviceName.trim() || !publicKey.trim()}
-                                          onClick={() => void registerDevice(member)}
-                                        >
-                                          Đăng ký WireGuard Public Key
-                                        </Button>
-                                      </div>
-                                    </details>
 
                                     <div className='border-t pt-2 text-xs text-muted-foreground flex justify-between'>
                                       <span>
@@ -1409,10 +1566,10 @@ export function MemberManagementView() {
                                     <div className='space-y-2'>
                                       <div className='flex justify-between border-b pb-1'>
                                         <span className='text-muted-foreground'>
-                                          Tên Container:
+                                          Tên Workspace / Container:
                                         </span>
                                         <span className='font-mono font-bold'>
-                                          ws-{member.username}
+                                          {member.workspaceName || `ws-${member.username}`}
                                         </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
@@ -1420,7 +1577,9 @@ export function MemberManagementView() {
                                           Máy chủ vật lý:
                                         </span>
                                         <span className='font-semibold'>
-                                          aiotlab-rack (192.168.167.250)
+                                          {member.assignedServer === 'workstation'
+                                            ? `Workstation aiot-ws1 (${resolvedHostIp})`
+                                            : `Rack aiotlab-rack (${resolvedHostIp})`}
                                         </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
@@ -1435,20 +1594,29 @@ export function MemberManagementView() {
                                     <div className='space-y-2'>
                                       <div className='flex justify-between border-b pb-1'>
                                         <span className='text-muted-foreground'>
-                                          Giới hạn vCPU:
+                                          Chính sách CPU:
                                         </span>
-                                        <span>{member.cpuLimitCores || 8} cores</span>
-                                      </div>
-                                      <div className='flex justify-between border-b pb-1'>
-                                        <span className='text-muted-foreground'>Giới hạn RAM:</span>
-                                        <span>{member.ramLimitGb || 32} GB</span>
+                                        <span className='font-mono'>
+                                          {member.cpuPolicy || 'SHARED_WEIGHTED'}
+                                        </span>
                                       </div>
                                       <div className='flex justify-between border-b pb-1'>
                                         <span className='text-muted-foreground'>
-                                          Thư mục Mount:
+                                          Chính sách RAM:
                                         </span>
-                                        <code className='font-mono'>
-                                          /media/LabOps-Data/{member.username}
+                                        <span className='font-mono'>
+                                          {member.memoryPolicy || 'SHARED_HOST_PROTECTED'}
+                                        </span>
+                                      </div>
+                                      <div className='flex justify-between border-b pb-1 gap-2'>
+                                        <span className='text-muted-foreground shrink-0'>
+                                          Thư mục lưu trữ:
+                                        </span>
+                                        <code className='font-mono text-right break-all'>
+                                          {member.memberStorageDirectory ||
+                                            member.workspaceDir ||
+                                            member.mountPath ||
+                                            'Chưa cấp phát'}
                                         </code>
                                       </div>
                                     </div>
@@ -1464,14 +1632,34 @@ export function MemberManagementView() {
                                       Tài nguyên GPU &amp; Tiến trình đang chạy
                                     </h4>
                                     <Badge variant='outline' className='font-mono text-xs'>
-                                      FULL_GPU_EXCLUSIVE
+                                      {member.gpuPermissions && member.gpuPermissions.length > 0
+                                        ? member.gpuAllocationMode || 'SHARED'
+                                        : 'CPU_ONLY'}
                                     </Badge>
                                   </div>
-                                  <p className='text-muted-foreground'>
-                                    Thành viên @{member.username} được cấp quyền giữ chỗ GPU độc
-                                    quyền theo UUID. Mọi tiến trình chạy trên GPU đều được xác minh
-                                    thực tế qua Go Node Agent và NVIDIA NVML.
-                                  </p>
+                                  {member.gpuPermissions && member.gpuPermissions.length > 0 ? (
+                                    <div className='space-y-1.5 text-muted-foreground'>
+                                      <p>
+                                        GPU được cấp:{' '}
+                                        <strong className='font-mono text-foreground'>
+                                          {member.gpuPermissions.join(', ')}
+                                        </strong>{' '}
+                                        · Chính sách VRAM:{' '}
+                                        <strong className='text-foreground'>
+                                          {member.vramPolicy || 'Policy-Monitored'}
+                                        </strong>
+                                      </p>
+                                      <p>
+                                        Tiến trình chạy trên GPU được xác minh thực tế qua Go Node
+                                        Agent và NVIDIA NVML.
+                                      </p>
+                                    </div>
+                                  ) : (
+                                    <p className='text-muted-foreground'>
+                                      Tài khoản @{member.username} hiện chưa được cấp phát GPU riêng
+                                      (chạy chế độ CPU-only).
+                                    </p>
+                                  )}
                                   <div className='pt-2 flex gap-2'>
                                     <Button
                                       size='sm'

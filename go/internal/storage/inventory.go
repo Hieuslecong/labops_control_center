@@ -31,6 +31,7 @@ func NewInventoryCollector(nodeID string, quotaMgr QuotaManager) *InventoryColle
 		quotaMgr:    quotaMgr,
 		customPools: make(map[string]*StoragePoolInfo),
 		approvedRoots: []string{
+			"/mnt/HDD3",
 			"/media/LabOps-Data",
 			"/tank/workspaces",
 			"/mnt/labops-data",
@@ -97,11 +98,16 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 			fsType := fields[2]
 			opts := strings.Split(fields[3], ",")
 
-			// Bỏ qua các filesystem ảo (cgroup, sysfs, proc, devtmpfs, tmpfs nếu không chỉ định)
-			if strings.HasPrefix(device, "none") || fsType == "cgroup" || fsType == "cgroup2" ||
+			// Bỏ qua loop devices, các filesystem ảo/boot và per-user sub-mounts
+			if strings.HasPrefix(device, "/dev/loop") || strings.HasPrefix(device, "none") ||
+				fsType == "cgroup" || fsType == "cgroup2" ||
 				fsType == "sysfs" || fsType == "proc" || fsType == "devpts" || fsType == "hugetlbfs" ||
 				fsType == "mqueue" || fsType == "securityfs" || fsType == "pstore" || fsType == "bpf" ||
-				fsType == "autofs" || fsType == "fusectl" {
+				fsType == "autofs" || fsType == "fusectl" || fsType == "vfat" || fsType == "squashfs" ||
+				fsType == "iso9660" || fsType == "devtmpfs" || fsType == "tmpfs" || fsType == "overlay" ||
+				fsType == "efivarfs" || fsType == "tracefs" || fsType == "debugfs" || fsType == "configfs" ||
+				fsType == "binfmt_misc" || fsType == "nsfs" || strings.HasPrefix(fsType, "fuse") ||
+				strings.Contains(mountPoint, "/users/") || strings.Contains(mountPoint, "/.quota-images") {
 				continue
 			}
 

@@ -14,8 +14,8 @@ from app.core.config import settings
 logger = logging.getLogger("labops.storage")
 
 FORBIDDEN_ROOTS = [
-    "/", "/etc", "/proc", "/sys", "/var/run", "/run", "/dev", "/boot", "/root",
-    "/bin", "/sbin", "/usr", "/lib", "/lib64", "/var/lib/docker", "/mnt/HDD3", "/home"
+    "/", "/etc", "/proc", "/sys", "/var", "/var/run", "/run", "/dev", "/boot", "/root",
+    "/bin", "/sbin", "/usr", "/lib", "/lib64", "/var/lib/docker", "/home", "/tmp"
 ]
 
 def _now_iso() -> str:
@@ -70,7 +70,13 @@ class StorageInventoryService:
 
     def _collect_local_storage_pools(self, host_id: str) -> List[Dict[str, Any]]:
         pools = []
-        approved_roots = ["/media/LabOps-Data", "/tank/workspaces", "/mnt/labops-data", "/data"]
+        approved_roots = ["/mnt/HDD3", "/media/LabOps-Data", "/tank/workspaces", "/mnt/labops-data", "/data"]
+        ignored_fs = {
+            "cgroup", "cgroup2", "sysfs", "proc", "devpts", "tmpfs", "securityfs",
+            "devtmpfs", "vfat", "iso9660", "squashfs", "swap", "autofs", "hugetlbfs",
+            "mqueue", "pstore", "efivarfs", "bpf", "debugfs", "tracefs", "fusectl",
+            "configfs", "binfmt_misc", "nsfs", "overlay", "ramfs",
+        }
 
         # Nếu host_id là rack (track), giả lập pool chuẩn ZFS
         if host_id == "track":
@@ -81,6 +87,8 @@ class StorageInventoryService:
                 "filesystem_uuid": hashlib.sha256(b"track-zfs-tank").hexdigest()[:36],
                 "mount_point": "/tank/workspaces",
                 "filesystem": "zfs",
+                "label": "ZFS Tank Workspaces (/tank/workspaces — 4000.0 GiB)",
+                "is_default": True,
                 "capacity_gib": 4000.0,
                 "used_gib": 850.0,
                 "free_gib": 3150.0,
@@ -101,6 +109,8 @@ class StorageInventoryService:
 
         # Quét /proc/mounts cho workstation (hoặc host hiện tại)
         seen_mounts = set()
+        pools_by_device: Dict[str, Dict[str, Any]] = {}
+        extra_pools: List[Dict[str, Any]] = []
         if os.path.exists("/proc/mounts"):
             try:
                 with open("/proc/mounts", "r") as f:
@@ -113,16 +123,20 @@ class StorageInventoryService:
                             continue
                         seen_mounts.add(mount)
 
+                        is_approved = any(mount == r or mount.startswith(r + "/") for r in approved_roots)
+
+                        # Lọc bỏ loop devices, virtual/boot filesystems và per-user sub-mounts
+                        if dev.startswith("/dev/loop") or dev.startswith("none"):
+                            continue
+                        if not dev.startswith("/dev/") and not is_approved:
+                            continue
+                        if fs in ignored_fs or fs.startswith("fuse"):
+                            continue
+                        if "/users/" in mount or "/.quota-images" in mount or "/docker/overlay2" in mount:
+                            continue
+
                         opts = opts_str.split(",")
                         read_only = "ro" in opts
-
-                        # Kiểm tra xem mount point có phải là approved root hoặc disk hợp lệ
-                        is_approved = any(mount == r or mount.startswith(r + "/") for r in approved_roots)
-                        is_root = mount == "/"
-
-                        # Bỏ qua hệ thống ảo
-                        if dev.startswith("none") or fs in ["cgroup", "cgroup2", "sysfs", "proc", "devpts", "tmpfs", "securityfs"]:
-                            continue
 
                         # Đọc statvfs
                         try:
@@ -132,6 +146,9 @@ class StorageInventoryService:
                             free_gib = round((stat.f_bavail * block_size) / (1024**3), 1)
                             used_gib = round(((stat.f_blocks - stat.f_bfree) * block_size) / (1024**3), 1)
                         except Exception:
+                            continue
+
+                        if cap_gib <= 0:
                             continue
 
                         reserved_gib = round(cap_gib * 0.1, 1)
@@ -146,7 +163,10 @@ class StorageInventoryService:
                             eligible = False
                             reason = "Ổ đĩa ở chế độ Read-Only"
                             status = "INELIGIBLE"
-                        elif mount in FORBIDDEN_ROOTS or any(mount == p or mount.startswith(p + "/") for p in FORBIDDEN_ROOTS):
+                        elif mount in FORBIDDEN_ROOTS or any(
+                            mount == p or (p != "/" and mount.startswith(p + "/"))
+                            for p in FORBIDDEN_ROOTS
+                        ):
                             eligible = False
                             reason = f"Vùng hệ thống nhạy cảm bị cấm ({mount})"
                             status = "INELIGIBLE"
@@ -154,17 +174,43 @@ class StorageInventoryService:
                             eligible = False
                             reason = f"Dung lượng trống quá thấp (< 10 GiB): {free_gib} GiB"
                             status = "INELIGIBLE"
+                        elif mount.startswith("/mnt/") or mount.startswith("/media/") or is_approved:
+                            eligible = True
 
-                        # Tạo storage_id ổn định
-                        storage_id = f"pool-{host_id}-{re.sub(r'[^a-z0-9]', '-', mount.strip('/').lower() or 'root')}"
+                        dev_base = os.path.basename(dev)
+                        is_default = False
+                        if mount == "/mnt/HDD3" or dev_base == "sdc":
+                            if dev_base == "sdc" and os.path.ismount("/mnt/HDD3"):
+                                mount = "/mnt/HDD3"
+                            storage_id = "pool-hdd3"
+                            label = f"Ổ đĩa Nghiên cứu AI HDD3 (/mnt/HDD3 — {cap_gib} GiB)"
+                            is_default = True
+                            is_approved = True
+                        elif mount == "/" or dev_base == "sda2":
+                            storage_id = "pool-root"
+                            mount = "/"
+                            label = f"Ổ đĩa Hệ thống Root ({fs.upper()} {dev} — {cap_gib} GiB)"
+                            eligible = False
+                            reason = "Phân vùng hệ thống Root (/) — không cấp phát trực tiếp cho workspace"
+                            status = "INELIGIBLE"
+                            is_default = False
+                            is_approved = False
+                        elif dev_base.startswith("sd") or dev_base.startswith("nvme"):
+                            storage_id = f"pool-{dev_base}"
+                            label = f"Ổ đĩa Lưu trữ Thứ cấp {dev_base.upper()} ({dev} — {cap_gib} GiB)"
+                        else:
+                            storage_id = f"pool-{host_id}-{re.sub(r'[^a-z0-9]', '-', mount.strip('/').lower() or 'root')}"
+                            label = f"{fs.upper()} ({mount} — {cap_gib} GiB)"
 
-                        pools.append({
+                        pool_entry = {
                             "host_id": host_id,
                             "storage_id": storage_id,
                             "device": dev,
                             "filesystem_uuid": hashlib.sha256(f"{host_id}:{mount}".encode()).hexdigest()[:36],
                             "mount_point": mount,
                             "filesystem": fs,
+                            "label": label,
+                            "is_default": is_default,
                             "capacity_gib": cap_gib,
                             "used_gib": used_gib,
                             "free_gib": free_gib,
@@ -179,11 +225,21 @@ class StorageInventoryService:
                             "ineligibility_reason": reason,
                             "last_verified_at": _now_iso(),
                             "verification_status": status
-                        })
+                        }
+
+                        if dev.startswith("/dev/"):
+                            existing = pools_by_device.get(dev)
+                            if existing is None or (dev_base == "sdc" and mount == "/mnt/HDD3") or (dev_base == "sda2" and mount == "/"):
+                                pools_by_device[dev] = pool_entry
+                        else:
+                            extra_pools.append(pool_entry)
             except Exception as e:
                 logger.error(f"Lỗi đọc /proc/mounts: {e}")
 
-        # Đảm bảo pool approved `/media/LabOps-Data` luôn có mặt cho workstation
+        pools.extend(pools_by_device.values())
+        pools.extend(extra_pools)
+
+        # Đảm bảo pool approved `/media/LabOps-Data` luôn có mặt cho workstation nếu chưa có ổ đĩa hợp lệ nào
         has_approved = any(p["eligible"] for p in pools)
         if not has_approved:
             default_pool = {
@@ -193,6 +249,8 @@ class StorageInventoryService:
                 "filesystem_uuid": hashlib.sha256(f"{host_id}-data".encode()).hexdigest()[:36],
                 "mount_point": "/media/LabOps-Data",
                 "filesystem": "ext4",
+                "label": f"Ổ đĩa Dữ liệu LabOps (/media/LabOps-Data — 1800.0 GiB)",
+                "is_default": True,
                 "capacity_gib": 1800.0,
                 "used_gib": 200.0,
                 "free_gib": 1600.0,
@@ -210,6 +268,7 @@ class StorageInventoryService:
             }
             pools.append(default_pool)
 
+        pools.sort(key=lambda p: (not p.get("eligible", False), not p.get("is_default", False), -float(p.get("allocatable_gib", 0.0))))
         return pools
 
     def get_storage_pool_by_id(self, host_id: str, storage_id: str) -> Optional[Dict[str, Any]]:

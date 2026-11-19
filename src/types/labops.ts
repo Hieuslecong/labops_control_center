@@ -165,6 +165,61 @@ export type StorageVerificationStatus =
 export interface StoragePoolInfo {
   hostId: ServerId;
   storageId: string;
+  label?: string;
+  isDefault?: boolean;
+  device: string;
+  filesystemUuid: string;
+  mountPoint: string;
+  filesystem: string;
+  capacityGib: number;
+  usedGib: number;
+  freeGib: number;
+  allocatableGib: number;
+  reservedGib: number;
+  quotaBackend: QuotaBackend;
+  quotaSupported: boolean;
+  quotaEnforced: boolean;
+  readOnly: boolean;
+  mounted: boolean;
+  eligible: boolean;
+  ineligibilityReason?: string | null;
+  lastVerifiedAt: string;
+  verificationStatus: StorageVerificationStatus;
+}
+
+export interface StorageValidateRequest {
+  hostId: ServerId;
+  storageId: string;
+  requestedQuotaGib: number;
+}
+
+export interface StorageValidateResponse {
+  valid: boolean;
+  hostId: ServerId;
+  storageId: string;
+  requestedQuotaGib: number;
+  allocatableGib?: number;
+  mountPoint?: string;
+  memberStorageDirPreview?: string;
+  error?: string;
+}
+
+export interface MemoryPressureTelemetry {
+  someAvg10: number;
+  someAvg60: number;
+  someAvg300: number;
+  fullAvg10: number;
+  fullAvg60: number;
+  fullAvg300: number;
+  pressureLevel: 'NONE' | 'ELEVATED' | 'CRITICAL';
+  isHighPressure: boolean;
+}
+
+export interface StoragePoolInfo {
+  hostId: ServerId;
+  storageId: string;
+  label?: string;
+  isDefault?: boolean;
   device: string;
   filesystemUuid: string;
   mountPoint: string;
@@ -345,7 +400,13 @@ export interface WireGuardDevice {
   serverPublicKey?: string;
   serverEndpoint?: string;
   allowedSubnets?: string;
-  status: 'ACTIVE' | 'PENDING_HANDSHAKE' | 'REVOKED' | 'DISABLED' | 'PARTIAL_FAILURE';
+  status:
+    | 'ACTIVE'
+    | 'PENDING_HANDSHAKE'
+    | 'PENDING_PROVISIONING'
+    | 'REVOKED'
+    | 'DISABLED'
+    | 'PARTIAL_FAILURE';
   enabled?: boolean;
   createdAt?: number | string;
   created_at?: string;
@@ -359,13 +420,24 @@ export interface WireGuardDevice {
 
 export interface WireGuardVpnOverview {
   active_provider: string;
-  status: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | string;
+  status: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNAVAILABLE' | string;
+  service_health?: string;
   public_endpoint: string;
   cidr: string;
   total_clients: number;
   active_clients: number;
   total_rx_bytes: number;
   total_tx_bytes: number;
+  server_public_key?: string;
+  route_policy?: string;
+  wg_easy?: {
+    status?: string;
+    service_health?: string;
+    error?: string;
+    public_endpoint?: string;
+    vpn_subnet?: string;
+    server_public_key?: string;
+  };
   web_ui_internal?: string;
   legacy_interface?: string;
 }
@@ -381,10 +453,14 @@ export interface WireGuardProfile {
     | 'ACTIVE'
     | 'PENDING'
     | 'PENDING_HANDSHAKE'
+    | 'PENDING_PROVISIONING'
+    | 'GATEWAY_OFFLINE'
     | 'NOT_CONFIGURED'
     | 'NOT_VERIFIED'
     | 'REVOKED'
     | 'PARTIAL_FAILURE';
+  registeredOnGateway?: boolean;
+  gatewayError?: string | null;
   lastHandshake?: string;
   transferRxBytes?: number;
   transferTxBytes?: number;
@@ -404,6 +480,8 @@ export interface LabMember {
   provisioningState?: string;
   workspaceStatus?: string;
   teleportStatus?: string;
+  archived_at?: string;
+  archivedAt?: string;
   // WireGuard VPN Mesh
   wireguard?: WireGuardProfile;
   // Storage Details
@@ -425,6 +503,7 @@ export interface LabMember {
   sshSessionsCount: number;
   sshIp?: string;
   sshPort?: number | null;
+  sshLoginUser?: string;
   sshKeyStatus: SshKeyEnrollmentStatus;
   sshFingerprint?: string;
   sshPublicKeyPreview: string;

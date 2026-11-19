@@ -179,7 +179,15 @@ class MemberLifecycleManager:
         wg_devices = list((member.get("wireguard") or {}).get("devices") or [])
         disabled_vpn = 0
         for d in wg_devices:
-            dev_id = str(d.get("external_id") or d.get("id") or d.get("device_id") or "")
+            dev_id = str(d.get("external_id") or d.get("id") or "")
+            is_pending = str(d.get("device_id") or "").startswith("dev-pending-") or (
+                d.get("status") == "PENDING_PROVISIONING" and not dev_id
+            )
+            if is_pending:
+                d["enabled"] = False
+                d["status"] = "DISABLED"
+                disabled_vpn += 1
+                continue
             if not dev_id:
                 continue
             try:
@@ -193,11 +201,14 @@ class MemberLifecycleManager:
         # Revoke SSH access & invalidate RAM secret vault
         server_id = member.get("assigned_server") or "workstation"
         try:
-            self.service.ssh_access_manager.revoke_member_ssh(
+            ssh_res = self.service.ssh_access_manager.revoke_member_ssh(
                 member=member,
                 host_online=self.service._is_host_online(server_id),
                 actor=actor,
+                workspace_dir=member.get("workspace_dir"),
             )
+            if ssh_res.get("status") == "VERIFIED_REVOKED":
+                member["ssh_key_status"] = "VERIFIED_REVOKED"
         except Exception as exc:
             logger.warning("SSH revocation during suspend encountered issue for %s: %s", username, exc)
 
@@ -279,6 +290,12 @@ class MemberLifecycleManager:
         member_id = member["id"]
         username = member["username"]
 
+        # Resilient auto-heal: if member already completed Step 2 (ARCHIVE), heal status to DELETE_ELIGIBLE
+        if member.get("status") not in self.ARCHIVED_STATES and member.get("archived_at") and member.get("archive_manifest"):
+            member["status"] = "DELETE_ELIGIBLE"
+            member["provisioning_state"] = "ARCHIVED"
+            self.service._save_persistent_data()
+
         workload = self.check_active_workloads(member)
         inventory = self.collect_workspace_inventory(member)
         wg_devices = list((member.get("wireguard") or {}).get("devices") or [])
@@ -359,6 +376,12 @@ class MemberLifecycleManager:
                     "Yêu cầu xác thực lại mật khẩu quản trị viên (X-LabOps-Step-Up-Token) để xóa thành viên.",
                     403,
                 )
+            # Resilient auto-heal: if member already completed Step 2 (ARCHIVE), heal status to DELETE_ELIGIBLE
+            if member.get("status") not in self.ARCHIVED_STATES and member.get("archived_at") and member.get("archive_manifest"):
+                member["status"] = "DELETE_ELIGIBLE"
+                member["provisioning_state"] = "ARCHIVED"
+                self.service._save_persistent_data()
+
             if member.get("status") not in self.ARCHIVED_STATES:
                 raise LifecyclePreconditionError(
                     "LIFECYCLE_PRECONDITION_FAILED",
@@ -417,6 +440,7 @@ class MemberLifecycleManager:
                 member=member,
                 host_online=self.service._is_host_online(server_id),
                 actor=actor,
+                workspace_dir=member.get("workspace_dir"),
             )
             keys = self.service.ssh_key_registry.list_keys(username=username)
             for k in keys:

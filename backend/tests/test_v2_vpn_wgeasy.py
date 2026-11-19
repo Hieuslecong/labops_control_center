@@ -111,7 +111,7 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
         base_dir = os.environ.get("LABOPS_USER_DATA_DIR") or getattr(self, "_users_dir", "")
         if not base_dir or not os.path.isdir(base_dir):
             return
-        for u in ("multidev_user", "api_dev_user", "delete_u"):
+        for u in ("multidev_user", "api_dev_user", "delete_u", "pending_u"):
             p = os.path.join(base_dir, u)
             if os.path.exists(p):
                 shutil.rmtree(p, ignore_errors=True)
@@ -356,6 +356,49 @@ class TestVpnWgEasyIntegration(unittest.TestCase):
             self.svc._find_member("delete_u")
         with self.assertRaises(LookupError):
             self.svc.delete_member_permanently(member_id)
+
+    def test_05_pending_placeholder_and_dynamic_configuration(self) -> None:
+        """Kiểm tra add_member_device trả về configuration động và xử lý thiết bị chờ PENDING_PROVISIONING."""
+        member = self.svc.provision_member_ssh_access({
+            "full_name": "Pending Device User",
+            "username": "pending_u",
+            "assigned_server": "workstation",
+            "require_passphrase": False,
+            "_actor_id": "admin_vpn",
+        })
+        member_id = member["id"]
+
+        # 1. Cài bản ghi pending placeholder giả lập trạng thái khi wg-easy từng offline
+        member.setdefault("wireguard", {"status": "PENDING_PROVISIONING", "devices": []})["devices"] = [
+            {
+                "device_id": "dev-pending-pending_u",
+                "external_id": "",
+                "provider": "wg-easy",
+                "name": "Thiết bị chính",
+                "client_ip": "10.88.40.88",
+                "status": "PENDING_PROVISIONING",
+                "enabled": False,
+            }
+        ]
+
+        # Không thể tải .conf hoặc bật/tắt bản ghi pending chưa đăng ký trên wg-easy
+        with self.assertRaises(ValueError):
+            self.svc.get_member_device_config(member_id, "dev-pending-pending_u", actor={"username": "admin_vpn", "role": "ADMIN"})
+        with self.assertRaises(ValueError):
+            self.svc.toggle_member_device(member_id, "dev-pending-pending_u", enable=True, actor="admin_vpn")
+
+        # Xóa bản ghi chờ phải thành công ngay cả khi không gọi wg-easy
+        rev = self.svc.revoke_member_device_v2(member_id, "dev-pending-pending_u", actor="admin_vpn")
+        self.assertEqual(rev["status"], "REVOKED")
+        self.assertEqual(len(member["wireguard"]["devices"]), 0)
+
+        # 2. Cấp thiết bị mới qua wg-easy phải trả về configuration động đúng host workstation
+        if not self.has_wgeasy:
+            dev = self.svc.add_member_device(member_id, "WS Laptop", actor="admin_vpn")
+            self.assertIn("configuration", dev)
+            self.assertIn("[Interface]", dev["configuration"])
+            self.assertIn("AllowedIPs = 10.88.40.0/24, 192.168.167.251/32", dev["configuration"])
+            self.assertNotIn("192.168.167.250", dev["configuration"])
 
 
 if __name__ == "__main__":

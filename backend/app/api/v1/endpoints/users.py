@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.api.dependencies import require_labops_admin
+from app.core.config import settings
 from app.core.security import AuthError, verify_step_up_token
 from app.schemas.labops import MemberCreateRequest, MemberResponse, WireGuardDeviceCreateRequest
 from app.services.labops_service import service
@@ -16,6 +17,10 @@ router = APIRouter(dependencies=[Depends(require_labops_admin)])
 async def list_members():
     for m in service.members:
         m["one_time_package"] = service.ssh_access_manager.vault.get_availability(m.get("id", ""))
+        m["ssh_login_user"] = service._resolve_effective_ssh_login_user(
+            m.get("username", ""),
+            m.get("assigned_server") or settings.LOCAL_HOST_ID,
+        )
     return service.members
 
 
@@ -25,6 +30,10 @@ async def get_member(user_id: str):
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
     member["one_time_package"] = service.ssh_access_manager.vault.get_availability(member.get("id", ""))
+    member["ssh_login_user"] = service._resolve_effective_ssh_login_user(
+        member.get("username", ""),
+        member.get("assigned_server") or settings.LOCAL_HOST_ID,
+    )
     return member
 
 

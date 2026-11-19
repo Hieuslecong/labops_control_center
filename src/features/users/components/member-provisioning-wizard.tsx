@@ -23,7 +23,9 @@ import {
   HostResourceProfile,
   StoragePoolInfo,
   QuotaBackend,
-  StorageVerificationStatus
+  StorageVerificationStatus,
+  WireGuardProfile,
+  WireGuardVpnOverview
 } from '@/types/labops';
 import { toast } from 'sonner';
 
@@ -79,7 +81,11 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [role, setRole] = useState<MemberRole>('RESEARCHER');
   const [researchGroup, setResearchGroup] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
-  const [serverId, setServerId] = useState<ServerId>('track');
+  const [serverId, setServerId] = useState<ServerId>(() => {
+    const online = servers.find((s) => s.status === 'online');
+    return online ? online.id : 'workstation';
+  });
+  const [vpnOverview, setVpnOverview] = useState<WireGuardVpnOverview | null>(null);
   const [storagePoolId, setStoragePoolId] = useState('');
   const [hostStoragePools, setHostStoragePools] = useState<StoragePoolInfo[]>([]);
   const [loadingPools, setLoadingPools] = useState(false);
@@ -124,12 +130,15 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   const [created, setCreated] = useState<{
     id: string;
     username: string;
+    assignedServer?: ServerId;
     status: string;
     provisioningState: string;
     sshPort?: number | null;
     sshIp?: string | null;
+    sshLoginUser?: string | null;
     sshFingerprint?: string | null;
     passwordStatus?: string;
+    wireguard?: WireGuardProfile | null;
     runtimeVerification?: {
       host_online?: boolean;
       directory_isolation?: string;
@@ -146,6 +155,52 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
       channel_secrets_available?: boolean;
     };
   } | null>(null);
+
+  const resetWizard = () => {
+    setStep(1);
+    setFullName('');
+    setUsername('');
+    setEmail('');
+    setResearchGroup('');
+    setExpiresAt('');
+    setWorkspaceName('');
+    setSelectedGpu('NONE');
+    setSshPublicKey('');
+    setAutoGenerateSsh(true);
+    setRequirePassphrase(false);
+    setClaimedBundle(null);
+    setClaimedSecrets(null);
+    setCreated(null);
+    const online = servers.find((s) => s.status === 'online');
+    if (online) {
+      setServerId(online.id);
+    }
+  };
+
+  useEffect(() => {
+    if (!open || DEMO_MODE) return;
+    let active = true;
+    if (step === 1 && !created && servers.length > 0) {
+      const current = servers.find((s) => s.id === serverId);
+      const online = servers.find((s) => s.status === 'online');
+      if (online && (!current || current.status !== 'online')) {
+        Promise.resolve().then(() => {
+          if (active) setServerId(online.id);
+        });
+      }
+    }
+    fetch('/api/labops/v2/vpn/overview', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active && data) {
+          setVpnOverview(data as WireGuardVpnOverview);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [open, step, created, servers, serverId]);
 
   const usernameIsValid = validUsername(username);
   const effectiveEmail = email.trim()
@@ -173,9 +228,12 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
         if (Array.isArray(data)) {
           const pools: StoragePoolInfo[] = data.map((item) => {
             const d = item as Record<string, unknown>;
+            const rawReason = d.ineligibilityReason || d.ineligibility_reason;
             return {
               hostId: (d.hostId || d.host_id || serverId) as ServerId,
               storageId: String(d.storageId || d.storage_id || d.id || ''),
+              label: String(d.label || d.name || d.mountPoint || d.mount_point || ''),
+              isDefault: Boolean(d.isDefault ?? d.is_default ?? false),
               device: String(d.device || d.diskIdentifier || d.disk_identifier || ''),
               filesystemUuid: String(d.filesystemUuid || d.filesystem_uuid || ''),
               mountPoint: String(d.mountPoint || d.mount_point || ''),
@@ -191,17 +249,22 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
               readOnly: Boolean(d.readOnly ?? d.read_only ?? false),
               mounted: Boolean(d.mounted ?? true),
               eligible: d.eligible !== false,
-              ineligibilityReason: d.ineligibilityReason
-                ? String(d.ineligibilityReason)
-                : undefined,
+              ineligibilityReason: rawReason ? String(rawReason) : undefined,
               lastVerifiedAt: String(d.lastVerifiedAt || d.last_verified_at || ''),
               verificationStatus: (d.verificationStatus ||
                 d.verification_status ||
                 'VERIFIED') as StorageVerificationStatus
             };
           });
+          pools.sort(
+            (a, b) =>
+              Number(b.eligible) - Number(a.eligible) ||
+              Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+              b.allocatableGib - a.allocatableGib
+          );
           setHostStoragePools(pools);
-          const eligible = pools.find((p) => p.eligible);
+          const eligible =
+            pools.find((p) => p.eligible && p.isDefault) || pools.find((p) => p.eligible);
           if (eligible) {
             setSelectedDrive(eligible);
             setStoragePoolId(eligible.storageId);
@@ -309,15 +372,32 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             : result.detail?.message || `Lỗi từ Backend (${response.status})`;
         throw new Error(msg);
       }
+      const rawWg = result.wireguard as Record<string, unknown> | undefined;
+      const parsedWg: WireGuardProfile | null = rawWg
+        ? {
+            clientIp: (rawWg.clientIp || rawWg.client_ip) as string | undefined,
+            vpnIp: (rawWg.vpnIp || rawWg.vpn_ip) as string | undefined,
+            allowedSubnets: (rawWg.allowedSubnets || rawWg.allowed_subnets) as string | undefined,
+            serverEndpoint: (rawWg.serverEndpoint || rawWg.server_endpoint) as string | undefined,
+            status: (rawWg.status || 'PENDING_PROVISIONING') as WireGuardProfile['status'],
+            registeredOnGateway: (rawWg.registeredOnGateway ?? rawWg.registered_on_gateway) as
+              | boolean
+              | undefined,
+            gatewayError: (rawWg.gatewayError ?? rawWg.gateway_error ?? null) as string | null
+          }
+        : null;
       setCreated({
         id: result.id,
         username: result.username,
+        assignedServer: (result.assignedServer || result.assigned_server || serverId) as ServerId,
         status: result.status,
         provisioningState: result.provisioningState || result.provisioning_state,
         sshPort: result.sshPort ?? result.ssh_port ?? null,
         sshIp: result.sshIp ?? result.ssh_ip ?? null,
+        sshLoginUser: result.sshLoginUser ?? result.ssh_login_user ?? null,
         sshFingerprint: result.sshFingerprint ?? result.ssh_fingerprint ?? null,
         passwordStatus: result.passwordStatus ?? result.password_status,
+        wireguard: parsedWg,
         runtimeVerification: result.runtimeVerification ?? result.runtime_verification,
         oneTimePackage: result.oneTimePackage ?? result.one_time_package
       });
@@ -444,7 +524,15 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && created) {
+          resetWizard();
+        }
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent className='sm:max-w-2xl max-h-[90vh] overflow-y-auto'>
         <DialogHeader>
           <div className='flex items-center justify-between gap-3'>
@@ -621,7 +709,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   Không tìm thấy ổ đĩa nào hoặc Node Agent trên máy chủ chưa kích hoạt.
                 </Card>
               ) : (
-                <div className='grid gap-2.5 max-h-[220px] overflow-y-auto pr-1'>
+                <div className='grid gap-2.5 max-h-[280px] overflow-y-auto pr-1'>
                   {hostStoragePools.map((drive) => {
                     const isSelected = selectedDrive?.storageId === drive.storageId;
                     const usedPct = Math.min(
@@ -643,7 +731,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                             setStoragePoolId(drive.storageId);
                           } else {
                             toast.error(
-                              `Ổ đĩa này không đủ điều kiện: ${drive.ineligibilityReason}`
+                              `Ổ đĩa này không đủ điều kiện: ${drive.ineligibilityReason || 'Không khả dụng'}`
                             );
                           }
                         }}
@@ -656,15 +744,28 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                         }`}
                       >
                         <div className='flex items-start justify-between gap-2 mb-1.5'>
-                          <div>
-                            <div className='flex items-center gap-2'>
-                              <span className='font-semibold text-sm'>{drive.mountPoint}</span>
+                          <div className='min-w-0'>
+                            <div className='flex flex-wrap items-center gap-1.5'>
+                              <span className='font-semibold text-sm'>
+                                {drive.label || drive.mountPoint}
+                              </span>
+                              {drive.isDefault && (
+                                <Badge
+                                  variant='outline'
+                                  className='text-[10px] border-primary/40 text-primary bg-primary/5'
+                                >
+                                  Mặc định
+                                </Badge>
+                              )}
                               <Badge
                                 variant='secondary'
                                 className='text-[10px] font-mono uppercase'
                               >
                                 {drive.filesystem} · {drive.device}
                               </Badge>
+                            </div>
+                            <div className='text-[11px] font-mono text-muted-foreground truncate mt-0.5'>
+                              Mount: {drive.mountPoint}
                             </div>
                             <p className='text-xs text-muted-foreground mt-0.5'>
                               {drive.quotaSupported ? (
@@ -678,7 +779,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                               )}
                             </p>
                           </div>
-                          <div>
+                          <div className='shrink-0'>
                             {drive.eligible ? (
                               <Badge
                                 variant='outline'
@@ -769,8 +870,9 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 </Badge>
               </div>
               <code className='block p-2 rounded bg-background font-mono text-xs text-emerald-800 dark:text-emerald-300 break-all border'>
-                {selectedDrive ? selectedDrive.mountPoint : '/media/LabOps-Data'}/labops/users/
-                {username || 'username'}
+                {selectedDrive
+                  ? `${selectedDrive.mountPoint}/labops/users/${username || 'username'}`
+                  : 'Chưa chọn ổ đĩa khả dụng trên máy chủ'}
               </code>
               <div className='flex items-center gap-2 pt-1'>
                 <span className='text-muted-foreground'>Gắn vào container (Mount path):</span>
@@ -1057,6 +1159,34 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 />
               </div>
             )}
+
+            <Card
+              className={`p-3 text-xs space-y-1 ${
+                vpnOverview?.status === 'HEALTHY'
+                  ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-800 dark:text-emerald-200'
+                  : 'border-amber-500/40 bg-amber-500/5 text-amber-900 dark:text-amber-200'
+              }`}
+            >
+              <div className='flex items-center justify-between gap-2'>
+                <span className='font-semibold'>Trạng thái WireGuard VPN Gateway (wg-easy):</span>
+                <Badge variant='outline' className='font-mono text-[10px]'>
+                  {vpnOverview?.status || 'ĐANG KIỂM TRA...'}
+                </Badge>
+              </div>
+              {vpnOverview?.status === 'HEALTHY' ? (
+                <p>
+                  WireGuard Gateway (wg-easy): ONLINE ({vpnOverview.public_endpoint}) — sẽ tự động
+                  cấp peer VPN theo đúng máy chủ (
+                  {serverId === 'workstation' ? '192.168.167.251/32' : '192.168.167.250/32'}).
+                </p>
+              ) : (
+                <p>
+                  WireGuard Gateway (wg-easy) đang OFFLINE — tài khoản vẫn tạo SSH thành công để kết
+                  nối trực tiếp trong mạng LAN; VPN từ xa sẽ ở trạng thái chờ (PENDING_PROVISIONING)
+                  cho đến khi khởi động container <code>labops-wg-easy</code>.
+                </p>
+              )}
+            </Card>
           </div>
         )}
 
@@ -1079,15 +1209,61 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     <div className='rounded-md border bg-background p-3 font-mono text-xs space-y-1'>
                       <p className='font-semibold text-foreground'>Thông tin kết nối SSH:</p>
                       <p>
-                        Lệnh SSH:{' '}
-                        <code className='text-primary font-bold'>
-                          ssh -i id_ed25519_{created.username} -p {created.sshPort}{' '}
-                          {created.username}@{created.sshIp || '192.168.167.250'}
+                        Lệnh SSH 1 chạm (sau khi chạy script cài đặt):{' '}
+                        <code className='text-primary font-bold select-all'>
+                          ssh labops-{created.username}
                         </code>
                       </p>
                       <p>
+                        Lệnh trực tiếp:{' '}
+                        <code className='text-foreground select-all'>
+                          ssh -i ~/.ssh/id_ed25519_{created.username} -p {created.sshPort}{' '}
+                          {created.sshLoginUser || created.username}@
+                          {created.sshIp ||
+                            (created.assignedServer === 'workstation'
+                              ? '192.168.167.251'
+                              : '192.168.167.250')}
+                        </code>
+                      </p>
+                      {created.sshLoginUser && created.sshLoginUser !== created.username && (
+                        <p className='text-[11px] font-sans text-muted-foreground'>
+                          Ghi chú cách ly: sshd không đặc quyền đăng nhập qua OS user{' '}
+                          <code>{created.sshLoginUser}</code> và ánh xạ ForceCommand vào thư mục
+                          workspace cô lập của @{created.username}.
+                        </p>
+                      )}
+                      <p>
                         Fingerprint: <code>{created.sshFingerprint}</code>
                       </p>
+                    </div>
+                  )}
+
+                  {created.wireguard && (
+                    <div
+                      className={`rounded-md border p-3 text-xs space-y-1 ${
+                        created.wireguard.registeredOnGateway
+                          ? 'border-emerald-500/40 bg-emerald-500/5'
+                          : 'border-amber-500/40 bg-amber-500/5'
+                      }`}
+                    >
+                      <div className='flex items-center justify-between gap-2'>
+                        <p className='font-semibold text-foreground'>Trạng thái WireGuard VPN:</p>
+                        <Badge variant='outline' className='font-mono text-[10px]'>
+                          {created.wireguard.status}
+                        </Badge>
+                      </div>
+                      <p className='font-mono'>
+                        IP VPN: <strong>{created.wireguard.clientIp || 'Chưa cấp'}</strong> · Route:{' '}
+                        <strong>{created.wireguard.allowedSubnets || 'Chưa xác định'}</strong>
+                      </p>
+                      {created.wireguard.registeredOnGateway === false && (
+                        <p className='text-amber-800 dark:text-amber-300'>
+                          ⚠️ Peer chưa được đăng ký trên wg-easy Gateway (
+                          {created.wireguard.gatewayError || 'wg-easy đang offline'}). Trong mạng
+                          LAN phòng Lab, hãy kết nối trực tiếp bằng{' '}
+                          <code>ssh labops-{created.username}</code> (không bật WireGuard).
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -1315,7 +1491,11 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   <div className='flex items-center justify-between'>
                     <span className='font-semibold text-foreground'>Ổ đĩa & Hạn ngạch:</span>
                     <Badge variant='outline' className='text-[10px] font-mono'>
-                      {selectedDrive?.quotaBackend || 'CƯỠNG CHẾ CỨNG'}
+                      {selectedDrive
+                        ? selectedDrive.quotaSupported && selectedDrive.quotaEnforced
+                          ? `${selectedDrive.quotaBackend} (Cưỡng chế cứng)`
+                          : `${selectedDrive.quotaBackend} (Giám sát — không quota cứng)`
+                        : 'Chưa chọn ổ đĩa'}
                     </Badge>
                   </div>
                   <p>
@@ -1323,13 +1503,30 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     <strong>
                       {selectedDrive
                         ? `${selectedDrive.mountPoint} (${selectedDrive.device})`
-                        : 'Mặc định'}
+                        : 'Chưa chọn'}
                     </strong>{' '}
                     · Hạn ngạch: <strong className='text-primary'>{storageQuotaGb} GiB</strong>
                   </p>
                   <p className='text-muted-foreground font-mono text-[11px] break-all'>
-                    Host dir: {selectedDrive ? selectedDrive.mountPoint : '/media/LabOps-Data'}
-                    /labops/users/{username || 'username'} → Container: /workspace
+                    Host dir:{' '}
+                    {selectedDrive
+                      ? `${selectedDrive.mountPoint}/labops/users/${username || 'username'}`
+                      : 'Chưa chọn ổ đĩa'}{' '}
+                    → Container: /workspace
+                  </p>
+                </div>
+
+                <div className='rounded-md border p-2.5 bg-muted/20 space-y-1 text-xs'>
+                  <div className='flex items-center justify-between gap-2'>
+                    <span className='font-semibold text-foreground'>WireGuard VPN Gateway:</span>
+                    <Badge variant='outline' className='text-[10px] font-mono'>
+                      {vpnOverview?.status || 'CHƯA RÕ'}
+                    </Badge>
+                  </div>
+                  <p className='text-muted-foreground'>
+                    {vpnOverview?.status === 'HEALTHY'
+                      ? `Tự động cấp peer VPN qua wg-easy (${vpnOverview.public_endpoint}).`
+                      : 'wg-easy đang OFFLINE — SSH LAN vẫn hoạt động ngay; VPN từ xa sẽ chờ kích hoạt.'}
                   </p>
                 </div>
 
@@ -1423,8 +1620,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             <Button
               type='button'
               onClick={() => {
-                setCreated(null);
-                setStep(1);
+                resetWizard();
                 onOpenChange(false);
               }}
             >

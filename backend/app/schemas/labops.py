@@ -260,6 +260,8 @@ class WireGuardProfileSchema(BaseSchema):
     server_endpoint: Optional[str] = Field(None, alias="serverEndpoint")
     allowed_subnets: Optional[str] = Field(None, alias="allowedSubnets")
     status: str = "NOT_CONFIGURED"
+    registered_on_gateway: Optional[bool] = Field(None, alias="registeredOnGateway")
+    gateway_error: Optional[str] = Field(None, alias="gatewayError")
     last_handshake: Optional[str] = Field(None, alias="lastHandshake")
     transfer_rx_bytes: Optional[int] = Field(0, alias="transferRxBytes")
     transfer_tx_bytes: Optional[int] = Field(0, alias="transferTxBytes")
@@ -368,6 +370,7 @@ class MemberResponse(BaseSchema):
     expires_at: Optional[str] = Field(None, alias="expiresAt")
     wireguard: Optional[WireGuardProfileSchema] = None
     workspace_dir: Optional[str] = Field(None, alias="workspaceDir")
+    ssh_login_user: Optional[str] = Field(None, alias="sshLoginUser")
     temp_password_expires_at: Optional[str] = Field(None, alias="tempPasswordExpiresAt")
     runtime_verification: Optional[Dict[str, Any]] = Field(None, alias="runtimeVerification")
     one_time_package: Optional[Dict[str, Any]] = Field(None, alias="oneTimePackage")

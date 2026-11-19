@@ -129,7 +129,10 @@ export function SafeMemberDeleteDialog({
   const effectivePreview = preview?.member_id === member.id ? preview : null;
   const isPreviewLoading = loadingPreview || (open && !effectivePreview && previewError === null);
   const currentStatus = effectivePreview?.current_status || member.status || 'UNKNOWN';
-  const isArchived = currentStatus === 'ARCHIVED' || currentStatus === 'DELETE_ELIGIBLE';
+  const isArchived =
+    currentStatus === 'ARCHIVED' ||
+    currentStatus === 'DELETE_ELIGIBLE' ||
+    Boolean(member.archived_at);
   const isSuspendedOrArchived = currentStatus === 'SUSPENDED' || isArchived;
   const activeProcessesCount = effectivePreview?.active_workloads?.active_processes?.length ?? 0;
   const activeReservationsCount =
@@ -427,20 +430,47 @@ export function SafeMemberDeleteDialog({
             </div>
 
             <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label htmlFor='confirm-delete-username' className='text-xs'>
-                  Nhập lại username <span className='font-mono font-bold'>{member.username}</span>
-                </Label>
+              <div className='space-y-1.5'>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='confirm-delete-username' className='text-xs'>
+                    Nhập lại username{' '}
+                    <span className='font-mono font-bold text-foreground'>@{member.username}</span>
+                  </Label>
+                  <Button
+                    type='button'
+                    variant='ghost'
+                    size='sm'
+                    className='h-5 px-1.5 text-[11px] text-primary hover:underline'
+                    disabled={!canDelete || actionBusy !== null}
+                    onClick={() => setConfirmUsername(member.username)}
+                  >
+                    Điền nhanh
+                  </Button>
+                </div>
                 <Input
                   id='confirm-delete-username'
                   value={confirmUsername}
                   onChange={(e) => setConfirmUsername(e.target.value)}
-                  placeholder={member.username}
+                  placeholder='Gõ lại chính xác username...'
                   className='h-8 text-xs font-mono'
                   disabled={!canDelete || actionBusy !== null}
                 />
+                {confirmUsername.trim() === '' ? (
+                  <p className='text-[11px] text-muted-foreground'>
+                    Bắt buộc nhập chính xác{' '}
+                    <code className='font-mono font-semibold'>@{member.username}</code>
+                  </p>
+                ) : usernameMatched ? (
+                  <p className='text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-medium'>
+                    <Icons.check className='size-3' /> Đã khớp chính xác @{member.username}
+                  </p>
+                ) : (
+                  <p className='text-[11px] text-rose-600 dark:text-rose-400 flex items-center gap-1'>
+                    <Icons.warning className='size-3' /> Chưa khớp với @{member.username}
+                  </p>
+                )}
               </div>
-              <div className='space-y-1'>
+              <div className='space-y-1.5'>
                 <Label htmlFor='step-up-admin-password' className='text-xs'>
                   Mật khẩu Quản trị viên (Step-Up)
                 </Label>
@@ -454,6 +484,9 @@ export function SafeMemberDeleteDialog({
                   className='h-8 text-xs'
                   disabled={!canDelete || actionBusy !== null}
                 />
+                <p className='text-[11px] text-muted-foreground'>
+                  Mật khẩu quản trị LabOps (LABOPS_ADMIN_PASSWORD)
+                </p>
               </div>
             </div>
 
@@ -478,29 +511,54 @@ export function SafeMemberDeleteDialog({
           </div>
         </div>
 
-        <DialogFooter className='gap-2 sm:gap-2'>
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
-            className='text-xs'
-            disabled={actionBusy !== null}
-            onClick={() => handleOpenChange(false)}
-          >
-            Đóng
-          </Button>
-          <Button
-            type='button'
-            variant='destructive'
-            size='sm'
-            className='text-xs'
-            disabled={!canDelete || !usernameMatched || !adminPassword || actionBusy !== null}
-            onClick={() => void handleConfirmDelete()}
-          >
-            {actionBusy === 'delete'
-              ? 'Đang xóa vĩnh viễn...'
-              : `Xác nhận Xóa vĩnh viễn @${member.username}`}
-          </Button>
+        <DialogFooter className='gap-2 sm:gap-2 flex-col sm:flex-row items-stretch sm:items-center justify-between'>
+          <div className='text-[11px] text-muted-foreground flex items-center gap-1.5 order-2 sm:order-1'>
+            {!canDelete ? (
+              <span className='text-amber-600 dark:text-amber-400 flex items-center gap-1'>
+                <Icons.warning className='size-3 shrink-0' /> Cần hoàn tất Suspend &amp; Archive
+                trước khi xóa.
+              </span>
+            ) : !usernameMatched ? (
+              <span className='text-amber-600 dark:text-amber-400 flex items-center gap-1'>
+                <Icons.warning className='size-3 shrink-0' /> Nhập lại @{member.username} để mở khóa
+                nút xóa.
+              </span>
+            ) : !adminPassword ? (
+              <span className='text-amber-600 dark:text-amber-400 flex items-center gap-1'>
+                <Icons.warning className='size-3 shrink-0' /> Nhập mật khẩu Admin để xác thực
+                Step-Up.
+              </span>
+            ) : (
+              <span className='text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-medium'>
+                <Icons.check className='size-3 shrink-0' /> Đã đủ điều kiện xác thực Step-Up &amp;
+                xóa an toàn.
+              </span>
+            )}
+          </div>
+          <div className='flex items-center justify-end gap-2 order-1 sm:order-2'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              className='text-xs'
+              disabled={actionBusy !== null}
+              onClick={() => handleOpenChange(false)}
+            >
+              Đóng
+            </Button>
+            <Button
+              type='button'
+              variant='destructive'
+              size='sm'
+              className='text-xs'
+              disabled={!canDelete || !usernameMatched || !adminPassword || actionBusy !== null}
+              onClick={() => void handleConfirmDelete()}
+            >
+              {actionBusy === 'delete'
+                ? 'Đang xóa vĩnh viễn...'
+                : `Xác nhận Xóa vĩnh viễn @${member.username}`}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

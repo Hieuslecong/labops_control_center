@@ -19,7 +19,7 @@ def _enrich_pool(p: Dict[str, Any]) -> Dict[str, Any]:
     res["serverName"] = "Workstation Primary" if res["serverId"] == "workstation" else "Rack Server Cluster"
     res["server_name"] = res["serverName"]
     res["name"] = p.get("mount_point", p.get("name", ""))
-    res["label"] = f"{p.get('filesystem', '').upper()} ({p.get('mount_point', '')})"
+    res["label"] = p.get("label") or f"{p.get('filesystem', '').upper()} ({p.get('mount_point', '')})"
     res["diskIdentifier"] = p.get("device", "")
     res["disk_identifier"] = res["diskIdentifier"]
     res["driver"] = p.get("filesystem", "ext4")
@@ -31,7 +31,10 @@ def _enrich_pool(p: Dict[str, Any]) -> Dict[str, Any]:
     res["free_gb"] = res["freeGb"]
     res["healthStatus"] = "ONLINE" if p.get("eligible", False) else "DEGRADED"
     res["health_status"] = res["healthStatus"]
-    res["isDefault"] = p.get("mount_point") in ["/media/LabOps-Data", "/tank/workspaces"]
+    res["isDefault"] = bool(
+        p.get("is_default")
+        or p.get("mount_point") in ["/mnt/HDD3", "/media/LabOps-Data", "/tank/workspaces"]
+    )
     res["is_default"] = res["isDefault"]
     return res
 

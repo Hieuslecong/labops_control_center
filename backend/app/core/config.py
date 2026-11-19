@@ -3,13 +3,20 @@ import sys
 from typing import List
 from pydantic import ConfigDict
 
-# Load backend/.env if not in a test session
+# Load .env.local and .env files (root and backend) if not in a test session
 if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
     try:
         from dotenv import load_dotenv
-        _backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
-        if os.path.exists(_backend_env):
-            load_dotenv(_backend_env)
+        _cur_dir = os.path.dirname(__file__)
+        _candidates = [
+            os.path.abspath(os.path.join(_cur_dir, "..", "..", "..", ".env.local")),
+            os.path.abspath(os.path.join(_cur_dir, "..", "..", "..", ".env")),
+            os.path.abspath(os.path.join(_cur_dir, "..", "..", ".env.local")),
+            os.path.abspath(os.path.join(_cur_dir, "..", "..", ".env")),
+        ]
+        for _env_file in _candidates:
+            if os.path.exists(_env_file):
+                load_dotenv(_env_file)
     except ImportError:
         pass
 
@@ -77,10 +84,10 @@ class Settings(BaseSettings):
     DEFAULT_USER_DATA_DIR: str = os.getenv("LABOPS_USER_DATA_DIR", "/media/LabOps-Data/users")
     STORAGE_POOL_DATA_PATH: str = os.getenv("LABOPS_STORAGE_DATA_PATH", "/media/LabOps-Data")
 
-    # WireGuard & wg-easy v15 Configuration (no hardcoded admin password)
+    # WireGuard & wg-easy v15 Configuration
     WG_EASY_API_URL: str = os.getenv("WG_EASY_API_URL", "http://127.0.0.1:51821")
     WG_EASY_ADMIN_USER: str = os.getenv("WG_EASY_ADMIN_USER", "admin")
-    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "")
+    WG_EASY_ADMIN_PASSWORD: str = os.getenv("WG_EASY_ADMIN_PASSWORD", "LabOpsSecureVPN2026!")
     WG_EASY_PUBLIC_ENDPOINT: str = os.getenv("WG_EASY_PUBLIC_ENDPOINT", "118.70.169.236:2204")
     WG_EASY_VPN_SUBNET: str = os.getenv("WG_EASY_VPN_SUBNET", "10.88.40.0/24")
     WG_EASY_ENABLED: bool = os.getenv("WG_EASY_ENABLED", "true").lower() == "true"

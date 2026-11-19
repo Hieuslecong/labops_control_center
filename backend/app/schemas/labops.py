@@ -347,6 +347,16 @@ class MemberResponse(BaseSchema):
     ssh_key_label: Optional[str] = Field(None, alias="sshKeyLabel")
     ssh_auth_mode: str = Field("PUBLIC_KEY_AND_PASSWORD", alias="sshAuthMode")
     password_status: str = Field("ACTIVE", alias="passwordStatus")
+    activation_status: Optional[str] = Field("PENDING_ACTIVATION", alias="activationStatus")
+    overall_readiness: Optional[str] = Field("PENDING_PROVISIONING", alias="overallReadiness")
+    ssh_key_enrollment_mode: Optional[str] = Field(None, alias="sshKeyEnrollmentMode")
+    ssh_key_passphrase_mode: Optional[str] = Field(None, alias="sshKeyPassphraseMode")
+    workspace_delegation_status: Optional[str] = Field(None, alias="workspaceDelegationStatus")
+    workspace_delegation_reason: Optional[str] = Field(None, alias="workspaceDelegationReason")
+    container_id: Optional[str] = Field(None, alias="containerId")
+    uid: Optional[int] = None
+    gid: Optional[int] = None
+    authorization_gate: Optional[Dict[str, Any]] = Field(None, alias="authorizationGate")
     failed_login_attempts: int = Field(0, alias="failedLoginAttempts")
     last_successful_login: Optional[str] = Field(None, alias="lastSuccessfulLogin")
     last_login_source_ip: Optional[str] = Field(None, alias="lastLoginSourceIp")

@@ -44,7 +44,7 @@ function resolveMemberHostIp(member: LabMember): string {
 }
 
 function resolveMemberSshUser(member: LabMember): string {
-  return member.sshLoginUser || member.username;
+  return member.username;
 }
 
 function parseUdpPort(endpoint?: string): string {
@@ -75,20 +75,32 @@ function getMemberWireGuardStatus(member: LabMember, devices: WireGuardDevice[])
 
 function statusBadge(status?: string) {
   const value = status || 'NOT_VERIFIED';
-  const style =
+  const isSuccess =
     value === 'ACTIVE' ||
+    value === 'ACTIVATED' ||
     value === 'READY' ||
     value === 'AVAILABLE' ||
     value === 'VERIFIED' ||
-    value === 'SSH_KEY_ENROLLED'
-      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-      : value === 'PARTIAL_FAILURE' ||
-          value === 'UNAVAILABLE' ||
-          value === 'FAILED' ||
-          value === 'VERIFIED_REVOKED' ||
-          value === 'REVOKED'
-        ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
-        : 'bg-amber-500/10 text-amber-800 dark:text-amber-200';
+    value === 'SSH_RUNTIME_VERIFIED' ||
+    value === 'SSH_KEY_ENROLLED';
+  const isDanger =
+    value === 'PARTIAL_FAILURE' ||
+    value === 'UNAVAILABLE' ||
+    value === 'FAILED' ||
+    value === 'VERIFIED_REVOKED' ||
+    value === 'REVOKED' ||
+    value === 'SSH_ACCESS_DENIED' ||
+    value === 'SSH_RUNTIME_NOT_ISOLATED' ||
+    value === 'AGENT_UNAVAILABLE' ||
+    value === 'PROVISION_FAILED' ||
+    value === 'QUOTA_NOT_ENFORCEABLE' ||
+    value === 'NOT_ENFORCEABLE' ||
+    value === 'TEMP_PASSWORD_EXPIRED';
+  const style = isSuccess
+    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    : isDanger
+      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+      : 'bg-amber-500/10 text-amber-800 dark:text-amber-200';
   return (
     <Badge variant='outline' className={style}>
       {value}
@@ -364,7 +376,7 @@ export function MemberManagementView() {
     }
   };
 
-  const rotateMemberSshKeypair = async (member: LabMember, requirePassphrase = false) => {
+  const rotateMemberSshKeypair = async (member: LabMember, requirePassphrase = true) => {
     const result = await runAction(
       `/api/labops/v2/ssh-access/${encodeURIComponent(member.id)}/rotate-key`,
       'POST',
@@ -372,7 +384,19 @@ export function MemberManagementView() {
     );
     if (result) {
       toast.success(
-        `Đã tạo cặp khóa Ed25519 mới (${requirePassphrase ? 'có passphrase' : 'kết nối thẳng 1 chạm'}) cho @${member.username}. Bạn có thể tải file config ngay bên dưới!`
+        `Đã tạo cặp khóa Ed25519 mới (${requirePassphrase ? 'bảo vệ Passphrase' : 'tùy chọn không passphrase'}) cho @${member.username}.`
+      );
+    }
+  };
+
+  const reverifyMemberWorkspace = async (member: LabMember) => {
+    const result = await runAction(
+      `/api/labops/v2/ssh-access/${encodeURIComponent(member.id)}/verify`,
+      'POST'
+    );
+    if (result) {
+      toast.info(
+        `Kết quả kiểm chứng runtime @${member.username}: ${result.overall_readiness || 'NOT_VERIFIED'}`
       );
     }
   };
@@ -547,6 +571,15 @@ export function MemberManagementView() {
   const vpnHealthy = vpnOverview?.status === 'HEALTHY' || vpnOverview?.status === 'VPN_API_HEALTHY';
   const vpnMisconfigured = vpnOverview?.status === 'VPN_ROUTING_MISCONFIGURED';
   const wgPort = parseUdpPort(vpnOverview?.public_endpoint);
+  const verifiedIsolatedCount = members.filter(
+    (m) => m.authorizationGate?.ssh_authorized === true || m.overallReadiness === 'READY'
+  ).length;
+  const openSshGatewayStatus =
+    verifiedIsolatedCount > 0
+      ? 'VERIFIED'
+      : members.length > 0
+        ? 'NOT_VERIFIED'
+        : 'PENDING_PROVISIONING';
 
   return (
     <div className='space-y-5'>
@@ -721,14 +754,15 @@ export function MemberManagementView() {
         </Card>
         <Card>
           <CardContent className='space-y-2 p-4'>
-            <h2 className='font-medium'>OpenSSH Workspace (Per-Member Public Key)</h2>
+            <h2 className='font-medium'>Container SSH Workspace (Isolated Non-Root)</h2>
             <div className='flex flex-wrap gap-2'>
-              <Badge variant='outline'>Managed by LabOps V2</Badge>
-              {statusBadge('ACTIVE')}
+              <Badge variant='outline'>Managed by Go Node Agent</Badge>
+              {statusBadge(openSshGatewayStatus)}
             </div>
             <p className='text-xs text-muted-foreground'>
-              Mỗi thành viên sử dụng khóa công khai OpenSSH riêng và được cấp cổng SSH riêng biệt
-              (dải <code>22001–29999</code>) vào Workspace cô lập.
+              Mỗi thành viên sử dụng khóa công khai OpenSSH riêng và kết nối trực tiếp vào Docker
+              container cô lập (dải <code>22001–29999 → 2222</code>), không chạy dưới user quản trị
+              host. ({verifiedIsolatedCount}/{members.length} workspace READY)
             </p>
           </CardContent>
         </Card>
@@ -1053,20 +1087,17 @@ export function MemberManagementView() {
                                             {member.sshPort} {resolvedSshUser}@{resolvedHostIp}
                                           </code>
                                         </p>
-                                        {resolvedSshUser !== member.username && (
-                                          <p className='text-[11px] font-sans text-muted-foreground'>
-                                            Tài khoản sshd host dùng <code>{resolvedSshUser}</code>{' '}
-                                            với ForceCommand cô lập vào workspace của @
-                                            {member.username}.
-                                          </p>
-                                        )}
                                         {member.sshFingerprint && (
                                           <p className='text-xs text-muted-foreground'>
                                             Fingerprint: {member.sshFingerprint}
                                           </p>
                                         )}
                                         <p className='text-xs text-muted-foreground'>
-                                          Trạng thái mật khẩu lần đầu:{' '}
+                                          Kích hoạt lần đầu:{' '}
+                                          <strong>
+                                            {member.activationStatus || 'PENDING_ACTIVATION'}
+                                          </strong>{' '}
+                                          · Mật khẩu:{' '}
                                           <strong>
                                             {member.passwordStatus || 'NOT_APPLICABLE'}
                                           </strong>
@@ -1074,28 +1105,129 @@ export function MemberManagementView() {
                                       </div>
                                     )}
 
+                                    {/* MA TRẬN 9 TRẠNG THÁI BẢO MẬT & SẴN SÀNG WORKSPACE */}
+                                    <div className='rounded-md border bg-muted/20 p-3 space-y-2 text-xs'>
+                                      <div className='flex items-center justify-between gap-2'>
+                                        <span className='font-semibold'>
+                                          Ma trận 9 Trạng thái Cô lập &amp; Kiểm chứng Runtime
+                                        </span>
+                                        <Button
+                                          type='button'
+                                          size='sm'
+                                          variant='outline'
+                                          disabled={busy || DEMO_MODE}
+                                          onClick={() => void reverifyMemberWorkspace(member)}
+                                        >
+                                          🔍 Kiểm chứng lại Runtime
+                                        </Button>
+                                      </div>
+                                      <div className='grid grid-cols-1 sm:grid-cols-3 gap-2'>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            1. Activation:
+                                          </span>
+                                          {statusBadge(
+                                            member.activationStatus || 'PENDING_ACTIVATION'
+                                          )}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>2. SSH Key:</span>
+                                          {statusBadge(member.sshKeyStatus || 'NOT_CONFIGURED')}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>3. Docker:</span>
+                                          {statusBadge(
+                                            member.workspaceDelegationStatus ||
+                                              member.runtimeVerification?.docker_running ||
+                                              'NOT_VERIFIED'
+                                          )}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            4. SSH Runtime:
+                                          </span>
+                                          {statusBadge(member.sshStatus || 'SSH_ACCESS_DENIED')}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            5. Privilege Iso:
+                                          </span>
+                                          {statusBadge(
+                                            member.runtimeVerification?.privilege_isolation ||
+                                              'NOT_VERIFIED'
+                                          )}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            6. Storage Quota:
+                                          </span>
+                                          {statusBadge(
+                                            member.runtimeVerification?.storage_quota ||
+                                              member.storageQuotaEnforcement ||
+                                              'NOT_VERIFIED'
+                                          )}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            7. CPU / RAM:
+                                          </span>
+                                          {statusBadge(
+                                            member.runtimeVerification?.cpu_ram_limits ||
+                                              'NOT_VERIFIED'
+                                          )}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>
+                                            8. VPN Peer:
+                                          </span>
+                                          {statusBadge(wgStatus)}
+                                        </div>
+                                        <div className='rounded border bg-background p-2 flex items-center justify-between gap-1'>
+                                          <span className='text-muted-foreground'>9. Overall:</span>
+                                          {statusBadge(
+                                            member.overallReadiness ||
+                                              member.provisioningState ||
+                                              'PENDING_PROVISIONING'
+                                          )}
+                                        </div>
+                                      </div>
+                                      {member.authorizationGate?.blocking_reasons &&
+                                        member.authorizationGate.blocking_reasons.length > 0 && (
+                                          <div className='rounded border border-rose-500/30 bg-rose-500/10 p-2 text-rose-800 dark:text-rose-200 space-y-0.5'>
+                                            <div className='font-semibold'>
+                                              Lý do Gate đang chặn SSH / READY:
+                                            </div>
+                                            {member.authorizationGate.blocking_reasons.map(
+                                              (reason, rIdx) => (
+                                                <div key={rIdx}>• {reason}</div>
+                                              )
+                                            )}
+                                          </div>
+                                        )}
+                                    </div>
+
                                     <div className='rounded-md border p-3 space-y-2 bg-muted/30'>
                                       <p className='text-xs font-semibold'>
-                                        A. Tạo mới / Cấp lại Khóa SSH (Bảo vệ bằng Passphrase) & Bàn
-                                        giao 1 lần
+                                        A. Cấp lại Khóa SSH Ed25519 (Mặc định Passphrase) &amp; Bàn
+                                        giao qua Kênh Riêng
                                       </p>
                                       <div className='flex flex-wrap gap-2'>
                                         <Button
                                           type='button'
                                           size='sm'
                                           disabled={busy || DEMO_MODE}
-                                          onClick={() => void rotateMemberSshKeypair(member, false)}
+                                          onClick={() => void rotateMemberSshKeypair(member, true)}
                                         >
-                                          ⚡ Cấp khóa kết nối thẳng 1 chạm (Không Passphrase)
+                                          🔒 Cấp khóa Ed25519 có Passphrase (Khuyến nghị)
                                         </Button>
                                         <Button
                                           type='button'
                                           size='sm'
                                           variant='outline'
                                           disabled={busy || DEMO_MODE}
-                                          onClick={() => void rotateMemberSshKeypair(member, true)}
+                                          onClick={() => void rotateMemberSshKeypair(member, false)}
                                         >
-                                          🔒 Cấp khóa có Passphrase
+                                          Cấp khóa không Passphrase (Chỉ thử nghiệm nội bộ)
                                         </Button>
                                         <Button
                                           type='button'

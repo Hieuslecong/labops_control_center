@@ -121,7 +121,12 @@ export type SshStatus =
   | 'VERIFIED_REVOKED'
   | 'FAILED'
   | 'PARTIAL_FAILURE'
-  | 'NOT_VERIFIED';
+  | 'NOT_VERIFIED'
+  | 'SSH_ACCESS_DENIED'
+  | 'SSH_RUNTIME_VERIFIED'
+  | 'SSH_RUNTIME_NOT_ISOLATED'
+  | 'SSH_ENDPOINT_LISTENING'
+  | 'SSH_KEY_REGISTERED';
 export type SshKeyEnrollmentStatus =
   | 'PENDING_KEY_ENROLMENT'
   | 'PENDING_KEY_ENROLLMENT'
@@ -551,9 +556,41 @@ export interface LabMember {
   lastLoginAt?: string;
   workspaceDir?: string;
   tempPasswordExpiresAt?: string;
+  activationStatus?: string;
+  overallReadiness?: string;
+  sshKeyEnrollmentMode?: string;
+  sshKeyPassphraseMode?: string;
+  workspaceDelegationStatus?: string;
+  workspaceDelegationReason?: string | null;
+  containerId?: string | null;
+  uid?: number | null;
+  gid?: number | null;
+  authorizationGate?: {
+    ssh_authorized?: boolean;
+    overall_readiness?: string;
+    ssh_runtime_state?: string;
+    activation_status?: string;
+    blocking_codes?: string[];
+    blocking_reasons?: string[];
+    evaluated_at?: string;
+    gates?: Record<
+      string,
+      {
+        status?: string;
+        observed_value?: unknown;
+        expected_value?: unknown;
+        source?: string;
+        verified_at?: string;
+        error_code?: string;
+        reason?: string;
+      }
+    >;
+  };
   runtimeVerification?: {
     verified_at?: string;
     host_online?: boolean;
+    canary_runtime?: boolean;
+    docker_running?: string;
     directory_isolation?: string;
     ssh_key_installed?: string;
     privilege_isolation?: string;
@@ -562,6 +599,18 @@ export interface LabMember {
     gpu_isolation?: string;
     ssh_runtime?: string;
     overall_status?: string;
+    checks_detail?: Record<
+      string,
+      {
+        status?: string;
+        observed_value?: unknown;
+        expected_value?: unknown;
+        source?: string;
+        verified_at?: string;
+        error_code?: string;
+        reason?: string;
+      }
+    >;
     reasons?: string[];
   };
   oneTimePackage?: {

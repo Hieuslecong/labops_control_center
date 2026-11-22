@@ -15,8 +15,9 @@ import os
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from app.services.zalo_assistant.ai_gateway_client import AIGatewayClient
 from app.services.zalo_assistant.identity_rbac import ZaloIdentityRBACService, ZaloPrincipal
@@ -31,6 +32,22 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _fmt_vn_time(iso_str: Any) -> str:
+    if not isinstance(iso_str, str) or not iso_str.strip():
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(iso_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M %d/%m/%Y")
+    except Exception:
+        try:
+            dt = datetime.fromisoformat(str(iso_str).strip().replace("Z", "+00:00"))
+            return (dt + timedelta(hours=7)).strftime("%H:%M %d/%m/%Y")
+        except Exception:
+            return str(iso_str)[:16]
 
 
 class ZaloBotEngine:
@@ -511,7 +528,7 @@ class ZaloBotEngine:
         lines = [
             "📊 TỔNG HỢP TRẠNG THÁI HẠ TẦNG (THỜI GIAN THỰC)",
             "━━━━━━━━━━━━━━━━━━━━",
-            f"• Sức khỏe cụm: {snap.get('overall_health', 'UNKNOWN')} | Timestamp: {snap.get('collected_at', 'N/A')}",
+            f"• Sức khỏe cụm: {snap.get('overall_health', 'UNKNOWN')} | Cập nhật: {_fmt_vn_time(snap.get('collected_at'))}",
             "🖥️ MÁY CHỦ:",
         ]
         if not hosts:
@@ -519,7 +536,6 @@ class ZaloBotEngine:
         else:
             for h in hosts:
                 st = h.get("status", "UNKNOWN")
-                fresh = h.get("freshness_status", "UNKNOWN")
                 cpu = f"{h['cpu_usage_percent']}%" if h.get("cpu_usage_percent") is not None else "N/A"
                 ram = (
                     f"{h['ram_used_gb']}/{h['ram_total_gb']} GiB"
@@ -531,30 +547,29 @@ class ZaloBotEngine:
                     if h.get("disk_total_tb")
                     else "N/A"
                 )
-                src = h.get("source", "unknown")
                 if st in {"ONLINE", "DEGRADED"}:
                     lines.append(
-                        f"• {h.get('display_name')} ({h.get('hostname')}): {st} [{fresh}, src={src}]\n"
-                        f"  CPU {cpu} | RAM {ram} | Disk {disk}"
+                        f"• {h.get('display_name')} ({h.get('hostname')}): {st}\n"
+                        f"  CPU {cpu} | RAM {ram} | Ổ đĩa {disk}"
                     )
                 else:
                     lines.append(
-                        f"• {h.get('display_name')} ({h.get('hostname')}): {st} [fresh={fresh}, last_hb={h.get('last_heartbeat_at') or 'N/A'}]"
+                        f"• {h.get('display_name')} ({h.get('hostname')}): {st} (Mất kết nối)"
                     )
 
-        lines.append("🎮 GPU TELEMETRY:")
+        lines.append("🎮 GPU:")
         if not gpus:
             lines.append("• Chưa ghi nhận GPU khả dụng.")
         else:
             for g in gpus:
                 if g.get("host_online"):
                     lines.append(
-                        f"• {g['gpu_key']} ({g['model']}): "
-                        f"{int(g.get('vram_used_mb') or 0):,}/{int(g.get('vram_total_mb') or 0):,} MiB "
-                        f"({g.get('utilization_gpu')}% util, {g.get('temp_celsius')}°C)"
+                        f"• {g['model']} ({g['host_id']}): "
+                        f"VRAM {int(g.get('vram_used_mb') or 0):,}/{int(g.get('vram_total_mb') or 0):,} MiB | "
+                        f"Hiệu suất {g.get('utilization_gpu')}% | Nhiệt độ {g.get('temp_celsius')}°C"
                     )
                 else:
-                    lines.append(f"• {g['gpu_key']} ({g['model']}): HOST KHÔNG KHẢ DỤNG")
+                    lines.append(f"• {g['model']} ({g['host_id']}): Máy chủ ngoại tuyến")
 
         lines.append(f"• AI Gateway: {r_health.get('status', 'UNKNOWN')}")
         lines.append("━━━━━━━━━━━━━━━━━━━━")
@@ -563,7 +578,7 @@ class ZaloBotEngine:
             for inc in open_incs[:3]:
                 lines.append(f"• [{inc['severity']}] {inc['incident_id']}: {inc['title']}")
         else:
-            lines.append("• Không có sự cố đang mở được ghi nhận.")
+            lines.append("• Không có sự cố đang mở.")
         return "\n".join(lines)
 
     def _cmd_jobs(self, principal: ZaloPrincipal, *, own_only: bool = False) -> str:
@@ -636,38 +651,38 @@ class ZaloBotEngine:
             return "\n".join(lines)
         for inc in open_incs[:10]:
             lines.append(
-                f"• `{inc['incident_id']}` [{inc['severity']}/{inc['confidence']}] ({inc['status']}) `{inc.get('resource_id')}`: {inc['title']}"
+                f"• {inc['incident_id']} [{inc['severity']}] ({inc['status']}) {inc.get('resource_id')}: {inc['title']}"
             )
-        lines.append("\nDùng `/incident <id>` để xem bằng chứng hoặc `/ack <id>` để xác nhận.")
+        lines.append("\nDùng /incident <id> để xem chi tiết hoặc /ack <id> để xác nhận.")
         return "\n".join(lines)
 
     def _cmd_incident_detail(self, arg: str, principal: ZaloPrincipal) -> str:
         inc_id = str(arg or "").strip()
         if not inc_id:
-            return "Vui lòng nhập mã sự cố. Ví dụ: `/incident inc-abc123`"
+            return "Vui lòng nhập mã sự cố. Ví dụ: /incident inc-abc123"
         inc = self.incident_engine.get_incident(inc_id)
         if inc is None:
-            return f"❌ Không tìm thấy sự cố `{inc_id}`."
+            return f"❌ Không tìm thấy sự cố {inc_id}."
         if not principal.is_admin and inc.get("owner_id") != principal.username:
             return "⛔ Bạn không có quyền xem sự cố của thành viên khác."
         return (
-            f"📌 CHI TIẾT SỰ CỐ `{inc['incident_id']}`\n"
+            f"📌 CHI TIẾT SỰ CỐ {inc['incident_id']}\n"
             f"• Tiêu đề: {inc['title']}\n"
-            f"• Mức độ: {inc['severity']} ({inc['confidence']}) | Trạng thái: {inc['status']}\n"
+            f"• Mức độ: {inc['severity']} | Trạng thái: {inc['status']}\n"
             f"• Nguồn: {inc['source']} | Tài nguyên: {inc['resource_id']} | Chủ sở hữu: {inc.get('owner_id') or 'N/A'}\n"
-            f"• Phát hiện: {inc['detected_at']} | Lần cuối: {inc['last_observed_at']} (Lặp: {inc['occurrence_count']})\n"
+            f"• Phát hiện: {_fmt_vn_time(inc['detected_at'])} | Cập nhật: {_fmt_vn_time(inc['last_observed_at'])} (Lặp: {inc['occurrence_count']})\n"
             f"• Khuyến nghị: {inc.get('recommended_action') or 'N/A'}"
         )
 
     def _cmd_ack(self, arg: str, principal: ZaloPrincipal) -> str:
         inc_id = str(arg or "").strip()
         if not inc_id:
-            return "Vui lòng nhập mã sự cố cần xác nhận. Ví dụ: `/ack inc-abc123`"
+            return "Vui lòng nhập mã sự cố cần xác nhận. Ví dụ: /ack inc-abc123"
         try:
             updated = self.incident_engine.acknowledge_incident(
                 inc_id, actor=principal.username, role=principal.role, note="Acknowledged via Zalo Bot"
             )
-            return f"✅ @{principal.username} đã xác nhận (ACKNOWLEDGED) sự cố `{updated['incident_id']}`."
+            return f"✅ @{principal.username} đã xác nhận (ACKNOWLEDGED) sự cố {updated['incident_id']}."
         except PermissionError as p_err:
             return f"⛔ {p_err}"
         except Exception as exc:
@@ -682,7 +697,7 @@ class ZaloBotEngine:
             "━━━━━━━━━━━━━━━━━━━━",
         ]
         for i in open_sec[:5]:
-            lines.append(f"• `{i['incident_id']}` [{i['severity']}] {i['title']}")
+            lines.append(f"• {i['incident_id']} [{i['severity']}] {i['title']}")
         if not open_sec:
             lines.append("• Hiện không có sự cố Repository Guard đang mở.")
         lines.append(f"\nSự kiện Audit gần đây: {len(res.get('audit_events') or [])} mục.")

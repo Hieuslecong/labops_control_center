@@ -14,8 +14,9 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -54,6 +55,23 @@ def _scrub_obj(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_scrub_obj(v) for v in obj]
     return obj
+
+
+def _format_vn_time(iso_str: Any) -> str:
+    if not isinstance(iso_str, str) or not iso_str.strip():
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(iso_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        vn_dt = dt.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
+        return vn_dt.strftime("%H:%M %d/%m/%Y")
+    except Exception:
+        try:
+            dt = datetime.fromisoformat(str(iso_str).strip().replace("Z", "+00:00"))
+            return (dt + timedelta(hours=7)).strftime("%H:%M %d/%m/%Y")
+        except Exception:
+            return str(iso_str)[:16]
 
 
 class SREToolRegistry:
@@ -346,8 +364,15 @@ class SREToolRegistry:
                 {
                     "host_id": h["host_id"],
                     "hostname": h["hostname"],
+                    "display_name": h.get("display_name") or h["hostname"],
                     "status": h["status"],
                     "freshness_status": h["freshness_status"],
+                    "cpu_usage_percent": h.get("cpu_usage_percent"),
+                    "ram_used_gb": h.get("ram_used_gb"),
+                    "ram_total_gb": h.get("ram_total_gb"),
+                    "disk_used_tb": h.get("disk_used_tb"),
+                    "disk_total_tb": h.get("disk_total_tb"),
+                    "disk_usage_percent": h.get("disk_usage_percent"),
                     "last_heartbeat_at": h["last_heartbeat_at"],
                     "collected_at": h["collected_at"],
                 }
@@ -504,10 +529,24 @@ class SREAgentRunner:
                 ("get_workspace_usage", {}),
                 ("get_incidents", {}),
             ])
-        elif any(k in q for k in ("gpu", "vram", "nhiệt", "cuda", "a30")):
+        elif any(
+            k in q
+            for k in (
+                "gpu",
+                "vram",
+                "nhiệt",
+                "cuda",
+                "a30",
+                "ai đang",
+                "nhiều nhất",
+                "ai chạy",
+                "ai dùng",
+                "thành viên",
+            )
+        ):
             selected.extend([
-                ("get_gpu_metrics", {}),
                 ("get_active_jobs", {}),
+                ("get_gpu_metrics", {}),
                 ("get_incidents", {}),
             ])
         elif any(k in q for k in ("repo", "clone", "scan", "trivy", "mã nguồn", "github")):
@@ -560,8 +599,10 @@ class SREAgentRunner:
 
         # Wrap user question safely (never treat logs/user text as system instructions)
         sys_msg = (
-            "Bạn là LabOps AI SRE Agent v2. Trả lời bằng tiếng Việt ngắn gọn, CHỈ dựa vào dữ liệu JSON từ công cụ (tool evidence). "
-            "Không tự suy diễn số liệu bị thiếu (nếu null/None ghi rõ N/A). Luôn cấu trúc: Kết luận, Bằng chứng + Timestamp, Độ chắc chắn, Hành động đề xuất."
+            "Bạn là LabOps AI SRE Agent v2. Trả lời bằng tiếng Việt tự nhiên, rõ ràng, dễ đọc trên Zalo điện thoại, CHỈ dựa vào dữ liệu từ công cụ. "
+            "Không tự suy diễn số liệu bị thiếu (nếu null/None ghi rõ N/A). "
+            "TUYỆT ĐỐI KHÔNG in tên biến JSON thô (collected_at, running_count, proc-..., stalled false, cuda_oom false, freshness=...), "
+            "KHÔNG dùng dấu backtick (`) hay dấu sao (**), và KHÔNG in chuỗi thời gian ISO UTC (hãy đổi sang giờ Việt Nam HH:MM DD/MM)."
         )
 
         # Try native tool calling if ai_client supports generate_with_tools
@@ -621,9 +662,12 @@ class SREAgentRunner:
             try:
                 synthesis_prompt = (
                     f"Câu hỏi của {principal.role} (@{principal.username}): {scrub_sensitive_text(question)}\n\n"
-                    f"BẰNG CHỨNG CÔNG CỤ ĐÃ THỰC THI (JSON):\n{evidence_json}\n\n"
-                    "Hãy phân tích và trả lời theo 4 mục:\n"
-                    "1) Kết luận\n2) Bằng chứng & Thời gian\n3) Mức độ chắc chắn\n4) Hành động đề xuất"
+                    f"DỮ LIỆU HỆ THỐNG ĐÃ THU THẬP (JSON):\n{evidence_json}\n\n"
+                    "Hãy trả lời ngắn gọn, dễ hiểu cho người dùng Zalo:\n"
+                    "- Trả lời thẳng vào câu hỏi bằng tiếng Việt tự nhiên, súc tích.\n"
+                    "- Nếu có tác vụ đang chạy, gom nhóm theo người dùng (tên tài khoản, số tác vụ/tên script, tổng VRAM).\n"
+                    "- Thời gian ghi theo định dạng dễ đọc (HH:MM DD/MM, múi giờ Việt Nam UTC+7).\n"
+                    "- Không chèn tên trường kỹ thuật JSON (collected_at, running_count, stalled false...), không dùng ký tự ` hoặc **."
                 )
                 raw = ai_client.generate_chat_response(
                     [{"role": "user", "content": synthesis_prompt}],
@@ -657,8 +701,8 @@ class SREAgentRunner:
         timestamps: List[str],
     ) -> str:
         lines = [
-            "🔍 PHÂN TÍCH HỆ THỐNG (Deterministic SRE Fallback):",
-            f"• Phạm vi quyền: {principal.role} (@{principal.username})",
+            "📊 TỔNG HỢP TRẠNG THÁI HỆ THỐNG:",
+            f"• Quyền truy cập: {principal.role} (@{principal.username})",
         ]
         for b in evidence_bundles:
             tname = b["tool"]
@@ -670,20 +714,45 @@ class SREAgentRunner:
                 for h in res.get("hosts") or []:
                     cpu = f"{h.get('cpu_usage_percent')}%" if h.get("cpu_usage_percent") is not None else "N/A"
                     ram = f"{h.get('ram_used_gb')}/{h.get('ram_total_gb')} GiB" if h.get("ram_total_gb") else "N/A"
-                    lines.append(f"• Host `{h.get('hostname')}`: {h.get('status')} (freshness={h.get('freshness_status')}) | CPU {cpu} | RAM {ram}")
+                    st = h.get("status")
+                    if st in {"ONLINE", "DEGRADED"}:
+                        lines.append(f"• Máy chủ {h.get('hostname')}: {st} | CPU {cpu} | RAM {ram}")
+                    else:
+                        lines.append(f"• Máy chủ {h.get('hostname')}: {st} (Mất kết nối)")
             elif tname == "get_gpu_metrics":
                 for g in res.get("gpus") or []:
-                    util = f"{g.get('utilization_gpu')}%" if g.get("utilization_gpu") is not None else "N/A"
-                    temp = f"{g.get('temp_celsius')}°C" if g.get("temp_celsius") is not None else "N/A"
-                    lines.append(f"• GPU `{g.get('gpu_key')}`: Util {util}, Temp {temp}")
+                    if g.get("host_online"):
+                        util = f"{g.get('utilization_gpu')}%" if g.get("utilization_gpu") is not None else "N/A"
+                        temp = f"{g.get('temp_celsius')}°C" if g.get("temp_celsius") is not None else "N/A"
+                        lines.append(f"• GPU {g.get('model')} ({g.get('host_id')}): Tải {util}, Nhiệt độ {temp}")
+                    else:
+                        lines.append(f"• GPU {g.get('model')} ({g.get('host_id')}): Máy chủ ngoại tuyến")
             elif tname == "get_incidents":
                 incs = res.get("incidents") or []
-                lines.append(f"• Sự cố ghi nhận: {len(incs)} sự cố" + (f" (gần nhất: {incs[0].get('incident_id')} [{incs[0].get('severity')}] {incs[0].get('title')})" if incs else ""))
+                lines.append(
+                    f"• Sự cố ghi nhận: {len(incs)} sự cố"
+                    + (f" (gần nhất: {incs[0].get('incident_id')} [{incs[0].get('severity')}] {incs[0].get('title')})" if incs else "")
+                )
             elif tname == "get_active_jobs":
-                lines.append(f"• Tác vụ đang chạy: {res.get('running_count', 0)}")
+                jobs = res.get("jobs") or []
+                lines.append(f"• Tác vụ đang chạy: {res.get('running_count', len(jobs))}")
+                by_owner: Dict[str, Dict[str, Any]] = {}
+                for j in jobs:
+                    owner = str(j.get("owner") or "unknown")
+                    bucket = by_owner.setdefault(owner, {"count": 0, "vram": 0, "names": []})
+                    bucket["count"] += 1
+                    bucket["vram"] += int(j.get("vram_mb") or 0)
+                    jname = str(j.get("name") or "").strip()
+                    if jname and jname not in bucket["names"]:
+                        bucket["names"].append(jname)
+                for owner, info in sorted(by_owner.items(), key=lambda kv: (-kv[1]["vram"], -kv[1]["count"]))[:5]:
+                    names_txt = ", ".join(info["names"][:3]) if info["names"] else "tiến trình"
+                    lines.append(f"  - @{owner}: {info['count']} tác vụ ({names_txt}) — Tổng VRAM: {info['vram']:,} MiB")
             elif tname == "get_metrics_history":
-                lines.append(f"• KPI 24h: Avail={res.get('availability_percent') or 'N/A'}% | CPU Peak={res.get('cpu_peak_percent') or 'N/A'}% (samples={res.get('sample_count', 0)})")
+                lines.append(
+                    f"• Chỉ số 24h: Khả dụng {res.get('availability_percent') or 'N/A'}% | CPU đỉnh {res.get('cpu_peak_percent') or 'N/A'}%"
+                )
         if timestamps:
-            lines.append(f"• Timestamp bằng chứng: {timestamps[0]}")
-        lines.append("• Độ chắc chắn: Xác định trực tiếp từ telemetry/DB (AI Gateway hiện ngoại tuyến).")
+            lines.append(f"• Cập nhật lúc: {_format_vn_time(timestamps[0])} (UTC+7)")
+        lines.append("• Nguồn dữ liệu: Đọc trực tiếp từ hệ thống giám sát.")
         return "\n".join(lines)

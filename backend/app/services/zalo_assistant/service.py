@@ -330,5 +330,118 @@ class ZaloAssistantService:
             "daily_breakdown": quota_status.get("daily_usage", {}),
         }
 
+    # ---------------- Daily Executive Briefing Management ----------------
+
+    def get_daily_brief_status(self) -> Dict[str, Any]:
+        cfg = self.identity_rbac.get_daily_brief_config()
+        ver = self.identity_rbac.verify_daily_brief_recipient()
+        runs = self.report_generator.list_daily_report_runs(25)
+        outbox_rows = [
+            o for o in self.notification_dispatcher.list_outbox_entries(100)
+            if str(o.get("event_type") or "").startswith("DAILY_EXECUTIVE_BRIEF")
+        ]
+        outbox_ids = {o.get("id") for o in outbox_rows}
+        attempts = [
+            a for a in self.notification_dispatcher.list_delivery_attempts(100)
+            if a.get("outbox_id") in outbox_ids
+        ]
+
+        sent_runs = [r for r in runs if str(r.get("status") or "").upper() == "SENT"]
+        last_success = sent_runs[0] if sent_runs else None
+        last_error = None
+        for r in runs:
+            d_err = (r.get("delivery_state") or {}).get("error")
+            if d_err:
+                last_error = d_err
+                break
+        if not last_error and outbox_rows:
+            for o in outbox_rows:
+                if o.get("last_error"):
+                    last_error = o["last_error"]
+                    break
+
+        return {
+            "config": {
+                "enabled": bool(cfg.get("enabled", True)),
+                "schedule_time": cfg.get("schedule_time", "08:00"),
+                "timezone": cfg.get("timezone", "Asia/Ho_Chi_Minh"),
+                "catchup_hours": int(cfg.get("catchup_hours", 4)),
+                "target_zalo_id": cfg.get("target_zalo_id"),
+                "target_display_name": cfg.get("target_display_name"),
+                "target_role": cfg.get("target_role", "ADMIN"),
+            },
+            "verification": ver,
+            "next_scheduled_at": self.report_generator.compute_next_scheduled_0800(),
+            "last_successful_at": (
+                (last_success.get("delivery_state") or {}).get("sent_at") or last_success.get("created_at")
+                if last_success
+                else None
+            ),
+            "last_error": last_error,
+            "latest_run": runs[0] if runs else None,
+            "runs": runs,
+            "delivery_outbox": outbox_rows,
+            "delivery_attempts": attempts,
+        }
+
+    def update_daily_brief_config(self, updates: Dict[str, Any], *, actor: str = "admin") -> Dict[str, Any]:
+        cfg = self.identity_rbac.update_daily_brief_config(updates)
+        if updates.get("verify_admin_link"):
+            observed_chat = updates.get("verified_chat_id")
+            if not observed_chat:
+                obs_map = cfg.get("observed_private_chats") or {}
+                tid = str(cfg.get("target_zalo_id") or "")
+                if isinstance(obs_map.get(tid), dict):
+                    observed_chat = obs_map[tid].get("chat_id")
+            self.identity_rbac.bind_daily_brief_admin(
+                admin_actor=actor,
+                verified_chat_id=str(observed_chat) if observed_chat else None,
+            )
+        return self.get_daily_brief_status()
+
+    def preview_daily_brief(self, *, author: str = "Admin Dry-Run", force: bool = True) -> Dict[str, Any]:
+        rep = self.report_generator.generate_daily_executive_briefing(
+            force=force,
+            author=author,
+            ai_client=self.ai_client,
+            telemetry_collector=self.telemetry_collector,
+            incident_engine=self.incident_engine,
+        )
+        return {
+            "report": rep,
+            "verification": self.identity_rbac.verify_daily_brief_recipient(),
+            "dry_run": True,
+        }
+
+    async def deliver_daily_brief(
+        self,
+        *,
+        period_key: Optional[str] = None,
+        is_test: bool = False,
+        bot: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        from app.services.zalo_assistant.worker import ZaloPollingWorker
+
+        self.bot_engine.reload_persisted_config()
+        pk = str(period_key or "").strip()
+        if not pk:
+            pk, _, _ = self.report_generator.compute_daily_window()
+
+        ver = self.identity_rbac.verify_daily_brief_recipient()
+        if not ver.get("verified"):
+            return {"success": False, "status": "RECIPIENT_NOT_VERIFIED", "verification": ver}
+
+        active_bot = bot
+        if active_bot is None:
+            token = self.bot_engine.bot_token or os.getenv("ZALO_BOT_TOKEN", "")
+            if not token:
+                raise RuntimeError("ZALO_BOT_TOKEN chưa được cấu hình")
+            from zalo_bot import Bot
+
+            active_bot = Bot(token=token)
+
+        worker = ZaloPollingWorker(service_instance=self)
+        return await worker.deliver_daily_brief_report(pk, bot=active_bot, is_test=is_test)
+
 
 zalo_assistant_service = ZaloAssistantService()

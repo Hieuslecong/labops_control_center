@@ -6,8 +6,10 @@ via short-lived one-time verification codes (preventing identity spoofing).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -17,6 +19,10 @@ from sqlalchemy import select
 
 from app.db.models import NotificationSubscriptionRecord, ZaloIdentityLinkRecord
 from app.db.session import DatabaseManager
+
+DAILY_BRIEF_TARGET_ZALO_ID = "0c00ed813eccd7928edd"
+DAILY_BRIEF_TARGET_DISPLAY_NAME = "Hiếu Lê"
+DAILY_BRIEF_TARGET_ROLE = "ADMIN"
 
 
 def _utcnow() -> datetime:
@@ -55,6 +61,169 @@ class ZaloIdentityRBACService:
     def __init__(self, data_dir: str, db_manager: Optional[DatabaseManager] = None):
         self.data_dir = os.path.abspath(data_dir)
         self.db = db_manager or DatabaseManager(self.data_dir)
+        self._daily_cfg_path = os.path.join(self.data_dir, "daily_brief_config.json")
+        self._daily_cfg_lock = threading.Lock()
+
+    def _default_daily_cfg(self) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "schedule_time": "08:00",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "catchup_hours": 4,
+            "target_zalo_id": DAILY_BRIEF_TARGET_ZALO_ID,
+            "target_display_name": DAILY_BRIEF_TARGET_DISPLAY_NAME,
+            "target_role": DAILY_BRIEF_TARGET_ROLE,
+            "observed_private_chats": {},
+        }
+
+    def _load_daily_cfg(self) -> Dict[str, Any]:
+        base = self._default_daily_cfg()
+        if os.path.exists(self._daily_cfg_path):
+            try:
+                with open(self._daily_cfg_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    base.update(loaded)
+                    if not isinstance(base.get("observed_private_chats"), dict):
+                        base["observed_private_chats"] = {}
+            except Exception:
+                pass
+        return base
+
+    def _save_daily_cfg(self, cfg: Dict[str, Any]) -> None:
+        os.makedirs(self.data_dir, exist_ok=True)
+        tmp = f"{self._daily_cfg_path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self._daily_cfg_path)
+
+    def get_daily_brief_config(self) -> Dict[str, Any]:
+        with self._daily_cfg_lock:
+            return self._load_daily_cfg()
+
+    def update_daily_brief_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        with self._daily_cfg_lock:
+            cfg = self._load_daily_cfg()
+            if "enabled" in updates and updates["enabled"] is not None:
+                cfg["enabled"] = bool(updates["enabled"])
+            if "catchup_hours" in updates and updates["catchup_hours"] is not None:
+                cfg["catchup_hours"] = max(1, min(int(updates["catchup_hours"]), 23))
+            if "target_zalo_id" in updates and updates["target_zalo_id"]:
+                tid = str(updates["target_zalo_id"]).strip()
+                if tid == "*":
+                    raise ValueError("Wildcard '*' is forbidden")
+                cfg["target_zalo_id"] = tid
+            if "target_display_name" in updates and updates["target_display_name"]:
+                cfg["target_display_name"] = str(updates["target_display_name"]).strip()[:120]
+            self._save_daily_cfg(cfg)
+            return cfg
+
+    def record_observed_private_chat(self, zalo_user_id: str, chat_id: str, display_name: str = "") -> bool:
+        """Record verified 1-1 DM interaction (excludes group chats where chat_id != sender_id)."""
+        uid = str(zalo_user_id or "").strip()
+        cid = str(chat_id or "").strip()
+        if not uid or not cid or uid == "*" or cid == "*" or cid != uid:
+            return False
+        now_iso = _utcnow().isoformat()
+        with self._daily_cfg_lock:
+            cfg = self._load_daily_cfg()
+            observed = cfg.setdefault("observed_private_chats", {})
+            observed[uid] = {
+                "chat_id": cid,
+                "last_seen_at": now_iso,
+                "observed_display_name": str(display_name or "").strip()[:120],
+            }
+            self._save_daily_cfg(cfg)
+        return True
+
+    def verify_daily_brief_recipient(self, target_zalo_id: Optional[str] = None) -> Dict[str, Any]:
+        """Strictly verify recipient has ACTIVE ADMIN link + verified 1-1 DM chat_id (never trusts display_name or falls back)."""
+        cfg = self.get_daily_brief_config()
+        target_id = str(target_zalo_id or cfg.get("target_zalo_id") or DAILY_BRIEF_TARGET_ZALO_ID).strip()
+        disp_name = str(cfg.get("target_display_name") or DAILY_BRIEF_TARGET_DISPLAY_NAME)
+
+        active_admin_link = None
+        if target_id and target_id != "*":
+            with self.db.session_scope() as session:
+                active_admin_link = session.execute(
+                    select(ZaloIdentityLinkRecord)
+                    .where(
+                        ZaloIdentityLinkRecord.zalo_user_id == target_id,
+                        ZaloIdentityLinkRecord.status == "ACTIVE",
+                        ZaloIdentityLinkRecord.role == "ADMIN",
+                    )
+                    .order_by(ZaloIdentityLinkRecord.verified_at.desc())
+                ).scalars().first()
+
+        obs = (cfg.get("observed_private_chats") or {}).get(target_id)
+        verified_chat_id = (
+            str(obs.get("chat_id")).strip()
+            if isinstance(obs, dict) and str(obs.get("chat_id") or "").strip() == target_id
+            else ""
+        )
+
+        if active_admin_link is not None and verified_chat_id:
+            return {
+                "verified": True,
+                "status": "VERIFIED",
+                "zalo_user_id": target_id,
+                "chat_id": verified_chat_id,
+                "username": active_admin_link.username,
+                "member_id": active_admin_link.member_id,
+                "role": "ADMIN",
+                "display_name": disp_name,
+                "verified_at": _as_utc(active_admin_link.verified_at).isoformat() if active_admin_link.verified_at else None,
+                "last_interaction_at": obs.get("last_seen_at") if isinstance(obs, dict) else None,
+            }
+
+        reasons: List[str] = []
+        if active_admin_link is None:
+            reasons.append("chưa có liên kết ACTIVE với vai trò ADMIN trong LabOps")
+        if not verified_chat_id:
+            reasons.append("chưa ghi nhận chat_id riêng 1-1 hợp lệ với Bot")
+
+        return {
+            "verified": False,
+            "status": "RECIPIENT_NOT_VERIFIED",
+            "zalo_user_id": target_id,
+            "chat_id": None,
+            "display_name": disp_name,
+            "role": "ADMIN",
+            "has_active_admin_link": active_admin_link is not None,
+            "has_verified_private_chat": bool(verified_chat_id),
+            "reason": "; ".join(reasons),
+            "instruction": (
+                f"Người nhận {disp_name} ({target_id}) {', '.join(reasons)}. "
+                "Vui lòng tạo mã /link từ Dashboard → AI Assistant và gửi `/link <MÃ>` trong tin nhắn riêng 1-1 với Zalo Bot."
+            ),
+        }
+
+    def bind_daily_brief_admin(
+        self,
+        *,
+        zalo_user_id: Optional[str] = None,
+        username: str = "admin",
+        member_id: str = "mem-admin",
+        admin_actor: str = "admin",
+        verified_chat_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cfg = self.get_daily_brief_config()
+        target_id = str(zalo_user_id or cfg.get("target_zalo_id") or DAILY_BRIEF_TARGET_ZALO_ID).strip()
+        disp_name = str(cfg.get("target_display_name") or DAILY_BRIEF_TARGET_DISPLAY_NAME)
+        link_res = self.admin_bind_identity(
+            zalo_user_id=target_id,
+            username=username,
+            member_id=member_id,
+            role="ADMIN",
+            display_name=disp_name,
+            admin_actor=admin_actor,
+        )
+        if verified_chat_id and str(verified_chat_id).strip() == target_id:
+            self.record_observed_private_chat(target_id, verified_chat_id, display_name=disp_name)
+        return {
+            "link": link_res,
+            "verification": self.verify_daily_brief_recipient(target_id),
+        }
 
     def generate_link_code(
         self,

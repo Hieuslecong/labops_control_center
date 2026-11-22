@@ -72,6 +72,18 @@ class RepositoryScanEventPayload(BaseModel):
     request_data: Dict[str, Any]
 
 
+class DailyBriefConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    catchup_hours: Optional[int] = None
+    verify_admin_link: Optional[bool] = None
+    verified_chat_id: Optional[str] = None
+
+
+class DailyBriefTestRequest(BaseModel):
+    confirm: bool = False
+    period_key: Optional[str] = None
+
+
 @router.get("/overview", summary="Tổng quan AI SRE Agent v2 & Zalo Quota")
 async def get_overview(principal: Principal = Depends(require_user)):
     return await asyncio.to_thread(zalo_assistant_service.get_overview)
@@ -120,6 +132,61 @@ async def generate_daily_report(force: bool = Query(False), principal: Principal
         telemetry_collector=zalo_assistant_service.telemetry_collector,
         incident_engine=zalo_assistant_service.incident_engine,
     )
+
+
+@router.get("/daily-brief/status", summary="Trạng thái lịch gửi, xác minh Hiếu Lê và lịch sử Daily Executive Brief")
+async def get_daily_brief_status(principal: Principal = Depends(require_admin)):
+    return await asyncio.to_thread(zalo_assistant_service.get_daily_brief_status)
+
+
+@router.post("/daily-brief/config", summary="Cấu hình bật/tắt Daily Brief & xác minh Admin Zalo")
+async def update_daily_brief_config(payload: DailyBriefConfigRequest, principal: Principal = Depends(require_admin)):
+    try:
+        return await asyncio.to_thread(
+            zalo_assistant_service.update_daily_brief_config,
+            payload.model_dump(exclude_unset=True),
+            actor=principal.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/daily-brief/preview", summary="Dry-run tạo bản xem trước Daily Brief từ dữ liệu thật (không gửi Zalo)")
+async def preview_daily_brief(force: bool = Query(True), principal: Principal = Depends(require_admin)):
+    return await asyncio.to_thread(
+        zalo_assistant_service.preview_daily_brief,
+        author=f"Admin Preview ({principal.username})",
+        force=force,
+    )
+
+
+@router.post("/daily-brief/test-delivery", summary="Gửi thử 01 tin nhắn Daily Brief tới Hiếu Lê (yêu cầu xác nhận)")
+async def test_daily_brief_delivery(payload: DailyBriefTestRequest, principal: Principal = Depends(require_admin)):
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="Yêu cầu confirm=true trước khi gửi tin nhắn kiểm thử thật qua Zalo.")
+    try:
+        res = await zalo_assistant_service.deliver_daily_brief(period_key=payload.period_key, is_test=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not res.get("success") and res.get("status") == "RECIPIENT_NOT_VERIFIED":
+        raise HTTPException(status_code=400, detail=res.get("verification", {}).get("instruction") or "RECIPIENT_NOT_VERIFIED")
+    return res
+
+
+@router.post("/daily-brief/retry/{period_key}", summary="Gửi lại Daily Brief đủ điều kiện retry")
+async def retry_daily_brief_delivery(period_key: str, principal: Principal = Depends(require_admin)):
+    existing = await asyncio.to_thread(zalo_assistant_service.report_generator.get_daily_report_by_period, period_key)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy Daily Brief kỳ {period_key}.")
+    st = str(existing.get("status") or "").upper()
+    if st in {"SENT", "DELIVERY_UNKNOWN"}:
+        raise HTTPException(status_code=409, detail=f"Kỳ {period_key} đang ở trạng thái {st}, không thể gửi lại để tránh trùng lặp.")
+    if st not in {"READY", "FAILED", "RETRY_PENDING", "RECIPIENT_NOT_VERIFIED", "MISSED_WINDOW"}:
+        raise HTTPException(status_code=400, detail=f"Trạng thái {st} không đủ điều kiện retry.")
+    try:
+        return await zalo_assistant_service.deliver_daily_brief(period_key=period_key, is_test=False)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/reports/{report_id}", summary="Chi tiết báo cáo")

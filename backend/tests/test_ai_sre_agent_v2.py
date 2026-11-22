@@ -471,3 +471,145 @@ def test_ai_agent_tool_calling_rbac_and_timeout(tmp_path: Path):
     assert inv["tool_traces"][0]["status"] == "OK"
     assert len(inv["evidence_timestamps"]) >= 1
     assert "execute_arbitrary_shell" in inv["tool_traces"][1]["tool"]
+
+
+# 8. Daily Brief Strict Recipient Verification (Hiếu Lê 0c00ed813eccd7928edd DM Only, No Fallback)
+def test_daily_brief_strict_recipient_verification_and_no_fallback(tmp_path: Path):
+    db, ledger, rbac, telemetry, incidents, reports, ai_client, registry, bot_engine = _build_stack(tmp_path)
+    bot_engine.authorized_users = ["legacy-user-1", "researcher-1"]
+    rbac.admin_bind_identity(zalo_user_id="researcher-1", username="tranglt", member_id="m-tr", role="RESEARCHER")
+
+    svc_stub = SimpleNamespace(
+        data_dir=str(tmp_path),
+        bot_engine=bot_engine,
+        quota_ledger=ledger,
+        report_generator=reports,
+        lease_manager=SchedulerLeaseManager(str(tmp_path), db_manager=db),
+        identity_rbac=rbac,
+        telemetry_collector=telemetry,
+        incident_engine=incidents,
+        notification_dispatcher=NotificationDispatcher(str(tmp_path), quota_ledger=ledger, db_manager=db),
+        repo_alert_monitor=RepoSecurityAlertMonitor(str(tmp_path), ledger, bot_engine, identity_rbac=rbac, incident_engine=incidents),
+        ai_client=ai_client,
+    )
+    worker = ZaloPollingWorker(service_instance=svc_stub)
+    worker.report_chat_ids = ["group-ops-1"]
+    bot = _FakeBot()
+
+    # Before 0c00ed813eccd7928edd is verified -> MUST NOT send to anyone or fallback!
+    utc_0800 = datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc)
+    asyncio.run(worker._check_daily_report_schedule(bot=bot, now_utc=utc_0800))
+    assert len(bot.sent) == 0
+    rep = reports.get_daily_report_by_period("2026-11-23")
+    assert rep is not None
+    assert rep["status"] == "RECIPIENT_NOT_VERIFIED"
+
+    # Group chat interaction must be rejected for private chat verification
+    assert rbac.record_observed_private_chat("0c00ed813eccd7928edd", "group-chat-999", "Hiếu Lê") is False
+    assert rbac.verify_daily_brief_recipient()["verified"] is False
+
+    # Valid 1-1 DM interaction + ADMIN link -> verified & delivers ONLY to 0c00ed813eccd7928edd
+    rbac.record_observed_private_chat("0c00ed813eccd7928edd", "0c00ed813eccd7928edd", "Hiếu Lê")
+    rbac.admin_bind_identity(
+        zalo_user_id="0c00ed813eccd7928edd",
+        username="admin",
+        member_id="mem-admin",
+        role="ADMIN",
+        display_name="Hiếu Lê",
+    )
+    ver = rbac.verify_daily_brief_recipient()
+    assert ver["verified"] is True
+    assert ver["chat_id"] == "0c00ed813eccd7928edd"
+
+    asyncio.run(worker._check_daily_report_schedule(bot=bot, now_utc=utc_0800))
+    assert len(bot.sent) == 1
+    assert bot.sent[0]["chat_id"] == "0c00ed813eccd7928edd"
+    assert "Hiếu Lê | Admin" in bot.sent[0]["text"]
+    assert "group-ops-1" not in [m["chat_id"] for m in bot.sent]
+    assert "legacy-user-1" not in [m["chat_id"] for m in bot.sent]
+
+    # Re-running schedule at 08:05 / after worker restart NEVER sends duplicate
+    worker2 = ZaloPollingWorker(service_instance=svc_stub)
+    asyncio.run(worker2._check_daily_report_schedule(bot=bot, now_utc=datetime(2026, 11, 23, 1, 5, tzinfo=timezone.utc)))
+    assert len(bot.sent) == 1
+
+
+# 9. Schedule Window, Restart Catch-Up, Missed Window Alert & Timeout DELIVERY_UNKNOWN
+def test_daily_brief_catchup_missed_window_and_timeout_delivery_unknown(tmp_path: Path):
+    db, ledger, rbac, telemetry, incidents, reports, ai_client, registry, bot_engine = _build_stack(tmp_path)
+    rbac.bind_daily_brief_admin(
+        zalo_user_id="0c00ed813eccd7928edd",
+        username="admin",
+        verified_chat_id="0c00ed813eccd7928edd",
+    )
+
+    svc_stub = SimpleNamespace(
+        data_dir=str(tmp_path),
+        bot_engine=bot_engine,
+        quota_ledger=ledger,
+        report_generator=reports,
+        lease_manager=SchedulerLeaseManager(str(tmp_path), db_manager=db),
+        identity_rbac=rbac,
+        telemetry_collector=telemetry,
+        incident_engine=incidents,
+        notification_dispatcher=NotificationDispatcher(str(tmp_path), quota_ledger=ledger, db_manager=db),
+        repo_alert_monitor=RepoSecurityAlertMonitor(str(tmp_path), ledger, bot_engine, identity_rbac=rbac, incident_engine=incidents),
+        ai_client=ai_client,
+    )
+    worker = ZaloPollingWorker(service_instance=svc_stub)
+
+    # Restart catch-up at 10:30 ICT (03:30 UTC, within 4h catch-up window), with provider timeout
+    timeout_bot = _FakeBot(timeout_for={"0c00ed813eccd7928edd"})
+    asyncio.run(
+        worker._check_daily_report_schedule(
+            bot=timeout_bot,
+            now_utc=datetime(2026, 11, 23, 3, 30, tzinfo=timezone.utc),
+        )
+    )
+    rep = reports.get_daily_report_by_period("2026-11-23")
+    assert rep is not None
+    assert rep["status"] == "DELIVERY_UNKNOWN"
+    assert rep["delivery_state"].get("is_late_catchup") is True
+    assert "Gửi bù sau khởi động" in rep["zalo_summary"]
+
+    # After DELIVERY_UNKNOWN, healthy bot on next tick MUST NOT blindly re-send!
+    ok_bot = _FakeBot()
+    asyncio.run(
+        worker._check_daily_report_schedule(
+            bot=ok_bot,
+            now_utc=datetime(2026, 11, 23, 3, 35, tzinfo=timezone.utc),
+        )
+    )
+    assert len(ok_bot.sent) == 0
+
+    # Missed window (>4h past 08:00 without any run on next day 14:00 ICT = 07:00 UTC) -> MISSED_WINDOW + P1 Incident
+    asyncio.run(
+        worker._check_daily_report_schedule(
+            bot=ok_bot,
+            now_utc=datetime(2026, 11, 24, 7, 0, tzinfo=timezone.utc),
+        )
+    )
+    missed = reports.get_daily_report_by_period("2026-11-24")
+    assert missed is not None
+    assert missed["status"] == "MISSED_WINDOW"
+    assert any(i.get("event_type") == "DAILY_BRIEF_MISSED_WINDOW" for i in incidents.list_incidents())
+
+
+# 10. Collector Down N/A + Partition/Job Dedup + Empty Priorities Phrase
+def test_daily_brief_metrics_dedup_collector_down_and_empty_priorities(tmp_path: Path):
+    db, ledger, rbac, telemetry, incidents, reports, ai_client, registry, bot_engine = _build_stack(tmp_path)
+
+    # Repo collector unreachable -> must report N/A (not 0) in Security section
+    rep = reports.generate_daily_executive_briefing(
+        now_utc=datetime(2026, 11, 23, 1, 0, tzinfo=timezone.utc),
+        ai_client=None,
+        telemetry_collector=telemetry,
+        incident_engine=incidents,
+        repo_requests=[],
+        repo_collector_ok=False,
+        incident_collector_ok=False,
+    )
+    assert "Repo mới clone: N/A" in rep["zalo_summary"]
+    assert "Sự cố đang mở: N/A" in rep["zalo_summary"]
+    assert "LABOPS | DAILY EXECUTIVE BRIEF" in rep["zalo_summary"]
+    assert len(rep["zalo_summary"]) < 2000

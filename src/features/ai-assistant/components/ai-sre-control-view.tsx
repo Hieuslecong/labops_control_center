@@ -45,6 +45,10 @@ export default function AIAssistantView() {
   const [config, setConfig] = useState<any>(null);
   const [tools, setTools] = useState<any>(null);
   const [history, setHistory] = useState<any>(null);
+  const [dailyBriefStatus, setDailyBriefStatus] = useState<any>(null);
+  const [dailyPreviewReport, setDailyPreviewReport] = useState<any>(null);
+  const [dailyActionLoading, setDailyActionLoading] = useState(false);
+  const [dailyActionMsg, setDailyActionMsg] = useState<string | null>(null);
 
   const [chatInput, setChatInput] = useState('');
   const [chatLog, setChatLog] = useState<ChatEntry[]>([
@@ -71,16 +75,18 @@ export default function AIAssistantView() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [ovRes, repRes, incRes, linkRes, subRes, cfgRes, toolRes, histRes] = await Promise.all([
-        fetch('/api/labops/ai-assistant/overview'),
-        fetch('/api/labops/ai-assistant/reports'),
-        fetch('/api/labops/ai-assistant/incidents?limit=50'),
-        fetch('/api/labops/ai-assistant/identity-links'),
-        fetch('/api/labops/ai-assistant/subscriptions'),
-        fetch('/api/labops/ai-assistant/config'),
-        fetch('/api/labops/ai-assistant/tools'),
-        fetch('/api/labops/ai-assistant/history')
-      ]);
+      const [ovRes, repRes, incRes, linkRes, subRes, cfgRes, toolRes, histRes, dbRes] =
+        await Promise.all([
+          fetch('/api/labops/ai-assistant/overview'),
+          fetch('/api/labops/ai-assistant/reports'),
+          fetch('/api/labops/ai-assistant/incidents?limit=50'),
+          fetch('/api/labops/ai-assistant/identity-links'),
+          fetch('/api/labops/ai-assistant/subscriptions'),
+          fetch('/api/labops/ai-assistant/config'),
+          fetch('/api/labops/ai-assistant/tools'),
+          fetch('/api/labops/ai-assistant/history'),
+          fetch('/api/labops/ai-assistant/daily-brief/status')
+        ]);
 
       if (ovRes.ok) setOverview(await ovRes.json());
       if (repRes.ok) {
@@ -107,6 +113,7 @@ export default function AIAssistantView() {
       }
       if (toolRes.ok) setTools(await toolRes.json());
       if (histRes.ok) setHistory(await histRes.json());
+      if (dbRes.ok) setDailyBriefStatus(await dbRes.json());
     } catch (e) {
       console.error('Lỗi tải dữ liệu AI SRE v2:', e);
     } finally {
@@ -166,6 +173,119 @@ export default function AIAssistantView() {
     } finally {
       setDailyGenLoading(false);
       setReportGenLoading(false);
+    }
+  };
+
+  const handleDailyPreview = async () => {
+    setDailyActionLoading(true);
+    setDailyActionMsg(null);
+    try {
+      const res = await fetch('/api/labops/ai-assistant/daily-brief/preview?force=true', {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDailyPreviewReport(data.report);
+        setDailyActionMsg('Đã tạo bản xem trước (Dry-run) từ dữ liệu thật. Chưa gửi qua Zalo.');
+        await fetchData();
+      } else {
+        setDailyActionMsg(`Lỗi tạo preview: ${data.detail || 'Unknown error'}`);
+      }
+    } finally {
+      setDailyActionLoading(false);
+    }
+  };
+
+  const handleToggleDailyEnabled = async (enabled: boolean) => {
+    setDailyActionLoading(true);
+    setDailyActionMsg(null);
+    try {
+      const res = await fetch('/api/labops/ai-assistant/daily-brief/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      if (res.ok) {
+        setDailyBriefStatus(await res.json());
+        setDailyActionMsg(
+          enabled ? 'Đã bật lịch gửi Daily Brief 08:00.' : 'Đã tạm tắt lịch gửi tự động.'
+        );
+      }
+    } finally {
+      setDailyActionLoading(false);
+    }
+  };
+
+  const handleVerifyDailyAdminBind = async () => {
+    setDailyActionLoading(true);
+    setDailyActionMsg(null);
+    try {
+      const res = await fetch('/api/labops/ai-assistant/daily-brief/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verify_admin_link: true })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDailyBriefStatus(data);
+        setDailyActionMsg(
+          data?.verification?.verified
+            ? 'Đã xác minh liên kết Admin Hiếu Lê với Zalo Bot thành công.'
+            : data?.verification?.instruction ||
+                'Chưa ghi nhận chat_id 1-1 hợp lệ từ tài khoản Zalo đích.'
+        );
+      }
+    } finally {
+      setDailyActionLoading(false);
+    }
+  };
+
+  const handleDailyTestDelivery = async () => {
+    if (
+      !window.confirm(
+        'Xác nhận gửi 01 tin nhắn Daily Executive Brief kiểm thử thật tới Zalo Hiếu Lê (0c00ed813eccd7928edd)?'
+      )
+    ) {
+      return;
+    }
+    setDailyActionLoading(true);
+    setDailyActionMsg(null);
+    try {
+      const res = await fetch('/api/labops/ai-assistant/daily-brief/test-delivery', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setDailyActionMsg(
+          `Đã gửi kiểm thử thành công tới ${data.delivery?.recipient_id} (MsgID: ${data.delivery?.provider_message_id || 'accepted'}).`
+        );
+        await fetchData();
+      } else {
+        setDailyActionMsg(`Không thể gửi kiểm thử: ${data.detail || data.status || 'Lỗi gửi tin'}`);
+      }
+    } finally {
+      setDailyActionLoading(false);
+    }
+  };
+
+  const handleDailyRetry = async (periodKey: string) => {
+    setDailyActionLoading(true);
+    setDailyActionMsg(null);
+    try {
+      const res = await fetch(`/api/labops/ai-assistant/daily-brief/retry/${periodKey}`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDailyActionMsg(`Retry kỳ ${periodKey}: ${data.status || 'OK'}`);
+        await fetchData();
+      } else {
+        setDailyActionMsg(`Retry thất bại: ${data.detail || 'Error'}`);
+      }
+    } finally {
+      setDailyActionLoading(false);
     }
   };
 
@@ -668,10 +788,187 @@ export default function AIAssistantView() {
 
         {/* TAB 4: BÁO CÁO NGÀY & TUẦN */}
         <TabsContent value='reports' className='space-y-4 pt-3'>
+          {/* Daily Executive Reporting Control Panel */}
+          <Card>
+            <CardHeader className='pb-3'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <div>
+                  <CardTitle className='text-sm font-bold'>
+                    Daily Executive Reporting (08:00 GMT+7)
+                  </CardTitle>
+                  <CardDescription className='text-xs'>
+                    Báo cáo điều hành tổng hợp 24 giờ • Gửi riêng DM cho Admin đã xác minh •
+                    Idempotent &amp; Catch-up
+                  </CardDescription>
+                </div>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Button
+                    size='sm'
+                    variant={dailyBriefStatus?.config?.enabled ? 'default' : 'outline'}
+                    onClick={() => handleToggleDailyEnabled(!dailyBriefStatus?.config?.enabled)}
+                    disabled={dailyActionLoading}
+                  >
+                    {dailyBriefStatus?.config?.enabled
+                      ? 'Lịch 08:00: ĐANG BẬT'
+                      : 'Lịch 08:00: ĐANG TẮT'}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={handleDailyPreview}
+                    disabled={dailyActionLoading}
+                  >
+                    <IconFileText className='h-4 w-4 mr-1' />
+                    Preview Report (Dry-run)
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='secondary'
+                    onClick={handleDailyTestDelivery}
+                    disabled={dailyActionLoading || !dailyBriefStatus?.verification?.verified}
+                  >
+                    <IconSend className='h-4 w-4 mr-1' />
+                    Test Delivery
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className='space-y-3 text-xs'>
+              <div className='grid gap-3 md:grid-cols-4'>
+                <div className='p-2.5 rounded border space-y-1'>
+                  <div className='text-muted-foreground'>Người nhận &amp; Vai trò</div>
+                  <div className='font-semibold'>
+                    {dailyBriefStatus?.config?.target_display_name || 'Hiếu Lê'} (
+                    {dailyBriefStatus?.config?.target_role || 'ADMIN'})
+                  </div>
+                  <div className='font-mono text-muted-foreground'>
+                    {dailyBriefStatus?.config?.target_zalo_id || '0c00ed813eccd7928edd'}
+                  </div>
+                </div>
+                <div className='p-2.5 rounded border space-y-1'>
+                  <div className='text-muted-foreground'>Xác minh Định danh Zalo</div>
+                  <div>
+                    <Badge
+                      variant={dailyBriefStatus?.verification?.verified ? 'default' : 'destructive'}
+                      className='font-mono text-xs'
+                    >
+                      {dailyBriefStatus?.verification?.status || 'UNKNOWN'}
+                    </Badge>
+                  </div>
+                  {!dailyBriefStatus?.verification?.verified && (
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      className='h-6 text-xs mt-1'
+                      onClick={handleVerifyDailyAdminBind}
+                      disabled={dailyActionLoading}
+                    >
+                      Xác nhận liên kết từ chat
+                    </Button>
+                  )}
+                </div>
+                <div className='p-2.5 rounded border space-y-1'>
+                  <div className='text-muted-foreground'>Lịch &amp; Múi giờ</div>
+                  <div className='font-mono font-semibold'>
+                    {dailyBriefStatus?.config?.schedule_time || '08:00'} •{' '}
+                    {dailyBriefStatus?.config?.timezone || 'Asia/Ho_Chi_Minh'}
+                  </div>
+                  <div className='text-muted-foreground'>
+                    Tiếp theo: {dailyBriefStatus?.next_scheduled_at || 'N/A'}
+                  </div>
+                </div>
+                <div className='p-2.5 rounded border space-y-1'>
+                  <div className='text-muted-foreground'>Trạng thái Gửi gần nhất</div>
+                  <div className='font-mono'>
+                    {dailyBriefStatus?.last_successful_at
+                      ? `Thành công: ${dailyBriefStatus.last_successful_at}`
+                      : 'Chưa gửi kỳ nào'}
+                  </div>
+                  {dailyBriefStatus?.last_error && (
+                    <div
+                      className='text-destructive font-mono truncate'
+                      title={dailyBriefStatus.last_error}
+                    >
+                      Lỗi: {dailyBriefStatus.last_error}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {dailyActionMsg && (
+                <div className='p-2.5 rounded border bg-muted/40 font-mono text-xs'>
+                  {dailyActionMsg}
+                </div>
+              )}
+
+              {(dailyPreviewReport?.zalo_summary || dailyBriefStatus?.latest_run?.zalo_summary) && (
+                <div className='space-y-1'>
+                  <div className='font-semibold'>
+                    Bản tin Zalo Preview (Chuẩn &lt; 2.000 ký tự):
+                  </div>
+                  <div className='p-3 rounded-lg bg-muted/40 border font-mono text-xs whitespace-pre-wrap max-h-72 overflow-y-auto'>
+                    {dailyPreviewReport?.zalo_summary || dailyBriefStatus?.latest_run?.zalo_summary}
+                  </div>
+                </div>
+              )}
+
+              {(dailyBriefStatus?.runs || []).length > 0 && (
+                <div className='space-y-1.5'>
+                  <div className='font-semibold'>Lịch sử Daily Report Runs &amp; Delivery:</div>
+                  <div className='space-y-1.5 max-h-56 overflow-y-auto'>
+                    {(dailyBriefStatus.runs as any[]).map((run) => {
+                      const canRetry = [
+                        'READY',
+                        'FAILED',
+                        'RETRY_PENDING',
+                        'RECIPIENT_NOT_VERIFIED',
+                        'MISSED_WINDOW'
+                      ].includes(String(run.status || '').toUpperCase());
+                      return (
+                        <div
+                          key={run.id}
+                          className='p-2 rounded border flex flex-wrap items-center justify-between gap-2 font-mono'
+                        >
+                          <div>
+                            <span className='font-bold'>{run.period_key}</span> •{' '}
+                            <Badge variant='outline' className='text-xs'>
+                              {run.status}
+                            </Badge>
+                            {run.delivery_state?.provider_message_id && (
+                              <span className='text-muted-foreground ml-2'>
+                                msg={run.delivery_state.provider_message_id}
+                              </span>
+                            )}
+                            {run.delivery_state?.error && (
+                              <span className='text-destructive ml-2'>
+                                err={run.delivery_state.error}
+                              </span>
+                            )}
+                          </div>
+                          {canRetry && (
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              className='h-6 text-xs'
+                              onClick={() => handleDailyRetry(run.period_key)}
+                              disabled={dailyActionLoading}
+                            >
+                              Retry
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border bg-card'>
             <div>
               <h3 className='text-sm font-bold'>
-                Báo cáo Điều hành Ngày (08:00 ICT) &amp; Báo cáo Tuần (Thứ 6 17:00)
+                Lưu trữ Báo cáo Điều hành Ngày &amp; Báo cáo Tuần (Thứ 6 17:00)
               </h3>
               <p className='text-xs text-muted-foreground'>
                 KPI tính toán deterministic trước khi tổng hợp • Không trùng lặp sau restart

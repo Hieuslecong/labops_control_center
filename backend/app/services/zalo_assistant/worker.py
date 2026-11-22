@@ -17,7 +17,7 @@ import signal
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -103,6 +103,7 @@ class ZaloPollingWorker:
                 return {"dropped": True, "reason": "UNAUTHORIZED"}
 
         logger.info("📩 Nhận tin nhắn từ '%s' (%s) trong chat %s: %s", sender_name, sender_id, chat_id, raw_text[:50])
+        self.identity_rbac.record_observed_private_chat(sender_id, chat_id, display_name=sender_name)
         idemp_key = f"zalo-msg-{message_id}" if message_id else None
 
         if idemp_key:
@@ -424,21 +425,18 @@ class ZaloPollingWorker:
         except Exception as exc:
             logger.warning("Lỗi đánh giá telemetry & incident engine: %s", exc)
 
-    async def _check_daily_report_schedule(self, bot: Optional[Any] = None, now_utc: Optional[datetime] = None) -> None:
-        """Deliver Daily Executive Briefing once per day at 08:00 Asia/Ho_Chi_Minh (window 08:00-08:59)."""
+    async def deliver_daily_brief_report(
+        self,
+        period_key: str,
+        *,
+        bot: Optional[Any] = None,
+        is_test: bool = False,
+        now_utc: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Deliver Daily Executive Briefing strictly to verified ADMIN recipient 0c00ed813eccd7928edd via DM."""
         ref_utc = now_utc or datetime.now(timezone.utc)
-        local_now = ref_utc.astimezone(VN_TZ)
-        if local_now.hour != 8:
-            return
-
-        period_key = local_now.strftime("%Y-%m-%d")
-        existing = self.report_generator.get_daily_report_by_period(period_key)
-        if existing is not None:
-            dstate = existing.get("delivery_state") or {}
-            if dstate.get("enqueued"):
-                return
-            report = existing
-        else:
+        report = self.report_generator.get_daily_report_by_period(period_key)
+        if report is None:
             report = await asyncio.to_thread(
                 self.report_generator.generate_daily_executive_briefing,
                 now_utc=ref_utc,
@@ -447,36 +445,178 @@ class ZaloPollingWorker:
                 incident_engine=self.incident_engine,
             )
 
-        recipients = list(
-            dict.fromkeys(
-                list(self.report_chat_ids)
-                + self.identity_rbac.get_verified_admin_recipients(
-                    fallback_authorized_users=self.bot_engine.authorized_users,
-                    alert_category="daily_report",
+        ver = self.identity_rbac.verify_daily_brief_recipient()
+        if not ver.get("verified"):
+            d_upd = {
+                "status": "RECIPIENT_NOT_VERIFIED",
+                "recipient_id": ver.get("zalo_user_id"),
+                "recipient_display_name": ver.get("display_name"),
+                "error": ver.get("reason") or "Recipient identity or private chat_id not verified",
+                "instruction": ver.get("instruction"),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if not is_test:
+                self.report_generator.transition_daily_report_state(
+                    period_key, status="RECIPIENT_NOT_VERIFIED", delivery_state=d_upd
                 )
-            )
+            return {"success": False, "status": "RECIPIENT_NOT_VERIFIED", "verification": ver, "report_id": report.get("id")}
+
+        chat_id = str(ver["chat_id"])
+        summary_msg = report.get("zalo_summary") or report.get("content", "")[:1750]
+        if len(summary_msg) > 1950:
+            summary_msg = summary_msg[:1950]
+
+        idemp_key = (
+            f"daily-brief-test:{period_key}:{chat_id}:{int(time.time())}"
+            if is_test
+            else f"daily-brief:{period_key}:{chat_id}"
         )
-        if not recipients:
+
+        # Check existing outbox state for scheduled / retry runs
+        if not is_test:
+            existing_outbox = [
+                o for o in self.dispatcher.list_outbox_entries(limit=100)
+                if o.get("idempotency_key") == idemp_key and o.get("recipient_id") == chat_id
+            ]
+            if existing_outbox:
+                ob = existing_outbox[0]
+                ob_status = str(ob.get("status") or "").upper()
+                if ob_status in {"SENT", "DELIVERY_UNKNOWN"}:
+                    self.report_generator.transition_daily_report_state(
+                        period_key,
+                        status=ob_status,
+                        delivery_state={
+                            "status": ob_status,
+                            "recipient_id": chat_id,
+                            "chat_id_ref": chat_id,
+                            "provider_message_id": ob.get("provider_message_id"),
+                            "sent_at": ob.get("sent_at"),
+                            "retry_count": ob.get("attempt_count", 0),
+                        },
+                    )
+                    return {"success": ob_status == "SENT", "deduplicated": True, "status": ob_status}
+
+        if not is_test:
+            self.report_generator.transition_daily_report_state(
+                period_key,
+                status="SENDING",
+                delivery_state={"status": "SENDING", "recipient_id": chat_id, "chat_id_ref": chat_id},
+            )
+
+        self.dispatcher.enqueue(
+            idempotency_key=idemp_key,
+            recipient_id=chat_id,
+            event_type="DAILY_EXECUTIVE_BRIEF_TEST" if is_test else "DAILY_EXECUTIVE_BRIEF",
+            severity="REPORT",
+            is_critical=False,
+            report_id=report.get("id"),
+            message_text=summary_msg,
+        )
+
+        if bot is None:
+            return {"success": True, "status": "ENQUEUED", "idempotency_key": idemp_key, "recipient_id": chat_id}
+
+        await self._flush_notification_outbox(bot=bot)
+
+        after = [
+            o for o in self.dispatcher.list_outbox_entries(limit=100)
+            if o.get("idempotency_key") == idemp_key and o.get("recipient_id") == chat_id
+        ]
+        if not after:
+            return {"success": False, "status": "UNKNOWN", "recipient_id": chat_id}
+
+        ob = after[0]
+        ob_st = str(ob.get("status") or "").upper()
+        mapped_status = (
+            "SENT"
+            if ob_st == "SENT"
+            else ("DELIVERY_UNKNOWN" if ob_st == "DELIVERY_UNKNOWN" else ("RETRY_PENDING" if ob_st == "FAILED_RETRYABLE" else "FAILED"))
+        )
+        upd = {
+            "status": mapped_status,
+            "recipient_id": chat_id,
+            "chat_id_ref": chat_id,
+            "provider_message_id": ob.get("provider_message_id"),
+            "sent_at": ob.get("sent_at"),
+            "retry_count": ob.get("attempt_count", 0),
+            "error": ob.get("last_error"),
+            "idempotency_key": idemp_key,
+        }
+        if is_test:
+            self.report_generator.transition_daily_report_state(
+                period_key,
+                delivery_state={"last_test_delivery": upd},
+            )
+        else:
+            self.report_generator.transition_daily_report_state(
+                period_key,
+                status=mapped_status,
+                delivery_state=upd,
+            )
+        return {"success": mapped_status == "SENT", "status": mapped_status, "delivery": upd, "verification": ver}
+
+    async def _check_daily_report_schedule(self, bot: Optional[Any] = None, now_utc: Optional[datetime] = None) -> None:
+        """Persistent 08:00 Asia/Ho_Chi_Minh Daily Executive Briefing scheduler with catch-up & missed-window alerting."""
+        cfg = self.identity_rbac.get_daily_brief_config()
+        if not cfg.get("enabled", True):
             return
 
-        summary_msg = report.get("zalo_summary") or report.get("content", "")[:1600]
-        for target_chat in recipients:
-            self.dispatcher.enqueue(
-                idempotency_key=f"daily-report:{period_key}",
-                recipient_id=target_chat,
-                event_type="DAILY_EXECUTIVE_BRIEF",
-                severity="REPORT",
-                is_critical=False,
-                report_id=report.get("id"),
-                message_text=summary_msg,
+        ref_utc = now_utc or datetime.now(timezone.utc)
+        if ref_utc.tzinfo is None:
+            ref_utc = ref_utc.replace(tzinfo=timezone.utc)
+        local_now = ref_utc.astimezone(VN_TZ)
+        today_08 = local_now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if local_now < today_08:
+            return
+
+        period_key = today_08.strftime("%Y-%m-%d")
+        existing = self.report_generator.get_daily_report_by_period(period_key)
+        hours_since_08 = max(0.0, (local_now - today_08).total_seconds() / 3600.0)
+        catchup_hours = float(cfg.get("catchup_hours") or 4)
+
+        if existing is not None:
+            st = str(existing.get("status") or "").upper()
+            if st in {"SENT", "DELIVERY_UNKNOWN", "MISSED_WINDOW", "FAILED"}:
+                return
+            # Wait for retry window / don't tight-loop RECIPIENT_NOT_VERIFIED except when freshly verified
+            if st == "RECIPIENT_NOT_VERIFIED":
+                ver_check = self.identity_rbac.verify_daily_brief_recipient()
+                if not ver_check.get("verified"):
+                    return
+        else:
+            if hours_since_08 > catchup_hours:
+                reason = f"Hệ thống ngoại tuyến vượt quá cửa sổ catch-up ({catchup_hours}h) sau 08:00 {period_key}."
+                self.report_generator.record_missed_daily_window(
+                    period_key,
+                    win_start_utc=(today_08 - timedelta(days=1)).astimezone(timezone.utc),
+                    win_end_utc=today_08.astimezone(timezone.utc),
+                    reason=reason,
+                )
+                try:
+                    self.incident_engine.upsert_incident(
+                        event_type="DAILY_BRIEF_MISSED_WINDOW",
+                        severity="P1",
+                        source="scheduler",
+                        resource_id="daily-brief-scheduler",
+                        fingerprint=f"daily-brief-missed:{period_key}",
+                        title=f"Bỏ lỡ lịch gửi Daily Executive Brief ngày {period_key} (quá hạn catch-up)",
+                        recommended_action="Kiểm tra uptime worker và bấm Retry trong /dashboard/ai-assistant.",
+                    )
+                except Exception:
+                    pass
+                return
+
+            is_late = hours_since_08 > (5.0 / 60.0)
+            await asyncio.to_thread(
+                self.report_generator.generate_daily_executive_briefing,
+                now_utc=ref_utc,
+                is_late_catchup=is_late,
+                ai_client=self.service.ai_client,
+                telemetry_collector=self.telemetry_collector,
+                incident_engine=self.incident_engine,
             )
 
-        self.report_generator.mark_daily_delivery_state(
-            period_key,
-            {"enqueued": True, "enqueued_at": datetime.now(timezone.utc).isoformat(), "recipients_count": len(recipients)},
-        )
-        if bot is not None:
-            await self._flush_notification_outbox(bot=bot)
+        await self.deliver_daily_brief_report(period_key, bot=bot, is_test=False, now_utc=ref_utc)
 
     async def _check_weekly_report_schedule(self, bot: Optional[Any] = None) -> None:
         """Friday 17:00 Asia/Ho_Chi_Minh weekly operational report."""

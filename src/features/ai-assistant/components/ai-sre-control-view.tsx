@@ -280,28 +280,28 @@ export default function AIAssistantView() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className='w-full'>
-        <TabsList className='grid grid-cols-2 sm:grid-cols-6 w-full h-auto'>
-          <TabsTrigger value='overview' className='text-xs py-2'>
+        <TabsList className='flex w-full flex-wrap !h-auto group-data-horizontal/tabs:!h-auto min-h-10 gap-1 p-1'>
+          <TabsTrigger value='overview' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconServer className='h-3.5 w-3.5 mr-1' />
             Tổng quan &amp; AI
           </TabsTrigger>
-          <TabsTrigger value='incidents' className='text-xs py-2'>
+          <TabsTrigger value='incidents' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconAlertCircle className='h-3.5 w-3.5 mr-1' />
             Sự cố ({openIncidentsCount})
           </TabsTrigger>
-          <TabsTrigger value='repo-security' className='text-xs py-2'>
+          <TabsTrigger value='repo-security' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconShield className='h-3.5 w-3.5 mr-1' />
             An ninh Repo ({repoIncidents.length})
           </TabsTrigger>
-          <TabsTrigger value='reports' className='text-xs py-2'>
+          <TabsTrigger value='reports' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconFileText className='h-3.5 w-3.5 mr-1' />
             Báo cáo
           </TabsTrigger>
-          <TabsTrigger value='config' className='text-xs py-2'>
+          <TabsTrigger value='config' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconUserCheck className='h-3.5 w-3.5 mr-1' />
             Định danh &amp; Cấu hình
           </TabsTrigger>
-          <TabsTrigger value='history' className='text-xs py-2'>
+          <TabsTrigger value='history' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconHistory className='h-3.5 w-3.5 mr-1' />
             Outbox &amp; Tools
           </TabsTrigger>

@@ -15,10 +15,12 @@ const META_THEME_COLORS = {
   dark: '#09090b'
 };
 
+const publicAppUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+const metadataBase = publicAppUrl ? new URL(publicAppUrl) : undefined;
+const socialImage = '/shadcn-dashboard.png';
+
 export const metadata: Metadata = {
-  ...(process.env.NEXT_PUBLIC_APP_URL
-    ? { metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL) }
-    : {}),
+  metadataBase,
   title: {
     default: 'Shadcn Dashboard - Next.js Admin Dashboard Template',
     template: '%s | Shadcn Dashboard'
@@ -31,21 +33,16 @@ export const metadata: Metadata = {
       'Free, open source admin dashboard starter built with Next.js 16, shadcn/ui, Tailwind CSS, and TypeScript.',
     siteName: 'Shadcn Dashboard',
     type: 'website',
-    images: [
-      {
-        url: '/shadcn-dashboard.png',
-        width: 3200,
-        height: 1600,
-        alt: 'Shadcn Dashboard overview page'
-      }
-    ]
+    images: metadataBase
+      ? [{ url: socialImage, width: 3200, height: 1600, alt: 'Shadcn Dashboard overview page' }]
+      : undefined
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Shadcn Dashboard - Next.js Admin Dashboard Template',
     description:
       'Free, open source admin dashboard starter built with Next.js 16, shadcn/ui, Tailwind CSS, and TypeScript.',
-    images: ['/shadcn-dashboard.png']
+    images: metadataBase ? [socialImage] : undefined
   }
 };
 

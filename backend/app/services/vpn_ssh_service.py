@@ -83,14 +83,29 @@ class SshKeyRegistry:
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
-    def list_keys(self, username: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_keys(self, username: Optional[str] = None, *, member_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if not os.path.exists(self.state_path):
             return []
         with open(self.state_path, "r", encoding="utf-8") as rf:
             keys = json.load(rf).get("keys", [])
-        return [k for k in keys if username is None or k.get("username") == username]
+        result: List[Dict[str, Any]] = []
+        for k in keys:
+            if username is not None and k.get("username") != username:
+                continue
+            if member_id is not None and k.get("member_id") not in (None, "", member_id):
+                continue
+            result.append(k)
+        return result
 
-    def register_key(self, *, username: str, label: str, public_key: str, actor: str) -> Dict[str, Any]:
+    def register_key(
+        self,
+        *,
+        username: str,
+        label: str,
+        public_key: str,
+        actor: str,
+        member_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         meta = compute_ssh_fingerprint(public_key)
         with self._locked() as st:
             existing = next(
@@ -98,12 +113,17 @@ class SshKeyRegistry:
                 None,
             )
             if existing:
-                if existing.get("username") == username:
+                same_user = existing.get("username") == username
+                same_member = member_id is None or existing.get("member_id") in (None, "", member_id)
+                if same_user and same_member:
+                    if member_id and not existing.get("member_id"):
+                        existing["member_id"] = member_id
                     existing["fingerprint"] = existing["fingerprint_sha256"]
                     return dict(existing)
                 raise ValueError("Khóa công khai SSH này đã được đăng ký cho một thành viên khác")
             record = {
                 "id": f"sshkey-{uuid.uuid4().hex[:10]}",
+                "member_id": member_id,
                 "username": username,
                 "label": label.strip() or meta["comment"] or "Khóa cá nhân",
                 "key_type": meta["key_type"],
@@ -118,6 +138,18 @@ class SshKeyRegistry:
             }
             st["keys"].insert(0, record)
             return record
+
+    def mark_provisioning_rolled_back(self, key_id: str, *, actor: str = "system:rollback") -> Optional[Dict[str, Any]]:
+        """Mark only the pending key created by a rolled-back attempt without touching historical keys."""
+        with self._locked() as st:
+            rec = next((k for k in st["keys"] if k["id"] == key_id), None)
+            if not rec:
+                return None
+            rec["desired_state"] = "REVOKED"
+            rec["observed_state"] = "PROVISIONING_ROLLED_BACK"
+            rec["revoked_at"] = _now()
+            rec["revoked_by"] = actor
+            return dict(rec)
 
     def revoke_key(self, key_id: str, *, actor: str, is_admin: bool) -> Dict[str, Any]:
         with self._locked() as st:

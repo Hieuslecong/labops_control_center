@@ -4,6 +4,13 @@ import { withSentryConfig } from '@sentry/nextjs/config';
 // Define the base Next.js configuration
 const baseConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  allowedDevOrigins: [
+    'aiotserver.fitdnu.id.vn',
+    '*.fitdnu.id.vn',
+    '192.168.167.251',
+    'localhost',
+    '127.0.0.1'
+  ],
   experimental: {
     agentUpgrade: 'security'
   } as any,

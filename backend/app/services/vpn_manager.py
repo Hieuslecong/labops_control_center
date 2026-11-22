@@ -90,6 +90,8 @@ class VPNManager:
             "total_devices": wg_easy_status.get("total_clients", 0),
             "active_clients": wg_easy_status.get("active_handshakes", 0),
             "active_handshakes": wg_easy_status.get("active_handshakes", 0),
+            "ever_connected_clients": wg_easy_status.get("ever_connected_clients", 0),
+            "handshake_ttl_seconds": wg_easy_status.get("handshake_ttl_seconds", 180),
             "total_rx_bytes": wg_easy_status.get("total_rx_bytes", 0),
             "total_tx_bytes": wg_easy_status.get("total_tx_bytes", 0),
             "server_public_key": wg_easy_status.get("server_public_key") or "",

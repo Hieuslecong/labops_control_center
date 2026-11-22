@@ -11,6 +11,7 @@ var SystemForbiddenMountPoints = map[string]bool{
 	"/boot":            true,
 	"/boot/efi":        true,
 	"/etc":             true,
+	"/home":            true,
 	"/root":            true,
 	"/sys":             true,
 	"/proc":            true,
@@ -18,6 +19,7 @@ var SystemForbiddenMountPoints = map[string]bool{
 	"/run":             true,
 	"/tmp":             true,
 	"/var":             true,
+	"/var/tmp":         true,
 	"/var/lib":         true,
 	"/var/lib/docker":  true,
 	"/var/lib/incus":   true,
@@ -29,13 +31,14 @@ var SystemForbiddenMountPoints = map[string]bool{
 var SystemForbiddenPrefixes = []string{
 	"/boot",
 	"/etc",
+	"/home",
 	"/root",
 	"/sys",
 	"/proc",
 	"/dev",
 	"/run",
-	"/var/lib/docker",
-	"/var/lib/incus",
+	"/usr",
+	"/var",
 }
 
 // EvaluateEligibility đánh giá xem một mount point có đủ điều kiện lưu trữ workspace thành viên không.

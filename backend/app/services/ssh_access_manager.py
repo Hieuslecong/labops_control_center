@@ -56,6 +56,275 @@ RESERVED_USERNAMES = {
     "postgres", "docker", "incus", "systemd-network", "aiot-1",
 }
 
+FIRST_LOGIN_GATE_SCRIPT = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import getpass
+import hashlib
+import hmac
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+POLICY_PATH = os.environ.get("LABOPS_FIRST_LOGIN_POLICY_PATH", "/etc/labops-ssh/first_login_policy.json")
+ACTIVATION_PATH = os.environ.get("LABOPS_FIRST_LOGIN_ACTIVATION_PATH", "/workspace/.labops_activation.json")
+ATTEMPTS_PATH = os.environ.get("LABOPS_FIRST_LOGIN_ATTEMPTS_PATH", "/workspace/.labops_activation_attempts.json")
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now_utc().isoformat()
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as rf:
+            data = json.load(rf)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_json_atomic(path: str, payload: Dict[str, Any], mode: int = 0o644) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as wf:
+        json.dump(payload, wf, ensure_ascii=False, indent=2)
+        wf.flush()
+        os.fsync(wf.fileno())
+    os.chmod(tmp_path, mode)
+    os.replace(tmp_path, path)
+
+
+def _hash_password_scrypt(password: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=16384,
+        r=8,
+        p=1,
+        maxmem=32 * 1024 * 1024,
+        dklen=32,
+    )
+    return f"scrypt$16384$8$1${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: Optional[str]) -> bool:
+    if not stored:
+        return False
+    if stored.startswith("scrypt$"):
+        parts = stored.split("$")
+        if len(parts) != 6:
+            return False
+        _, n_s, r_s, p_s, salt_hex, expected_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            n_val, r_val, p_val = int(n_s), int(r_s), int(p_s)
+            dklen = len(bytes.fromhex(expected_hex))
+        except ValueError:
+            return False
+        dk = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=n_val,
+            r=r_val,
+            p=p_val,
+            maxmem=64 * 1024 * 1024,
+            dklen=dklen,
+        )
+        return hmac.compare_digest(dk.hex(), expected_hex)
+    if stored.startswith("pbkdf2_sha256$"):
+        parts = stored.split("$")
+        if len(parts) != 4:
+            return False
+        _, iterations_str, salt_hex, expected_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            iterations = int(iterations_str)
+        except ValueError:
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(dk.hex(), expected_hex)
+    return False
+
+
+def _validate_new_password_strength(new_password: str, temp_password: str) -> Optional[str]:
+    if len(new_password) < 12:
+        return "Mật khẩu mới phải có ít nhất 12 ký tự."
+    if not any(c.islower() for c in new_password):
+        return "Mật khẩu mới phải chứa ít nhất 1 chữ thường."
+    if not any(c.isupper() for c in new_password):
+        return "Mật khẩu mới phải chứa ít nhất 1 chữ hoa."
+    if not any(c.isdigit() for c in new_password):
+        return "Mật khẩu mới phải chứa ít nhất 1 chữ số."
+    if not any(not c.isalnum() for c in new_password):
+        return "Mật khẩu mới phải chứa ít nhất 1 ký tự đặc biệt."
+    if new_password == temp_password:
+        return "Mật khẩu mới không được trùng với mật khẩu tạm."
+    return None
+
+
+def _launch_target_shell() -> None:
+    orig_cmd = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
+    if os.path.isdir("/workspace"):
+        try:
+            os.chdir("/workspace")
+        except OSError:
+            pass
+    if orig_cmd:
+        if orig_cmd == "internal-sftp" and os.path.exists("/usr/lib/openssh/sftp-server"):
+            os.execl("/usr/lib/openssh/sftp-server", "sftp-server")
+        os.execl("/bin/bash", "bash", "-c", orig_cmd)
+    os.execl("/bin/bash", "-bash")
+
+
+def main() -> int:
+    policy = _load_json(POLICY_PATH)
+    if not policy or not policy.get("must_change_password"):
+        _launch_target_shell()
+        return 0
+
+    expected_hash = str(policy.get("temp_password_hash") or "").strip()
+    raw_accepted = policy.get("accepted_temp_password_hashes")
+    accepted_hashes: List[str] = []
+    for h in [expected_hash] + (raw_accepted if isinstance(raw_accepted, list) else []):
+        h_s = str(h or "").strip()
+        if h_s and h_s not in accepted_hashes:
+            accepted_hashes.append(h_s)
+    if not expected_hash and not accepted_hashes:
+        _launch_target_shell()
+        return 0
+    if not expected_hash:
+        expected_hash = accepted_hashes[0]
+
+    activation = _load_json(ACTIVATION_PATH)
+    activated_for = str(activation.get("activated_for_hash") or "").strip()
+    if activation.get("activated") is True and activated_for and activated_for in accepted_hashes:
+        _launch_target_shell()
+        return 0
+
+    username = str(policy.get("username") or os.environ.get("USER") or "member")
+
+    if not sys.stdin.isatty():
+        sys.stderr.write(
+            f"\n🔒 Tài khoản SSH @{username} chưa kích hoạt mật khẩu lần đầu.\n"
+            f"   Vui lòng kết nối bằng terminal tương tác: ssh labops-{username}\n\n"
+        )
+        sys.stderr.flush()
+        return 1
+
+    exp_dt = _parse_iso(policy.get("temp_password_expires_at"))
+    if exp_dt is not None and _now_utc() > exp_dt:
+        sys.stderr.write(
+            "\n❌ Mật khẩu tạm lần đầu đã hết hạn.\n"
+            "   Vui lòng liên hệ Admin LabOps để cấp lại mật khẩu tạm mới.\n\n"
+        )
+        sys.stderr.flush()
+        return 1
+
+    print("==================================================================")
+    print(f"🔐 LabOps Control Center — Kích hoạt Workspace lần đầu (@{username})")
+    print("   Mật khẩu tạm chỉ dùng 1 lần. Vui lòng xác thực và đổi mật khẩu mới.")
+    print("==================================================================")
+    sys.stdout.flush()
+
+    verified_temp: Optional[str] = None
+    while True:
+        try:
+            candidate = getpass.getpass("Nhập mật khẩu tạm (LabOps!...): ").rstrip("\r\n")
+        except (EOFError, KeyboardInterrupt):
+            print("\nĐã hủy phiên kích hoạt SSH (bạn có thể chạy lại ssh labops-" + username + " bất cứ lúc nào).")
+            return 1
+
+        if not candidate:
+            print("❌ Mật khẩu tạm không được để trống. Vui lòng thử lại (hoặc nhấn Ctrl+C để thoát).")
+            continue
+
+        if any(_verify_password(candidate, h) for h in accepted_hashes):
+            verified_temp = candidate
+            break
+
+        print("❌ Mật khẩu tạm không chính xác. Vui lòng thử lại (hoặc nhấn Ctrl+C để thoát).")
+
+    if verified_temp is None:
+        return 1
+
+    print("\n✅ Xác thực mật khẩu tạm thành công. Hãy đặt mật khẩu mới mạnh để mở khóa Workspace:")
+    print("   Yêu cầu: >= 12 ký tự, có chữ hoa, chữ thường, chữ số và ký tự đặc biệt.")
+    sys.stdout.flush()
+
+    new_password: Optional[str] = None
+    while True:
+        try:
+            pw1 = getpass.getpass("Mật khẩu mới: ").rstrip("\r\n")
+            pw2 = getpass.getpass("Nhập lại mật khẩu mới: ").rstrip("\r\n")
+        except (EOFError, KeyboardInterrupt):
+            print("\nĐã hủy phiên kích hoạt SSH (bạn có thể chạy lại ssh labops-" + username + " bất cứ lúc nào).")
+            return 1
+
+        if pw1 != pw2:
+            print("❌ Mật khẩu xác nhận không khớp. Vui lòng nhập lại.")
+            continue
+
+        err = _validate_new_password_strength(pw1, verified_temp)
+        if err:
+            print(f"❌ {err}")
+            continue
+
+        new_password = pw1
+        break
+
+    activation_payload = {
+        "username": username,
+        "member_id": policy.get("member_id"),
+        "activated": True,
+        "activated_at": _now_iso(),
+        "activated_for_hash": expected_hash,
+        "new_password_hash": _hash_password_scrypt(new_password),
+    }
+    try:
+        _save_json_atomic(ACTIVATION_PATH, activation_payload, mode=0o644)
+    except OSError as exc:
+        sys.stderr.write(f"\n❌ Không thể lưu trạng thái kích hoạt vào workspace: {exc}\n")
+        sys.stderr.flush()
+        return 1
+
+    if os.path.exists(ATTEMPTS_PATH):
+        try:
+            os.remove(ATTEMPTS_PATH)
+        except OSError:
+            pass
+
+    print("\n🎉 Kích hoạt thành công! Mật khẩu mới đã được thiết lập.")
+    print("   Từ các lần kết nối sau sẽ vào thẳng terminal workspace.\n")
+    sys.stdout.flush()
+    _launch_target_shell()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -513,16 +782,56 @@ class SshAccessManager:
                 finally:
                     fcntl.flock(lf, fcntl.LOCK_UN)
 
-    def get_account_security_state(self, username: str) -> Dict[str, Any]:
+    def get_account_security_state(
+        self, username: str, *, expected_member_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         if not os.path.exists(self.accounts_path):
             return {}
         with open(self.accounts_path, "r", encoding="utf-8") as rf:
             accounts = json.load(rf).get("accounts", {})
         rec = dict(accounts.get(username) or {})
+        if not rec:
+            return {}
+        if expected_member_id and rec.get("member_id") and rec.get("member_id") != expected_member_id:
+            return {}
         # Tuyệt đối không bao giờ trả về password hash ra ngoài
         rec.pop("temp_password_hash", None)
         rec.pop("active_password_hash", None)
         return rec
+
+    def snapshot_account_state(self, username: str) -> Dict[str, Any]:
+        """Capture prior active/archived entry for clean compensation if DB commit fails."""
+        with self._locked_accounts() as state:
+            acct = state.get("accounts", {}).get(username)
+            archived = dict(state.get("archived_accounts") or {})
+            return {
+                "had_account": acct is not None,
+                "account": dict(acct) if isinstance(acct, dict) else None,
+                "archived_keys": set(archived.keys()),
+            }
+
+    def restore_account_state(
+        self,
+        username: str,
+        snapshot: Dict[str, Any],
+        *,
+        expected_new_member_id: Optional[str] = None,
+    ) -> None:
+        """Restore pre-provisioning account state cleanly without destroying prior member history."""
+        with self._locked_accounts() as state:
+            current = state.get("accounts", {}).get(username)
+            if expected_new_member_id and isinstance(current, dict):
+                cur_mid = current.get("member_id")
+                if cur_mid and cur_mid != expected_new_member_id:
+                    return
+            if snapshot.get("had_account") and isinstance(snapshot.get("account"), dict):
+                state["accounts"][username] = dict(snapshot["account"])
+                old_mid = snapshot["account"].get("member_id")
+                archived = state.get("archived_accounts")
+                if isinstance(archived, dict) and old_mid and old_mid not in (snapshot.get("archived_keys") or set()):
+                    archived.pop(old_mid, None)
+            else:
+                state.get("accounts", {}).pop(username, None)
 
     def member_workspace_dir(self, host_id: str, username: str, storage_root: Optional[str] = None) -> str:
         if not SAFE_USERNAME_RE.match(username) or username in RESERVED_USERNAMES:
@@ -1194,6 +1503,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         cpu_weight: int = 100,
         expected_uid: Optional[int] = None,
         require_authorized_key_present: bool = False,
+        storage_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Kiểm tra thực tế tại runtime (tuyệt đối không giả lập PASSED):
@@ -1206,6 +1516,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         Chỉ trả về overall_status = "READY" khi TẤT CẢ kiểm tra bắt buộc đều VERIFIED.
         """
         ws_dir = workspace_dir or self.member_workspace_dir(host_id, username)
+        quota_target_dir = storage_dir or ws_dir
         ssh_dir = os.path.join(ws_dir, ".ssh")
         auth_keys_path = os.path.join(ssh_dir, "authorized_keys")
         now_ts = _now_iso()
@@ -1404,7 +1715,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 checks["storage_quota"] = "VERIFIED"
                 _set_detail("storage_quota", "VERIFIED", sq.get("observed_value") or storage_quota_gb, storage_quota_gb, sq.get("source", "go_node_agent"))
             else:
-                mount_info = self._inspect_mount_quota_state(ws_dir)
+                mount_info = self._inspect_mount_quota_state(quota_target_dir)
                 checks["storage_quota"] = "NOT_ENFORCEABLE"
                 q_reason = sq.get("reason") or (
                     f"Filesystem '{mount_info['fs_type']}' tại '{mount_info['mount_point']}' "
@@ -1533,7 +1844,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                         _set_detail("ssh_runtime", "NOT_VERIFIED", "closed", f"container:{ssh_port}", "tcp_probe", error_code="SSH_ENDPOINT_NOT_VERIFIED")
 
             # Storage quota trung thực trên host (không dùng RLIMIT_FSIZE giả mạo quota đĩa)
-            mount_info = self._inspect_mount_quota_state(ws_dir)
+            mount_info = self._inspect_mount_quota_state(quota_target_dir)
             checks["storage_quota"] = "NOT_ENFORCEABLE"
             q_err = (
                 f"Filesystem '{mount_info['fs_type']}' tại '{mount_info['mount_point']}' "
@@ -1706,6 +2017,18 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         pw_hash = _hash_password(temp_password)
 
         with self._locked_accounts() as state:
+            prev = state["accounts"].get(username)
+            prev_hashes: List[str] = []
+            if isinstance(prev, dict):
+                prev_mid = str(prev.get("member_id") or "").strip()
+                if prev_mid and prev_mid != member_id:
+                    state.setdefault("archived_accounts", {})[prev_mid] = dict(prev)
+                elif not prev.get("temp_password_used"):
+                    for h in [prev.get("temp_password_hash")] + list(prev.get("prev_temp_password_hashes") or []):
+                        h_s = str(h or "").strip()
+                        if h_s and h_s != pw_hash and h_s not in prev_hashes:
+                            prev_hashes.append(h_s)
+                    prev_hashes = prev_hashes[:5]
             state["accounts"][username] = {
                 "member_id": member_id,
                 "username": username,
@@ -1713,6 +2036,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 "password_status": "CHANGE_REQUIRED",
                 "must_change_password": True,
                 "temp_password_hash": pw_hash,
+                "prev_temp_password_hashes": prev_hashes,
                 "active_password_hash": None,
                 "temp_password_issued_at": now_dt.isoformat(),
                 "temp_password_expires_at": expires_iso,
@@ -1737,7 +2061,9 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         }
         return temp_password, pub_meta
 
-    def verify_workspace_password_login(self, username: str, password: str) -> Dict[str, Any]:
+    def verify_workspace_password_login(
+        self, username: str, password: str, *, expected_member_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Kiểm tra đăng nhập mật khẩu tài khoản trên workspace:
         - Nếu đang ở trạng thái CHANGE_REQUIRED: mật khẩu tạm hợp lệ chỉ cho phép bước đổi mật khẩu,
@@ -1749,6 +2075,8 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             acc = state["accounts"].get(username)
             if not acc:
                 raise LookupError(f"Tài khoản '{username}' chưa được cấp mật khẩu tạm")
+            if expected_member_id and acc.get("member_id") and acc.get("member_id") != expected_member_id:
+                raise LookupError(f"Tài khoản '{username}' (ID: {expected_member_id}) chưa được cấp mật khẩu tạm")
 
             if acc.get("password_status") == "REVOKED" or acc.get("activation_status") == "REVOKED":
                 raise PermissionError("ACCOUNT_REVOKED: Quyền truy cập tài khoản đã bị thu hồi")
@@ -1831,6 +2159,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         username: str,
         temporary_password: str,
         new_password: str,
+        expected_member_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Thực hiện đổi mật khẩu bắt buộc ở lần đăng nhập đầu tiên.
@@ -1846,6 +2175,8 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             acc = state["accounts"].get(username)
             if not acc:
                 raise LookupError(f"Không tìm thấy tài khoản '{username}'")
+            if expected_member_id and acc.get("member_id") and acc.get("member_id") != expected_member_id:
+                raise LookupError(f"Không tìm thấy thông tin kích hoạt cho '{username}' (ID: {expected_member_id})")
             if acc.get("password_status") == "REVOKED" or acc.get("activation_status") == "REVOKED":
                 raise PermissionError("ACCOUNT_REVOKED: Quyền truy cập tài khoản đã bị thu hồi")
 
@@ -2188,17 +2519,18 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         # Xóa ngay mọi gói key hoặc mật khẩu tạm chưa tải trong RAM
         self.vault.invalidate_member(member_id)
 
-        # Khóa tài khoản mật khẩu tạm
+        # Khóa tài khoản mật khẩu tạm đúng theo member_id
         with self._locked_accounts() as state:
-            if username in state["accounts"]:
-                state["accounts"][username]["password_status"] = "REVOKED"
-                state["accounts"][username]["activation_status"] = "REVOKED"
-                state["accounts"][username]["revoked_at"] = _now_iso()
-                state["accounts"][username]["temp_password_hash"] = None
-                state["accounts"][username]["active_password_hash"] = None
+            acct = state["accounts"].get(username)
+            if isinstance(acct, dict) and acct.get("member_id") in (None, "", member_id):
+                acct["password_status"] = "REVOKED"
+                acct["activation_status"] = "REVOKED"
+                acct["revoked_at"] = _now_iso()
+                acct["temp_password_hash"] = None
+                acct["active_password_hash"] = None
 
         # Chuyển các khóa trong SshKeyRegistry sang PENDING_REVOKE trước
-        keys = self.ssh_key_registry.list_keys(username=username)
+        keys = self.ssh_key_registry.list_keys(username=username, member_id=member_id)
         revoked_key_ids: List[str] = []
         for k in keys:
             if k.get("desired_state") != "REVOKED" or k.get("observed_state") != "VERIFIED_REVOKED":
@@ -2282,7 +2614,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             # Cập nhật observed_state = VERIFIED_REVOKED trong SshKeyRegistry
             with self.ssh_key_registry._locked() as st:
                 for k in st["keys"]:
-                    if k.get("username") == username:
+                    if k.get("username") == username and k.get("member_id") in (None, "", member_id):
                         k["desired_state"] = "REVOKED"
                         k["observed_state"] = "VERIFIED_REVOKED"
                         k["revoked_at"] = _now_iso()
@@ -2332,5 +2664,178 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
             "status": "VERIFIED_TERMINATED",
             "actor": actor,
             "timestamp": _now_iso(),
+        }
+
+    @staticmethod
+    def _atomic_write_text(path: str, content: str, mode: int = 0o644) -> None:
+        parent = os.path.dirname(path) or "."
+        tmp_path = os.path.join(parent, f".{os.path.basename(path)}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}")
+        with open(tmp_path, "w", encoding="utf-8") as wf:
+            wf.write(content)
+            wf.flush()
+            os.fsync(wf.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+
+    def reconcile_container_activation_marker(
+        self,
+        username: str,
+        *,
+        expected_member_id: Optional[str] = None,
+        member_storage_dir: Optional[str] = None,
+    ) -> bool:
+        """
+        Đồng bộ trạng thái đã kích hoạt từ file /workspace/.labops_activation.json (nếu đọc được)
+        vào v2_ssh_accounts.json để trạng thái Dashboard và gate luôn nhất quán.
+        """
+        if not member_storage_dir:
+            return False
+        marker_path = os.path.join(str(member_storage_dir), ".labops_activation.json")
+        try:
+            if not os.path.isfile(marker_path):
+                return False
+            with open(marker_path, "r", encoding="utf-8") as rf:
+                marker = json.load(rf)
+        except (OSError, ValueError):
+            return False
+
+        if not isinstance(marker, dict) or marker.get("activated") is not True:
+            return False
+        marker_hash = str(marker.get("activated_for_hash") or "").strip()
+        new_pw_hash = str(marker.get("new_password_hash") or "").strip()
+        if not marker_hash or not new_pw_hash.startswith(("scrypt$", "pbkdf2_sha256$", "$argon2id$")):
+            return False
+
+        with self._locked_accounts() as state:
+            acc = state.get("accounts", {}).get(username)
+            if not isinstance(acc, dict):
+                return False
+            if expected_member_id and acc.get("member_id") and acc.get("member_id") != expected_member_id:
+                return False
+            if acc.get("activation_status") == "ACTIVATED" and acc.get("password_status") == "ACTIVE":
+                return False
+            current_temp_hash = str(acc.get("temp_password_hash") or "").strip()
+            candidate_hashes = [current_temp_hash] + [
+                str(h or "").strip() for h in (acc.get("prev_temp_password_hashes") or [])
+            ]
+            if not any(h and hmac.compare_digest(h, marker_hash) for h in candidate_hashes):
+                return False
+
+            changed_iso = str(marker.get("activated_at") or _now_iso())
+            acc["temp_password_hash"] = None
+            acc["prev_temp_password_hashes"] = []
+            acc["active_password_hash"] = new_pw_hash
+            acc["temp_password_used"] = True
+            acc["must_change_password"] = False
+            acc["password_status"] = "ACTIVE"
+            acc["activation_status"] = "ACTIVATED"
+            acc["failed_login_attempts"] = 0
+            acc["locked_until"] = None
+            acc["password_changed_at"] = changed_iso
+            acc["activated_at"] = changed_iso
+            acc["last_successful_login"] = changed_iso
+            return True
+
+    def sync_container_first_login_gate(
+        self,
+        *,
+        workspace_id: str,
+        username: str,
+        keys: List[str],
+        member_id: Optional[str] = None,
+        member_storage_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Cập nhật cặp script/policy trong <runtime_root>/<workspace_id>/ssh_ro (/etc/labops-ssh:ro)
+        và gắn forced-command vào authorized_keys khi tài khoản còn must_change_password=True.
+        """
+        self.reconcile_container_activation_marker(
+            username,
+            expected_member_id=member_id,
+            member_storage_dir=member_storage_dir,
+        )
+
+        runtime_root = os.getenv("LABOPS_WORKSPACE_RUNTIME_DIR") or "/var/lib/labops-agent/runtime"
+        ssh_ro_dir = os.path.join(runtime_root, str(workspace_id), "ssh_ro")
+        if not os.path.isdir(ssh_ro_dir):
+            return {"synced": False, "reason": "ssh_ro_dir_missing", "ssh_ro_dir": ssh_ro_dir}
+
+        acc: Dict[str, Any] = {}
+        if os.path.exists(self.accounts_path):
+            try:
+                with open(self.accounts_path, "r", encoding="utf-8") as rf:
+                    raw = json.load(rf).get("accounts", {}).get(username)
+                    if isinstance(raw, dict):
+                        if not member_id or not raw.get("member_id") or raw.get("member_id") == member_id:
+                            acc = raw
+            except (OSError, ValueError):
+                acc = {}
+
+        temp_hash = str(acc.get("temp_password_hash") or "").strip()
+        must_change = bool(
+            acc
+            and temp_hash
+            and (
+                acc.get("must_change_password")
+                or acc.get("activation_status") == "PENDING_ACTIVATION"
+                or acc.get("password_status") == "CHANGE_REQUIRED"
+            )
+            and acc.get("activation_status") != "ACTIVATED"
+            and acc.get("password_status") != "ACTIVE"
+        )
+
+        clean_keys = [
+            str(k).strip()
+            for k in keys
+            if str(k or "").strip() and "\n" not in str(k) and "\r" not in str(k)
+        ]
+
+        gate_script_path = os.path.join(ssh_ro_dir, "first_login_gate.py")
+        policy_path = os.path.join(ssh_ro_dir, "first_login_policy.json")
+        ak_path = os.path.join(ssh_ro_dir, "authorized_keys")
+
+        accepted_hashes: List[str] = []
+        if must_change:
+            accepted_hashes = [temp_hash] + [
+                str(h).strip()
+                for h in (acc.get("prev_temp_password_hashes") or [])
+                if isinstance(h, str) and h.strip() and h.strip() != temp_hash
+            ]
+
+        policy_payload = {
+            "username": username,
+            "member_id": str(member_id or acc.get("member_id") or ""),
+            "must_change_password": must_change,
+            "temp_password_hash": temp_hash if must_change else None,
+            "accepted_temp_password_hashes": accepted_hashes,
+            "temp_password_expires_at": acc.get("temp_password_expires_at") if must_change else None,
+            "activation_status": acc.get("activation_status") or "PENDING_ACTIVATION",
+            "password_status": acc.get("password_status") or "CHANGE_REQUIRED",
+            "updated_at": _now_iso(),
+        }
+
+        if clean_keys and must_change:
+            ak_lines = [
+                f'command="/usr/bin/python3 /etc/labops-ssh/first_login_gate.py" {pub}'
+                for pub in clean_keys
+            ]
+        else:
+            ak_lines = clean_keys
+
+        ak_content = ("\n".join(ak_lines) + "\n") if ak_lines else ""
+
+        self._atomic_write_text(gate_script_path, FIRST_LOGIN_GATE_SCRIPT, mode=0o755)
+        self._atomic_write_text(
+            policy_path,
+            json.dumps(policy_payload, ensure_ascii=False, indent=2) + "\n",
+            mode=0o644,
+        )
+        self._atomic_write_text(ak_path, ak_content, mode=0o644)
+
+        return {
+            "synced": True,
+            "must_change_password": must_change,
+            "ssh_ro_dir": ssh_ro_dir,
+            "authorized_keys_count": len(ak_lines),
         }
 

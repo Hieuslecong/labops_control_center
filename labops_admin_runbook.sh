@@ -58,7 +58,7 @@ image() {
   [[ "$LABOPS_REGISTRY_IMAGE_TAG" == */*:* ]] || die 'Expected a registry/repository:tag reference.'
   [[ "$LABOPS_REGISTRY_IMAGE_TAG" != *@* ]] || die 'Provide a push target by tag, not by digest.'
   note "Building immutable workspace image source as labops-workspace:v2"
-  sudo docker build -t labops-workspace:v2 infrastructure/workspace-image
+  sudo docker build -f infrastructure/workspace-image/Dockerfile -t labops-workspace:v2 .
   sudo docker tag labops-workspace:v2 "$LABOPS_REGISTRY_IMAGE_TAG"
   note 'Pushing image to the selected registry (separate from git push).'
   sudo docker push "$LABOPS_REGISTRY_IMAGE_TAG"
@@ -82,6 +82,7 @@ install_agent() {
   sudo -v
   [[ -f infrastructure/systemd/install-workstation-agent.sh ]] || die 'Installer script missing.'
   sudo test -s /etc/labops/agent.env || die '/etc/labops/agent.env missing or empty. Configure it first.'
+  sudo grep -Eq '^LABOPS_AGENT_SECRET=.' /etc/labops/agent.env || die 'Missing LABOPS_AGENT_SECRET in agent.env.'
   sudo grep -Eq '^LABOPS_NODE_AGENT_TOKEN=.' /etc/labops/agent.env || die 'Missing LABOPS_NODE_AGENT_TOKEN in agent.env.'
   sudo grep -Eq '^LABOPS_WORKSPACE_IMAGE_REF=.' /etc/labops/agent.env || die 'Missing LABOPS_WORKSPACE_IMAGE_REF in agent.env.'
   sudo grep -Eq '^LABOPS_WORKSPACE_IMAGE_DIGEST=.' /etc/labops/agent.env || die 'Missing LABOPS_WORKSPACE_IMAGE_DIGEST in agent.env.'

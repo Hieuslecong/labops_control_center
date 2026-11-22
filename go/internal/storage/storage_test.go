@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -38,6 +39,22 @@ func TestStorageEligibility_Rules(t *testing.T) {
 	eligible, _ = EvaluateEligibility(sysPool, false)
 	if eligible {
 		t.Errorf("Phân vùng /var/lib/docker PHẢI bị từ chối")
+	}
+
+	varTmpPool := &StoragePoolInfo{
+		MountPoint:     "/var/tmp",
+		Device:         "/dev/sda2",
+		Mounted:        true,
+		ReadOnly:       false,
+		FreeGiB:        500,
+		QuotaSupported: true,
+	}
+	eligible, reason = EvaluateEligibility(varTmpPool, false)
+	if eligible {
+		t.Errorf("Phân vùng /var/tmp PHẢI bị từ chối, nhưng được chấp thuận")
+	}
+	if !strings.Contains(reason, "/var") {
+		t.Errorf("Lý do từ chối /var/tmp không chính xác: %s", reason)
 	}
 
 	// 3. Phân vùng read-only
@@ -318,5 +335,88 @@ func TestSystemQuotaManager_NonSimulatedFailClosed(t *testing.T) {
 	}
 	if res.VerificationStatus != StatusQuotaNotEnforced {
 		t.Fatalf("VerificationStatus kỳ vọng %s, nhận %s", StatusQuotaNotEnforced, res.VerificationStatus)
+	}
+}
+
+func TestInventoryCollector_StackedMountsAndDuplicateUUIDPreference(t *testing.T) {
+	mountsContent := strings.Join([]string{
+		"/dev/sda2 / ext4 rw,relatime 0 0",
+		"/dev/sda2 /var/tmp ext4 rw,relatime 0 0",
+		"/dev/sdc /media/aiot-ws1/HDD3 ext4 rw,nosuid,nodev 0 0",
+		"/dev/sdc /mnt/HDD3 ext4 rw,relatime 0 0",
+		"/dev/sdb /media/aiot-ws1/sdb-data ext4 ro,relatime 0 0",
+		"/dev/sdb /media/aiot-ws1/sdb-data ext4 rw,relatime 0 0",
+		"/dev/sdd /mnt/readonly-backup ext4 ro,relatime 0 0",
+	}, "\n")
+
+	mountsFile := filepath.Join(t.TempDir(), "mounts")
+	if err := os.WriteFile(mountsFile, []byte(mountsContent), 0644); err != nil {
+		t.Fatalf("không thể tạo file mounts giả: %v", err)
+	}
+
+	inv := NewInventoryCollector("workstation", NewSystemQuotaManager(false))
+	inv.mountsPath = mountsFile
+	inv.statfsFn = func(_ string, st *syscall.Statfs_t) error {
+		const gib = 1024 * 1024 * 1024
+		st.Bsize = 4096
+		st.Blocks = (500 * gib) / 4096
+		st.Bavail = (300 * gib) / 4096
+		return nil
+	}
+	inv.uuidFn = func(device, _ string) string {
+		switch device {
+		case "/dev/sda2":
+			return "uuid-sda2"
+		case "/dev/sdb":
+			return "uuid-sdb"
+		case "/dev/sdc":
+			return "uuid-sdc"
+		case "/dev/sdd":
+			return "uuid-sdd"
+		default:
+			return ""
+		}
+	}
+
+	pools := inv.CollectStoragePools()
+	if len(pools) != 4 {
+		t.Fatalf("kỳ vọng đúng 4 storage pools (không nhân đôi /dev/sdc), nhận %d", len(pools))
+	}
+
+	byUUID := make(map[string]*StoragePoolInfo, len(pools))
+	for _, p := range pools {
+		byUUID[p.FilesystemUUID] = p
+	}
+
+	sdc := byUUID["uuid-sdc"]
+	if sdc == nil {
+		t.Fatalf("thiếu pool uuid-sdc")
+	}
+	if sdc.MountPoint != "/mnt/HDD3" || sdc.ReadOnly || !sdc.Eligible {
+		t.Fatalf("uuid-sdc không đúng kỳ vọng (/mnt/HDD3, rw, eligible): %+v", sdc)
+	}
+
+	sdb := byUUID["uuid-sdb"]
+	if sdb == nil {
+		t.Fatalf("thiếu pool uuid-sdb")
+	}
+	if sdb.ReadOnly || !sdb.Eligible {
+		t.Fatalf("uuid-sdb stacked mount phải kế thừa flag rw ở dòng sau: %+v", sdb)
+	}
+
+	sdd := byUUID["uuid-sdd"]
+	if sdd == nil {
+		t.Fatalf("thiếu pool uuid-sdd")
+	}
+	if !sdd.ReadOnly || sdd.Eligible || !strings.Contains(sdd.IneligibilityReason, "chỉ đọc") {
+		t.Fatalf("uuid-sdd phải bị gắn nhãn chỉ đọc và ineligible: %+v", sdd)
+	}
+
+	sda2 := byUUID["uuid-sda2"]
+	if sda2 == nil {
+		t.Fatalf("thiếu pool uuid-sda2")
+	}
+	if sda2.MountPoint != "/" || sda2.ReadOnly || sda2.Eligible || !strings.Contains(sda2.IneligibilityReason, "hệ thống") {
+		t.Fatalf("uuid-sda2 phải là '/', rw, ineligible vì phân vùng hệ thống: %+v", sda2)
 	}
 }

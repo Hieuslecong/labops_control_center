@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -43,9 +44,19 @@ class HostNodeRecord(Base):
 
 class MemberRecord(Base):
     __tablename__ = "members"
+    __table_args__ = (
+        Index("ix_members_username", "username", unique=False),
+        Index(
+            "uq_members_active_username",
+            "username",
+            unique=True,
+            sqlite_where=text("status != 'DELETED' OR deleted_at IS NULL"),
+            postgresql_where=text("status != 'DELETED' OR deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     full_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="RESEARCHER")
@@ -147,10 +158,27 @@ class RevokedTokenRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     jti: Mapped[Optional[str]] = mapped_column(String(128), unique=True, nullable=True)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    member_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     revoked_before_epoch: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     reason: Mapped[str] = mapped_column(String(128), nullable=False, default="revoked")
+    permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expires_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class PersistenceRecoveryRecord(Base):
+    __tablename__ = "persistence_recovery_records"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(48), nullable=False, default="PERSISTENCE")
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING_RECOVERY", index=True)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DeletionOperationRecord(Base):

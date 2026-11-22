@@ -4,7 +4,9 @@ Manages configuration, quota ledger, 9Router client, report generator, and bot e
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.services.zalo_assistant.ai_gateway_client import AIGatewayClient
@@ -26,7 +28,9 @@ class ZaloAssistantService:
             quota_ledger=self.quota_ledger,
             ai_client=self.ai_client,
             report_generator=self.report_generator,
+            config_path=os.path.join(self.data_dir, "zalo_config.json"),
         )
+        self.bot_engine.reload_persisted_config(force=True)
 
     def _build_dynamic_alerts(self, ai_health: Dict[str, Any]) -> List[Dict[str, Any]]:
         alerts: List[Dict[str, Any]] = []
@@ -73,14 +77,86 @@ class ZaloAssistantService:
         })
         return alerts[:10]
 
+    def _read_worker_health(self) -> Dict[str, Any]:
+        status_file = os.path.join(self.data_dir, "zalo_worker_status.json")
+        pid_file = os.path.join(self.data_dir, "zalo_worker.pid")
+        data: Dict[str, Any] = {}
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+
+        pid = data.get("pid")
+        if pid is None and os.path.exists(pid_file):
+            try:
+                with open(pid_file, "r", encoding="utf-8") as f:
+                    pid = int(f.read().strip())
+            except Exception:
+                pid = None
+
+        pid_alive = False
+        if isinstance(pid, int) and pid > 0:
+            try:
+                os.kill(pid, 0)
+                pid_alive = True
+            except OSError:
+                pid_alive = False
+
+        last_hb = data.get("last_heartbeat")
+        hb_fresh = False
+        if isinstance(last_hb, str) and last_hb.strip():
+            try:
+                dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - dt).total_seconds()
+                hb_fresh = age <= 60.0
+            except ValueError:
+                hb_fresh = False
+
+        is_polling = bool(data.get("is_polling")) and pid_alive and hb_fresh
+        return {
+            "worker_pid": pid if pid_alive else None,
+            "pid_alive": pid_alive,
+            "is_polling": is_polling,
+            "last_heartbeat": last_hb,
+            "bot_name": data.get("bot_name"),
+            "authorized_users_count": data.get("authorized_users_count"),
+            "last_error": data.get("last_error"),
+        }
+
     def get_overview(self) -> Dict[str, Any]:
+        self.bot_engine.reload_persisted_config()
         quota = self.quota_ledger.get_status()
         ai_health = self.ai_client.check_health()
         consumer = self.bot_engine.get_consumer_status()
+        worker_health = self._read_worker_health()
+        if worker_health.get("worker_pid"):
+            consumer["consumer_id"] = f"worker-ws-{worker_health['worker_pid']}"
+        consumer["is_polling"] = bool(worker_health.get("is_polling") or consumer.get("is_polling"))
+        consumer["last_heartbeat"] = worker_health.get("last_heartbeat") or consumer.get("last_heartbeat")
+        consumer["worker_pid"] = worker_health.get("worker_pid")
+        if worker_health.get("bot_name"):
+            consumer["bot_name"] = worker_health["bot_name"]
+        auth_count = len(self.bot_engine.authorized_users or [])
+        consumer["authorized_users_count"] = auth_count
+
         reports = self.report_generator.list_reports()
+        if not consumer["has_token"]:
+            zalo_status = "STANDBY (Chưa nạp Token)"
+        elif auth_count == 0:
+            zalo_status = "MISCONFIGURED (Chưa cấp quyền Zalo User ID)"
+        elif not consumer["is_polling"]:
+            zalo_status = "WORKER_OFFLINE"
+        else:
+            zalo_status = "READY"
 
         return {
-            "zalo_status": "READY" if consumer["has_token"] else "STANDBY (Chưa nạp Token)",
+            "zalo_status": zalo_status,
             "consumer": consumer,
             "quota": quota,
             "ai_gateway": ai_health,
@@ -161,6 +237,7 @@ class ZaloAssistantService:
         if validated_timeout is not None:
             self.ai_client.timeout = validated_timeout
 
+        self.bot_engine.save_persisted_config()
         return self.get_config()
 
     def get_tools_and_permissions(self) -> Dict[str, Any]:

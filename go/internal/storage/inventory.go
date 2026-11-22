@@ -14,11 +14,22 @@ import (
 
 // InventoryCollector thu thập và theo dõi danh sách ổ đĩa/volume thực tế trên host.
 type InventoryCollector struct {
-	nodeID       string
-	quotaMgr     QuotaManager
-	mu           sync.RWMutex
+	nodeID        string
+	quotaMgr      QuotaManager
+	mu            sync.RWMutex
 	approvedRoots []string
-	customPools  map[string]*StoragePoolInfo
+	customPools   map[string]*StoragePoolInfo
+	mountsPath    string
+	statfsFn      func(string, *syscall.Statfs_t) error
+	uuidFn        func(device, mountPoint string) string
+}
+
+type mountEntry struct {
+	device     string
+	mountPoint string
+	fsType     string
+	opts       []string
+	isApproved bool
 }
 
 // NewInventoryCollector khởi tạo bộ thu thập inventory.
@@ -30,6 +41,9 @@ func NewInventoryCollector(nodeID string, quotaMgr QuotaManager) *InventoryColle
 		nodeID:      nodeID,
 		quotaMgr:    quotaMgr,
 		customPools: make(map[string]*StoragePoolInfo),
+		mountsPath:  "/proc/mounts",
+		statfsFn:    syscall.Statfs,
+		uuidFn:      getFilesystemUUID,
 		approvedRoots: []string{
 			"/mnt/HDD3",
 			"/media/LabOps-Data",
@@ -69,8 +83,8 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 	defer c.mu.RUnlock()
 
 	var result []*StoragePoolInfo
-	seenUUIDs := make(map[string]bool)
-	seenMounts := make(map[string]bool)
+	customUUIDs := make(map[string]bool)
+	customMounts := make(map[string]bool)
 
 	// 1. Thêm các custom / registered pools trước (dùng cho test/staging)
 	for _, p := range c.customPools {
@@ -79,15 +93,32 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 		cpy.LastVerifiedAt = nowISO()
 		result = append(result, &cpy)
 		if cpy.FilesystemUUID != "" {
-			seenUUIDs[cpy.FilesystemUUID] = true
+			customUUIDs[cpy.FilesystemUUID] = true
 		}
-		seenMounts[cpy.MountPoint] = true
+		customMounts[cpy.MountPoint] = true
 	}
 
-	// 2. Quét /proc/mounts tìm các filesystem thực tế
-	if file, err := os.Open("/proc/mounts"); err == nil {
+	mountsPath := c.mountsPath
+	if mountsPath == "" {
+		mountsPath = "/proc/mounts"
+	}
+	statfsFn := c.statfsFn
+	if statfsFn == nil {
+		statfsFn = syscall.Statfs
+	}
+	uuidFn := c.uuidFn
+	if uuidFn == nil {
+		uuidFn = getFilesystemUUID
+	}
+
+	// 2. Quét /proc/mounts theo 2 pha để xử lý đúng stacked mounts và chọn mount ưu tiên khi trùng UUID
+	if file, err := os.Open(mountsPath); err == nil {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
+
+		effectiveByMount := make(map[string]mountEntry)
+		var mountOrder []string
+
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
 			if len(fields) < 4 {
@@ -111,8 +142,7 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 				continue
 			}
 
-			// Chống trùng mount point
-			if seenMounts[mountPoint] {
+			if customMounts[mountPoint] {
 				continue
 			}
 
@@ -130,8 +160,27 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 				continue
 			}
 
+			if _, seen := effectiveByMount[mountPoint]; !seen {
+				mountOrder = append(mountOrder, mountPoint)
+			}
+			// Dòng xuất hiện sau trên cùng mountPoint sẽ ghi đè dòng trước (stacked mount)
+			effectiveByMount[mountPoint] = mountEntry{
+				device:     device,
+				mountPoint: mountPoint,
+				fsType:     fsType,
+				opts:       opts,
+				isApproved: isApproved,
+			}
+		}
+
+		uuidToIdx := make(map[string]int)
+		uuidApproved := make(map[string]bool)
+
+		for _, mountPoint := range mountOrder {
+			entry := effectiveByMount[mountPoint]
+
 			var stat syscall.Statfs_t
-			if errStat := syscall.Statfs(mountPoint, &stat); errStat != nil {
+			if errStat := statfsFn(entry.mountPoint, &stat); errStat != nil {
 				continue
 			}
 
@@ -146,7 +195,7 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 			usedGiB := math.Round((capacityGiB-freeGiB)*10) / 10
 
 			isReadOnly := false
-			for _, o := range opts {
+			for _, o := range entry.opts {
 				if o == "ro" {
 					isReadOnly = true
 					break
@@ -154,19 +203,15 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 			}
 
 			// Tạo stable Storage ID bằng hash mountPoint + device hoặc filesystem UUID
-			fsUUID := getFilesystemUUID(device, mountPoint)
-			if fsUUID != "" && seenUUIDs[fsUUID] {
-				// Đã có entry cho filesystem UUID này (bind mount hoặc alias), tránh cộng trùng dung lượng
+			fsUUID := uuidFn(entry.device, entry.mountPoint)
+			if fsUUID != "" && customUUIDs[fsUUID] {
 				continue
-			}
-			if fsUUID != "" {
-				seenUUIDs[fsUUID] = true
 			}
 
 			storageID := fsUUID
 			if storageID == "" {
 				hasher := sha256.New()
-				hasher.Write([]byte(c.nodeID + ":" + mountPoint + ":" + device))
+				hasher.Write([]byte(c.nodeID + ":" + entry.mountPoint + ":" + entry.device))
 				storageID = "fs-" + hex.EncodeToString(hasher.Sum(nil))[:12]
 			}
 
@@ -174,15 +219,15 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 			safetyReserve := math.Max(10.0, capacityGiB*0.1)
 			allocatableGiB := math.Max(0.0, math.Round((freeGiB-safetyReserve)*10)/10)
 
-			quotaSupported, quotaBackend := c.quotaMgr.CheckSupport(mountPoint, fsType)
+			quotaSupported, quotaBackend := c.quotaMgr.CheckSupport(entry.mountPoint, entry.fsType)
 
 			pool := &StoragePoolInfo{
 				HostID:             c.nodeID,
 				StorageID:          storageID,
-				Device:             device,
+				Device:             entry.device,
 				FilesystemUUID:     fsUUID,
-				MountPoint:         mountPoint,
-				Filesystem:         fsType,
+				MountPoint:         entry.mountPoint,
+				Filesystem:         entry.fsType,
 				CapacityGiB:        capacityGiB,
 				UsedGiB:            usedGiB,
 				FreeGiB:            freeGiB,
@@ -206,12 +251,42 @@ func (c *InventoryCollector) CollectStoragePools() []*StoragePoolInfo {
 				pool.VerificationStatus = StatusQuotaNotEnforced
 			}
 
-			seenMounts[mountPoint] = true
+			if fsUUID != "" {
+				if existingIdx, exists := uuidToIdx[fsUUID]; exists {
+					if shouldPreferPool(pool, result[existingIdx], entry.isApproved, uuidApproved[fsUUID]) {
+						result[existingIdx] = pool
+						uuidApproved[fsUUID] = entry.isApproved
+					}
+					continue
+				}
+				uuidToIdx[fsUUID] = len(result)
+				uuidApproved[fsUUID] = entry.isApproved
+			}
+
 			result = append(result, pool)
 		}
 	}
 
 	return result
+}
+
+func shouldPreferPool(candidate, existing *StoragePoolInfo, candidateApproved, existingApproved bool) bool {
+	if existing.MountPoint == "/" {
+		return false
+	}
+	if candidate.MountPoint == "/" {
+		return true
+	}
+	if candidate.Eligible != existing.Eligible {
+		return candidate.Eligible
+	}
+	if candidate.ReadOnly != existing.ReadOnly {
+		return !candidate.ReadOnly
+	}
+	if candidateApproved != existingApproved {
+		return candidateApproved
+	}
+	return false
 }
 
 // GetStoragePoolByID tìm một pool cụ thể bằng ID bất biến.

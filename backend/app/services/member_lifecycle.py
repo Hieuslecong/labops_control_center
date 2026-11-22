@@ -173,7 +173,9 @@ class MemberLifecycleManager:
         member_id = member["id"]
         username = member["username"]
 
-        get_revocation_store().revoke_subject(username, reason=f"suspended:{actor}")
+        store = get_revocation_store()
+        store.revoke_member(member_id, username=username, reason=f"suspended:{actor}", permanent=False)
+        store.revoke_subject(username, reason=f"suspended:{actor}", member_id=member_id)
 
         # Disable VPN devices owned strictly by this member
         wg_devices = list((member.get("wireguard") or {}).get("devices") or [])
@@ -299,10 +301,10 @@ class MemberLifecycleManager:
         workload = self.check_active_workloads(member)
         inventory = self.collect_workspace_inventory(member)
         wg_devices = list((member.get("wireguard") or {}).get("devices") or [])
-        ssh_keys = self.service.ssh_key_registry.list_keys(username=username)
+        ssh_keys = self.service.ssh_key_registry.list_keys(username=username, member_id=member_id)
         workspaces = [
             w for w in self.service.workspace_controller.list_workspaces(owner=username, legacy_endpoints=self.service.ssh_endpoints)
-            if w.get("owner") == username
+            if w.get("owner") == username and w.get("member_id") in (None, "", member_id)
         ]
 
         reasons: List[str] = []
@@ -416,10 +418,17 @@ class MemberLifecycleManager:
                         steps_json={},
                     )
                 )
+                m_row = s.get(MemberRecord, member_id)
+                if m_row is not None:
+                    m_row.status = "DELETION_IN_PROGRESS"
+                    m_row.provisioning_state = "DELETION_IN_PROGRESS"
+                    m_row.deleted_at = None
 
-        # 1. Subject token revocation
+        # 1. Subject & member-scoped token revocation
         try:
-            get_revocation_store().revoke_subject(username, reason=f"deleted:{actor}")
+            store = get_revocation_store()
+            store.revoke_member(member_id, username=username, reason=f"deleted:{actor}", permanent=True)
+            store.revoke_subject(username, reason=f"deleted:{actor}", member_id=member_id)
             steps["session_revocation"] = {"status": "COMPLETED"}
         except Exception as exc:
             failures.append(f"session_revocation: {exc}")
@@ -433,18 +442,19 @@ class MemberLifecycleManager:
             failures.append(f"vault_purge: {exc}")
             steps["vault_purge"] = {"status": "FAILED", "error": str(exc)}
 
-        # 3. SSH keys & account revocation
+        # 3. SSH keys & account revocation (strictly scoped by member_id + legacy keys)
         ssh_keys_revoked = 0
         try:
-            self.service.ssh_access_manager.revoke_member_ssh(
+            ssh_res = self.service.ssh_access_manager.revoke_member_ssh(
                 member=member,
                 host_online=self.service._is_host_online(server_id),
                 actor=actor,
                 workspace_dir=member.get("workspace_dir"),
             )
-            keys = self.service.ssh_key_registry.list_keys(username=username)
+            ssh_keys_revoked = len(ssh_res.get("revoked_key_ids") or [])
+            keys = self.service.ssh_key_registry.list_keys(username=username, member_id=member_id)
             for k in keys:
-                if k.get("status") != "REVOKED":
+                if k.get("desired_state") != "REVOKED":
                     self.service.ssh_key_registry.revoke_key(k["id"], actor=actor, is_admin=True)
                     ssh_keys_revoked += 1
             steps["ssh_keys_revoke"] = {"status": "COMPLETED", "revoked_count": ssh_keys_revoked}
@@ -474,7 +484,10 @@ class MemberLifecycleManager:
         # 5. Delegated Docker workspace container stop (never runs docker rm -f from FastAPI)
         member_workspaces = [
             w for w in self.service.workspace_controller.list_workspaces(owner=username)
-            if w.get("owner") == username and w.get("runtime_type") == "DOCKER" and w.get("container_id")
+            if w.get("owner") == username
+            and w.get("member_id") in (None, "", member_id)
+            and w.get("runtime_type") == "DOCKER"
+            and w.get("container_id")
         ]
         docker_stopped = False
         if not member_workspaces:
@@ -514,9 +527,9 @@ class MemberLifecycleManager:
                 failures.append(f"workspace_files_cleanup: {exc}")
                 steps["workspace_files_cleanup"] = {"status": "FAILED", "error": str(exc)}
 
-        # 7. Workspace controller record removal
+        # 7. Workspace controller record removal (scoped by member_id)
         try:
-            self.service.workspace_controller.remove_workspace(username)
+            self.service.workspace_controller.remove_workspace(username, member_id=member_id)
             steps["workspace_registry_cleanup"] = {"status": "COMPLETED"}
         except Exception as exc:
             failures.append(f"workspace_registry_cleanup: {exc}")
@@ -533,35 +546,70 @@ class MemberLifecycleManager:
                         rec.status = "PARTIAL_FAILURE"
                         rec.steps_json = steps
                         rec.error_detail = err_summary
+                    m_row = s.get(MemberRecord, member_id)
+                    if m_row is not None:
+                        m_row.status = "DELETION_PARTIAL_FAILURE"
+                        m_row.provisioning_state = "DELETION_PARTIAL_FAILURE"
+                        m_row.deleted_at = None
             self.service._audit(
                 actor,
                 "MEMBER_DELETION_PARTIAL_FAILURE",
                 "MEMBER",
                 username,
                 "PARTIAL_FAILURE",
-                f"Xóa tài khoản @{username} gặp lỗi một phần: {err_summary}",
+                f"Xóa tài khoản @{username} (ID: {member_id}) gặp lỗi một phần: {err_summary}",
                 correlation_id=op_id,
             )
             self.service._save_persistent_data()
             raise RuntimeError(f"PARTIAL_DELETION_FAILURE ({op_id}): {err_summary}")
 
-        # All required cleanup steps succeeded -> finalize deletion & DB tombstone
+        # All required cleanup steps succeeded -> finalize DB tombstone FIRST, then active stores
         deleted_at = _now_iso()
-        self.service.ssh_endpoints = [ep for ep in self.service.ssh_endpoints if ep.get("member_id") != member_id]
-        self.service.members = [m for m in self.service.members if m["id"] != member_id and m.get("username") != username]
+        tombstone_payload = dict(member)
+        tombstone_payload["status"] = "DELETED"
+        tombstone_payload["provisioning_state"] = "DELETED"
+        tombstone_payload["deleted_at"] = deleted_at
+        tombstone_payload["version"] = int(member.get("version") or 1) + 1
 
         if hasattr(self.service, "db") and self.service.db is not None:
-            with self.service.db.session_scope() as s:
-                rec = s.get(DeletionOperationRecord, op_id)
-                if rec is not None:
-                    rec.status = "COMPLETED"
-                    rec.steps_json = steps
-                    rec.completed_at = datetime.now(timezone.utc)
-                m_row = s.get(MemberRecord, member_id)
-                if m_row is not None:
+            try:
+                with self.service.db.session_scope() as s:
+                    rec = s.get(DeletionOperationRecord, op_id)
+                    if rec is not None:
+                        rec.status = "COMPLETED"
+                        rec.steps_json = steps
+                        rec.completed_at = datetime.now(timezone.utc)
+                    m_row = s.get(MemberRecord, member_id)
+                    if m_row is None:
+                        m_row = MemberRecord(
+                            id=member_id,
+                            username=username,
+                            email=str(member.get("email") or ""),
+                            full_name=str(member.get("full_name") or ""),
+                            role=str(member.get("role") or "RESEARCHER"),
+                            assigned_server=server_id,
+                            workspace_name=str(member.get("workspace_name") or f"ws-{username}"),
+                            workspace_dir=member.get("workspace_dir"),
+                            ssh_port=member.get("ssh_port"),
+                            created_at=str(member.get("created_at") or ""),
+                        )
+                        s.add(m_row)
                     m_row.status = "DELETED"
                     m_row.provisioning_state = "DELETED"
                     m_row.deleted_at = deleted_at
+                    m_row.archived_at = member.get("archived_at")
+                    m_row.archive_manifest_json = member.get("archive_manifest")
+                    m_row.version = tombstone_payload["version"]
+                    m_row.payload_json = tombstone_payload
+            except Exception as db_exc:
+                member["status"] = "DELETION_PARTIAL_FAILURE"
+                member["provisioning_state"] = "DELETION_PARTIAL_FAILURE"
+                raise RuntimeError(
+                    f"DELETION_DB_COMMIT_FAILED ({op_id}): Không thể xác nhận xóa trong DB: {db_exc}"
+                ) from db_exc
+
+        self.service.ssh_endpoints = [ep for ep in self.service.ssh_endpoints if ep.get("member_id") != member_id]
+        self.service.members = [m for m in self.service.members if m.get("id") != member_id]
 
         self.service._audit(
             actor,

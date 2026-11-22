@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -117,28 +118,34 @@ func TestEvaluatePolicy(t *testing.T) {
 		t.Fatalf("Uninspected empty submodules expected REVIEW_REQUIRED, got %s", v)
 	}
 
-	// B. Leaked Secret -> REJECTED
+	// B. Leaked Secret -> REVIEW_REQUIRED (cảnh báo cao chờ Admin xác minh false-positive hay lộ khóa thật)
 	secretReport := &ScanReport{
 		Coverage: ScanCoverage{
 			OverallCoverage: "POLICY_COMPLETE",
 		},
 		SecretsCount: 1,
 	}
-	verdictSec, _ := EvaluatePolicy(secretReport)
-	if verdictSec != StateRejected {
-		t.Fatalf("Secret report expected REJECTED, got %s", verdictSec)
+	verdictSec, reasonsSec := EvaluatePolicy(secretReport)
+	if verdictSec != StateReviewRequired {
+		t.Fatalf("Secret report expected REVIEW_REQUIRED, got %s", verdictSec)
+	}
+	if len(reasonsSec) == 0 {
+		t.Fatalf("Secret report expected non-empty policy reasons")
 	}
 
-	// C. Critical Vulnerability -> REJECTED
+	// C. Critical Vulnerability -> REVIEW_REQUIRED (cảnh báo cao chờ Admin đánh giá)
 	critReport := &ScanReport{
 		Coverage: ScanCoverage{
 			OverallCoverage: "POLICY_COMPLETE",
 		},
 		Vulnerabilities: VulnerabilitySummary{Critical: 1},
 	}
-	verdictCrit, _ := EvaluatePolicy(critReport)
-	if verdictCrit != StateRejected {
-		t.Fatalf("Critical report expected REJECTED, got %s", verdictCrit)
+	verdictCrit, reasonsCrit := EvaluatePolicy(critReport)
+	if verdictCrit != StateReviewRequired {
+		t.Fatalf("Critical report expected REVIEW_REQUIRED, got %s", verdictCrit)
+	}
+	if len(reasonsCrit) == 0 {
+		t.Fatalf("Critical report expected non-empty policy reasons")
 	}
 
 	// D. High Vulnerability -> REVIEW_REQUIRED
@@ -165,6 +172,23 @@ func TestEvaluatePolicy(t *testing.T) {
 	verdictInc, _ := EvaluatePolicy(incompleteReport)
 	if verdictInc != StateReviewRequired {
 		t.Fatalf("Incomplete coverage report expected REVIEW_REQUIRED, got %s", verdictInc)
+	}
+
+	// F. Permissive / Audit-Only Mode (Mức 3): Always AUTO_APPROVED regardless of secrets/CVEs
+	t.Setenv("LABOPS_REPO_PERMISSIVE_MODE", "true")
+	verdictPerm, reasonsPerm := EvaluatePolicy(secretReport)
+	if verdictPerm != StateAutoApproved {
+		t.Fatalf("Permissive mode expected AUTO_APPROVED, got %s", verdictPerm)
+	}
+	foundPermissiveReason := false
+	for _, r := range reasonsPerm {
+		if strings.Contains(r, "Chế độ Giám sát Toàn diện") {
+			foundPermissiveReason = true
+			break
+		}
+	}
+	if !foundPermissiveReason {
+		t.Fatalf("Permissive mode expected explanation in reasons, got: %v", reasonsPerm)
 	}
 }
 
@@ -701,7 +725,14 @@ func TestGuardService_FullGitBundleE2E(t *testing.T) {
 	}
 	runGitTest(srcRepo, "add", ".")
 	runGitTest(srcRepo, "-c", "user.name=LabOps Test", "-c", "user.email=test@lab.local", "commit", "-m", "initial verified commit")
+	if err := os.WriteFile(filepath.Join(srcRepo, ".gitattributes"), []byte("src/model.py export-ignore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(srcRepo, "add", ".gitattributes")
+	runGitTest(srcRepo, "-c", "user.name=LabOps Test", "-c", "user.email=test@lab.local", "commit", "-m", "add export attribute")
+
 	expectedSHA := runGitTest(srcRepo, "rev-parse", "HEAD")
+	runGitTest(srcRepo, "branch", "topics/verified")
 
 	runGitTest("", "clone", "--bare", srcRepo, bareRepo)
 	runGitTest("", "--git-dir", bareRepo, "update-server-info")
@@ -716,6 +747,9 @@ func TestGuardService_FullGitBundleE2E(t *testing.T) {
 	svc.SetAllowLoopbackForTest(true)
 	svc.SetWorkspaceRoots([]string{wsRoot})
 	svc.SetScanFuncForTest(func(ctx context.Context, sourceDir string) (*ScanReport, error) {
+		if _, err := os.Stat(filepath.Join(sourceDir, "src", "model.py")); err != nil {
+			return nil, err
+		}
 		sub, lfs := InspectAuxiliaryFeatures(sourceDir)
 		return &ScanReport{
 			Coverage: ScanCoverage{
@@ -774,8 +808,61 @@ func TestGuardService_FullGitBundleE2E(t *testing.T) {
 	if originURL := runGitTest(destDir, "remote", "get-url", "origin"); originURL != ReapprovalRequiredOriginURL {
 		t.Fatalf("Expected origin pull URL %q, got %q", ReapprovalRequiredOriginURL, originURL)
 	}
-	if logMsg := runGitTest(destDir, "log", "-1", "--format=%s"); logMsg != "initial verified commit" {
+	if logMsg := runGitTest(destDir, "log", "-1", "--format=%s"); logMsg != "add export attribute" {
 		t.Fatalf("Unexpected git log commit message: %q", logMsg)
+	}
+	if count := runGitTest(destDir, "rev-list", "--count", "HEAD"); count != "2" {
+		t.Fatalf("Expected complete fetched history, got %q commits", count)
+	}
+
+	managed, err := svc.SubmitRequest(context.Background(), repoURL, "topics/verified", "alice", "managed:ws-alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := svc.SubmitRequest(context.Background(), repoURL, "topics/verified", "alice", "managed:ws-alice")
+	if err != nil || retry.ID != managed.ID {
+		t.Fatalf("Equivalent request was not reused: %+v, %v", retry, err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		managed, _ = svc.GetRequest(managed.ID)
+		if managed.State == StateAutoApproved || managed.State == StateFailed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if managed.State != StateAutoApproved || !managed.CacheHit {
+		t.Fatalf("Managed request should use the verified commit cache: %+v", managed)
+	}
+	stageBase := filepath.Join(tempDir, "delivery-staging")
+	if err := os.Mkdir(stageBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LABOPS_REPOSITORY_DELIVERY_STAGING", stageBase)
+	workspace := WorkspaceDelivery{Root: filepath.Join(wsRoot, "alice"), UID: os.Geteuid(), GID: os.Getegid()}
+	entry, found := svc.store.GetApproved(managed.CanonicalRepo, expectedSHA)
+	if !found {
+		t.Fatal("approved artifact is missing")
+	}
+	if err := deliverToWorkspace(context.Background(), entry.ArtifactPath, entry.ArtifactDigest,
+		strings.Repeat("1", 40), managed.CheckoutRef, repoURL, "wrong-commit", workspace); err == nil {
+		t.Fatal("approved artifact must be rejected when the expected commit differs")
+	}
+	if _, err := os.Lstat(filepath.Join(workspace.Root, "wrong-commit")); !os.IsNotExist(err) {
+		t.Fatalf("mismatched commit left a destination: %v", err)
+	}
+	if err := svc.deliverAuthorized(managed.ID, "alice", false, "managed", "ws-alice", &workspace); err != nil {
+		t.Fatal(err)
+	}
+	managedDest := filepath.Join(workspace.Root, "managed")
+	if branch := runGitTest(managedDest, "branch", "--show-current"); branch != "topics/verified" {
+		t.Fatalf("Managed checkout changed the requested branch: %s", branch)
+	}
+	if upstream := runGitTest(managedDest, "rev-parse", "--abbrev-ref", "@{upstream}"); upstream != "origin/topics/verified" {
+		t.Fatalf("Unexpected upstream: %s", upstream)
+	}
+	if head := runGitTest(managedDest, "rev-parse", "HEAD"); head != expectedSHA {
+		t.Fatalf("Managed delivery changed the approved commit: %s", head)
 	}
 
 	trainBytes, err := os.ReadFile(filepath.Join(destDir, "train.py"))
@@ -784,5 +871,163 @@ func TestGuardService_FullGitBundleE2E(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destDir, BundleSubdirName)); !os.IsNotExist(err) {
 		t.Fatalf(".labops_bundle staging directory should not be left in delivered worktree")
+	}
+}
+
+// 11. Test Local Workspace Clone Post-Clone Review, Private Cache Isolation, AdminDecision & Rescan
+func TestGuardService_WorkspaceClonePostReviewAndRescan(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "labops-ws-clone-review-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	guardDir := filepath.Join(tempDir, "guard")
+	wsRoot := filepath.Join(tempDir, "ws-tranglt")
+	repoDir := filepath.Join(wsRoot, "risk-constrained-endpointing")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitLocal := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	runGitLocal(repoDir, "init")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.py"), []byte("API_KEY = 'demo'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitLocal(repoDir, "add", ".")
+	runGitLocal(repoDir, "-c", "user.name=Trang", "-c", "user.email=trang@lab.local", "commit", "-m", "private commit")
+	commitSHA := runGitLocal(repoDir, "rev-parse", "HEAD")
+
+	// Reject traversal / symlink escape in PrepareQuarantineFromLocalGit
+	if _, err := PrepareQuarantineFromLocalGit(context.Background(), filepath.Join(guardDir, "quarantine"), "req-bad", wsRoot, "../escape", "https://github.com/TrangLe1912/risk-constrained-endpointing", commitSHA); err == nil {
+		t.Fatal("PrepareQuarantineFromLocalGit MUST reject traversal relative paths")
+	}
+
+	t.Setenv("LABOPS_REPO_PERMISSIVE_MODE", "true")
+	svc, err := NewGuardService(guardDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetScanFuncForTest(func(ctx context.Context, sourceDir string) (*ScanReport, error) {
+		if _, err := os.Stat(filepath.Join(sourceDir, "app.py")); err != nil {
+			return nil, fmt.Errorf("missing extracted app.py: %w", err)
+		}
+		return &ScanReport{
+			Coverage: ScanCoverage{
+				VulnerabilityScan:    "COMPLETED",
+				SecretScan:           "COMPLETED",
+				MisconfigurationScan: "COMPLETED",
+				Submodules:           "NOT_PRESENT",
+				LFS:                  "NOT_PRESENT",
+				OverallCoverage:      "POLICY_COMPLETE",
+			},
+			Vulnerabilities: VulnerabilitySummary{High: 1},
+			SecretsCount:    1,
+			ScannerVersion:  "0.76.2-test",
+			Findings: []FindingItem{
+				{ID: "generic-api-key", Type: "SECRET", Severity: "HIGH", Title: "API Key", TargetFile: "app.py:1", MaskedValue: "****"},
+			},
+		}, nil
+	})
+
+	req, err := svc.SubmitRequestWithOptions(
+		context.Background(),
+		"https://github.com/TrangLe1912/risk-constrained-endpointing",
+		commitSHA,
+		"tranglt",
+		"ws-tranglt",
+		SubmitOptions{
+			Source:                SourceWorkspaceClone,
+			LocalRepoRelPath:      "risk-constrained-endpointing",
+			VerifiedWorkspaceRoot: wsRoot,
+		},
+	)
+	if err != nil {
+		t.Fatalf("SubmitRequestWithOptions failed: %v", err)
+	}
+
+	var doneReq *RepositoryRequest
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		curr, ok := svc.GetRequest(req.ID)
+		if ok && curr.State == StateAutoApproved && curr.ReviewStatus == ReviewStatusReviewRequired {
+			doneReq = curr
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if doneReq == nil {
+		curr, _ := svc.GetRequest(req.ID)
+		t.Fatalf("Expected AUTO_APPROVED + ReviewStatusReviewRequired, got %+v", curr)
+	}
+	if doneReq.CloneStatus != CloneStatusCloned || doneReq.Source != SourceWorkspaceClone {
+		t.Fatalf("Expected CloneStatus=CLONED & Source=workspace_clone, got %+v", doneReq)
+	}
+	// Private workspace clone must NOT be stored into shared ApprovedArtifactStore
+	if _, leaked := svc.store.GetApproved(doneReq.CanonicalRepo, commitSHA); leaked {
+		t.Fatal("workspace_clone private repo MUST NOT be cached in shared ApprovedArtifactStore")
+	}
+
+	// Post-clone AdminDecision APPROVED preserves CloneStatus=CLONED and marks ReviewStatus=APPROVED
+	decided, err := svc.AdminDecision(doneReq.ID, "APPROVED", "admin", "Verified false positive")
+	if err != nil {
+		t.Fatalf("Post-clone AdminDecision failed: %v", err)
+	}
+	if decided.ReviewStatus != ReviewStatusApproved || decided.CloneStatus != CloneStatusCloned || decided.State != StateManuallyApproved {
+		t.Fatalf("Unexpected post-clone decision result: %+v", decided)
+	}
+
+	// RescanRequest recovers a pre-existing FAILED request in-place with local workspace scanning
+	svc.mu.Lock()
+	svc.requests["req-failed-old"] = &RepositoryRequest{
+		ID:            "req-failed-old",
+		RepoURL:       "https://github.com/TrangLe1912/risk-constrained-endpointing",
+		CanonicalRepo: "https://github.com/TrangLe1912/risk-constrained-endpointing",
+		Owner:         "TrangLe1912",
+		RepoName:      "risk-constrained-endpointing",
+		RequestedRef:  commitSHA,
+		CommitSHA:     commitSHA,
+		Submitter:     "tranglt",
+		SubmittedAt:   time.Now(),
+		UpdatedAt:     time.Now(),
+		State:         StateFailed,
+		Error:         "fatal: could not read Username for 'https://github.com'",
+	}
+	svc.mu.Unlock()
+
+	rescanned, err := svc.RescanRequest(context.Background(), "req-failed-old", SubmitOptions{
+		Source:                SourceWorkspaceClone,
+		LocalRepoRelPath:      "risk-constrained-endpointing",
+		VerifiedWorkspaceRoot: wsRoot,
+	})
+	if err != nil {
+		t.Fatalf("RescanRequest failed: %v", err)
+	}
+	if rescanned.CloneStatus != CloneStatusCloned {
+		t.Fatalf("Expected RescanRequest to set CloneStatus=CLONED, got %+v", rescanned)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		curr, _ := svc.GetRequest("req-failed-old")
+		if curr.State == StateAutoApproved && curr.Error == "" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	finalOld, _ := svc.GetRequest("req-failed-old")
+	if finalOld.State != StateAutoApproved || finalOld.ReviewStatus != ReviewStatusReviewRequired || finalOld.Error != "" {
+		t.Fatalf("Expected req-failed-old to recover cleanly, got %+v", finalOld)
 	}
 }

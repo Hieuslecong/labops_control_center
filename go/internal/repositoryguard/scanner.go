@@ -53,9 +53,89 @@ type TrivyVersionInfo struct {
 	} `json:"VulnerabilityDB"`
 }
 
+const (
+	defaultAgentWorkDir        = "/var/lib/labops-agent"
+	defaultAgentTrivyCacheDir  = "/var/lib/labops-agent/trivy-cache"
+	defaultAgentTrivyModuleDir = "/var/lib/labops-agent/trivy-modules"
+)
+
+func resolveTrivyDir(envVar, defaultDir string) string {
+	if custom := strings.TrimSpace(os.Getenv(envVar)); custom != "" {
+		return custom
+	}
+	if info, err := os.Stat(defaultAgentWorkDir); err == nil && info.IsDir() {
+		if err := os.MkdirAll(defaultDir, 0o750); err == nil {
+			return defaultDir
+		}
+	}
+	return ""
+}
+
+func resolveTrivyCacheDir() string {
+	return resolveTrivyDir("TRIVY_CACHE_DIR", defaultAgentTrivyCacheDir)
+}
+
+func resolveTrivyModuleDir() string {
+	return resolveTrivyDir("TRIVY_MODULE_DIR", defaultAgentTrivyModuleDir)
+}
+
+func trivyCommandEnv(cacheDir, moduleDir string) []string {
+	overrides := map[string]string{}
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		if info, err := os.Stat(defaultAgentWorkDir); err == nil && info.IsDir() {
+			overrides["HOME"] = defaultAgentWorkDir
+		}
+	} else if _, err := os.Stat(home); err != nil {
+		if info, dErr := os.Stat(defaultAgentWorkDir); dErr == nil && info.IsDir() {
+			overrides["HOME"] = defaultAgentWorkDir
+		}
+	}
+	if cacheDir != "" {
+		overrides["TRIVY_CACHE_DIR"] = cacheDir
+	}
+	if moduleDir != "" {
+		overrides["TRIVY_MODULE_DIR"] = moduleDir
+	}
+
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, skip := overrides[key]; skip {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	for k, v := range overrides {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+func formatTrivyStderr(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) > 400 {
+		return string(runes[:400]) + "..."
+	}
+	return trimmed
+}
+
 // GetTrivyVersion lấy phiên bản Trivy và ngày cập nhật DB
 func GetTrivyVersion() (version string, dbUpdated string, err error) {
-	cmd := exec.Command("trivy", "version", "--format", "json")
+	cacheDir := resolveTrivyCacheDir()
+	moduleDir := resolveTrivyModuleDir()
+	args := []string{"version", "--format", "json"}
+	if cacheDir != "" {
+		args = append(args, "--cache-dir", cacheDir)
+	}
+	cmd := exec.Command("trivy", args...)
+	cmd.Env = trivyCommandEnv(cacheDir, moduleDir)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("không thể kiểm tra phiên bản trivy: %w", err)
@@ -127,15 +207,32 @@ func RunTrivyScan(ctx context.Context, sourceDir string) (*ScanReport, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctxTimeout, trivyPath,
+	cacheDir := resolveTrivyCacheDir()
+	moduleDir := resolveTrivyModuleDir()
+	args := []string{
 		"fs",
 		"--quiet",
 		"--format", "json",
 		"--scanners", "vuln,secret,misconfig",
-		sourceDir,
-	)
+	}
+	if cacheDir != "" {
+		args = append(args, "--cache-dir", cacheDir)
+	}
+	if moduleDir != "" {
+		args = append(args, "--module-dir", moduleDir)
+	}
+	args = append(args, sourceDir)
 
-	out, err := cmd.Output()
+	cmd := exec.CommandContext(ctxTimeout, trivyPath, args...)
+	cmd.Env = trivyCommandEnv(cacheDir, moduleDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	out := stdout.Bytes()
+	stderrSnippet := formatTrivyStderr(stderr.String())
+
 	overall := "POLICY_COMPLETE"
 	if submodStatus != "NOT_PRESENT" || lfsStatus != "NOT_PRESENT" {
 		overall = "INCOMPLETE_UNFETCHED_REFS"
@@ -149,20 +246,27 @@ func RunTrivyScan(ctx context.Context, sourceDir string) (*ScanReport, error) {
 		OverallCoverage:      overall,
 	}
 
-	if err != nil {
-		if len(out) == 0 {
-			return nil, fmt.Errorf("trivy fs thất bại không xuất được kết quả: %w", err)
+	if err != nil && len(bytes.TrimSpace(out)) == 0 {
+		if stderrSnippet != "" {
+			return nil, fmt.Errorf("trivy fs thất bại không xuất được kết quả: %w (%s)", err, stderrSnippet)
 		}
+		return nil, fmt.Errorf("trivy fs thất bại không xuất được kết quả: %w", err)
 	}
 
 	var parsed TrivyOutput
 	if uErr := json.Unmarshal(out, &parsed); uErr != nil {
 		if err != nil {
+			if stderrSnippet != "" {
+				return nil, fmt.Errorf("trivy fs lỗi (%w) và JSON không hợp lệ: %v (%s)", err, uErr, stderrSnippet)
+			}
 			return nil, fmt.Errorf("trivy fs lỗi (%w) và JSON không hợp lệ: %v", err, uErr)
 		}
 		return nil, fmt.Errorf("lỗi unmarshal kết quả JSON từ trivy: %w", uErr)
 	}
 	if err != nil && parsed.SchemaVersion == 0 && len(parsed.Results) == 0 {
+		if stderrSnippet != "" {
+			return nil, fmt.Errorf("trivy fs trả về mã lỗi không hợp lệ: %w (%s)", err, stderrSnippet)
+		}
 		return nil, fmt.Errorf("trivy fs trả về mã lỗi không hợp lệ: %w", err)
 	}
 

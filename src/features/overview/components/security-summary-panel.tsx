@@ -8,66 +8,13 @@ import { Icons } from '@/components/icons';
 import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
 import { useRepositoryRequestsQuery } from '@/features/labops/queries';
+import {
+  getCloneStatusMeta,
+  getPostCloneReviewMeta,
+  resolveCloneStatus,
+  resolvePostCloneReviewStatus
+} from '@/features/security/utils/repo-status';
 import Link from 'next/link';
-
-function getSecurityStatusBadge(status: string) {
-  switch (status) {
-    case 'AUTO_APPROVED':
-    case 'APPROVED':
-    case 'MANUALLY_APPROVED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-semibold'
-        >
-          {status === 'AUTO_APPROVED' ? 'TỰ ĐỘNG DUYỆT' : 'ADMIN ĐÃ DUYỆT'}
-        </Badge>
-      );
-    case 'DELIVERED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-semibold'
-        >
-          ĐÃ PHÂN PHỐI
-        </Badge>
-      );
-    case 'REVIEW_REQUIRED':
-    case 'MANUAL_REVIEW':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-semibold'
-        >
-          CẦN ADMIN DUYỆT
-        </Badge>
-      );
-    case 'REJECTED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs font-semibold'
-        >
-          BỊ TỪ CHỐI
-        </Badge>
-      );
-    case 'FAILED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30 text-xs'
-        >
-          THẤT BẠI
-        </Badge>
-      );
-    default:
-      return (
-        <Badge variant='outline' className='text-xs font-mono'>
-          {status}
-        </Badge>
-      );
-  }
-}
 
 export function SecuritySummaryPanel() {
   const requestsQuery = useRepositoryRequestsQuery({ intervalMs: 15_000 });
@@ -100,7 +47,7 @@ export function SecuritySummaryPanel() {
                 Kiểm duyệt Mã nguồn & An toàn Hạ tầng
               </CardTitle>
               <p className='text-xs text-muted-foreground'>
-                Auto Security Bot quét cách ly bằng Trivy cho các repo trước khi chạy trên GPU
+                Auto Security Bot quét cách ly bằng Trivy sau khi clone &amp; cảnh báo Zalo Admin
               </p>
             </div>
           </div>
@@ -130,86 +77,106 @@ export function SecuritySummaryPanel() {
               </span>
             </div>
           ) : (
-            topRequests.map((item) => (
-              <div
-                key={item.id}
-                className='p-2.5 rounded-lg border bg-muted/20 flex flex-col gap-1.5 text-xs'
-              >
-                <div className='flex items-center justify-between gap-1'>
-                  <div className='flex items-center gap-1.5 truncate'>
-                    <Icons.github className='size-3.5 shrink-0 text-muted-foreground' />
-                    <span className='font-mono font-semibold text-foreground truncate'>
-                      {item.owner && item.repo_name
-                        ? `${item.owner}/${item.repo_name}`
-                        : item.repo_name || item.canonical_repo}
-                    </span>
-                    <span className='font-mono text-xs text-muted-foreground'>
-                      (
-                      {item.commit_sha ? item.commit_sha.slice(0, 7) : item.requested_ref || 'HEAD'}
-                      )
-                    </span>
-                  </div>
-                  {getSecurityStatusBadge(item.state)}
-                </div>
-
-                <div className='text-xs text-muted-foreground line-clamp-1'>
-                  {item.report?.policy_reasons?.length ? (
-                    item.report.policy_reasons[0]
-                  ) : item.error ? (
-                    <span className='text-rose-600 dark:text-rose-400'>{item.error}</span>
-                  ) : (
-                    'Kho mã an toàn đạt chuẩn Kiểm duyệt Cách ly'
-                  )}
-                </div>
-
-                <div className='flex items-center justify-between text-xs text-muted-foreground pt-1 border-t border-border/40'>
-                  <span>
-                    Bởi:{' '}
-                    <span className='font-mono font-medium text-foreground'>
-                      @{item.submitted_by}
-                    </span>
-                    {item.report?.vulnerabilities && (
-                      <>
-                        {' '}
-                        • Lỗ hổng:{' '}
-                        <strong
-                          className={
-                            item.report.vulnerabilities.critical > 0 ||
-                            item.report.vulnerabilities.high > 0
-                              ? 'text-rose-500'
-                              : 'text-emerald-500'
-                          }
-                        >
-                          {item.report.vulnerabilities.critical} Crit /{' '}
-                          {item.report.vulnerabilities.high} High
-                        </strong>
-                      </>
-                    )}
-                  </span>
-
-                  {item.state === 'REVIEW_REQUIRED' && (
-                    <div className='flex items-center gap-1'>
-                      <Button
-                        size='sm'
-                        variant='outline'
-                        onClick={() => void handleDecision(item.id, 'APPROVED')}
-                        className='h-6 text-xs px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10'
-                      >
-                        Duyệt
-                      </Button>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        onClick={() => void handleDecision(item.id, 'REJECTED')}
-                        className='h-6 text-xs px-2 text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
-                      >
-                        Từ chối
-                      </Button>
+            topRequests.map((item) => {
+              const cloneMeta = getCloneStatusMeta(resolveCloneStatus(item));
+              const reviewStatus = resolvePostCloneReviewStatus(item);
+              const reviewMeta = getPostCloneReviewMeta(reviewStatus);
+              return (
+                <div
+                  key={item.id}
+                  className='p-2.5 rounded-lg border bg-muted/20 flex flex-col gap-1.5 text-xs'
+                >
+                  <div className='flex items-center justify-between gap-1'>
+                    <div className='flex items-center gap-1.5 truncate'>
+                      <Icons.github className='size-3.5 shrink-0 text-muted-foreground' />
+                      <span className='font-mono font-semibold text-foreground truncate'>
+                        {item.owner && item.repo_name
+                          ? `${item.owner}/${item.repo_name}`
+                          : item.repo_name || item.canonical_repo}
+                      </span>
+                      <span className='font-mono text-xs text-muted-foreground'>
+                        (
+                        {item.commit_sha
+                          ? item.commit_sha.slice(0, 7)
+                          : item.requested_ref || 'HEAD'}
+                        )
+                      </span>
                     </div>
-                  )}
+                    <div className='flex items-center gap-1 shrink-0'>
+                      <Badge
+                        variant='outline'
+                        className={`${cloneMeta.className} text-xs font-semibold`}
+                      >
+                        Clone: {cloneMeta.label}
+                      </Badge>
+                      <Badge
+                        variant='outline'
+                        className={`${reviewMeta.className} text-xs font-semibold`}
+                      >
+                        {reviewMeta.label}
+                      </Badge>
+                    </div>
+                  </div>
+
+                  <div className='text-xs text-muted-foreground line-clamp-1'>
+                    {item.report?.policy_reasons?.length ? (
+                      item.report.policy_reasons[0]
+                    ) : item.error ? (
+                      <span className='text-rose-600 dark:text-rose-400'>{item.error}</span>
+                    ) : (
+                      'Kho mã an toàn đạt chuẩn Kiểm duyệt Cách ly'
+                    )}
+                  </div>
+
+                  <div className='flex items-center justify-between text-xs text-muted-foreground pt-1 border-t border-border/40'>
+                    <span>
+                      Bởi:{' '}
+                      <span className='font-mono font-medium text-foreground'>
+                        @{item.submitted_by}
+                      </span>
+                      {item.report?.vulnerabilities && (
+                        <>
+                          {' '}
+                          • Lỗ hổng:{' '}
+                          <strong
+                            className={
+                              item.report.vulnerabilities.critical > 0 ||
+                              item.report.vulnerabilities.high > 0
+                                ? 'text-rose-500'
+                                : 'text-emerald-500'
+                            }
+                          >
+                            {item.report.vulnerabilities.critical} Crit /{' '}
+                            {item.report.vulnerabilities.high} High
+                          </strong>
+                        </>
+                      )}
+                    </span>
+
+                    {reviewStatus === 'REVIEW_REQUIRED' && (
+                      <div className='flex items-center gap-1'>
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          onClick={() => void handleDecision(item.id, 'APPROVED')}
+                          className='h-6 text-xs px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10'
+                        >
+                          Duyệt
+                        </Button>
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={() => void handleDecision(item.id, 'REJECTED')}
+                          className='h-6 text-xs px-2 text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
+                        >
+                          Từ chối
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 

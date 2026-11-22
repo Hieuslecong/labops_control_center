@@ -141,3 +141,70 @@ func TestCLI_CloneStatusDeliver_Contract(t *testing.T) {
 		t.Fatalf("Expected req-cli-101 in status table output: %s", stdout.String())
 	}
 }
+
+func TestClonePendingReviewAndUnconfirmedDelivery(t *testing.T) {
+	for _, test := range []struct {
+		state string
+		want  int
+	}{
+		{"REVIEW_REQUIRED", 3},
+		{"REJECTED", 2},
+		{"AUTO_APPROVED", 1},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch filepath.Base(r.URL.Path) {
+				case "requests":
+					io.WriteString(w, `{"id":"req-test","state":"REQUESTED"}`)
+				case "req-test":
+					json.NewEncoder(w).Encode(map[string]string{"id": "req-test", "state": test.state})
+				case "deliver":
+					w.WriteHeader(http.StatusAccepted)
+					io.WriteString(w, `{"state":"DELIVERING"}`)
+				}
+			}))
+			defer srv.Close()
+			got := RunWithOptions([]string{"clone", "https://github.com/org/demo"}, "aiotgit", Options{
+				APIBaseURL: srv.URL, Token: "test", Stdout: io.Discard, Stderr: io.Discard, MaxWait: time.Second,
+			})
+			if got != test.want {
+				t.Fatalf("exit = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCloneAPIFailures(t *testing.T) {
+	for _, scenario := range []string{"unauthorized", "malformed", "offline", "deadline", "already-delivered"} {
+		t.Run(scenario, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					switch scenario {
+					case "unauthorized":
+						w.WriteHeader(http.StatusUnauthorized)
+					case "malformed":
+						io.WriteString(w, `not json`)
+					default:
+						io.WriteString(w, `{"id":"test-id","state":"REQUESTED"}`)
+					}
+					return
+				}
+				if scenario == "already-delivered" {
+					io.WriteString(w, `{"id":"test-id","state":"DELIVERED"}`)
+				} else {
+					<-r.Context().Done()
+				}
+			}))
+			defer srv.Close()
+			if scenario == "offline" {
+				srv.Close()
+			}
+			if got := RunWithOptions([]string{"clone", "https://github.com/org/repo"}, "aiotgit", Options{
+				APIBaseURL: srv.URL, Token: "test", MaxWait: 30 * time.Millisecond,
+				Stdout: io.Discard, Stderr: io.Discard,
+			}); got != 1 {
+				t.Fatalf("exit = %d, want 1", got)
+			}
+		})
+	}
+}

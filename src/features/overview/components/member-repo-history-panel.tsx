@@ -13,95 +13,57 @@ import {
   DialogDescription
 } from '@/components/ui/dialog';
 import { Icons } from '@/components/icons';
+import { labopsCall } from '@/features/labops/api';
 import { useRepositoryAuditQuery, useRepositoryRequestsQuery } from '@/features/labops/queries';
+import {
+  getCloneStatusMeta,
+  getPostCloneReviewMeta,
+  resolveCloneStatus,
+  resolvePostCloneReviewStatus
+} from '@/features/security/utils/repo-status';
 import { useAuthSession } from '@/hooks/use-auth-session';
-import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
+import { RepositoryGuardRequest } from '@/types/labops';
 import Link from 'next/link';
+import { toast } from 'sonner';
 
-function getApprovalBadge(status: SecurityReviewStatus | string) {
-  switch (status) {
-    case 'AUTO_APPROVED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.check className='size-3 text-emerald-600' />
-          TỰ ĐỘNG DUYỆT
-        </Badge>
-      );
-    case 'APPROVED':
-    case 'MANUALLY_APPROVED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-teal-500/15 text-teal-700 dark:text-teal-400 border-teal-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.circleCheck className='size-3 text-teal-600' />
-          ADMIN ĐÃ DUYỆT
-        </Badge>
-      );
-    case 'DELIVERED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.check className='size-3 text-blue-600' />
-          ĐÃ PHÂN PHỐI
-        </Badge>
-      );
-    case 'REVIEW_REQUIRED':
-    case 'MANUAL_REVIEW':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.warning className='size-3 text-amber-600' />
-          CHỜ ADMIN DUYỆT
-        </Badge>
-      );
-    case 'REJECTED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.close className='size-3 text-rose-600' />
-          BỊ TỪ CHỐI
-        </Badge>
-      );
-    case 'FAILED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30 text-xs font-semibold gap-1 shrink-0'
-        >
-          <Icons.alertCircle className='size-3 text-red-600' />
-          THẤT BẠI
-        </Badge>
-      );
-    case 'FETCHING':
-    case 'SCANNING':
-    case 'POLICY_EVALUATION':
-    case 'RESOLVING_COMMIT':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30 text-xs font-mono animate-pulse shrink-0'
-        >
-          <Icons.spinner className='size-3 animate-spin' />
-          ĐANG QUÉT
-        </Badge>
-      );
-    default:
-      return (
-        <Badge variant='outline' className='text-xs font-mono shrink-0'>
-          {status}
-        </Badge>
-      );
-  }
+function CloneStatusBadge({ req }: { req: RepositoryGuardRequest }) {
+  const status = resolveCloneStatus(req);
+  const meta = getCloneStatusMeta(status);
+  return (
+    <Badge variant='outline' className={`${meta.className} text-xs font-semibold gap-1 shrink-0`}>
+      {status === 'CLONED' ? (
+        <Icons.check className='size-3' />
+      ) : status === 'CLONING' ? (
+        <Icons.spinner className='size-3 animate-spin' />
+      ) : status === 'PENDING' ? (
+        <Icons.clock className='size-3' />
+      ) : (
+        <Icons.close className='size-3' />
+      )}
+      {meta.label}
+    </Badge>
+  );
+}
+
+function PostCloneReviewBadge({ req }: { req: RepositoryGuardRequest }) {
+  const status = resolvePostCloneReviewStatus(req);
+  const meta = getPostCloneReviewMeta(status);
+  return (
+    <Badge variant='outline' className={`${meta.className} text-xs font-semibold gap-1 shrink-0`}>
+      {status === 'CLEAN' || status === 'APPROVED' ? (
+        <Icons.circleCheck className='size-3' />
+      ) : status === 'REVIEW_REQUIRED' || status === 'SCAN_FAILED' ? (
+        <Icons.warning className='size-3' />
+      ) : status === 'SCANNING' ? (
+        <Icons.spinner className='size-3 animate-spin' />
+      ) : status === 'REJECTED' ? (
+        <Icons.close className='size-3' />
+      ) : (
+        <Icons.info className='size-3' />
+      )}
+      {meta.label}
+    </Badge>
+  );
 }
 
 function formatDateTime(isoString?: string): { formatted: string; relative: string } {
@@ -157,12 +119,28 @@ export function MemberRepoHistoryPanel() {
 
   // Selected for detail modal
   const [selectedReq, setSelectedReq] = useState<RepositoryGuardRequest | null>(null);
+  const [rescanningId, setRescanningId] = useState<string | null>(null);
 
   const fetchHistory = async () => {
     await Promise.all([
       requestsQuery.refetch(),
       isAdmin ? auditQuery.refetch() : Promise.resolve()
     ]);
+  };
+
+  const handleRescan = async (reqId: string) => {
+    setRescanningId(reqId);
+    try {
+      const res = await labopsCall(`repositories/requests/${reqId}/rescan`, { method: 'POST' });
+      if (!res.ok) {
+        toast.error('Không thể quét lại hậu kiểm', { description: res.error });
+        return;
+      }
+      toast.success('Đã gửi yêu cầu quét lại hậu kiểm trong workspace');
+      void fetchHistory();
+    } finally {
+      setRescanningId(null);
+    }
   };
 
   // Distinct member list for filter
@@ -178,14 +156,17 @@ export function MemberRepoHistoryPanel() {
   // Overall Statistics
   const stats = useMemo(() => {
     const total = requests.length;
-    const approved = requests.filter((r) =>
-      ['AUTO_APPROVED', 'APPROVED', 'MANUALLY_APPROVED', 'DELIVERED'].includes(r.state)
-    ).length;
-    const rejected = requests.filter((r) => r.state === 'REJECTED').length;
-    const reviewReq = requests.filter((r) => r.state === 'REVIEW_REQUIRED').length;
-    const failed = requests.filter((r) => r.state === 'FAILED').length;
-    const approvalRate = total > 0 ? Math.round((approved / total) * 100) : 0;
-    return { total, approved, rejected, reviewReq, failed, approvalRate };
+    const cloned = requests.filter((r) => resolveCloneStatus(r) === 'CLONED').length;
+    const cloneFailed = requests.filter((r) => {
+      const cs = resolveCloneStatus(r);
+      return cs === 'FAILED' || cs === 'BLOCKED';
+    }).length;
+    const reviewReq = requests.filter((r) => {
+      const rs = resolvePostCloneReviewStatus(r);
+      return rs === 'REVIEW_REQUIRED' || rs === 'SCAN_FAILED';
+    }).length;
+    const cloneSuccessRate = total > 0 ? Math.round((cloned / total) * 100) : 0;
+    return { total, cloned, cloneFailed, reviewReq, cloneSuccessRate };
   }, [requests]);
 
   // Filtered requests
@@ -196,19 +177,16 @@ export function MemberRepoHistoryPanel() {
         return false;
       }
 
+      const cloneStatus = resolveCloneStatus(r);
+      const reviewStatus = resolvePostCloneReviewStatus(r);
+
       // Status filter
-      if (selectedStatusGroup === 'approved') {
-        if (!['AUTO_APPROVED', 'APPROVED', 'MANUALLY_APPROVED', 'DELIVERED'].includes(r.state)) {
-          return false;
-        }
-      } else if (selectedStatusGroup === 'not_approved') {
-        if (!['REJECTED', 'FAILED'].includes(r.state)) {
-          return false;
-        }
+      if (selectedStatusGroup === 'cloned') {
+        if (cloneStatus !== 'CLONED') return false;
+      } else if (selectedStatusGroup === 'clone_failed') {
+        if (cloneStatus !== 'FAILED' && cloneStatus !== 'BLOCKED') return false;
       } else if (selectedStatusGroup === 'review_required') {
-        if (r.state !== 'REVIEW_REQUIRED') {
-          return false;
-        }
+        if (reviewStatus !== 'REVIEW_REQUIRED' && reviewStatus !== 'SCAN_FAILED') return false;
       }
 
       // Search filter
@@ -300,27 +278,27 @@ export function MemberRepoHistoryPanel() {
 
           <div className='p-2.5 rounded-lg border bg-emerald-500/5 border-emerald-500/20'>
             <span className='text-xs text-emerald-700 dark:text-emerald-400 font-medium block'>
-              Đã được phê duyệt
+              Clone thành công
             </span>
             <div className='text-lg font-bold mt-0.5 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
               <Icons.check className='size-4' />
-              {stats.approved}
+              {stats.cloned}
             </div>
           </div>
 
           <div className='p-2.5 rounded-lg border bg-rose-500/5 border-rose-500/20'>
             <span className='text-xs text-rose-700 dark:text-rose-400 font-medium block'>
-              Không được duyệt / Bị chặn
+              Clone thất bại / Chặn
             </span>
             <div className='text-lg font-bold mt-0.5 text-rose-600 dark:text-rose-400 flex items-center gap-1.5'>
               <Icons.close className='size-4' />
-              {stats.rejected + stats.failed}
+              {stats.cloneFailed}
             </div>
           </div>
 
           <div className='p-2.5 rounded-lg border bg-amber-500/5 border-amber-500/20'>
             <span className='text-xs text-amber-700 dark:text-amber-400 font-medium block'>
-              Cần Admin duyệt ngoại lệ
+              Cần kiểm duyệt sau clone
             </span>
             <div className='text-lg font-bold mt-0.5 text-amber-600 dark:text-amber-400 flex items-center gap-1.5'>
               <Icons.warning className='size-4' />
@@ -330,11 +308,11 @@ export function MemberRepoHistoryPanel() {
 
           <div className='p-2.5 rounded-lg border bg-muted/20'>
             <span className='text-xs text-muted-foreground font-medium block'>
-              Tỷ lệ duyệt an toàn
+              Tỷ lệ clone thành công
             </span>
             <div className='text-lg font-bold mt-0.5 text-blue-600 dark:text-blue-400 flex items-center gap-1.5'>
               <Icons.shield className='size-4' />
-              {stats.approvalRate}%
+              {stats.cloneSuccessRate}%
             </div>
           </div>
         </div>
@@ -385,25 +363,25 @@ export function MemberRepoHistoryPanel() {
               </button>
               <button
                 type='button'
-                onClick={() => setSelectedStatusGroup('approved')}
+                onClick={() => setSelectedStatusGroup('cloned')}
                 className={`px-2 py-1 rounded text-xs transition-colors ${
-                  selectedStatusGroup === 'approved'
+                  selectedStatusGroup === 'cloned'
                     ? 'bg-emerald-500/15 font-semibold text-emerald-700 dark:text-emerald-400'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                ✅ Được duyệt ({stats.approved})
+                ✅ Clone thành công ({stats.cloned})
               </button>
               <button
                 type='button'
-                onClick={() => setSelectedStatusGroup('not_approved')}
+                onClick={() => setSelectedStatusGroup('clone_failed')}
                 className={`px-2 py-1 rounded text-xs transition-colors ${
-                  selectedStatusGroup === 'not_approved'
+                  selectedStatusGroup === 'clone_failed'
                     ? 'bg-rose-500/15 font-semibold text-rose-700 dark:text-rose-400'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                ❌ Không duyệt ({stats.rejected + stats.failed})
+                ❌ Clone thất bại ({stats.cloneFailed})
               </button>
               <button
                 type='button'
@@ -414,7 +392,7 @@ export function MemberRepoHistoryPanel() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                ⚠️ Cần duyệt ({stats.reviewReq})
+                ⚠️ Cần kiểm duyệt ({stats.reviewReq})
               </button>
             </div>
 
@@ -439,7 +417,8 @@ export function MemberRepoHistoryPanel() {
                   <th className='py-2.5 px-3 whitespace-nowrap'>Thời gian</th>
                   <th className='py-2.5 px-3 whitespace-nowrap'>Thành viên</th>
                   <th className='py-2.5 px-3 min-w-[200px]'>Kho lưu trữ & Nhánh</th>
-                  <th className='py-2.5 px-3 whitespace-nowrap'>Kết quả Kiểm duyệt</th>
+                  <th className='py-2.5 px-3 whitespace-nowrap'>Trạng thái Clone</th>
+                  <th className='py-2.5 px-3 whitespace-nowrap'>Kiểm duyệt sau Clone</th>
                   <th className='py-2.5 px-3 min-w-[180px]'>Phát hiện An ninh & Lý do</th>
                   <th className='py-2.5 px-3 text-right whitespace-nowrap'>Hành động</th>
                 </tr>
@@ -447,7 +426,7 @@ export function MemberRepoHistoryPanel() {
               <tbody className='divide-y divide-border/40'>
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className='py-8 text-center text-muted-foreground'>
+                    <td colSpan={7} className='py-8 text-center text-muted-foreground'>
                       <div className='flex items-center justify-center gap-2'>
                         <Icons.spinner className='size-4 animate-spin text-primary' />
                         <span>Đang nạp lịch sử kiểm duyệt từ Auto Security Bot...</span>
@@ -456,7 +435,7 @@ export function MemberRepoHistoryPanel() {
                   </tr>
                 ) : filteredRequests.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className='py-8 text-center text-muted-foreground'>
+                    <td colSpan={7} className='py-8 text-center text-muted-foreground'>
                       <div className='flex flex-col items-center justify-center gap-1.5'>
                         <Icons.shield className='size-6 text-muted-foreground/50' />
                         <span className='font-medium'>
@@ -475,18 +454,17 @@ export function MemberRepoHistoryPanel() {
                 ) : (
                   filteredRequests.map((r) => {
                     const timeInfo = formatDateTime(r.submitted_at);
-                    const isApproved = [
-                      'AUTO_APPROVED',
-                      'APPROVED',
-                      'MANUALLY_APPROVED',
-                      'DELIVERED'
-                    ].includes(r.state);
+                    const cloneStatus = resolveCloneStatus(r);
+                    const reviewStatus = resolvePostCloneReviewStatus(r);
+                    const isCloneHealthy = cloneStatus === 'CLONED';
+                    const canRescan =
+                      isAdmin && (reviewStatus === 'SCAN_FAILED' || r.state === 'FAILED');
 
                     return (
                       <tr
                         key={r.id}
                         className={`hover:bg-muted/30 transition-colors ${
-                          !isApproved ? 'bg-rose-500/[0.02]' : ''
+                          !isCloneHealthy ? 'bg-rose-500/[0.02]' : ''
                         }`}
                       >
                         {/* 1. Thời gian */}
@@ -568,10 +546,15 @@ export function MemberRepoHistoryPanel() {
                           </div>
                         </td>
 
-                        {/* 4. Kết quả duyệt */}
+                        {/* 4. Trạng thái Clone */}
+                        <td className='py-2.5 px-3 whitespace-nowrap'>
+                          <CloneStatusBadge req={r} />
+                        </td>
+
+                        {/* 5. Kiểm duyệt sau Clone */}
                         <td className='py-2.5 px-3 whitespace-nowrap'>
                           <div className='flex flex-col gap-1 items-start'>
-                            {getApprovalBadge(r.state)}
+                            <PostCloneReviewBadge req={r} />
                             {r.decision && (
                               <span className='text-xs text-muted-foreground font-mono truncate max-w-[120px]'>
                                 bởi @{r.decision.reviewer}
@@ -636,7 +619,7 @@ export function MemberRepoHistoryPanel() {
                               ) : r.report?.policy_reasons?.length ? (
                                 <span
                                   className={
-                                    isApproved
+                                    reviewStatus === 'CLEAN' || reviewStatus === 'APPROVED'
                                       ? 'text-emerald-600 dark:text-emerald-400'
                                       : 'text-amber-600 dark:text-amber-400'
                                   }
@@ -650,17 +633,33 @@ export function MemberRepoHistoryPanel() {
                           </div>
                         </td>
 
-                        {/* 6. Hành động */}
+                        {/* 7. Hành động */}
                         <td className='py-2.5 px-3 text-right whitespace-nowrap'>
-                          <Button
-                            size='sm'
-                            variant='outline'
-                            onClick={() => setSelectedReq(r)}
-                            className='h-7 text-xs px-2 gap-1'
-                          >
-                            <Icons.info className='size-3' />
-                            Chi tiết
-                          </Button>
+                          <div className='flex items-center justify-end gap-1.5'>
+                            {canRescan && (
+                              <Button
+                                size='sm'
+                                variant='outline'
+                                disabled={rescanningId === r.id}
+                                onClick={() => void handleRescan(r.id)}
+                                className='h-7 text-xs px-2 gap-1'
+                              >
+                                <Icons.refresh
+                                  className={`size-3 ${rescanningId === r.id ? 'animate-spin' : ''}`}
+                                />
+                                Quét lại
+                              </Button>
+                            )}
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              onClick={() => setSelectedReq(r)}
+                              className='h-7 text-xs px-2 gap-1'
+                            >
+                              <Icons.info className='size-3' />
+                              Chi tiết
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -705,8 +704,16 @@ export function MemberRepoHistoryPanel() {
                   </a>
                 </div>
                 <div>
-                  <span className='text-xs text-muted-foreground block'>Trạng thái duyệt</span>
-                  <div className='mt-0.5'>{getApprovalBadge(selectedReq.state)}</div>
+                  <span className='text-xs text-muted-foreground block'>Trạng thái Clone</span>
+                  <div className='mt-0.5'>
+                    <CloneStatusBadge req={selectedReq} />
+                  </div>
+                </div>
+                <div>
+                  <span className='text-xs text-muted-foreground block'>Kiểm duyệt sau Clone</span>
+                  <div className='mt-0.5'>
+                    <PostCloneReviewBadge req={selectedReq} />
+                  </div>
                 </div>
                 <div>
                   <span className='text-xs text-muted-foreground block'>Nhánh / Tag</span>

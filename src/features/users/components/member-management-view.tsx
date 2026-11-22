@@ -36,6 +36,19 @@ function downloadTextFile(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
+function formatMemberRoleLabel(role?: string): string {
+  switch (role) {
+    case 'STUDENT':
+      return 'Sinh viên';
+    case 'RESEARCHER':
+      return 'Nghiên cứu viên';
+    case 'ADMIN':
+      return 'Quản trị viên';
+    default:
+      return role || 'RESEARCHER';
+  }
+}
+
 function resolveMemberHostIp(member: LabMember): string {
   return (
     member.sshIp ||
@@ -716,7 +729,13 @@ export function MemberManagementView() {
               >
                 {vpnOverview?.active_clients ?? 0} / {vpnOverview?.total_clients ?? 0} online
               </div>
-              <div className='text-xs text-muted-foreground mt-0.5'>Xác minh Handshake thực tế</div>
+              <div className='text-xs text-muted-foreground mt-0.5'>
+                Handshake ≤{' '}
+                {Math.max(1, Math.round((vpnOverview?.handshake_ttl_seconds ?? 180) / 60))} phút
+                {(vpnOverview?.ever_connected_clients ?? 0) > (vpnOverview?.active_clients ?? 0)
+                  ? ` · từng nối: ${vpnOverview?.ever_connected_clients}`
+                  : ''}
+              </div>
             </div>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Lưu lượng Mạng VPN</div>
@@ -861,7 +880,11 @@ export function MemberManagementView() {
                             {member.fullName} · {member.email}
                           </div>
                         </td>
-                        <td className='p-3'>{member.role}</td>
+                        <td className='p-3'>
+                          <Badge variant='outline' className='text-xs font-medium'>
+                            {formatMemberRoleLabel(member.role)}
+                          </Badge>
+                        </td>
                         <td className='p-3'>
                           <div className='font-mono uppercase text-xs font-semibold'>
                             {member.assignedServer} · {resolvedHostIp}
@@ -981,7 +1004,8 @@ export function MemberManagementView() {
                                           Vai trò hệ thống:
                                         </span>
                                         <Badge variant='outline' className='text-xs font-mono'>
-                                          {member.role || 'RESEARCHER'}
+                                          {formatMemberRoleLabel(member.role)} (
+                                          {member.role || 'RESEARCHER'})
                                         </Badge>
                                       </div>
                                       <div className='flex justify-between border-b pb-1.5'>

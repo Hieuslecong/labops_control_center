@@ -25,20 +25,50 @@ export function validateSameOriginMutation(request: Request): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
     return true;
   }
-  let expectedOrigin: string;
+
+  const allowedOrigins = new Set<string>(['https://aiotserver.fitdnu.id.vn']);
   try {
-    expectedOrigin = new URL(request.url).origin;
+    allowedOrigins.add(new URL(request.url).origin);
   } catch {
     return false;
   }
+
+  const configuredCors = process.env.LABOPS_CORS_ORIGINS || '';
+  for (const entry of configuredCors.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    try {
+      allowedOrigins.add(new URL(trimmed).origin);
+    } catch {
+      // ignore invalid origin entries
+    }
+  }
+
+  for (const headerName of ['x-forwarded-host', 'host']) {
+    const rawHeader = request.headers.get(headerName);
+    if (!rawHeader) continue;
+    const firstHost = rawHeader.split(',')[0]?.trim();
+    if (!firstHost || /\s|[/\\]/.test(firstHost)) continue;
+    allowedOrigins.add(`https://${firstHost}`);
+    allowedOrigins.add(`http://${firstHost}`);
+    const colonIdx = firstHost.lastIndexOf(':');
+    if (colonIdx > 0 && !firstHost.endsWith(']')) {
+      const bareHost = firstHost.slice(0, colonIdx).trim();
+      if (bareHost) {
+        allowedOrigins.add(`https://${bareHost}`);
+        allowedOrigins.add(`http://${bareHost}`);
+      }
+    }
+  }
+
   const originHeader = request.headers.get('origin');
   if (originHeader) {
-    return originHeader === expectedOrigin;
+    return allowedOrigins.has(originHeader);
   }
   const refererHeader = request.headers.get('referer');
   if (refererHeader) {
     try {
-      return new URL(refererHeader).origin === expectedOrigin;
+      return allowedOrigins.has(new URL(refererHeader).origin);
     } catch {
       return false;
     }

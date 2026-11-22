@@ -380,7 +380,7 @@ export function ResourcesManagementView() {
 
             return (
               <Card
-                key={pool.id}
+                key={`${pool.serverId}-${pool.id}-${pool.mountPoint}`}
                 className='p-4 bg-card border relative overflow-hidden flex flex-col justify-between'
               >
                 {/* Top indicator color */}

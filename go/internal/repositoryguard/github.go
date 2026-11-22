@@ -62,60 +62,59 @@ func NormalizeAndValidateURL(rawURL string) (canonical, owner, repo string, err 
 
 // ResolveCommitSHA xác định commit SHA 40 ký tự hex từ branch, tag hoặc commit sẵn có
 func ResolveCommitSHA(ctx context.Context, repoURL, ref string) (string, error) {
+	commit, _, err := resolveCheckoutRef(ctx, repoURL, ref)
+	return commit, err
+}
+
+// resolveCheckoutRef returns the exact commit and the remote branch/tag used for checkout.
+func resolveCheckoutRef(ctx context.Context, repoURL, ref string) (string, string, error) {
 	ref = strings.TrimSpace(ref)
 	if sha40Regex.MatchString(ref) {
-		return strings.ToLower(ref), nil
+		return strings.ToLower(ref), "", nil
+	}
+	if ref == "" {
+		ref = "HEAD"
+	}
+	var candidates []string
+	switch {
+	case ref == "HEAD":
+		candidates = []string{"HEAD"}
+	case strings.HasPrefix(ref, "refs/heads/"):
+		candidates = []string{ref}
+	case strings.HasPrefix(ref, "refs/tags/"):
+		candidates = []string{ref + "^{}", ref}
+	default:
+		candidates = []string{"refs/heads/" + ref, "refs/tags/" + ref + "^{}", "refs/tags/" + ref}
 	}
 
-	// Sử dụng git config cấm hooks, filters, submodules và file:// khi phân giải SHA từ remote
 	ctxTimeout, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-
-	safeArgs := SafeGitConfigArgs()
-	lsArgs := append(append([]string{}, safeArgs...), "ls-remote", repoURL, ref)
-	cmd := exec.CommandContext(ctxTimeout, "git", lsArgs...)
+	args := append(SafeGitConfigArgs(), "ls-remote", "--symref", "--", repoURL)
+	args = append(args, candidates...)
+	cmd := exec.CommandContext(ctxTimeout, "git", args...)
 	cmd.Env = SafeGitEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		// Thử resolve HEAD nếu ref trống
-		if ref == "" || ref == "HEAD" {
-			symArgs := append(append([]string{}, safeArgs...), "ls-remote", "--symref", repoURL, "HEAD")
-			cmdHead := exec.CommandContext(ctxTimeout, "git", symArgs...)
-			cmdHead.Env = SafeGitEnv()
-			outHead, errHead := cmdHead.Output()
-			if errHead == nil {
-				lines := strings.Split(string(outHead), "\n")
-				for _, l := range lines {
-					fields := strings.Fields(l)
-					if len(fields) >= 2 && fields[1] == "HEAD" && sha40Regex.MatchString(fields[0]) {
-						return strings.ToLower(fields[0]), nil
-					}
-				}
+		return "", "", fmt.Errorf("không thể phân giải ref %q: %w", ref, err)
+	}
+	refs := make(map[string]string)
+	headRef := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "ref:" && fields[2] == "HEAD" && strings.HasPrefix(fields[1], "refs/heads/") {
+			headRef = fields[1]
+		}
+		if len(fields) == 2 && sha40Regex.MatchString(fields[0]) {
+			refs[fields[1]] = strings.ToLower(fields[0])
+		}
+	}
+	for _, candidate := range candidates {
+		if commit := refs[candidate]; commit != "" {
+			if candidate == "HEAD" {
+				return commit, headRef, nil
 			}
-		}
-		return "", fmt.Errorf("không thể phân giải ref '%s' từ kho %s: %w", ref, repoURL, err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, l := range lines {
-		fields := strings.Fields(l)
-		if len(fields) >= 2 && sha40Regex.MatchString(fields[0]) {
-			return strings.ToLower(fields[0]), nil
+			return commit, strings.TrimSuffix(candidate, "^{}"), nil
 		}
 	}
-
-	// Nếu ref trống nhưng chưa resolve được, gọi trực tiếp với HEAD
-	if ref == "" {
-		headArgs := append(append([]string{}, safeArgs...), "ls-remote", repoURL, "HEAD")
-		cmdHead := exec.CommandContext(ctxTimeout, "git", headArgs...)
-		cmdHead.Env = SafeGitEnv()
-		if outHead, errHead := cmdHead.Output(); errHead == nil {
-			fields := strings.Fields(string(outHead))
-			if len(fields) >= 1 && sha40Regex.MatchString(fields[0]) {
-				return strings.ToLower(fields[0]), nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("không tìm thấy commit tương ứng với reference '%s'", ref)
+	return "", "", fmt.Errorf("không tìm thấy commit tương ứng với ref %q", ref)
 }

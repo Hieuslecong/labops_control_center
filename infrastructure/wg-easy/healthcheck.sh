@@ -27,7 +27,7 @@ fi
 
 echo ""
 echo "2. Kiểm tra UDP ${EXPECTED_PORT} trên host..."
-if ss -ulnp 2>/dev/null | grep -qE ":${EXPECTED_PORT}[[:space:]]"; then
+if ss -ulnp 2>/dev/null | grep -q ":${EXPECTED_PORT} "; then
     echo "   ✅ Cổng UDP ${EXPECTED_PORT} đang lắng nghe trên host."
 else
     echo "   ❌ Cổng UDP ${EXPECTED_PORT} chưa mở trên host."
@@ -53,7 +53,7 @@ else
 fi
 
 NAT_OUT="$(docker exec "${CONTAINER_NAME}" iptables -t nat -S POSTROUTING 2>/dev/null || true)"
-if echo "$NAT_OUT" | grep -q -- "-s ${EXPECTED_CIDR}.*MASQUERADE"; then
+if echo "$NAT_OUT" | grep -q "\-s ${EXPECTED_CIDR}.*MASQUERADE"; then
     echo "   ✅ NAT POSTROUTING khớp ${EXPECTED_CIDR} MASQUERADE"
 else
     echo "   ❌ VPN_NAT_MISMATCH: NAT='${NAT_OUT}' (expected -s ${EXPECTED_CIDR})"

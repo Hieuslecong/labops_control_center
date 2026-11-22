@@ -266,13 +266,17 @@ class ProcessMonitorAdapter:
                 if filter_type == "system" and classification != "SYSTEM_PROCESS":
                     continue
                 if filter_type == "member" and not (
-                    classification in ("MEMBER_PROCESS", "RESEARCH_JOB") or is_user_workload
+                    classification in ("MEMBER_PROCESS", "RESEARCH_JOB", "GPU_PROCESS") or is_user_workload
                 ):
                     continue
                 if filter_type in ("research", "workloads", "workload") and (
-                    is_protected or not (is_user_workload or classification == "RESEARCH_JOB")
+                    is_protected or not (is_user_workload or classification in ("RESEARCH_JOB", "GPU_PROCESS"))
                 ):
                     continue
+
+                tree_gpu_idx = p.get("tree_gpu_index") if p.get("tree_gpu_index") is not None else gpu_idx
+                total_vram_mb = p.get("total_vram_mb", p.get("vram_mb", 0))
+                tree_is_gpu = bool(p.get("tree_is_gpu") or p.get("is_gpu", False) or (total_vram_mb or 0) > 0)
 
                 procs.append({
                     "host_id": self.server_id,
@@ -298,6 +302,10 @@ class ProcessMonitorAdapter:
                     "gpu_id": f"{self.server_id}-gpu-0{int(gpu_idx) + 1}" if gpu_idx is not None else None,
                     "gpu_index": gpu_idx,
                     "vram_mb": p.get("vram_mb", 0),
+                    "total_vram_mb": total_vram_mb,
+                    "tree_is_gpu": tree_is_gpu,
+                    "tree_gpu_index": tree_gpu_idx,
+                    "tree_gpu_id": f"{self.server_id}-gpu-0{int(tree_gpu_idx) + 1}" if tree_gpu_idx is not None else None,
                     "container_id": container_id,
                     "workspace": p.get("workspace") or (f"docker-{container_id}" if container_id else None),
                     "is_protected": is_protected,
@@ -562,9 +570,15 @@ class ProcessMonitorAdapter:
             job_id = f"proc-{p['pid']}"
             gpu_id = p.get("gpu_id")
 
-            # Sử dụng CPU & RAM gộp của cả nhóm workload (tránh double-counting)
+            # Sử dụng CPU, RAM & VRAM gộp của cả nhóm workload (tránh double-counting ở raw process list)
             cpu_val = float(p.get("total_cpu_percent") if p.get("total_cpu_percent") is not None else p.get("cpu_percent", 0.0))
             ram_val = float(p.get("total_memory_rss_mb") if p.get("total_memory_rss_mb") is not None else p.get("memory_rss_mb", 0.0))
+            vram_val = int(p.get("total_vram_mb") if p.get("total_vram_mb") is not None else p.get("vram_mb", 0))
+            is_gpu_val = bool(p.get("tree_is_gpu") or p.get("is_gpu_process") or vram_val > 0)
+            gpu_id = p.get("tree_gpu_id") or p.get("gpu_id")
+            if is_gpu_val and not gpu_id:
+                gpu_id = f"{self.server_id}-gpu-01"
+            classification = "GPU_PROCESS" if is_gpu_val else (p.get("classification") or "RESEARCH_JOB")
 
             jobs.append({
                 "id": job_id,
@@ -591,8 +605,8 @@ class ProcessMonitorAdapter:
                 "ramUsedMb": ram_val,
                 "ram_used_mb": ram_val,
                 "ramUsageMb": ram_val,
-                "vramUsedMb": p.get("vram_mb", 0),
-                "vram_used_mb": p.get("vram_mb", 0),
+                "vramUsedMb": vram_val,
+                "vram_used_mb": vram_val,
                 "startTime": p["start_time"],
                 "start_time": p["start_time"],
                 "elapsedTime": p["elapsed_time"],
@@ -602,8 +616,11 @@ class ProcessMonitorAdapter:
                 "ssh_status": "SSH Online" if uname in active_ssh_users else "Chạy nền / Không có SSH",
                 "containerState": "Running" if p["container_id"] else "Trực tiếp trên Host",
                 "container_state": "Running" if p["container_id"] else "Trực tiếp trên Host",
-                "isGpu": p["is_gpu_process"],
-                "is_gpu": p["is_gpu_process"],
+                "isGpu": is_gpu_val,
+                "is_gpu": is_gpu_val,
+                "classification": classification,
+                "isProtected": bool(p.get("is_protected", False)),
+                "is_protected": bool(p.get("is_protected", False)),
                 "childrenCount": p.get("children_count", 0),
                 "children_count": p.get("children_count", 0),
                 "attribution": p.get("attribution", "VERIFIED_USER_WORKLOAD"),
@@ -611,6 +628,7 @@ class ProcessMonitorAdapter:
                 "is_root_workload": p.get("is_root_workload", True)
             })
 
+        jobs.sort(key=lambda x: (not x["isGpu"], -x["vramUsedMb"], -x["cpuPercent"]))
         return jobs
 
     def _parse_proc_stat(self, pid: int) -> Dict[str, Any]:

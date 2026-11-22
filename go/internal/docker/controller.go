@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -75,6 +77,8 @@ type WorkspaceContainer struct {
 // ProvisionRequest mô tả cấu hình workspace an toàn cần tạo qua Docker Controller.
 type ProvisionRequest struct {
 	WorkspaceID        string   `json:"workspace_id"`
+	RepositoryAPIURL   string   `json:"repository_api_url,omitempty"`
+	RepositoryToken    string   `json:"repository_token,omitempty"`
 	Name               string   `json:"name"`
 	MemberID           string   `json:"member_id"`
 	MemberUsername     string   `json:"member_username"`
@@ -284,7 +288,7 @@ func ValidateContainerSafety(raw *dockerInspectJSON) []string {
 				violations = append(violations, "FORBIDDEN_HOST_PREFIX_"+pref)
 			}
 		}
-		if (dst == "/etc/passwd" || dst == "/etc/group" || dst == "/etc/labops-ssh") && m.RW {
+		if (dst == "/etc/passwd" || dst == "/etc/group" || dst == "/etc/labops-ssh" || dst == repositoryCredentialMount) && m.RW {
 			violations = append(violations, "READONLY_CONFIG_MOUNT_REQUIRED_"+dst)
 		}
 	}
@@ -665,6 +669,7 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	if existing, status, _ := c.inspectRaw(ctx, req.Name); existing != nil || status == http.StatusOK {
 		return nil, fmt.Errorf("ERR_CONTAINER_EXISTS_PRESERVED: container '%s' đã tồn tại; giữ nguyên dữ liệu cũ, không tự động thay thế", req.Name)
 	}
+	ensureWorkspaceStorageOwnership(hostStorageDir, req.UID, req.GID)
 
 	bindIP := strings.TrimSpace(req.VPNBindIP)
 	if bindIP == "" || bindIP == "0.0.0.0" {
@@ -702,6 +707,22 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		fmt.Sprintf("%s:/etc/labops-ssh:ro", rtFiles.sshDir),
 	}
 
+	env := []string{
+		fmt.Sprintf("HOME=%s", containerMount),
+		fmt.Sprintf("USER=%s", req.MemberUsername),
+		fmt.Sprintf("LOGNAME=%s", req.MemberUsername),
+		fmt.Sprintf("LABOPS_WORKSPACE=%s", req.Name),
+	}
+	if req.RepositoryAPIURL != "" || req.RepositoryToken != "" {
+		credentialsDir, err := c.prepareRepositoryCredentials(req, rtFiles.baseDir)
+		if err != nil {
+			return nil, err
+		}
+		binds = append(binds, credentialsDir+":"+repositoryCredentialMount+":ro")
+		env = append(env, "LABOPS_API_URL="+req.RepositoryAPIURL,
+			"LABOPS_TOKEN_FILE="+repositoryCredentialMount+"/repository-token")
+	}
+
 	hostCfg := map[string]any{
 		"Privileged":     false,
 		"CapDrop":        []string{"ALL"},
@@ -711,6 +732,7 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 		"CpuShares":      cpuShares,
 		"Memory":         req.RAMLimitMB * 1024 * 1024,
 		"MemorySwap":     req.RAMLimitMB * 1024 * 1024,
+		"OomScoreAdj":    300,
 		"PidsLimit":      req.PidsLimit,
 		"Binds":          binds,
 		"ReadonlyRootfs": false,
@@ -728,12 +750,7 @@ func (c *Controller) ProvisionWorkspace(ctx context.Context, req ProvisionReques
 	createBody := map[string]any{
 		"Image": imageID,
 		"User":  fmt.Sprintf("%d:%d", req.UID, req.GID),
-		"Env": []string{
-			fmt.Sprintf("HOME=%s", containerMount),
-			fmt.Sprintf("USER=%s", req.MemberUsername),
-			fmt.Sprintf("LOGNAME=%s", req.MemberUsername),
-			fmt.Sprintf("LABOPS_WORKSPACE=%s", req.Name),
-		},
+		"Env":   env,
 		"Labels": map[string]string{
 			"labops.managed":       "true",
 			"labops.workspace_id":  req.WorkspaceID,
@@ -1030,29 +1047,91 @@ func (c *Controller) StopContainer(containerID string, timeoutSec int) error {
 	return nil
 }
 
+// ensureWorkspaceStorageOwnership đảm bảo thư mục lưu trữ của thành viên thuộc quyền sở hữu UID:GID cô lập của container.
+func ensureWorkspaceStorageOwnership(hostStorageDir string, uid, gid int) {
+	if uid < MinWorkspaceUID || gid < MinWorkspaceUID {
+		return
+	}
+	if err := os.MkdirAll(hostStorageDir, 0700); err != nil {
+		return
+	}
+	info, err := os.Lstat(hostStorageDir)
+	if err != nil {
+		return
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid == uint32(uid) && st.Gid == uint32(gid) {
+		return
+	}
+	for _, sub := range []string{"work", "checkpoints", "datasets"} {
+		subDir := filepath.Join(hostStorageDir, sub)
+		if mkErr := os.MkdirAll(subDir, 0700); mkErr == nil {
+			if chownErr := os.Chown(subDir, uid, gid); chownErr != nil && errors.Is(chownErr, os.ErrPermission) {
+				return
+			}
+			_ = os.Chmod(subDir, 0700)
+		}
+	}
+	if chownErr := os.Chown(hostStorageDir, uid, gid); chownErr != nil && errors.Is(chownErr, os.ErrPermission) {
+		return
+	}
+	_ = os.Chmod(hostStorageDir, 0700)
+}
+
 // VerifySSHReachability kiểm tra cổng SSH container có thực sự phản hồi hay không
 func VerifySSHReachability(host string, port int, timeout time.Duration) (bool, string) {
 	if port <= 0 {
 		return false, "Cổng SSH chưa được cấp phát"
 	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	conn, err := net.DialTimeout("tcp", target, timeout)
-	if err != nil {
-		return false, fmt.Sprintf("Không thể kết nối TCP %s: %v", target, err)
-	}
-	defer conn.Close()
+	deadline := time.Now().Add(timeout)
+	lastMsg := fmt.Sprintf("Không thể kết nối TCP %s", target)
 
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return false, fmt.Sprintf("Không đọc được banner SSH từ %s: %v", target, err)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, lastMsg
+		}
+		attemptTimeout := 500 * time.Millisecond
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+		conn, err := net.DialTimeout("tcp", target, attemptTimeout)
+		if err == nil {
+			readDeadline := time.Now().Add(attemptTimeout)
+			if deadline.Before(readDeadline) {
+				readDeadline = deadline
+			}
+			_ = conn.SetReadDeadline(readDeadline)
+			buf := make([]byte, 256)
+			n, readErr := conn.Read(buf)
+			_ = conn.Close()
+			if readErr == nil && n > 0 {
+				banner := strings.TrimSpace(string(buf[:n]))
+				if strings.HasPrefix(banner, "SSH-") {
+					return true, banner
+				}
+				return false, fmt.Sprintf("Phản hồi trên port %d không phải giao thức SSH: %s", port, banner)
+			}
+			if readErr != nil {
+				lastMsg = fmt.Sprintf("Không đọc được banner SSH từ %s: %v", target, readErr)
+			} else {
+				lastMsg = fmt.Sprintf("Không đọc được banner SSH từ %s: phản hồi rỗng", target)
+			}
+		} else {
+			lastMsg = fmt.Sprintf("Không thể kết nối TCP %s: %v", target, err)
+		}
+
+		sleepFor := 150 * time.Millisecond
+		if rem := time.Until(deadline); rem <= 0 {
+			return false, lastMsg
+		} else if rem < sleepFor {
+			sleepFor = rem
+		}
+		time.Sleep(sleepFor)
 	}
-	banner := strings.TrimSpace(string(buf[:n]))
-	if !strings.HasPrefix(banner, "SSH-") {
-		return false, fmt.Sprintf("Phản hồi trên port %d không phải giao thức SSH: %s", port, banner)
-	}
-	return true, banner
 }
 
 type workspaceRuntimeFiles struct {
@@ -1064,16 +1143,44 @@ type workspaceRuntimeFiles struct {
 	authKeys   string
 }
 
+var workspaceUsernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{2,31}$`)
+
+// Keep reserved accounts aligned with the backend member policy.
+var reservedWorkspaceUsernames = map[string]struct{}{
+	"root": {}, "bin": {}, "daemon": {}, "sys": {}, "adm": {}, "sync": {},
+	"games": {}, "man": {}, "lp": {}, "mail": {}, "news": {}, "uucp": {},
+	"proxy": {}, "www-data": {}, "backup": {}, "list": {}, "irc": {}, "gnats": {},
+	"nobody": {}, "systemd-network": {}, "systemd-resolve": {}, "messagebus": {},
+	"sshd": {}, "incus": {}, "docker": {}, "sudo": {}, "wheel": {}, "admin": {},
+	"operator": {}, "nogroup": {},
+}
+
 func (c *Controller) prepareWorkspaceRuntimeDir(workspaceID, memberUsername string, uid, gid int, containerHome string) (*workspaceRuntimeFiles, error) {
 	root := strings.TrimSpace(c.runtimeRoot)
 	if root == "" {
 		root = DefaultRuntimeRootDir
 	}
-	cleanWSID := filepath.Base(strings.TrimSpace(workspaceID))
-	if cleanWSID == "" || cleanWSID == "." || cleanWSID == ".." || strings.Contains(workspaceID, "/") {
-		return nil, fmt.Errorf("INVALID_WORKSPACE_ID: '%s'", workspaceID)
+	if !safeWorkspaceNameRegex.MatchString(workspaceID) || strings.Contains(workspaceID, "..") {
+		return nil, fmt.Errorf("INVALID_WORKSPACE_ID")
 	}
-	baseDir := filepath.Join(root, cleanWSID)
+	if !workspaceUsernamePattern.MatchString(memberUsername) {
+		return nil, fmt.Errorf("INVALID_MEMBER_USERNAME")
+	}
+	if _, reserved := reservedWorkspaceUsernames[memberUsername]; reserved {
+		return nil, fmt.Errorf("RESERVED_MEMBER_USERNAME")
+	}
+	if uid < MinWorkspaceUID || uid > MaxWorkspaceUID || gid < MinWorkspaceUID || gid > MaxWorkspaceUID {
+		return nil, fmt.Errorf("INVALID_WORKSPACE_UID_GID")
+	}
+	switch containerHome {
+	case "/workspace", "/home", "/data":
+	default:
+		return nil, fmt.Errorf("INVALID_CONTAINER_MOUNT_PATH")
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return nil, fmt.Errorf("INVALID_RUNTIME_ROOT")
+	}
+	baseDir := filepath.Join(root, workspaceID)
 	sshDir := filepath.Join(baseDir, "ssh_ro")
 	if err := os.MkdirAll(sshDir, 0755); err != nil {
 		return nil, fmt.Errorf("RUNTIME_CONFIG_PREPARE_FAILED: %w", err)
@@ -1106,7 +1213,10 @@ func (c *Controller) prepareWorkspaceRuntimeDir(workspaceID, memberUsername stri
 			"AuthorizedKeysFile /etc/labops-ssh/authorized_keys\n"+
 			"StrictModes no\n"+
 			"AllowUsers %s\n"+
-			"AllowTcpForwarding no\n"+
+			"AllowTcpForwarding local\n"+
+			"PermitOpen 127.0.0.1:* localhost:*\n"+
+			"AllowStreamLocalForwarding no\n"+
+			"GatewayPorts no\n"+
 			"X11Forwarding no\n"+
 			"Subsystem sftp internal-sftp\n",
 		ContainerSSHDPort, memberUsername,

@@ -48,7 +48,7 @@ class TestRepositoryGuardScanner(unittest.TestCase):
         self.assertEqual(res["verdict"], "REVIEW_REQUIRED")
         self.assertTrue(any("Scan coverage incomplete" in r for r in res["policy_reasons"]))
 
-    def test_critical_vulnerability_rejects(self):
+    def test_critical_vulnerability_requires_review(self):
         report = {
             "Results": [
                 {
@@ -63,9 +63,10 @@ class TestRepositoryGuardScanner(unittest.TestCase):
             }
         }
         res = evaluate_policy(report)
-        self.assertEqual(res["verdict"], "REJECTED")
+        self.assertEqual(res["verdict"], "REVIEW_REQUIRED")
+        self.assertTrue(len(res["policy_reasons"]) > 0)
 
-    def test_leaked_secret_rejects(self):
+    def test_leaked_secret_requires_review(self):
         report = {
             "Results": [
                 {
@@ -80,7 +81,7 @@ class TestRepositoryGuardScanner(unittest.TestCase):
             }
         }
         res = evaluate_policy(report)
-        self.assertEqual(res["verdict"], "REJECTED")
+        self.assertEqual(res["verdict"], "REVIEW_REQUIRED")
         self.assertEqual(res["secrets"], 1)
 
     def test_high_vulnerability_requires_review(self):

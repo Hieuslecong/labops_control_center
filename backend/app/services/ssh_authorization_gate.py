@@ -6,12 +6,34 @@ KHÔNG một đường code nào được phép tự đặt status = READY hoặ
 """
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _allow_soft_storage_quota() -> bool:
+    val = os.getenv("LABOPS_ALLOW_SOFT_STORAGE_QUOTA", "").strip().lower()
+    if val:
+        return val in ("1", "true", "yes")
+    if "PYTEST_CURRENT_TEST" in os.environ or "unittest" in sys.modules:
+        return False
+    from app.core.config import settings
+    return bool(getattr(settings, "LABOPS_ALLOW_SOFT_STORAGE_QUOTA", False))
+
+
+def _allow_pending_activation_ssh() -> bool:
+    val = os.getenv("LABOPS_AUTO_ACTIVATE_SSH_ON_PROVISION", "").strip().lower()
+    if val:
+        return val in ("1", "true", "yes")
+    if "PYTEST_CURRENT_TEST" in os.environ or "unittest" in sys.modules:
+        return False
+    from app.core.config import settings
+    return bool(getattr(settings, "LABOPS_AUTO_ACTIVATE_SSH_ON_PROVISION", False))
 
 
 INACTIVE_MEMBER_STATUSES = frozenset({
@@ -117,6 +139,14 @@ def evaluate_ssh_authorization_gate(
             error_code="ACCOUNT_REVOKED",
             reason="Quyền kích hoạt đã bị thu hồi.",
         )
+    elif _allow_pending_activation_ssh():
+        g_activation = _gate_entry(
+            "POLICY_ONLY",
+            act_status,
+            "POLICY_ONLY",
+            "ssh_account_store",
+            reason="Mở khóa SSH ngay khi cấp phát (LABOPS_AUTO_ACTIVATE_SSH_ON_PROVISION=true).",
+        )
     else:
         g_activation = _gate_entry(
             "NOT_VERIFIED",
@@ -218,14 +248,23 @@ def evaluate_ssh_authorization_gate(
     if quota_state == "VERIFIED":
         g_storage = _gate_entry("VERIFIED", quota_detail.get("observed_value") or "HARD_ENFORCED", "HARD_ENFORCED", quota_detail.get("source") or "filesystem_quota")
     elif quota_state in ("NOT_ENFORCEABLE", "FAILED"):
-        g_storage = _gate_entry(
-            quota_state,
-            quota_detail.get("observed_value") or quota_state,
-            "HARD_ENFORCED",
-            quota_detail.get("source") or "filesystem_quota",
-            error_code=quota_detail.get("error_code") or "STORAGE_QUOTA_NOT_ENFORCEABLE",
-            reason=quota_detail.get("reason") or "Filesystem chưa bật hard project/dataset quota.",
-        )
+        if quota_state == "NOT_ENFORCEABLE" and _allow_soft_storage_quota():
+            g_storage = _gate_entry(
+                "POLICY_ONLY",
+                quota_detail.get("observed_value") or "NOT_ENFORCEABLE",
+                "POLICY_ONLY",
+                quota_detail.get("source") or "filesystem_quota",
+                reason="Filesystem chưa bật kernel prjquota; đang áp dụng soft quota (LABOPS_ALLOW_SOFT_STORAGE_QUOTA=true).",
+            )
+        else:
+            g_storage = _gate_entry(
+                quota_state,
+                quota_detail.get("observed_value") or quota_state,
+                "HARD_ENFORCED",
+                quota_detail.get("source") or "filesystem_quota",
+                error_code=quota_detail.get("error_code") or "STORAGE_QUOTA_NOT_ENFORCEABLE",
+                reason=quota_detail.get("reason") or "Filesystem chưa bật hard project/dataset quota.",
+            )
     else:
         g_storage = _gate_entry(
             "NOT_VERIFIED",
@@ -300,7 +339,10 @@ def evaluate_ssh_authorization_gate(
     blocking_codes: List[str] = []
     blocking_reasons: List[str] = []
     for gname, gval in gates.items():
-        if gval["status"] != "VERIFIED":
+        if not (
+            gval["status"] == "VERIFIED"
+            or (gname in ("storage_quota", "account_activation") and gval["status"] == "POLICY_ONLY")
+        ):
             if gval.get("error_code"):
                 blocking_codes.append(str(gval["error_code"]))
             else:

@@ -243,32 +243,110 @@ func (c *Collector) getMemoryInfo() (totalGB, usedGB, usagePct float64) {
 	return totalGB, usedGB, usagePct
 }
 
-// getDiskInfo sử dụng syscall.Statfs đọc mount point thực tế
+// getDiskInfo quét toàn bộ ổ đĩa vật lý từ /proc/mounts và tổng hợp dung lượng qua syscall.Statfs
 func (c *Collector) getDiskInfo() (totalTB, usedTB, pct float64, fstypeStr string) {
-	mountPoint := "/"
-	fstypeStr = "EXT4 (/dev/sda2)"
+	type diskSample struct {
+		device     string
+		mountPoint string
+		fstype     string
+		totalBytes uint64
+		usedBytes  uint64
+	}
 
-	// Kiểm tra /proc/mounts tìm thiết bị root
+	ignoredFS := map[string]bool{
+		"cgroup": true, "cgroup2": true, "sysfs": true, "proc": true, "devpts": true,
+		"tmpfs": true, "securityfs": true, "devtmpfs": true, "vfat": true, "iso9660": true,
+		"squashfs": true, "swap": true, "autofs": true, "hugetlbfs": true, "mqueue": true,
+		"pstore": true, "efivarfs": true, "bpf": true, "debugfs": true, "tracefs": true,
+		"fusectl": true, "configfs": true, "binfmt_misc": true, "nsfs": true, "overlay": true,
+		"ramfs": true,
+	}
+
+	byDevice := make(map[string]diskSample)
+	var deviceOrder []string
+
 	if file, err := os.Open("/proc/mounts"); err == nil {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
-			if len(fields) >= 3 && fields[1] == "/" {
-				fstypeStr = fmt.Sprintf("%s (%s)", strings.ToUpper(fields[2]), fields[0])
-				break
+			if len(fields) < 3 {
+				continue
+			}
+			dev, mnt, fs := fields[0], fields[1], fields[2]
+			if strings.HasPrefix(dev, "/dev/loop") {
+				continue
+			}
+			isPhysical := strings.HasPrefix(dev, "/dev/sd") ||
+				strings.HasPrefix(dev, "/dev/nvme") ||
+				strings.HasPrefix(dev, "/dev/vd") ||
+				strings.HasPrefix(dev, "/dev/xvd")
+			if !isPhysical || ignoredFS[fs] || strings.HasPrefix(fs, "fuse") {
+				continue
+			}
+			if strings.Contains(mnt, "/var/tmp") || strings.Contains(mnt, "/docker/") ||
+				strings.Contains(mnt, "/users/") || strings.Contains(mnt, "/.quota-images") {
+				continue
+			}
+
+			var st syscall.Statfs_t
+			if err := syscall.Statfs(mnt, &st); err != nil || st.Blocks == 0 {
+				continue
+			}
+			tBytes := st.Blocks * uint64(st.Bsize)
+			uBytes := uint64(0)
+			if st.Blocks >= st.Bfree {
+				uBytes = (st.Blocks - st.Bfree) * uint64(st.Bsize)
+			}
+
+			if prev, exists := byDevice[dev]; !exists {
+				deviceOrder = append(deviceOrder, dev)
+				byDevice[dev] = diskSample{
+					device: dev, mountPoint: mnt, fstype: strings.ToUpper(fs),
+					totalBytes: tBytes, usedBytes: uBytes,
+				}
+			} else if mnt == "/" || mnt == "/mnt/HDD3" || (prev.mountPoint != "/" && prev.mountPoint != "/mnt/HDD3" && len(mnt) < len(prev.mountPoint)) {
+				byDevice[dev] = diskSample{
+					device: dev, mountPoint: mnt, fstype: strings.ToUpper(fs),
+					totalBytes: tBytes, usedBytes: uBytes,
+				}
 			}
 		}
 	}
 
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(mountPoint, &stat); err != nil {
-		return 0, 0, 0, "UNKNOWN"
+	var totalBytes, usedBytes uint64
+	var summaries []string
+	for _, dev := range deviceOrder {
+		s := byDevice[dev]
+		totalBytes += s.totalBytes
+		usedBytes += s.usedBytes
+		gb := math.Round(float64(s.totalBytes)/(1024*1024*1024)*10) / 10
+		name := strings.ToUpper(filepath.Base(s.device))
+		if s.mountPoint == "/" {
+			name = "Root"
+		} else if strings.Contains(s.mountPoint, "HDD3") {
+			name = "HDD3"
+		}
+		summaries = append(summaries, fmt.Sprintf("%s (%.1fGB)", name, gb))
 	}
 
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
-	usedBytes := totalBytes - freeBytes
+	if totalBytes == 0 {
+		mountPoint := "/"
+		fstypeStr = "EXT4 (/dev/sda2)"
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(mountPoint, &stat); err != nil {
+			return 0, 0, 0, "UNKNOWN"
+		}
+		totalBytes = stat.Blocks * uint64(stat.Bsize)
+		if stat.Blocks >= stat.Bfree {
+			usedBytes = (stat.Blocks - stat.Bfree) * uint64(stat.Bsize)
+		}
+	} else if len(deviceOrder) == 1 {
+		s := byDevice[deviceOrder[0]]
+		fstypeStr = fmt.Sprintf("%s (%s)", s.fstype, s.device)
+	} else {
+		fstypeStr = fmt.Sprintf("%d Ổ đĩa: %s", len(deviceOrder), strings.Join(summaries, ", "))
+	}
 
 	tbDivider := float64(1024 * 1024 * 1024 * 1024)
 	totalTB = math.Round((float64(totalBytes)/tbDivider)*100) / 100

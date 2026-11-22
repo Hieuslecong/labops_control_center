@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -32,6 +33,132 @@ func PrepareQuarantine(ctx context.Context, baseQuarantineDir, requestID, repoUR
 	return PrepareQuarantineWithCanonical(ctx, baseQuarantineDir, requestID, repoURL, repoURL, commitSHA)
 }
 
+func extractTarToQuarantine(archiveCmd *exec.Cmd, tarOut io.Reader, sourceDir string) (int64, int, error) {
+	tr := tar.NewReader(tarOut)
+	var totalSize int64
+	var fileCount int
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = archiveCmd.Process.Kill()
+			_ = archiveCmd.Wait()
+			return 0, 0, fmt.Errorf("lỗi đọc archive: %w", err)
+		}
+
+		if header.Typeflag == tar.TypeXHeader || header.Typeflag == tar.TypeXGlobalHeader {
+			continue
+		}
+
+		cleanName, err := ValidateArchivePath(header.Name)
+		if err != nil {
+			_ = archiveCmd.Process.Kill()
+			_ = archiveCmd.Wait()
+			return 0, 0, fmt.Errorf("phát hiện đường dẫn tệp độc hại (%s): %w", header.Name, err)
+		}
+		if cleanName == "." {
+			continue
+		}
+
+		targetPath := filepath.Join(sourceDir, filepath.FromSlash(cleanName))
+		if err := LstatNoSymlinkChain(sourceDir, targetPath); err != nil {
+			_ = archiveCmd.Process.Kill()
+			_ = archiveCmd.Wait()
+			return 0, 0, fmt.Errorf("phát hiện chuỗi symlink nguy hiểm trong quarantine (%s): %w", header.Name, err)
+		}
+
+		fileCount++
+		if fileCount > MaxFileCount {
+			_ = archiveCmd.Process.Kill()
+			_ = archiveCmd.Wait()
+			return 0, 0, fmt.Errorf("vượt giới hạn số lượng tệp tối đa (%d tệp)", MaxFileCount)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0750); err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, fmt.Errorf("kích thước tệp âm không hợp lệ: %s", header.Name)
+			}
+			remaining := MaxRepoSizeBytes - totalSize
+			if remaining < 0 || header.Size > remaining {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, fmt.Errorf("kích thước kho mã vượt giới hạn tối đa (%d MB)", MaxRepoSizeBytes/(1024*1024))
+			}
+
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, err
+			}
+
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
+			if err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, err
+			}
+
+			n, copyErr := io.Copy(outFile, io.LimitReader(tr, remaining+1))
+			closeErr := outFile.Close()
+			if copyErr != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, copyErr
+			}
+			if closeErr != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, closeErr
+			}
+			totalSize += n
+			if totalSize > MaxRepoSizeBytes {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, fmt.Errorf("kích thước kho mã vượt giới hạn tối đa (%d MB)", MaxRepoSizeBytes/(1024*1024))
+			}
+
+		case tar.TypeSymlink:
+			if err := ValidateArchiveSymlink(sourceDir, targetPath, header.Linkname); err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, fmt.Errorf("phát hiện symlink traversal attack (%s -> %s): %w", header.Name, header.Linkname, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, err
+			}
+			if err := os.Symlink(header.Linkname, targetPath); err != nil {
+				_ = archiveCmd.Process.Kill()
+				_ = archiveCmd.Wait()
+				return 0, 0, err
+			}
+
+		default:
+			_ = archiveCmd.Process.Kill()
+			_ = archiveCmd.Wait()
+			return 0, 0, fmt.Errorf("loại entry tar không được phép (%d): %s", header.Typeflag, header.Name)
+		}
+	}
+
+	if err := archiveCmd.Wait(); err != nil {
+		return 0, 0, fmt.Errorf("git archive trả về lỗi: %w", err)
+	}
+	return totalSize, fileCount, nil
+}
+
 // PrepareQuarantineWithCanonical tải snapshot, kiểm tra ràng buộc đường dẫn/symlink và đóng gói tar.gz kèm .labops_bundle.
 func PrepareQuarantineWithCanonical(ctx context.Context, baseQuarantineDir, requestID, repoURL, canonicalRepo, commitSHA string) (*QuarantineWorkspace, error) {
 	reqDir := filepath.Join(baseQuarantineDir, requestID)
@@ -41,37 +168,39 @@ func PrepareQuarantineWithCanonical(ctx context.Context, baseQuarantineDir, requ
 	if err := LstatNoSymlinkChain(baseQuarantineDir, reqDir); err != nil {
 		return nil, fmt.Errorf("đường dẫn quarantine không an toàn: %w", err)
 	}
-	if err := os.MkdirAll(sourceDir, 0750); err != nil {
+	if err := os.Mkdir(reqDir, 0750); err != nil {
 		return nil, fmt.Errorf("không thể tạo thư mục quarantine: %w", err)
+	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			_ = os.RemoveAll(reqDir)
+		}
+	}()
+	if err := os.Mkdir(sourceDir, 0750); err != nil {
+		return nil, fmt.Errorf("không thể tạo thư mục source: %w", err)
 	}
 
 	ctxTimeout, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	// 1. Tải bằng git clone --no-checkout vào thư mục tạm có kiểm soát, chặn tuyệt đối hooks/filters/submodules/file://
+	// Fetch the resolved commit and its complete reachable history.
 	gitDir := filepath.Join(reqDir, ".git_clone_tmp")
 	defer os.RemoveAll(gitDir)
-
-	safeArgs := SafeGitConfigArgs()
-	cloneArgs1 := append(append([]string{}, safeArgs...), "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repoURL, gitDir)
-	cloneCmd := exec.CommandContext(ctxTimeout, "git", cloneArgs1...)
-	cloneCmd.Env = SafeGitEnv()
-	if err := cloneCmd.Run(); err != nil {
-		_ = os.RemoveAll(gitDir)
-		cloneArgs2 := append(append([]string{}, safeArgs...), "clone", "--no-checkout", repoURL, gitDir)
-		cloneFallback := exec.CommandContext(ctxTimeout, "git", cloneArgs2...)
-		cloneFallback.Env = SafeGitEnv()
-		if errFb := cloneFallback.Run(); errFb != nil {
-			return nil, fmt.Errorf("không thể clone repo về quarantine: %w", errFb)
-		}
+	if _, err := runGit(ctxTimeout, "", "init", gitDir); err != nil {
+		return nil, err
+	}
+	if _, err := runGit(ctxTimeout, gitDir, "fetch", "--no-tags", "--", repoURL, commitSHA); err != nil {
+		return nil, fmt.Errorf("không thể fetch commit đã ghim: %w", err)
 	}
 
-	// Fetch commit chính xác nếu cần (bỏ qua lỗi nếu commit đã nằm trong clone)
-	fetchArgs := append(append([]string{}, safeArgs...), "-C", gitDir, "fetch", "--depth=1", "origin", commitSHA)
-	fetchCmd := exec.CommandContext(ctxTimeout, "git", fetchArgs...)
-	fetchCmd.Env = SafeGitEnv()
-	_ = fetchCmd.Run()
+	// Ensure the checkout and the scanner snapshot contain the same tracked files.
+	attributes := filepath.Join(gitDir, ".git", "info", "attributes")
+	if err := os.WriteFile(attributes, []byte("* -export-ignore -export-subst\n"), 0600); err != nil {
+		return nil, err
+	}
 
+	safeArgs := SafeGitConfigArgs()
 	// Xác minh tuyệt đối commitSHA tồn tại trong object database
 	if _, err := runGit(ctxTimeout, gitDir, "rev-parse", "--verify", commitSHA+"^{commit}"); err != nil {
 		return nil, fmt.Errorf("không thể xác minh commit %s trong repo: %w", commitSHA, err)
@@ -91,127 +220,9 @@ func PrepareQuarantineWithCanonical(ctx context.Context, baseQuarantineDir, requ
 	}
 
 	// 2. Bung tar vào sourceDir kèm kiểm tra bảo mật nghiêm ngặt (Path Depth, LimitReader Bomb, Symlink Chain)
-	tr := tar.NewReader(tarOut)
-	var totalSize int64
-	var fileCount int
-
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			_ = archiveCmd.Process.Kill()
-			_ = archiveCmd.Wait()
-			return nil, fmt.Errorf("lỗi đọc archive: %w", err)
-		}
-
-		if header.Typeflag == tar.TypeXHeader || header.Typeflag == tar.TypeXGlobalHeader {
-			continue
-		}
-
-		cleanName, err := ValidateArchivePath(header.Name)
-		if err != nil {
-			_ = archiveCmd.Process.Kill()
-			_ = archiveCmd.Wait()
-			return nil, fmt.Errorf("phát hiện đường dẫn tệp độc hại (%s): %w", header.Name, err)
-		}
-		if cleanName == "." {
-			continue
-		}
-
-		targetPath := filepath.Join(sourceDir, filepath.FromSlash(cleanName))
-		if err := LstatNoSymlinkChain(sourceDir, targetPath); err != nil {
-			_ = archiveCmd.Process.Kill()
-			_ = archiveCmd.Wait()
-			return nil, fmt.Errorf("phát hiện chuỗi symlink nguy hiểm trong quarantine (%s): %w", header.Name, err)
-		}
-
-		fileCount++
-		if fileCount > MaxFileCount {
-			_ = archiveCmd.Process.Kill()
-			_ = archiveCmd.Wait()
-			return nil, fmt.Errorf("vượt giới hạn số lượng tệp tối đa (%d tệp)", MaxFileCount)
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0750); err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if header.Size < 0 {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, fmt.Errorf("kích thước tệp âm không hợp lệ: %s", header.Name)
-			}
-			remaining := MaxRepoSizeBytes - totalSize
-			if remaining < 0 || header.Size > remaining {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, fmt.Errorf("kích thước kho mã vượt giới hạn tối đa (%d MB)", MaxRepoSizeBytes/(1024*1024))
-			}
-
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, err
-			}
-
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0640)
-			if err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, err
-			}
-
-			n, copyErr := io.Copy(outFile, io.LimitReader(tr, remaining+1))
-			closeErr := outFile.Close()
-			if copyErr != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, copyErr
-			}
-			if closeErr != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, closeErr
-			}
-			totalSize += n
-			if totalSize > MaxRepoSizeBytes {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, fmt.Errorf("kích thước kho mã vượt giới hạn tối đa (%d MB)", MaxRepoSizeBytes/(1024*1024))
-			}
-
-		case tar.TypeSymlink:
-			if err := ValidateArchiveSymlink(sourceDir, targetPath, header.Linkname); err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, fmt.Errorf("phát hiện symlink traversal attack (%s -> %s): %w", header.Name, header.Linkname, err)
-			}
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, err
-			}
-			if err := os.Symlink(header.Linkname, targetPath); err != nil {
-				_ = archiveCmd.Process.Kill()
-				_ = archiveCmd.Wait()
-				return nil, err
-			}
-
-		default:
-			_ = archiveCmd.Process.Kill()
-			_ = archiveCmd.Wait()
-			return nil, fmt.Errorf("loại entry tar không được phép (%d): %s", header.Typeflag, header.Name)
-		}
-	}
-
-	if err := archiveCmd.Wait(); err != nil {
-		return nil, fmt.Errorf("git archive trả về lỗi: %w", err)
+	totalSize, fileCount, err := extractTarToQuarantine(archiveCmd, tarOut, sourceDir)
+	if err != nil {
+		return nil, err
 	}
 
 	// 3. Tạo Git bundle + manifest trong thư mục staging riêng để không lẫn vào bước quét sourceDir
@@ -233,12 +244,111 @@ func PrepareQuarantineWithCanonical(ctx context.Context, baseQuarantineDir, requ
 		return nil, fmt.Errorf("lỗi tính checksum archive: %w", err)
 	}
 
+	prepared = true
 	return &QuarantineWorkspace{
 		BaseDir:      reqDir,
 		SourceDir:    sourceDir,
 		ArchiveFile:  archivePath,
 		DigestSHA256: digest,
 		BundleSHA256: manifest.BundleSHA256,
+		TotalSize:    totalSize,
+		FileCount:    fileCount,
+	}, nil
+}
+
+// PrepareQuarantineFromLocalGit trích xuất chỉ đọc snapshot tại commitSHA từ repo đã clone sẵn trong workspace host.
+func PrepareQuarantineFromLocalGit(ctx context.Context, baseQuarantineDir, requestID, workspaceRoot, relRepoPath, canonicalRepo, commitSHA string) (*QuarantineWorkspace, error) {
+	cleanRoot := filepath.Clean(strings.TrimSpace(workspaceRoot))
+	if !filepath.IsAbs(cleanRoot) {
+		return nil, errors.New("workspaceRoot phải là đường dẫn tuyệt đối")
+	}
+	rel := strings.TrimSpace(relRepoPath)
+	if rel == "" || rel == "." || strings.ContainsAny(rel, "\\\x00") || !filepath.IsLocal(rel) {
+		return nil, fmt.Errorf("đường dẫn repo trong workspace không hợp lệ: %q", relRepoPath)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if seg == ".." || seg == ".ssh" || seg == ".git" {
+			return nil, fmt.Errorf("đường dẫn repo chứa thành phần bị cấm: %q", relRepoPath)
+		}
+	}
+
+	hostRepoDir := filepath.Join(cleanRoot, filepath.Clean(rel))
+	if err := LstatNoSymlinkChain(cleanRoot, hostRepoDir); err != nil {
+		return nil, fmt.Errorf("đường dẫn repo trong workspace không an toàn: %w", err)
+	}
+	repoStat, err := os.Lstat(hostRepoDir)
+	if err != nil || !repoStat.IsDir() {
+		return nil, fmt.Errorf("không tìm thấy thư mục repo trong workspace: %s", rel)
+	}
+	gitMetaPath := filepath.Join(hostRepoDir, ".git")
+	if err := LstatNoSymlinkChain(cleanRoot, gitMetaPath); err != nil {
+		return nil, fmt.Errorf("thư mục .git trong workspace không an toàn: %w", err)
+	}
+	if _, err := os.Lstat(gitMetaPath); err != nil {
+		return nil, fmt.Errorf("thư mục workspace không phải Git repository: %w", err)
+	}
+
+	reqDir := filepath.Join(baseQuarantineDir, requestID)
+	sourceDir := filepath.Join(reqDir, "source")
+	archivePath := filepath.Join(reqDir, "source.tar.gz")
+
+	if err := LstatNoSymlinkChain(baseQuarantineDir, reqDir); err != nil {
+		return nil, fmt.Errorf("đường dẫn quarantine không an toàn: %w", err)
+	}
+	if err := os.Mkdir(reqDir, 0750); err != nil {
+		return nil, fmt.Errorf("không thể tạo thư mục quarantine: %w", err)
+	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			_ = os.RemoveAll(reqDir)
+		}
+	}()
+	if err := os.Mkdir(sourceDir, 0750); err != nil {
+		return nil, fmt.Errorf("không thể tạo thư mục source: %w", err)
+	}
+
+	ctxTimeout, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+
+	// Scoped safe.directory for this exact verified workspace repository (read-only).
+	scopedArgs := []string{"-c", "safe.directory=" + hostRepoDir, "-C", hostRepoDir}
+	verifyArgs := append(append([]string{}, scopedArgs...), "rev-parse", "--verify", commitSHA+"^{commit}")
+	if _, err := runGit(ctxTimeout, "", verifyArgs...); err != nil {
+		return nil, fmt.Errorf("không thể xác minh commit %s trong repo workspace: %w", commitSHA, err)
+	}
+
+	archiveArgs := append(SafeGitConfigArgs(), scopedArgs...)
+	archiveArgs = append(archiveArgs, "archive", "--format=tar", commitSHA)
+	archiveCmd := exec.CommandContext(ctxTimeout, "git", archiveArgs...)
+	archiveCmd.Env = SafeGitEnv()
+	tarOut, err := archiveCmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("lỗi khởi tạo luồng git archive nội bộ: %w", err)
+	}
+	if err := archiveCmd.Start(); err != nil {
+		return nil, fmt.Errorf("không thể trích xuất commit %s từ workspace: %w", commitSHA, err)
+	}
+
+	totalSize, fileCount, err := extractTarToQuarantine(archiveCmd, tarOut, sourceDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := CreateSealedTarGz(sourceDir, "", archivePath, MaxRepoSizeBytes); err != nil {
+		return nil, fmt.Errorf("không thể tạo gói snapshot quarantine: %w", err)
+	}
+	digest, err := HashFileSHA256(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("lỗi tính checksum snapshot: %w", err)
+	}
+
+	prepared = true
+	return &QuarantineWorkspace{
+		BaseDir:      reqDir,
+		SourceDir:    sourceDir,
+		ArchiveFile:  archivePath,
+		DigestSHA256: digest,
 		TotalSize:    totalSize,
 		FileCount:    fileCount,
 	}, nil

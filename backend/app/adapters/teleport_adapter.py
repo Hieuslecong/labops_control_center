@@ -26,7 +26,7 @@ class TeleportAdapter:
             raise TeleportError("Teleport/Linux login is invalid")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", workspace):
             raise TeleportError("Workspace label is invalid")
-        if user_type not in {"RESEARCHER", "ADMIN"}:
+        if user_type not in {"RESEARCHER", "STUDENT", "ADMIN"}:
             raise TeleportError("User type is invalid")
         ttl = "2h" if user_type == "ADMIN" else "12h"
         labels = ["*"] if user_type == "ADMIN" else [workspace]

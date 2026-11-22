@@ -108,6 +108,24 @@ describe('Milestone 3 BFF CSRF & RBAC Policy', () => {
     });
     assert.equal(validateSameOriginMutation(evilOriginPost), false);
 
+    const proxiedPost = new Request('http://127.0.0.1:3000/api/auth/login', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://aiotserver.fitdnu.id.vn',
+        'X-Forwarded-Host': 'aiotserver.fitdnu.id.vn'
+      }
+    });
+    assert.equal(validateSameOriginMutation(proxiedPost), true);
+
+    const proxiedEvilPost = new Request('http://127.0.0.1:3000/api/auth/login', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://evil.attacker',
+        'X-Forwarded-Host': 'aiotserver.fitdnu.id.vn'
+      }
+    });
+    assert.equal(validateSameOriginMutation(proxiedEvilPost), false);
+
     const missingHeadersPost = new Request('https://labops.local/api/labops/v2/ssh-keys', {
       method: 'POST'
     });

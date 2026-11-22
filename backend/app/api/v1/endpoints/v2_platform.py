@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from app.adapters.vpn_provider import VPNProviderError
 from app.api.dependencies import require_admin, require_agent, require_user
 from app.core.security import AuthError, Principal, verify_step_up_token
-from app.services.labops_service import service
+from app.services.labops_service import MemberConflictError, MemberPersistenceError, service
 from app.services.member_lifecycle import LifecyclePreconditionError
 from app.services.vpn_route_resolver import RouteResolutionError
 from app.services.wireguard_config_builder import ConfigBuilderError
@@ -140,12 +140,24 @@ async def provision_ssh_access(payload: Dict[str, Any], p: Principal = Depends(r
         data = dict(payload)
         data["_actor_id"] = p.username
         return service.provision_member_ssh_access(data)
+    except MemberConflictError as e:
+        raise HTTPException(
+            status_code=e.http_status,
+            detail={"code": e.code, "message": e.message, "details": e.details},
+        ) from e
+    except MemberPersistenceError as e:
+        raise HTTPException(
+            status_code=e.http_status,
+            detail={"code": e.code, "message": e.message, "recovery_id": e.recovery_id},
+        ) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except WorkspaceSecurityError as e:
-        raise HTTPException(status_code=e.http_status, detail=e.message)
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @router.get("/ssh-access/{member_id}/status")

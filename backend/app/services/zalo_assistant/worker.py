@@ -7,6 +7,7 @@ and handles scheduled weekly report notifications.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -19,6 +20,7 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+from app.services.zalo_assistant.repo_alert_monitor import RepoSecurityAlertMonitor
 from app.services.zalo_assistant.service import zalo_assistant_service
 
 logging.basicConfig(
@@ -26,6 +28,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] (ZaloWorker) %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("zalo_worker")
 
 
@@ -38,12 +42,18 @@ class ZaloPollingWorker:
         self.bot_token = os.getenv("ZALO_BOT_TOKEN") or self.bot_engine.bot_token
         self.is_running = False
         self.pid_file = os.path.join(self.service.data_dir, "zalo_worker.pid")
+        self.status_file = os.path.join(self.service.data_dir, "zalo_worker_status.json")
         self.last_reported_week = self.report_generator.get_last_reported_week()
         self.report_chat_ids = [
             c.strip()
             for c in os.getenv("ZALO_REPORT_CHAT_IDS", "").split(",")
             if c.strip() and c.strip() != "*"
         ]
+        self.repo_alert_monitor = RepoSecurityAlertMonitor(
+            data_dir=self.service.data_dir,
+            quota_ledger=self.quota_ledger,
+            bot_engine=self.bot_engine,
+        )
 
     async def process_incoming_message(
         self,
@@ -136,6 +146,29 @@ class ZaloPollingWorker:
             logger.error(f"Không thể tạo lease PID file: {e}")
             return False
 
+    def _write_worker_status(
+        self,
+        is_polling: bool,
+        bot_name: str = "",
+        last_error: Optional[str] = None,
+    ) -> None:
+        os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "is_polling": is_polling,
+            "bot_name": bot_name,
+            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+            "authorized_users_count": len(self.bot_engine.authorized_users or []),
+            "last_error": last_error,
+        }
+        tmp_path = f"{self.status_file}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.status_file)
+        except Exception as exc:
+            logger.debug("Không thể ghi trạng thái worker: %s", exc)
+
     def _release_lease(self):
         try:
             if os.path.exists(self.pid_file):
@@ -154,24 +187,35 @@ class ZaloPollingWorker:
         if not self._acquire_lease():
             return
 
+        self.bot_engine.reload_persisted_config(force=True)
         self.is_running = True
         logger.info(f"🚀 Khởi động Zalo Polling Worker (PID: {os.getpid()})")
         logger.info(f"   • Model AI: {self.service.ai_client.model} ({self.service.ai_client.base_url})")
         logger.info(f"   • Hạn mức: {self.quota_ledger.TOTAL_MONTHLY_LIMIT} tin/tháng (2800 std / 200 crit)")
+        logger.info(f"   • Zalo User ID được cấp phép: {len(self.bot_engine.authorized_users or [])} tài khoản")
+        if not self.bot_engine.authorized_users:
+            logger.warning(
+                "⚠️ ZALO_AUTHORIZED_USERS đang rỗng (lưu ý: wildcard '*' bị cấm). Bot sẽ từ chối toàn bộ tin nhắn cho tới khi cấu hình ID hợp lệ."
+            )
 
         try:
             from zalo_bot import Bot
         except ImportError:
             logger.error("❌ Thiếu thư viện python-zalo-bot. Cài đặt qua: pip install python-zalo-bot")
+            self._write_worker_status(False, last_error="MISSING_ZALO_BOT_PACKAGE")
             self._release_lease()
             return
 
         bot = Bot(token=self.bot_token)
+        bot_name = ""
         try:
             me = await bot.get_me()
+            bot_name = str(getattr(me, "display_name", "") or "")
             logger.info(f"✅ Đã kết nối Zalo Bot Platform: {me.display_name} (ID: {me.id}, Type: {me.account_type})")
+            self._write_worker_status(True, bot_name=bot_name)
         except Exception as e:
             logger.error(f"❌ Không thể xác thực Token Zalo: {e}")
+            self._write_worker_status(False, last_error=str(e))
             self._release_lease()
             return
 
@@ -180,9 +224,11 @@ class ZaloPollingWorker:
 
         while self.is_running:
             try:
+                self.bot_engine.reload_persisted_config()
                 # Long polling with 15s timeout
                 updates = await bot.get_update(offset=offset, timeout=15, limit=20)
                 consecutive_errors = 0
+                self._write_worker_status(True, bot_name=bot_name)
 
                 update_list = updates if isinstance(updates, list) else ([updates] if updates else [])
                 for update in update_list:
@@ -198,6 +244,7 @@ class ZaloPollingWorker:
                     if not message:
                         continue
 
+                    self.bot_engine.reload_persisted_config()
                     raw_text = getattr(message, "text", "") or ""
                     chat = getattr(message, "chat", None)
                     chat_id = str(getattr(chat, "id", "")) if chat else ""
@@ -221,6 +268,9 @@ class ZaloPollingWorker:
                 # Check scheduled weekly report (Friday 17:00 Asia/Ho_Chi_Minh)
                 await self._check_weekly_report_schedule(bot=bot)
 
+                # Check post-clone repository review alerts for Admin
+                await self._check_repo_security_alerts(bot=bot)
+
                 # Yield control briefly
                 await asyncio.sleep(0.5)
 
@@ -231,8 +281,10 @@ class ZaloPollingWorker:
                 consecutive_errors += 1
                 backoff = min(30, 2 ** consecutive_errors)
                 logger.warning("Lỗi polling (lần %d), thử lại sau %ds: %s", consecutive_errors, backoff, e)
+                self._write_worker_status(True, bot_name=bot_name, last_error=str(e))
                 await asyncio.sleep(backoff)
 
+        self._write_worker_status(False, bot_name=bot_name)
         self._release_lease()
         logger.info("🛑 Zalo Polling Worker đã dừng an toàn.")
 
@@ -278,6 +330,15 @@ class ZaloPollingWorker:
                             logger.error("Lỗi gửi báo cáo tuần tới %s: %s", target_chat, send_err)
             except Exception as e:
                 logger.error("Lỗi khi tự động tạo báo cáo tuần: %s", e)
+
+    async def _check_repo_security_alerts(self, bot: Optional[Any] = None) -> None:
+        """Periodically notify Admin Zalo recipients when post-clone repo review finds issues."""
+        if bot is None:
+            return
+        try:
+            await self.repo_alert_monitor.check_and_notify(bot)
+        except Exception as exc:
+            logger.warning("Lỗi kiểm tra cảnh báo kiểm duyệt repo sau clone: %s", exc)
 
     def stop(self):
         self.is_running = False

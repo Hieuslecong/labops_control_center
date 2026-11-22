@@ -46,11 +46,11 @@ type VulnerabilitySummary struct {
 }
 
 type ScorecardSummary struct {
-	Score       float64           `json:"score"`
-	Status      string            `json:"status"` // "EVALUATED", "UNKNOWN", "NOT_CONFIGURED"
-	Checks      map[string]int    `json:"checks,omitempty"`
-	Reasons     []string          `json:"reasons,omitempty"`
-	CollectedAt *time.Time        `json:"collected_at,omitempty"`
+	Score       float64        `json:"score"`
+	Status      string         `json:"status"` // "EVALUATED", "UNKNOWN", "NOT_CONFIGURED"
+	Checks      map[string]int `json:"checks,omitempty"`
+	Reasons     []string       `json:"reasons,omitempty"`
+	CollectedAt *time.Time     `json:"collected_at,omitempty"`
 }
 
 type FindingItem struct {
@@ -63,17 +63,17 @@ type FindingItem struct {
 }
 
 type ScanReport struct {
-	Verdict           ScanState            `json:"verdict"`
-	Coverage          ScanCoverage         `json:"coverage"`
-	Vulnerabilities   VulnerabilitySummary `json:"vulnerabilities"`
-	SecretsCount      int                  `json:"secrets_count"`
-	MisconfigHighCount int                 `json:"misconfig_high_count"`
-	Scorecard         ScorecardSummary     `json:"scorecard"`
-	PolicyReasons     []string             `json:"policy_reasons"`
-	Findings          []FindingItem        `json:"findings,omitempty"`
-	ScannerVersion    string               `json:"scanner_version"`
-	DBVersion         string               `json:"db_version,omitempty"`
-	ScanDurationMs    int64                `json:"scan_duration_ms"`
+	Verdict            ScanState            `json:"verdict"`
+	Coverage           ScanCoverage         `json:"coverage"`
+	Vulnerabilities    VulnerabilitySummary `json:"vulnerabilities"`
+	SecretsCount       int                  `json:"secrets_count"`
+	MisconfigHighCount int                  `json:"misconfig_high_count"`
+	Scorecard          ScorecardSummary     `json:"scorecard"`
+	PolicyReasons      []string             `json:"policy_reasons"`
+	Findings           []FindingItem        `json:"findings,omitempty"`
+	ScannerVersion     string               `json:"scanner_version"`
+	DBVersion          string               `json:"db_version,omitempty"`
+	ScanDurationMs     int64                `json:"scan_duration_ms"`
 }
 
 type DecisionRecord struct {
@@ -83,26 +83,50 @@ type DecisionRecord struct {
 	Reason     string    `json:"reason"`
 }
 
+const (
+	SourceGateway        = "gateway"
+	SourceWorkspaceClone = "workspace_clone"
+
+	CloneStatusCloned  = "CLONED"
+	CloneStatusCloning = "CLONING"
+	CloneStatusFailed  = "FAILED"
+	CloneStatusBlocked = "BLOCKED"
+	CloneStatusPending = "PENDING"
+
+	ReviewStatusClean          = "CLEAN"
+	ReviewStatusReviewRequired = "REVIEW_REQUIRED"
+	ReviewStatusApproved       = "APPROVED"
+	ReviewStatusRejected       = "REJECTED"
+	ReviewStatusScanning       = "SCANNING"
+	ReviewStatusScanFailed     = "SCAN_FAILED"
+	ReviewStatusNotStarted     = "NOT_STARTED"
+)
+
 type RepositoryRequest struct {
-	ID              string          `json:"id"`
-	RepoURL         string          `json:"repo_url"`
-	CanonicalRepo   string          `json:"canonical_repo"`
-	Owner           string          `json:"owner"`
-	RepoName        string          `json:"repo_name"`
-	RequestedRef    string          `json:"requested_ref"`
-	CommitSHA       string          `json:"commit_sha"`
-	Submitter       string          `json:"submitted_by"`
-	TargetWorkspace string          `json:"target_workspace,omitempty"`
-	TargetServer    string          `json:"target_server,omitempty"`
-	SubmittedAt     time.Time       `json:"submitted_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	State           ScanState       `json:"state"`
-	CacheHit        bool            `json:"cache_hit"`
-	ArtifactDigest  string          `json:"artifact_digest,omitempty"`
-	ArtifactSize    int64           `json:"artifact_size_bytes,omitempty"`
-	Report          *ScanReport     `json:"report,omitempty"`
-	Decision        *DecisionRecord `json:"decision,omitempty"`
-	Error           string          `json:"error,omitempty"`
+	ID                 string          `json:"id"`
+	RepoURL            string          `json:"repo_url"`
+	CanonicalRepo      string          `json:"canonical_repo"`
+	Owner              string          `json:"owner"`
+	RepoName           string          `json:"repo_name"`
+	RequestedRef       string          `json:"requested_ref"`
+	CheckoutRef        string          `json:"checkout_ref,omitempty"`
+	CommitSHA          string          `json:"commit_sha"`
+	Submitter          string          `json:"submitted_by"`
+	TargetWorkspace    string          `json:"target_workspace,omitempty"`
+	TargetServer       string          `json:"target_server,omitempty"`
+	Source             string          `json:"source,omitempty"`
+	CloneStatus        string          `json:"clone_status,omitempty"`
+	ReviewStatus       string          `json:"review_status,omitempty"`
+	LocalRepoPath      string          `json:"local_repo_path,omitempty"`
+	SubmittedAt        time.Time       `json:"submitted_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	State              ScanState       `json:"state"`
+	CacheHit           bool            `json:"cache_hit"`
+	ArtifactDigest     string          `json:"artifact_digest,omitempty"`
+	ArtifactSize       int64           `json:"artifact_size_bytes,omitempty"`
+	Report             *ScanReport     `json:"report,omitempty"`
+	Decision           *DecisionRecord `json:"decision,omitempty"`
+	Error              string          `json:"error,omitempty"`
 	PolicyVersion      string          `json:"policy_version"`
 	ScannerVersion     string          `json:"scanner_version,omitempty"`
 	DBVersion          string          `json:"db_version,omitempty"`
@@ -115,7 +139,9 @@ type RepositoryRequest struct {
 
 type DeliverPayload struct {
 	RequestID       string `json:"request_id"`
-	TargetWorkspace string `json:"target_workspace"`
+	WorkspaceID     string `json:"workspace_id"`
+	MemberID        string `json:"member_id"`
+	NodeID          string `json:"node_id"`
 	TargetDirectory string `json:"target_directory"`
 	DeliverAsUser   string `json:"deliver_as_user,omitempty"`
 }

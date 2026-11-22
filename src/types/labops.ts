@@ -445,6 +445,8 @@ export interface WireGuardVpnOverview {
   cidr: string;
   total_clients: number;
   active_clients: number;
+  ever_connected_clients?: number;
+  handshake_ttl_seconds?: number;
   total_rx_bytes: number;
   total_tx_bytes: number;
   server_public_key?: string;
@@ -681,6 +683,17 @@ export type SecurityReviewStatus =
   | 'FAILED'
   | 'DELIVERED';
 
+export type RepositoryCloneStatus = 'CLONED' | 'CLONING' | 'FAILED' | 'BLOCKED' | 'PENDING';
+
+export type RepositoryPostCloneReviewStatus =
+  | 'CLEAN'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'SCANNING'
+  | 'SCAN_FAILED'
+  | 'NOT_STARTED';
+
 export interface RepositoryGuardFinding {
   id: string;
   type: string;
@@ -728,6 +741,10 @@ export interface RepositoryGuardRequest {
   commit_sha: string;
   submitted_by: string;
   target_workspace?: string;
+  source?: 'workspace_clone' | 'gateway' | string;
+  clone_status?: RepositoryCloneStatus;
+  review_status?: RepositoryPostCloneReviewStatus;
+  local_repo_path?: string;
   submitted_at: string;
   updated_at: string;
   state: SecurityReviewStatus;

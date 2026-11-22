@@ -49,7 +49,7 @@ class TestScanner(unittest.TestCase):
             verdict_clean = evaluate_policy(json.loads(out_clean))
             self.assertEqual(verdict_clean["verdict"], "PASSED")
 
-        # 2. Quét thư mục chứa khóa bí mật rò rỉ bằng binary /usr/bin/trivy thật -> REJECTED
+        # 2. Quét thư mục chứa khóa bí mật rò rỉ bằng binary /usr/bin/trivy thật -> REVIEW_REQUIRED
         with tempfile.TemporaryDirectory() as leak_dir:
             hdr = "-----BEGIN " + "RSA PRIVATE KEY-----"
             ftr = "-----END " + "RSA PRIVATE KEY-----"
@@ -62,7 +62,7 @@ class TestScanner(unittest.TestCase):
                 timeout=60,
             )
             verdict_leak = evaluate_policy(json.loads(out_leak))
-            self.assertEqual(verdict_leak["verdict"], "REJECTED")
+            self.assertEqual(verdict_leak["verdict"], "REVIEW_REQUIRED")
             self.assertGreaterEqual(verdict_leak["secrets"], 1)
 
     def test_invalid_sha_rejected(self):
@@ -75,9 +75,9 @@ class TestScanner(unittest.TestCase):
         with self.assertRaises(ValueError):
             sc.submit("file:///etc/passwd", SHA, "alice")
 
-    def test_policy_secret_rejects(self):
+    def test_policy_secret_requires_review(self):
         r = evaluate_policy({"Results": [{"Secrets": [{"RuleID": "aws"}]}]})
-        self.assertEqual(r["verdict"], "REJECTED")
+        self.assertEqual(r["verdict"], "REVIEW_REQUIRED")
 
     def test_policy_high_requires_review(self):
         r = evaluate_policy({"Results": [{"Vulnerabilities": [{"Severity": "HIGH"}]}]})

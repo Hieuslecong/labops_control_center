@@ -51,6 +51,10 @@ type ProcessInfo struct {
 	GPUIndex          *int          `json:"gpu_index,omitempty"`
 	GPUUUID           string        `json:"gpu_uuid,omitempty"`
 	VRAMMB            uint64        `json:"vram_mb,omitempty"`
+	TotalVRAMMB       uint64        `json:"total_vram_mb,omitempty"`     // Tổng VRAM cả cây tiến trình
+	TreeIsGPU         bool          `json:"tree_is_gpu,omitempty"`       // True nếu tiến trình gốc hoặc bất kỳ tiến trình con nào đang dùng GPU
+	TreeGPUIndex      *int          `json:"tree_gpu_index,omitempty"`    // GPU index nhỏ nhất/đại diện của cây tiến trình
+	TreeGPUUUID       string        `json:"tree_gpu_uuid,omitempty"`     // GPU UUID đại diện của cây tiến trình
 	IsProtected       bool          `json:"is_protected"`              // True nếu thuộc whitelist không được kill
 	Children          []ProcessInfo `json:"children,omitempty"`        // Danh sách tiến trình con khi query tree
 }

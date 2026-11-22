@@ -440,7 +440,7 @@ export function SafeMemberDeleteDialog({
                     type='button'
                     variant='ghost'
                     size='sm'
-                    className='h-5 px-1.5 text-[11px] text-primary hover:underline'
+                    className='h-5 px-1.5 text-xs text-primary hover:underline'
                     disabled={!canDelete || actionBusy !== null}
                     onClick={() => setConfirmUsername(member.username)}
                   >
@@ -456,16 +456,16 @@ export function SafeMemberDeleteDialog({
                   disabled={!canDelete || actionBusy !== null}
                 />
                 {confirmUsername.trim() === '' ? (
-                  <p className='text-[11px] text-muted-foreground'>
+                  <p className='text-xs text-muted-foreground'>
                     Bắt buộc nhập chính xác{' '}
                     <code className='font-mono font-semibold'>@{member.username}</code>
                   </p>
                 ) : usernameMatched ? (
-                  <p className='text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-medium'>
+                  <p className='text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-medium'>
                     <Icons.check className='size-3' /> Đã khớp chính xác @{member.username}
                   </p>
                 ) : (
-                  <p className='text-[11px] text-rose-600 dark:text-rose-400 flex items-center gap-1'>
+                  <p className='text-xs text-rose-600 dark:text-rose-400 flex items-center gap-1'>
                     <Icons.warning className='size-3' /> Chưa khớp với @{member.username}
                   </p>
                 )}
@@ -484,7 +484,7 @@ export function SafeMemberDeleteDialog({
                   className='h-8 text-xs'
                   disabled={!canDelete || actionBusy !== null}
                 />
-                <p className='text-[11px] text-muted-foreground'>
+                <p className='text-xs text-muted-foreground'>
                   Mật khẩu quản trị LabOps (LABOPS_ADMIN_PASSWORD)
                 </p>
               </div>
@@ -512,7 +512,7 @@ export function SafeMemberDeleteDialog({
         </div>
 
         <DialogFooter className='gap-2 sm:gap-2 flex-col sm:flex-row items-stretch sm:items-center justify-between'>
-          <div className='text-[11px] text-muted-foreground flex items-center gap-1.5 order-2 sm:order-1'>
+          <div className='text-xs text-muted-foreground flex items-center gap-1.5 order-2 sm:order-1'>
             {!canDelete ? (
               <span className='text-amber-600 dark:text-amber-400 flex items-center gap-1'>
                 <Icons.warning className='size-3 shrink-0' /> Cần hoàn tất Suspend &amp; Archive

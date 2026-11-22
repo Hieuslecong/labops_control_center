@@ -88,12 +88,39 @@ class WorkspaceController:
     def _save(self, state: Dict[str, Any]) -> None:
         atomic_write_json(self.state_path, state, use_lock=False)
 
-    def remove_workspace(self, owner: str) -> bool:
+    def remove_workspace(self, owner: str, *, member_id: Optional[str] = None) -> bool:
         with self._locked() as state:
             workspaces = state.get("workspaces", [])
             initial_count = len(workspaces)
-            state["workspaces"] = [w for w in workspaces if w.get("owner") != owner]
+            if member_id:
+                state["workspaces"] = [
+                    w for w in workspaces
+                    if not (
+                        w.get("member_id") == member_id
+                        or (w.get("member_id") in (None, "") and w.get("owner") == owner)
+                    )
+                ]
+            else:
+                state["workspaces"] = [w for w in workspaces if w.get("owner") != owner]
             return len(state["workspaces"]) != initial_count
+
+    def remove_workspace_by_id(self, workspace_id: str, *, require_no_container: bool = True) -> bool:
+        """Remove a specific pending workspace record on provisioning rollback ONLY if no container was created."""
+        with self._locked() as state:
+            workspaces = state.get("workspaces", [])
+            kept: List[Dict[str, Any]] = []
+            removed = False
+            for w in workspaces:
+                if w.get("id") == workspace_id:
+                    if require_no_container and w.get("container_id"):
+                        kept.append(w)
+                    else:
+                        removed = True
+                        continue
+                else:
+                    kept.append(w)
+            state["workspaces"] = kept
+            return removed
 
     def list_workspaces(self, owner: Optional[str] = None, legacy_endpoints: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         state = self._load()
@@ -176,6 +203,7 @@ class WorkspaceController:
         container_mount_path: Optional[str] = None,
         resource_mode: str = "SHARED_WEIGHTED",
         cpu_weight: int = 100,
+        member_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._locked() as state:
@@ -213,6 +241,7 @@ class WorkspaceController:
                 "id": f"ws-{uuid.uuid4().hex[:10]}",
                 "name": f"ws-{owner}",
                 "owner": owner,
+                "member_id": member_id,
                 "uid": uid,
                 "gid": gid,
                 "host_id": host_id,
@@ -270,6 +299,27 @@ class WorkspaceController:
                 return uid, uid
         raise WorkspaceSecurityError("UID_SPACE_EXHAUSTED", "Hết dải UID/GID cô lập khả dụng.", 507)
 
+    @staticmethod
+    def _safe_ram_limit_mb(host_id: str, member: Dict[str, Any], workspace: Dict[str, Any]) -> int:
+        raw_gb = member.get("ram_limit_gb")
+        if raw_gb is not None:
+            requested_mb = int(float(raw_gb) * 1024)
+        elif workspace.get("ram_mb_limit"):
+            requested_mb = int(workspace["ram_mb_limit"])
+        else:
+            requested_mb = 8192
+        requested_mb = max(1024, requested_mb)
+        if host_id == settings.LOCAL_HOST_ID:
+            try:
+                from app.services.storage_inventory_service import storage_service
+                profile = storage_service.get_resource_profile(host_id)
+                safe_max_mb = int(profile.get("shared_budget_bytes", 0) // (1024 * 1024))
+                if safe_max_mb > 0:
+                    return min(requested_mb, max(1024, safe_max_mb))
+            except Exception:
+                pass
+        return requested_mb
+
     def build_provision_workspace_spec(
         self,
         *,
@@ -279,6 +329,7 @@ class WorkspaceController:
         actor: str = "admin",
         image_ref: Optional[str] = None,
         image_digest: Optional[str] = None,
+        gpu_id_to_uuid: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Tạo và xác thực nghiêm ngặt hợp đồng ProvisionWorkspaceSpec gửi tới Go Node Agent."""
         username = str(member.get("username") or workspace.get("owner") or "").strip().lower()
@@ -348,11 +399,33 @@ class WorkspaceController:
             workspace.get("vpn_bind_ip")
             or (getattr(settings, "LABOPS_WORKSPACE_BIND_IP", "192.168.167.251") if host_id == "workstation" else "192.168.167.250")
         ).strip()
-        gpu_uuids = [str(g) for g in (member.get("gpu_permissions") or []) if g]
-        if not gpu_uuids and workspace.get("gpu_uuid"):
-            gpu_uuids = [str(workspace["gpu_uuid"])]
+        raw_gpus = [str(g).strip() for g in (member.get("gpu_permissions") or []) if g and str(g).strip()]
+        if not raw_gpus and workspace.get("gpu_uuid"):
+            raw_gpus = [str(workspace["gpu_uuid"]).strip()]
+        gpu_uuids: List[str] = []
+        for raw_g in raw_gpus:
+            if raw_g.startswith(("GPU-", "MIG-")) or raw_g.isdigit():
+                if raw_g not in gpu_uuids:
+                    gpu_uuids.append(raw_g)
+                continue
+            if gpu_id_to_uuid is not None:
+                mapped = gpu_id_to_uuid.get(raw_g) or gpu_id_to_uuid.get(raw_g.lower())
+                if mapped and (mapped.startswith(("GPU-", "MIG-")) or mapped.isdigit()):
+                    if mapped not in gpu_uuids:
+                        gpu_uuids.append(mapped)
+            elif raw_g not in gpu_uuids:
+                gpu_uuids.append(raw_g)
+
+        repository = {}
+        repository_url = os.getenv("LABOPS_REPOSITORY_API_URL", "").strip()
+        if repository_url and host_id == settings.LOCAL_HOST_ID:
+            from app.core.repository_credentials import issue_repository_token
+
+            credential = issue_repository_token(username, str(member.get("id") or ""), ws_id, host_id)
+            repository = {"repository_api_url": repository_url, "repository_token": credential["token"]}
 
         return {
+            **repository,
             "workspace_id": ws_id,
             "name": ws_name,
             "member_id": str(member.get("id") or ""),
@@ -370,7 +443,7 @@ class WorkspaceController:
             "resource_mode": str(workspace.get("resource_mode") or "SHARED_WEIGHTED"),
             "cpu_weight": int(workspace.get("cpu_weight") or 100),
             "cpu_limit_cores": int(member.get("cpu_limit_cores") or workspace.get("cpu_cores_limit") or 4),
-            "ram_limit_mb": int((member.get("ram_limit_gb") or 8) * 1024),
+            "ram_limit_mb": self._safe_ram_limit_mb(host_id, member, workspace),
             "pids_limit": int(workspace.get("pids_limit") or 4096),
             "gpu_uuids": gpu_uuids,
             "network_isolated": False,

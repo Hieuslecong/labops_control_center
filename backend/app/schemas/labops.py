@@ -281,7 +281,7 @@ class MemberCreateRequest(BaseSchema):
     full_name: str = Field(alias="fullName", min_length=1, max_length=120)
     username: str = Field(min_length=3, max_length=32, pattern=r"^[a-z_][a-z0-9_-]{2,31}$")
     email: str = Field(min_length=3, max_length=254)
-    role: Literal["RESEARCHER", "ADMIN"] = "RESEARCHER"
+    role: Literal["RESEARCHER", "STUDENT", "ADMIN"] = "RESEARCHER"
     research_group: Optional[str] = Field("AI Research Lab", alias="researchGroup", max_length=120)
     assigned_server: Literal["track", "workstation"] = Field("track", alias="assignedServer")
     workspace_name: str = Field(alias="workspaceName", min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_-]{2,63}$")
@@ -387,6 +387,7 @@ class MemberResponse(BaseSchema):
 
 class JobResponse(BaseSchema):
     id: str
+    ref: Optional[str] = None
     member_id: Optional[str] = Field(None, alias="memberId")
     username: str
     full_name: str = Field(alias="fullName")
@@ -407,6 +408,8 @@ class JobResponse(BaseSchema):
     ssh_status: str = Field(alias="sshStatus")
     container_state: str = Field(alias="containerState")
     is_gpu: Optional[bool] = Field(False, alias="isGpu")
+    classification: Optional[str] = None
+    is_protected: Optional[bool] = Field(False, alias="isProtected")
     children_count: Optional[int] = Field(0, alias="childrenCount")
     attribution: Optional[str] = Field("VERIFIED_USER_WORKLOAD", alias="attribution")
     is_root_workload: Optional[bool] = Field(True, alias="isRootWorkload")

@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	workspaceTokenFile = "/run/labops/credentials/repository-token"
 	DefaultAPIBaseURL  = "http://127.0.0.1:8000/api/v1/repositories"
 	defaultHTTPTimeout = 30 * time.Second
 	defaultPollPeriod  = 1500 * time.Millisecond
@@ -114,7 +115,7 @@ Cú pháp:
 Biến môi trường:
   LABOPS_API_URL     Backend Repositories API (mặc định: %s)
   LABOPS_TOKEN       Bearer token xác thực Researcher/Admin
-  LABOPS_TOKEN_FILE  Tệp chứa token (bắt buộc chmod 0600, mặc định: ~/.config/labops/token)
+  LABOPS_TOKEN_FILE  Tệp chứa token (bắt buộc chmod 0600, mặc định: /run/labops/credentials/repository-token hoặc ~/.config/labops/token)
 `, progName, progName, progName, progName, progName, DefaultAPIBaseURL)
 }
 
@@ -122,6 +123,11 @@ func resolveAPIBaseURL(opts *Options) string {
 	u := strings.TrimSpace(opts.APIBaseURL)
 	if u == "" {
 		u = strings.TrimSpace(os.Getenv("LABOPS_API_URL"))
+	}
+	if u == "" {
+		if content, err := os.ReadFile(filepath.Join(filepath.Dir(workspaceTokenFile), "repository-api-url")); err == nil {
+			u = strings.TrimSpace(string(content))
+		}
 	}
 	if u == "" {
 		return DefaultAPIBaseURL
@@ -144,6 +150,8 @@ func ResolveToken(opts *Options) (string, error) {
 		tokenFile = strings.TrimSpace(opts.TokenFile)
 	} else if envFile := strings.TrimSpace(os.Getenv("LABOPS_TOKEN_FILE")); envFile != "" {
 		tokenFile = envFile
+	} else if _, err := os.Stat(workspaceTokenFile); !os.IsNotExist(err) {
+		tokenFile = workspaceTokenFile
 	} else {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -178,7 +186,11 @@ func resolveHTTPClient(opts *Options) *http.Client {
 	if opts != nil && opts.HTTPClient != nil {
 		return opts.HTTPClient
 	}
-	return &http.Client{Timeout: defaultHTTPTimeout}
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func doJSONRequest(ctx context.Context, client *http.Client, token, method, targetURL string, payload interface{}) (int, []byte, error) {
@@ -217,10 +229,24 @@ func doJSONRequest(ctx context.Context, client *http.Client, token, method, targ
 func parseCloneArgs(args []string) (repoURL, ref, destDir, workspace string, noDeliver bool, err error) {
 	ref = "HEAD"
 	var positionals []string
+	optionsEnded := false
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if optionsEnded {
+			positionals = append(positionals, arg)
+			continue
+		}
+		if value, ok := strings.CutPrefix(arg, "--branch="); ok {
+			if value == "" {
+				return "", "", "", "", false, errors.New("thiếu giá trị cho --branch")
+			}
+			ref = value
+			continue
+		}
 		switch arg {
+		case "--":
+			optionsEnded = true
 		case "-b", "--branch", "--ref":
 			if i+1 >= len(args) {
 				return "", "", "", "", false, fmt.Errorf("thiếu giá trị cho tham số %s", arg)
@@ -253,7 +279,10 @@ func parseCloneArgs(args []string) (repoURL, ref, destDir, workspace string, noD
 		return "", "", "", "", false, errors.New("cần cung cấp URL kho mã (ví dụ: gitaiot clone https://github.com/owner/repo)")
 	}
 	repoURL = positionals[0]
-	if len(positionals) > 1 && destDir == "" {
+	if len(positionals) > 1 {
+		if destDir != "" {
+			return "", "", "", "", false, errors.New("đường dẫn đích được chỉ định hai lần")
+		}
 		destDir = positionals[1]
 	}
 	if len(positionals) > 2 {
@@ -282,6 +311,12 @@ func handleClone(args []string, opts *Options) int {
 	repoURL, ref, destDir, workspace, noDeliver, err := parseCloneArgs(args)
 	if err != nil {
 		fmt.Fprintf(opts.Stderr, "Lỗi tham số: %v\n", err)
+		return 1
+	}
+
+	repository, parseErr := url.Parse(repoURL)
+	if parseErr != nil || repository.Scheme != "https" || repository.User != nil || repository.Host == "" {
+		fmt.Fprintln(opts.Stderr, "Clone được quản lý yêu cầu URL HTTPS không chứa thông tin xác thực.")
 		return 1
 	}
 
@@ -352,32 +387,33 @@ func handleClone(args []string, opts *Options) int {
 	fmt.Fprintf(opts.Stdout, "Mã yêu cầu: %s\n", reqData.ID)
 	fmt.Fprintln(opts.Stdout, "Đang xử lý quy trình kiểm duyệt an toàn...")
 
-	deadline := time.Now().Add(maxWait)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), maxWait)
+	defer cancelWait()
 	lastState := ""
 
 	for {
-		if time.Now().After(deadline) {
+		if waitCtx.Err() != nil {
 			fmt.Fprintf(opts.Stderr, "Hết thời gian chờ kết quả kiểm duyệt cho yêu cầu %s\n", reqData.ID)
 			return 1
 		}
 
-		pollCtx, cancelPoll := context.WithTimeout(context.Background(), defaultHTTPTimeout)
+		pollCtx, cancelPoll := context.WithTimeout(waitCtx, defaultHTTPTimeout)
 		statusCode, bodyBytes, pollErr := doJSONRequest(pollCtx, client, token, http.MethodGet, baseURL+"/requests/"+url.PathEscape(reqData.ID), nil)
 		cancelPoll()
 
 		if pollErr != nil || statusCode >= 500 {
-			time.Sleep(pollPeriod)
+			waitForPoll(waitCtx, pollPeriod)
 			continue
 		}
-		if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		if statusCode != http.StatusOK {
 			fmt.Fprintf(opts.Stderr, "Lỗi phân quyền (%d): %s\n", statusCode, strings.TrimSpace(string(bodyBytes)))
 			return 1
 		}
 
 		var current requestStatus
-		if err := json.Unmarshal(bodyBytes, &current); err != nil {
-			time.Sleep(pollPeriod)
-			continue
+		if err := json.Unmarshal(bodyBytes, &current); err != nil || current.ID != reqData.ID || current.State == "" {
+			fmt.Fprintln(opts.Stderr, "Phản hồi trạng thái không hợp lệ")
+			return 1
 		}
 
 		if current.State != lastState {
@@ -386,13 +422,13 @@ func handleClone(args []string, opts *Options) int {
 		}
 
 		switch current.State {
-		case "AUTO_APPROVED", "MANUALLY_APPROVED", "APPROVED":
+		case "AUTO_APPROVED", "MANUALLY_APPROVED", "APPROVED", "DELIVERY_FAILED":
 			if current.ArtifactDigest != "" {
 				fmt.Fprintf(opts.Stdout, "SHA-256 Digest: %s\n", current.ArtifactDigest)
 			}
 			if noDeliver {
 				fmt.Fprintf(opts.Stdout, "Đã phê duyệt (Request ID: %s). Chưa giải nén vì --no-deliver.\n", current.ID)
-				return 0
+				return 4
 			}
 
 			deliverPayload := map[string]string{
@@ -402,10 +438,10 @@ func handleClone(args []string, opts *Options) int {
 			if workspace != "" {
 				deliverPayload["target_workspace"] = workspace
 			}
-			delCtx, cancelDel := context.WithTimeout(context.Background(), 2*time.Minute)
+			delCtx, cancelDel := context.WithTimeout(context.Background(), 150*time.Second)
 			delCode, delBody, delErr := doJSONRequest(delCtx, client, token, http.MethodPost, baseURL+"/deliver", deliverPayload)
 			cancelDel()
-			if delErr != nil || (delCode != http.StatusOK && delCode != http.StatusAccepted) {
+			if delErr != nil || !deliveryConfirmed(delCode, delBody) {
 				fmt.Fprintf(opts.Stderr, "Phân phối thất bại (%d): %v %s\n", delCode, delErr, strings.TrimSpace(string(delBody)))
 				return 1
 			}
@@ -413,8 +449,8 @@ func handleClone(args []string, opts *Options) int {
 			return 0
 
 		case "DELIVERED":
-			fmt.Fprintf(opts.Stdout, "Kho mã %s đã ở trạng thái DELIVERED.\n", current.ID)
-			return 0
+			fmt.Fprintf(opts.Stderr, "Yêu cầu %s đã bàn giao trước đó. Kiểm tra bằng aiotgit status %s.\n", current.ID, current.ID)
+			return 1
 
 		case "REVIEW_REQUIRED":
 			fmt.Fprintln(opts.Stdout, "REVIEW_REQUIRED: Kho mã đang chờ Admin phê duyệt ngoại lệ.")
@@ -423,8 +459,8 @@ func handleClone(args []string, opts *Options) int {
 					fmt.Fprintf(opts.Stdout, "  • %s\n", r)
 				}
 			}
-			fmt.Fprintf(opts.Stdout, "Mã nguồn CHƯA ĐƯỢC PHÂN PHỐI. Mã yêu cầu: %s\n", current.ID)
-			return 0
+			fmt.Fprintf(opts.Stdout, "Mã nguồn chưa được phân phối. Kiểm tra bằng aiotgit status %s.\n", current.ID)
+			return 3
 
 		case "REJECTED", "REVOKED":
 			fmt.Fprintf(opts.Stderr, "%s: Kho mã bị từ chối theo chính sách bảo mật.\n", current.State)
@@ -435,13 +471,36 @@ func handleClone(args []string, opts *Options) int {
 			}
 			return 2
 
-		case "FAILED", "EXPIRED", "DELIVERY_FAILED":
+		case "FAILED", "EXPIRED":
 			fmt.Fprintf(opts.Stderr, "%s: %s\n", current.State, current.Error)
+			return 1
+
+		case "REQUESTED", "SUBMITTED", "VALIDATING", "RESOLVING_COMMIT", "CHECKING_CACHE",
+			"FETCHING", "SCANNING", "POLICY_EVALUATION", "PUBLISHING", "DELIVERING":
+			// Continue polling while the broker is processing the request.
+		default:
+			fmt.Fprintln(opts.Stderr, "Trạng thái yêu cầu không hợp lệ")
 			return 1
 		}
 
-		time.Sleep(pollPeriod)
+		waitForPoll(waitCtx, pollPeriod)
 	}
+}
+
+func waitForPoll(ctx context.Context, period time.Duration) {
+	timer := time.NewTimer(period)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+func deliveryConfirmed(status int, body []byte) bool {
+	var result struct {
+		Success bool `json:"success"`
+	}
+	return status == http.StatusOK && json.Unmarshal(body, &result) == nil && result.Success
 }
 
 func handleStatus(args []string, opts *Options) int {
@@ -509,7 +568,7 @@ func handleStatus(args []string, opts *Options) int {
 }
 
 func handleDeliver(args []string, opts *Options) int {
-	if len(args) < 2 {
+	if len(args) != 2 {
 		fmt.Fprintln(opts.Stderr, "Cú pháp: gitaiot deliver <request_id> <dest_dir>")
 		return 1
 	}
@@ -528,7 +587,7 @@ func handleDeliver(args []string, opts *Options) int {
 
 	baseURL := resolveAPIBaseURL(opts)
 	client := resolveHTTPClient(opts)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 
 	payload := map[string]string{
@@ -540,7 +599,7 @@ func handleDeliver(args []string, opts *Options) int {
 		fmt.Fprintf(opts.Stderr, "Lỗi kết nối: %v\n", err)
 		return 1
 	}
-	if code >= 400 {
+	if !deliveryConfirmed(code, respBytes) {
 		fmt.Fprintf(opts.Stderr, "Phân phối thất bại (%d): %s\n", code, strings.TrimSpace(string(respBytes)))
 		return 1
 	}

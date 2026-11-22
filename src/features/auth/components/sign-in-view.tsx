@@ -115,7 +115,12 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className='w-full space-y-4'>
+          <form
+            method='post'
+            action='/api/auth/login'
+            onSubmit={handleSubmit}
+            className='w-full space-y-4'
+          >
             <div className='space-y-1.5'>
               <label
                 htmlFor='login-username'
@@ -126,7 +131,9 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
               </label>
               <input
                 id='login-username'
+                name='username'
                 type='text'
+                autoComplete='username'
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -146,7 +153,9 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
               </label>
               <input
                 id='admin-password'
+                name='password'
                 type='password'
+                autoComplete='current-password'
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

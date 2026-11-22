@@ -45,6 +45,8 @@ class Principal:
     jti: Optional[str] = None
     iat: Optional[int] = None
     scope: str = "session"
+    workspace_id: Optional[str] = None
+    node_id: Optional[str] = None
 
     @property
     def is_admin(self) -> bool:
@@ -79,11 +81,16 @@ class TokenRevocationStore:
         self._db_manager = db_manager
 
     def _load(self) -> Dict[str, Any]:
-        raw = safe_load_json(self.store_path, lambda: {"jtis": {}, "subjects": {}})
+        raw = safe_load_json(
+            self.store_path,
+            lambda: {"jtis": {}, "subjects": {}, "members": {}, "active_members": {}},
+        )
         if not isinstance(raw, dict):
-            return {"jtis": {}, "subjects": {}}
+            return {"jtis": {}, "subjects": {}, "members": {}, "active_members": {}}
         raw.setdefault("jtis", {})
         raw.setdefault("subjects", {})
+        raw.setdefault("members", {})
+        raw.setdefault("active_members", {})
         return raw
 
     def _prune(self, state: Dict[str, Any], now: int) -> None:
@@ -92,18 +99,63 @@ class TokenRevocationStore:
         for k in expired:
             jtis.pop(k, None)
 
-    def revoke_jti(self, jti: str, exp: int, reason: str = "logout") -> None:
+    def revoke_jti(self, jti: str, exp: int, reason: str = "logout", *, member_id: Optional[str] = None) -> None:
         if not jti:
             return
         now = int(time.time())
         with self._lock:
             state = self._load()
             self._prune(state, now)
-            state["jtis"][jti] = {"exp": int(exp), "revoked_at": now, "reason": reason}
+            state["jtis"][jti] = {"exp": int(exp), "revoked_at": now, "reason": reason, "member_id": member_id}
             atomic_write_json(self.store_path, state)
-        self._persist_db(jti=jti, username=None, revoked_before=None, exp=int(exp), reason=reason)
+        self._persist_db(jti=jti, username=None, member_id=member_id, revoked_before=None, exp=int(exp), reason=reason)
 
-    def revoke_subject(self, username: str, revoked_before: Optional[int] = None, reason: str = "suspended") -> None:
+    def revoke_member(
+        self,
+        member_id: str,
+        *,
+        username: Optional[str] = None,
+        revoked_before: Optional[int] = None,
+        reason: str = "deleted",
+        permanent: bool = False,
+    ) -> None:
+        if not member_id:
+            return
+        now = int(time.time())
+        cutoff = int(revoked_before) if revoked_before is not None else now + 1
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            state["members"][member_id] = {
+                "revoked_before": cutoff,
+                "username": username,
+                "updated_at": now,
+                "reason": reason,
+                "permanent": bool(permanent),
+            }
+            if username:
+                active = state.get("active_members", {}).get(username)
+                if isinstance(active, dict) and active.get("member_id") == member_id:
+                    state["active_members"].pop(username, None)
+            atomic_write_json(self.store_path, state)
+        self._persist_db(
+            jti=None,
+            username=username,
+            member_id=member_id,
+            revoked_before=cutoff,
+            exp=0,
+            reason=reason,
+            permanent=bool(permanent),
+        )
+
+    def revoke_subject(
+        self,
+        username: str,
+        revoked_before: Optional[int] = None,
+        reason: str = "suspended",
+        *,
+        member_id: Optional[str] = None,
+    ) -> None:
         if not username:
             return
         now = int(time.time())
@@ -111,9 +163,45 @@ class TokenRevocationStore:
         with self._lock:
             state = self._load()
             self._prune(state, now)
-            state["subjects"][username] = {"revoked_before": cutoff, "updated_at": now, "reason": reason}
+            entry: Dict[str, Any] = {
+                "revoked_before": cutoff,
+                "updated_at": now,
+                "reason": reason,
+            }
+            if member_id:
+                entry["member_id"] = member_id
+            state["subjects"][username] = entry
+            if member_id:
+                active = state.get("active_members", {}).get(username)
+                if isinstance(active, dict) and active.get("member_id") == member_id:
+                    state["active_members"].pop(username, None)
             atomic_write_json(self.store_path, state)
-        self._persist_db(jti=None, username=username, revoked_before=cutoff, exp=0, reason=reason)
+        self._persist_db(
+            jti=None,
+            username=username,
+            member_id=member_id,
+            revoked_before=cutoff,
+            exp=0,
+            reason=reason,
+        )
+
+    def register_active_member(self, username: str, member_id: str) -> None:
+        """
+        Register newly committed (username, member_id) without clearing any historical JTI
+        or prior-member revocation records. Legacy subject-level revocations lacking
+        member_id continue to apply to legacy/prior tokens while exempting only the new member_id.
+        """
+        if not username or not member_id:
+            return
+        now = int(time.time())
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            state["active_members"][username] = {"member_id": member_id, "activated_at": now}
+            subj = state.get("subjects", {}).get(username)
+            if isinstance(subj, dict) and not subj.get("member_id"):
+                subj["applies_except_member_id"] = member_id
+            atomic_write_json(self.store_path, state)
 
     def unrevoke_subject(self, username: str) -> None:
         if not username:
@@ -124,17 +212,44 @@ class TokenRevocationStore:
                 state["subjects"].pop(username, None)
                 atomic_write_json(self.store_path, state)
 
-    def is_revoked(self, jti: Optional[str], username: str, iat: Optional[int]) -> bool:
+    def is_revoked(
+        self,
+        jti: Optional[str],
+        username: str,
+        iat: Optional[int],
+        *,
+        member_id: Optional[str] = None,
+    ) -> bool:
         now = int(time.time())
         with self._lock:
             state = self._load()
             if jti and jti in state.get("jtis", {}):
                 return True
+            if member_id:
+                m_rec = state.get("members", {}).get(member_id)
+                if isinstance(m_rec, dict):
+                    if m_rec.get("permanent"):
+                        return True
+                    cutoff = int(m_rec.get("revoked_before", 0))
+                    if iat is None or int(iat) <= cutoff:
+                        return True
             subj = state.get("subjects", {}).get(username)
             if isinstance(subj, dict):
-                cutoff = int(subj.get("revoked_before", 0))
-                if iat is None or int(iat) <= cutoff:
-                    return True
+                subj_mid = subj.get("member_id")
+                exempt_mid = subj.get("applies_except_member_id")
+                applies = False
+                if subj_mid:
+                    # Legacy tokens lacking member_id or tokens belonging to the revoked member_id remain blocked;
+                    # tokens belonging to a distinctly recreated member_id are unaffected.
+                    applies = (member_id is None) or (member_id == subj_mid)
+                elif exempt_mid:
+                    applies = (member_id is None) or (member_id != exempt_mid)
+                else:
+                    applies = True
+                if applies:
+                    cutoff = int(subj.get("revoked_before", 0))
+                    if iat is None or int(iat) <= cutoff:
+                        return True
             if now <= 0:
                 return False
         return False
@@ -147,6 +262,8 @@ class TokenRevocationStore:
         revoked_before: Optional[int],
         exp: int,
         reason: str,
+        member_id: Optional[str] = None,
+        permanent: bool = False,
     ) -> None:
         if self._db_manager is None:
             return
@@ -154,15 +271,34 @@ class TokenRevocationStore:
             from app.db.models import RevokedTokenRecord
 
             with self._db_manager.session_scope() as s:
-                s.add(
-                    RevokedTokenRecord(
-                        jti=jti,
-                        username=username,
-                        revoked_before_epoch=revoked_before,
-                        reason=reason,
-                        expires_at=exp,
+                if getattr(self._db_manager, "revoked_tokens_has_member_id", True):
+                    s.add(
+                        RevokedTokenRecord(
+                            jti=jti,
+                            username=username,
+                            member_id=member_id,
+                            revoked_before_epoch=revoked_before,
+                            reason=reason,
+                            permanent=bool(permanent) if getattr(self._db_manager, "revoked_tokens_has_permanent", True) else False,
+                            expires_at=exp,
+                        )
                     )
-                )
+                else:
+                    from sqlalchemy import text
+
+                    s.execute(
+                        text(
+                            "INSERT INTO revoked_tokens (jti, username, revoked_before_epoch, reason, expires_at, created_at) "
+                            "VALUES (:jti, :username, :revoked_before_epoch, :reason, :expires_at, CURRENT_TIMESTAMP)"
+                        ),
+                        {
+                            "jti": jti,
+                            "username": username,
+                            "revoked_before_epoch": revoked_before,
+                            "reason": reason,
+                            "expires_at": exp,
+                        },
+                    )
         except Exception:
             pass
 
@@ -261,6 +397,7 @@ def verify_token(token: str, secret: Optional[str] = None) -> Principal:
         jti=str(jti) if isinstance(jti, str) else None,
         username=subject,
         iat=int(iat) if type(iat) is int else None,
+        member_id=str(data["member_id"]) if isinstance(data.get("member_id"), str) and data["member_id"].strip() else None,
     ):
         raise AuthError(401, "Phiên đăng nhập đã bị thu hồi")
     return Principal(

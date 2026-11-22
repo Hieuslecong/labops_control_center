@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.dependencies import require_labops_admin
 from app.schemas.labops import MemberCreateRequest, MemberResponse, StorageQuotaUpdateRequest
-from app.services.labops_service import service
+from app.services.labops_service import MemberConflictError, MemberPersistenceError, service
 from app.services.workspace_controller import WorkspaceSecurityError
 
 router = APIRouter(dependencies=[Depends(require_labops_admin)])
@@ -14,6 +14,18 @@ async def provision_member(payload: MemberCreateRequest, actor: str = Depends(re
         data = payload.model_dump(by_alias=False)
         data["_actor_id"] = actor
         return service.provision_member(data)
+    except MemberConflictError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": exc.code, "message": exc.message, "details": exc.details},
+        ) from exc
+    except MemberPersistenceError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": exc.code, "message": exc.message, "recovery_id": exc.recovery_id},
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except WorkspaceSecurityError as exc:

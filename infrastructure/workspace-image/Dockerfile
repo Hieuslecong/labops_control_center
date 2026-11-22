@@ -1,5 +1,13 @@
 # LabOps Standard Workspace Image (Debian 13 + OpenSSH Unprivileged + Python/Git/Node/micromamba)
 # KHÔNG cài sudo; container chạy hoàn toàn bằng UID/GID riêng (>= 20000), CapDrop=ALL, no-new-privileges.
+ARG GO_BUILDER_IMAGE=golang:1.26.11-trixie
+FROM ${GO_BUILDER_IMAGE} AS cli
+WORKDIR /build
+COPY go/go.mod go/go.sum ./
+COPY go/internal/gitaiotcli/cli.go ./internal/gitaiotcli/cli.go
+COPY go/cmd/aiotgit/main.go ./cmd/aiotgit/main.go
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -mod=readonly -o /out/aiotgit ./cmd/aiotgit
+
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -24,11 +32,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chmod 1777 /tmp /var/tmp
 
 # Cài micromamba trong /usr/local/bin để Researcher tạo môi trường user-space không cần sudo
-RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /usr/local bin/micromamba \
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in amd64) platform=linux-64 ;; arm64) platform=linux-aarch64 ;; *) exit 1 ;; esac \
+    && curl --fail --location --silent --show-error "https://micro.mamba.pm/api/micromamba/${platform}/latest" -o /tmp/micromamba.tar.bz2 \
+    && tar -xj -f /tmp/micromamba.tar.bz2 -C /usr/local bin/micromamba \
+    && rm /tmp/micromamba.tar.bz2 \
     && chmod 0755 /usr/local/bin/micromamba
 
-COPY entrypoint.sh /usr/local/bin/labops-workspace-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/labops-workspace-entrypoint.sh
+COPY --from=cli --chmod=0755 /out/aiotgit /usr/local/bin/aiotgit
+COPY --chmod=0755 infrastructure/workspace-image/git-wrapper.sh /usr/local/bin/git
+COPY --chmod=0755 infrastructure/workspace-image/entrypoint.sh /usr/local/bin/labops-workspace-entrypoint.sh
+RUN ln -s aiotgit /usr/local/bin/gitaiot
 
 EXPOSE 2222
 

@@ -86,6 +86,10 @@ func NewServer(
 			cfg.BrokerVerifySecret,
 			[]string{"/workspaces", "/mnt", "/var/lib/labops/workspaces", "/home"},
 		)
+		repoHandler.ResolveWorkspace = func(ctx context.Context, workspaceID, memberID, username, nodeID string) (repositoryguard.WorkspaceDelivery, error) {
+			root, uid, gid, err := dockerCtrl.ResolveRepositoryWorkspace(ctx, workspaceID, memberID, username, nodeID)
+			return repositoryguard.WorkspaceDelivery{Root: root, UID: uid, GID: gid}, err
+		}
 		repoHandler.RegisterRoutes(mux)
 	}
 

@@ -17,8 +17,9 @@ const brokerReplayWindowSeconds int64 = 300
 
 // HTTPHandler serves Repository Guard API endpoints with broker HMAC & strict RBAC enforcement.
 type HTTPHandler struct {
-	service      *GuardService
-	brokerSecret string
+	service          *GuardService
+	brokerSecret     string
+	ResolveWorkspace WorkspaceResolver
 }
 
 // NewHTTPHandler constructs a handler without broker HMAC secret (intended for unit tests only; still enforces header identity & RBAC).
@@ -143,10 +144,15 @@ func (h *HTTPHandler) handleRequests(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var payload struct {
-			RepoURL         string `json:"repo_url"`
-			Ref             string `json:"ref"`
-			Submitter       string `json:"submitter"`
-			TargetWorkspace string `json:"target_workspace"`
+			RepoURL          string `json:"repo_url"`
+			Ref              string `json:"ref"`
+			Submitter        string `json:"submitter"`
+			TargetWorkspace  string `json:"target_workspace"`
+			Source           string `json:"source"`
+			LocalRepoRelPath string `json:"local_repo_rel_path"`
+			WorkspaceID      string `json:"workspace_id"`
+			MemberID         string `json:"member_id"`
+			NodeID           string `json:"node_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			writeError(w, http.StatusBadRequest, "Dữ liệu JSON không hợp lệ")
@@ -163,7 +169,30 @@ func (h *HTTPHandler) handleRequests(w http.ResponseWriter, r *http.Request) {
 			submitter = claimedSubmitter
 		}
 
-		req, err := h.service.SubmitRequest(r.Context(), payload.RepoURL, payload.Ref, submitter, payload.TargetWorkspace)
+		opts := SubmitOptions{
+			Source:           strings.TrimSpace(payload.Source),
+			LocalRepoRelPath: strings.TrimSpace(payload.LocalRepoRelPath),
+		}
+		if opts.Source == SourceWorkspaceClone && opts.LocalRepoRelPath != "" &&
+			h.ResolveWorkspace != nil && strings.TrimSpace(payload.WorkspaceID) != "" &&
+			strings.TrimSpace(payload.MemberID) != "" {
+			if resolved, wsErr := h.ResolveWorkspace(
+				r.Context(),
+				strings.TrimSpace(payload.WorkspaceID),
+				strings.TrimSpace(payload.MemberID),
+				submitter,
+				strings.TrimSpace(payload.NodeID),
+			); wsErr == nil {
+				opts.VerifiedWorkspaceRoot = resolved.Root
+			}
+		}
+
+		req, err := h.service.SubmitRequestWithOptions(r.Context(), payload.RepoURL, payload.Ref, submitter, payload.TargetWorkspace, opts)
+		if errors.Is(err, ErrScanCapacity) {
+			w.Header().Set("Retry-After", "30")
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -217,6 +246,67 @@ func (h *HTTPHandler) handleRequestByID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if len(parts) > 1 && parts[1] == "rescan" && r.Method == http.MethodPost {
+		existing, found := h.service.GetRequest(reqID)
+		if !found {
+			writeError(w, http.StatusNotFound, "Không tìm thấy yêu cầu")
+			return
+		}
+		if !isAdmin && existing.Submitter != actor {
+			writeError(w, http.StatusForbidden, "Forbidden: bạn không có quyền quét lại yêu cầu của thành viên khác")
+			return
+		}
+
+		var payload struct {
+			Source           string `json:"source"`
+			LocalRepoRelPath string `json:"local_repo_rel_path"`
+			WorkspaceID      string `json:"workspace_id"`
+			MemberID         string `json:"member_id"`
+			NodeID           string `json:"node_id"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+		}
+
+		opts := SubmitOptions{
+			Source:           strings.TrimSpace(payload.Source),
+			LocalRepoRelPath: strings.TrimSpace(payload.LocalRepoRelPath),
+		}
+		if opts.Source == "" {
+			opts.Source = existing.Source
+		}
+		if opts.LocalRepoRelPath == "" {
+			opts.LocalRepoRelPath = existing.LocalRepoPath
+		}
+		if opts.Source == SourceWorkspaceClone && opts.LocalRepoRelPath != "" &&
+			h.ResolveWorkspace != nil && strings.TrimSpace(payload.WorkspaceID) != "" &&
+			strings.TrimSpace(payload.MemberID) != "" {
+			if resolved, wsErr := h.ResolveWorkspace(
+				r.Context(),
+				strings.TrimSpace(payload.WorkspaceID),
+				strings.TrimSpace(payload.MemberID),
+				existing.Submitter,
+				strings.TrimSpace(payload.NodeID),
+			); wsErr == nil {
+				opts.VerifiedWorkspaceRoot = resolved.Root
+			}
+		}
+
+		updated, err := h.service.RescanRequest(r.Context(), reqID, opts)
+		if errors.Is(err, ErrScanCapacity) {
+			w.Header().Set("Retry-After", "30")
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusAccepted, updated)
+		return
+	}
+
 	if r.Method == http.MethodGet {
 		req, found := h.service.GetRequest(reqID)
 		if !found {
@@ -261,7 +351,21 @@ func (h *HTTPHandler) handleDeliver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.service.DeliverAuthorized(payload.RequestID, actor, isAdmin, payload.TargetDirectory); err != nil {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(140 * time.Second))
+	var workspace *WorkspaceDelivery
+	if payload.WorkspaceID != "" || payload.MemberID != "" || payload.NodeID != "" {
+		if h.ResolveWorkspace == nil || h.brokerSecret == "" {
+			writeError(w, http.StatusServiceUnavailable, "Managed workspace delivery is not configured")
+			return
+		}
+		resolved, err := h.ResolveWorkspace(r.Context(), payload.WorkspaceID, payload.MemberID, actor, payload.NodeID)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "Workspace identity could not be verified")
+			return
+		}
+		workspace = &resolved
+	}
+	if err := h.service.deliverAuthorized(payload.RequestID, actor, isAdmin, payload.TargetDirectory, payload.WorkspaceID, workspace); err != nil {
 		if errors.Is(err, ErrPermissionDenied) {
 			writeError(w, http.StatusForbidden, err.Error())
 			return

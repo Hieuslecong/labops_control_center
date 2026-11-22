@@ -193,7 +193,7 @@ fi
 # ------------------------------------------------------------------------------
 if [ -n "$ZALO_BOT_TOKEN" ]; then
     echo -e "\n${BLUE}[3b] Kích hoạt Trợ lý Zalo AI Assistant Polling Worker...${NC}"
-    "$PYTHON_BIN" "$PROJECT_DIR/backend/app/services/zalo_assistant/worker.py" >/dev/null 2>&1 &
+    "$PYTHON_BIN" "$PROJECT_DIR/backend/app/services/zalo_assistant/worker.py" >> "$PROJECT_DIR/backend/zalo_worker.log" 2>&1 &
     STARTED_ZALO_PID=$!
     echo -e "${GREEN}✅ Zalo Assistant Worker đang chạy ngầm (PID: $STARTED_ZALO_PID).${NC}"
 fi

@@ -1,0 +1,15 @@
+**
+!go/
+!go/go.mod
+!go/go.sum
+!go/internal/
+!go/internal/gitaiotcli/
+!go/internal/gitaiotcli/cli.go
+!go/cmd/
+!go/cmd/aiotgit/
+!go/cmd/aiotgit/main.go
+!infrastructure/
+!infrastructure/workspace-image/
+!infrastructure/workspace-image/Dockerfile
+!infrastructure/workspace-image/entrypoint.sh
+!infrastructure/workspace-image/git-wrapper.sh

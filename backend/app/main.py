@@ -14,7 +14,7 @@ from app.core.security import AuthError, principal_from_authorization, require_n
 from app.services.gpu_scheduler import GpuScheduler, SchedulerError
 from app.services.job_access import visible_jobs
 from app.services.workspace_controller import WorkspaceSecurityError
-from app.services.labops_service import service
+from app.services.labops_service import MemberConflictError, MemberPersistenceError, service
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ app = None
 try:
     from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
     from app.api.v1.api import api_router
 
     app = FastAPI(
@@ -46,6 +47,20 @@ try:
         )
 
     app.include_router(api_router, prefix=settings.API_V1_STR)
+
+    @app.exception_handler(MemberConflictError)
+    async def member_conflict_exception_handler(request, exc: MemberConflictError):
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"detail": {"code": exc.code, "message": exc.message, "details": exc.details}},
+        )
+
+    @app.exception_handler(MemberPersistenceError)
+    async def member_persistence_exception_handler(request, exc: MemberPersistenceError):
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"detail": {"code": exc.code, "message": exc.message, "recovery_id": exc.recovery_id}},
+        )
 
     @app.get("/healthz", tags=["Health"])
     async def healthz():
@@ -522,9 +537,17 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép tạo thành viên và cấp quyền SSH"})
                 return
             try:
+                from app.services.labops_service import MemberConflictError, MemberPersistenceError
+
                 body["_actor_id"] = principal.username
                 created = service.provision_member(body)
                 self._send_json(200, _format_member(created))
+            except MemberConflictError as e:
+                self._send_json(e.http_status, {"detail": {"code": e.code, "message": e.message, "details": e.details}})
+            except MemberPersistenceError as e:
+                self._send_json(e.http_status, {"detail": {"code": e.code, "message": e.message, "recovery_id": e.recovery_id}})
+            except PermissionError as e:
+                self._send_json(403, {"detail": str(e)})
             except ValueError as e:
                 self._send_json(400, {"detail": str(e)})
             except WorkspaceSecurityError as e:
@@ -676,13 +699,23 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép tạo quyền truy cập SSH"})
                 return
             try:
+                from app.services.labops_service import MemberConflictError, MemberPersistenceError
+
                 body["_actor_id"] = principal.username
                 created = service.provision_member_ssh_access(body)
                 self._send_json(200, _format_member(created))
+            except MemberConflictError as e:
+                self._send_json(e.http_status, {"detail": {"code": e.code, "message": e.message, "details": e.details}})
+            except MemberPersistenceError as e:
+                self._send_json(e.http_status, {"detail": {"code": e.code, "message": e.message, "recovery_id": e.recovery_id}})
+            except PermissionError as e:
+                self._send_json(403, {"detail": str(e)})
             except ValueError as e:
                 self._send_json(400, {"detail": str(e)})
             except WorkspaceSecurityError as e:
                 self._send_json(e.http_status, {"detail": e.message})
+            except RuntimeError as e:
+                self._send_json(503, {"detail": str(e)})
         elif path.startswith("/api/v1/v2/ssh-access/") and path.endswith("/claim-key-bundle"):
             if not principal.is_admin:
                 self._send_json(403, {"detail": "Chỉ quản trị viên được phép tải gói khóa riêng"})

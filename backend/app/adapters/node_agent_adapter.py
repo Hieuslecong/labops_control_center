@@ -228,6 +228,9 @@ class NodeAgentClient:
             str_params[k] = v if isinstance(v, str) else json.dumps(v)
 
         delegation_secret = os.getenv("LABOPS_DELEGATION_SECRET", "").strip()
+        if not delegation_secret and not ("PYTEST_CURRENT_TEST" in os.environ or "unittest" in sys.modules):
+            from app.core.config import settings
+            delegation_secret = getattr(settings, "LABOPS_DELEGATION_SECRET", "").strip()
         auth_ctx = ""
         if delegation_secret:
             from app.core.delegation import build_delegation_context
@@ -245,7 +248,10 @@ class NodeAgentClient:
         # 1. Thử gửi lệnh qua LabOps Zero-Trust Gateway (mTLS gRPC tunnel) nếu được cấu hình
         gateway_http_url = os.getenv("LABOPS_GATEWAY_HTTP_URL", "").strip()
         control_secret = os.getenv("LABOPS_GATEWAY_CONTROL_SECRET", "").strip()
-        if gateway_http_url and control_secret:
+        managed_provision = action == "PROVISION_DOCKER_WORKSPACE" and "repository_token" in str_params.get("spec_json", "")
+        if managed_provision and not is_local:
+            raise NodeAgentError("REPOSITORY_LOCAL_ONLY", "Managed Git yêu cầu Agent cục bộ.", 400)
+        if gateway_http_url and control_secret and not managed_provision:
             gw_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {control_secret}"}
             dispatch_body: Dict[str, Any] = {
                 "node_id": node_id,
@@ -296,6 +302,9 @@ class NodeAgentClient:
                 from app.core.config import settings
                 agent_url = getattr(settings, "LABOPS_LOCAL_AGENT_URL", "").strip()
 
+        if managed_provision:
+            agent_url = os.getenv("LABOPS_LOCAL_AGENT_URL", "").strip() or "http://127.0.0.1:9100"
+
         token = (
             os.getenv("LABOPS_NODE_AGENT_TOKEN", "").strip()
             or os.getenv("LABOPS_AGENT_SECRET", "").strip()
@@ -331,7 +340,13 @@ class NodeAgentClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                if managed_provision:
+                    from app.adapters.repository_agent_http import open_repository_agent
+
+                    open_agent = open_repository_agent
+                else:
+                    open_agent = urllib.request.urlopen
+                with open_agent(req, timeout=15) as resp:
                     res_data = json.loads(resp.read().decode("utf-8"))
                     if not res_data.get("success", False):
                         raise NodeAgentError(

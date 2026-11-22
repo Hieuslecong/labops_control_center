@@ -75,6 +75,7 @@ backend/data/*.journal
 backend/data/*.lock
 backend/data/*.tmp
 backend/data/workspaces/
+backend/data/backups/
 !backend/data/examples/*.example.json
 graphify-out/
 

@@ -11,9 +11,14 @@ Group=aiot-ws1
 SupplementaryGroups=docker
 
 WorkingDirectory=/var/lib/labops-agent
+Environment=HOME=/var/lib/labops-agent
 Environment=LABOPS_WORKSPACE_REGISTRY_PATH=/var/lib/labops/workspace_registry.json
 Environment=LABOPS_WORKSPACE_RUNTIME_DIR=/var/lib/labops-agent/runtime
 Environment=LABOPS_REPO_GUARD_DATA_DIR=/var/lib/labops/repositoryguard
+Environment=TRIVY_CACHE_DIR=/var/lib/labops-agent/trivy-cache
+Environment=TRIVY_MODULE_DIR=/var/lib/labops-agent/trivy-modules
+Environment=XDG_CACHE_HOME=/var/lib/labops-agent/.cache
+Environment=LABOPS_REPO_PERMISSIVE_MODE=true
 EnvironmentFile=/etc/labops/agent.env
 ExecStart=/usr/local/bin/labops-agent
 
@@ -21,11 +26,12 @@ Restart=on-failure
 RestartSec=5
 
 NoNewPrivileges=true
-ProtectSystem=strict
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER
+# Dùng ProtectSystem=full (chỉ read-only /usr, /boot, /efi, /etc) thay vì strict để giữ nguyên trạng thái rw thực tế của các ổ đĩa dữ liệu (/mnt/*, /media/*) và /var/lib/*.
+ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
-# Cho phép Agent ghi workspace registry, thư mục runtime ssh_ro/passwd/group, dữ liệu pool đã duyệt (tùy chọn '-'), và Docker socket
-ReadWritePaths=/var/lib/labops /var/lib/labops-agent -/mnt/HDD3/labops/users /run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

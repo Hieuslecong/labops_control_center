@@ -327,7 +327,7 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		}
 	}
 
-	// Đọc bảng GPU compute apps từ GPU collector
+	// Đọc bảng GPU compute apps từ GPU collector (cộng dồn nếu 1 PID dùng nhiều GPU)
 	gpuProcessMap := make(map[int]struct {
 		gpuIndex int
 		gpuUUID  string
@@ -339,14 +339,23 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		if gpuReport != nil {
 			for _, g := range gpuReport.GPUs {
 				for _, p := range g.ActiveProcesses {
-					gpuProcessMap[p.PID] = struct {
-						gpuIndex int
-						gpuUUID  string
-						vramMB   uint64
-					}{
-						gpuIndex: g.Index,
-						gpuUUID:  g.UUID,
-						vramMB:   p.UsedMemoryMB,
+					if existing, ok := gpuProcessMap[p.PID]; ok {
+						existing.vramMB += p.UsedMemoryMB
+						if g.Index < existing.gpuIndex {
+							existing.gpuIndex = g.Index
+							existing.gpuUUID = g.UUID
+						}
+						gpuProcessMap[p.PID] = existing
+					} else {
+						gpuProcessMap[p.PID] = struct {
+							gpuIndex int
+							gpuUUID  string
+							vramMB   uint64
+						}{
+							gpuIndex: g.Index,
+							gpuUUID:  g.UUID,
+							vramMB:   p.UsedMemoryMB,
+						}
 					}
 				}
 			}
@@ -500,8 +509,12 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			isUserWorkload = false
 		} else {
 			// Thuộc tài khoản user (UID >= 1000) hoặc trong Container
-			// Kiểm tra xem có phải là background/desktop service hay IDE tooling hay idle shell không
-			if IsDesktopOrBackgroundService(procName, cmdline) {
+			// Nếu tiến trình đang dùng GPU / VRAM thì ưu tiên là user workload (tránh bị ẩn bởi VS Code / background matcher)
+			if isGPU || vramMB > 0 {
+				isUserWorkload = true
+				attribution = AttributionVerifiedWorkload
+				classification = ClassGPUProcess
+			} else if IsDesktopOrBackgroundService(procName, cmdline) {
 				classification = ClassMemberProcess
 				attribution = AttributionBackgroundProcess
 				isUserWorkload = false
@@ -555,6 +568,10 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			ChildrenCount:     0,
 			TotalCPUPercent:   cpuPct,
 			TotalMemoryRSSMB:  rssMB,
+			TotalVRAMMB:       vramMB,
+			TreeIsGPU:         isGPU || vramMB > 0,
+			TreeGPUIndex:      gpuIdx,
+			TreeGPUUUID:       gpuUUID,
 			ContainerID:       containerID,
 			Workspace:         workspace,
 			CPUPercent:        cpuPct,
@@ -576,53 +593,7 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 	}
 
 	// GOM NHÓM TIẾN TRÌNH (PARENT - WORKERS HIERARCHY)
-	// Xây dựng map PID -> index
-	pidMap := make(map[int]int, len(procs))
-	for i := range procs {
-		pidMap[procs[i].PID] = i
-	}
-
-	// Xác định quan hệ Root Workload vs Worker con
-	for i := range procs {
-		p := &procs[i]
-		if p.IsUserWorkload {
-			if parentIdx, ok := pidMap[p.PPID]; ok {
-				parent := &procs[parentIdx]
-				if parent.IsUserWorkload && parent.User == p.User {
-					p.IsRootWorkload = false
-					p.ParentWorkloadPID = parent.PID
-				}
-			}
-		}
-	}
-
-	// Tính tổng CPU và RAM gộp cho Root Workload (tránh double-counting)
-	for i := range procs {
-		root := &procs[i]
-		if root.IsUserWorkload && root.IsRootWorkload {
-			totalCPU := root.CPUPercent
-			totalRSS := root.MemoryRSSMB
-			childrenCount := 0
-
-			var aggregateWorkers func(parentPID int)
-			aggregateWorkers = func(parentPID int) {
-				for j := range procs {
-					child := &procs[j]
-					if child.ParentWorkloadPID == parentPID && child.PID != parentPID {
-						childrenCount++
-						totalCPU += child.CPUPercent
-						totalRSS += child.MemoryRSSMB
-						aggregateWorkers(child.PID)
-					}
-				}
-			}
-			aggregateWorkers(root.PID)
-
-			root.ChildrenCount = childrenCount
-			root.TotalCPUPercent = math.Round(totalCPU*10) / 10
-			root.TotalMemoryRSSMB = math.Round(totalRSS*10) / 10
-		}
-	}
+	aggregateWorkloadTrees(procs)
 
 	c.prevCPUTimes = newCPUTimes
 	c.lastScan = time.Now()
@@ -631,8 +602,20 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 	filtered := make([]ProcessInfo, 0, len(procs))
 	for _, p := range procs {
 		if filterType == "workloads" || filterType == "workload" || filterType == "research" {
-			// Chỉ lấy User Workload gốc (root)
+			// Chỉ lấy User Workload gốc (root), mang theo giá trị GPU gộp của cả cây tiến trình
 			if p.IsUserWorkload && p.IsRootWorkload {
+				if p.TreeIsGPU || p.TotalVRAMMB > 0 {
+					p.IsGPU = true
+					p.VRAMMB = p.TotalVRAMMB
+					if p.TreeGPUIndex != nil {
+						idxCopy := *p.TreeGPUIndex
+						p.GPUIndex = &idxCopy
+					}
+					if p.TreeGPUUUID != "" {
+						p.GPUUUID = p.TreeGPUUUID
+					}
+					p.Classification = ClassGPUProcess
+				}
 				filtered = append(filtered, p)
 			}
 		} else if filterType == "gpu" {
@@ -731,4 +714,87 @@ func (c *Collector) GetProcessTree(ref string) (*ProcessInfo, error) {
 
 	buildTree(root)
 	return root, nil
+}
+
+// aggregateWorkloadTrees gom nhóm tiến trình cha-con và cộng dồn CPU, RAM, VRAM GPU lên root workload.
+// Lưu ý: chỉ cập nhật các trường tổng hợp (TotalVRAMMB, TreeIsGPU, TreeGPUIndex, TreeGPUUUID),
+// KHÔNG ghi đè VRAMMB / IsGPU gốc của từng PID để tránh double-counting ở màn hình tiến trình thô hoặc process tree.
+func aggregateWorkloadTrees(procs []ProcessInfo) {
+	pidMap := make(map[int]int, len(procs))
+	for i := range procs {
+		pidMap[procs[i].PID] = i
+	}
+
+	for i := range procs {
+		p := &procs[i]
+		if p.IsUserWorkload {
+			if parentIdx, ok := pidMap[p.PPID]; ok {
+				parent := &procs[parentIdx]
+				if parent.IsUserWorkload && parent.User == p.User {
+					p.IsRootWorkload = false
+					p.ParentWorkloadPID = parent.PID
+				}
+			}
+		}
+	}
+
+	for i := range procs {
+		root := &procs[i]
+		if !root.IsUserWorkload || !root.IsRootWorkload {
+			continue
+		}
+
+		totalCPU := root.CPUPercent
+		totalRSS := root.MemoryRSSMB
+		totalVRAM := root.VRAMMB
+		treeIsGPU := root.IsGPU || root.VRAMMB > 0
+		var treeGPUIdx *int
+		if root.GPUIndex != nil {
+			idxCopy := *root.GPUIndex
+			treeGPUIdx = &idxCopy
+		}
+		treeGPUUUID := root.GPUUUID
+		childrenCount := 0
+		visited := map[int]bool{root.PID: true}
+
+		var aggregateWorkers func(parentPID int)
+		aggregateWorkers = func(parentPID int) {
+			for j := range procs {
+				child := &procs[j]
+				if child.ParentWorkloadPID == parentPID && child.PID != parentPID && !visited[child.PID] {
+					visited[child.PID] = true
+					childrenCount++
+					totalCPU += child.CPUPercent
+					totalRSS += child.MemoryRSSMB
+					totalVRAM += child.VRAMMB
+
+					if child.IsGPU || child.VRAMMB > 0 {
+						treeIsGPU = true
+						if child.GPUIndex != nil {
+							if treeGPUIdx == nil || *child.GPUIndex < *treeGPUIdx {
+								idxCopy := *child.GPUIndex
+								treeGPUIdx = &idxCopy
+								if child.GPUUUID != "" {
+									treeGPUUUID = child.GPUUUID
+								}
+							}
+						}
+						if treeGPUUUID == "" && child.GPUUUID != "" {
+							treeGPUUUID = child.GPUUUID
+						}
+					}
+					aggregateWorkers(child.PID)
+				}
+			}
+		}
+		aggregateWorkers(root.PID)
+
+		root.ChildrenCount = childrenCount
+		root.TotalCPUPercent = math.Round(totalCPU*10) / 10
+		root.TotalMemoryRSSMB = math.Round(totalRSS*10) / 10
+		root.TotalVRAMMB = totalVRAM
+		root.TreeIsGPU = treeIsGPU || totalVRAM > 0
+		root.TreeGPUIndex = treeGPUIdx
+		root.TreeGPUUUID = treeGPUUUID
+	}
 }

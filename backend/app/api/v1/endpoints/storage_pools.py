@@ -45,11 +45,24 @@ async def list_storage_pools(host_id: Optional[str] = Query(None, alias="host_id
         pools = storage_service.get_storage_pools(host_id)
         return [_enrich_pool(p) for p in pools]
     
-    # Global: cả workstation và track
+    # Global: cả workstation và track (deduplicate theo host + storage + device + mount)
     ws_pools = storage_service.get_storage_pools("workstation")
     track_pools = storage_service.get_storage_pools("track")
-    all_pools = ws_pools + track_pools
-    return [_enrich_pool(p) for p in all_pools]
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for p in ws_pools + track_pools:
+        enriched = _enrich_pool(p)
+        key = (
+            enriched.get("serverId"),
+            enriched.get("id"),
+            enriched.get("diskIdentifier"),
+            enriched.get("name"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(enriched)
+    return deduped
 
 @router.post("/validate", response_model=StorageValidateResponse)
 async def validate_storage_allocation(payload: StorageValidateRequest):

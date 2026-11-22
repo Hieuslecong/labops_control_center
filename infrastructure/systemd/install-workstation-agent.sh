@@ -31,7 +31,7 @@ if [[ ! -x "$AGENT_BIN" || ! -r "$UNIT_SOURCE" ]]; then
     exit 1
 fi
 if [[ "$SKIP_IMAGE_BUILD" == false ]]; then
-    docker build -t "$IMAGE_TAG" "$REPO_DIR/infrastructure/workspace-image"
+    docker build -f "$REPO_DIR/infrastructure/workspace-image/Dockerfile" -t "$IMAGE_TAG" "$REPO_DIR"
 fi
 if ! IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")" ||
     [[ ! "$IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ ]]; then
@@ -39,7 +39,24 @@ if ! IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")" ||
     exit 1
 fi
 
-install -d -m 0750 -o aiot-ws1 -g aiot-ws1 /var/lib/labops /var/lib/labops/repositoryguard /var/lib/labops-agent /var/lib/labops-agent/runtime
+install -d -m 0750 -o aiot-ws1 -g aiot-ws1 /var/lib/labops /var/lib/labops/repositoryguard /var/lib/labops-agent /var/lib/labops-agent/runtime /var/lib/labops-agent/trivy-cache /var/lib/labops-agent/trivy-modules /var/lib/labops-agent/.cache
+SEEN_DATA_SOURCES=""
+for mnt in /mnt/HDD3 /media/aiot-ws1/*; do
+    [[ -d "$mnt" && ! -L "$mnt" ]] || continue
+    mountpoint -q "$mnt" || continue
+    SRC_DEV="$(findmnt -n -o SOURCE --target "$mnt" 2>/dev/null || true)"
+    MNT_OPTS="$(findmnt -n -o OPTIONS --target "$mnt" 2>/dev/null || true)"
+    [[ "$SRC_DEV" == /dev/* ]] || continue
+    [[ ",$MNT_OPTS," == *,rw,* ]] || continue
+    case " $SEEN_DATA_SOURCES " in
+        *" $SRC_DEV "*) continue ;;
+    esac
+    SEEN_DATA_SOURCES="$SEEN_DATA_SOURCES $SRC_DEV"
+    if [[ ! -L "$mnt/labops" && ! -L "$mnt/labops/users" ]]; then
+        install -d -m 0755 -o aiot-ws1 -g aiot-ws1 "$mnt/labops"
+        install -d -m 0751 -o aiot-ws1 -g aiot-ws1 "$mnt/labops/users"
+    fi
+done
 BACKUP_DIR="$(mktemp -d /var/backups/labops-agent.XXXXXXXX)"
 for target in "$BIN_TARGET" "$UNIT_TARGET"; do
     if [[ -e "$target" || -L "$target" ]]; then
@@ -84,6 +101,31 @@ trap 'exit 143' TERM
 
 install -m 0755 -o root -g root "$AGENT_BIN" "$BIN_TARGET"
 install -m 0644 -o root -g root "$UNIT_SOURCE" "$UNIT_TARGET"
+
+ENV_LOCAL="$REPO_DIR/.env.local"
+AGENT_ENV=/etc/labops/agent.env
+if [[ -r "$ENV_LOCAL" ]]; then
+    DEL_SECRET="$(grep -E '^LABOPS_DELEGATION_SECRET=' "$ENV_LOCAL" | tail -n 1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+    if [[ -n "$DEL_SECRET" ]]; then
+        install -d -m 0750 -o root -g aiot-ws1 /etc/labops
+        if [[ ! -e "$AGENT_ENV" ]]; then
+            (
+                umask 077
+                printf 'LABOPS_DELEGATION_SECRET=%s\n' "$DEL_SECRET" >"$AGENT_ENV"
+            )
+            chown root:aiot-ws1 "$AGENT_ENV"
+            chmod 0640 "$AGENT_ENV"
+        else
+            TMP_ENV="$(mktemp /etc/labops/agent.env.tmp.XXXXXXXX)"
+            grep -v -E '^LABOPS_DELEGATION_SECRET=' "$AGENT_ENV" >"$TMP_ENV" || true
+            printf 'LABOPS_DELEGATION_SECRET=%s\n' "$DEL_SECRET" >>"$TMP_ENV"
+            chown --reference="$AGENT_ENV" "$TMP_ENV"
+            chmod --reference="$AGENT_ENV" "$TMP_ENV"
+            mv -f "$TMP_ENV" "$AGENT_ENV"
+        fi
+    fi
+fi
+
 systemctl daemon-reload
 systemctl restart "$UNIT"
 HEALTH_RESPONSE="$(curl --noproxy "*" --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 \

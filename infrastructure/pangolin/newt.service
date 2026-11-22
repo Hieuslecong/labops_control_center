@@ -1,0 +1,16 @@
+[Unit]
+Description=LabOps Pangolin Site Connector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+DynamicUser=yes
+UMask=0077
+EnvironmentFile=/etc/labops-pangolin/newt.env
+ExecStart=/opt/labops-pangolin/newt
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

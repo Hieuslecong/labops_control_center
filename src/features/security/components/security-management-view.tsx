@@ -19,77 +19,30 @@ import { Icons } from '@/components/icons';
 import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
 import { useRepositoryRequestsQuery } from '@/features/labops/queries';
-import { RepositoryGuardRequest, SecurityReviewStatus } from '@/types/labops';
+import {
+  getCloneStatusMeta,
+  getPostCloneReviewMeta,
+  resolveCloneStatus,
+  resolvePostCloneReviewStatus
+} from '@/features/security/utils/repo-status';
+import { RepositoryGuardRequest } from '@/types/labops';
 
-function getSecurityStatusBadge(status: SecurityReviewStatus | string) {
-  switch (status) {
-    case 'AUTO_APPROVED':
-    case 'APPROVED':
-    case 'MANUALLY_APPROVED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-mono font-semibold'
-        >
-          {status === 'AUTO_APPROVED' ? 'TỰ ĐỘNG PHÊ DUYỆT' : 'ADMIN ĐÃ DUYỆT'}
-        </Badge>
-      );
-    case 'REVIEW_REQUIRED':
-    case 'MANUAL_REVIEW':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 text-xs font-mono font-semibold'
-        >
-          CẦN ADMIN DUYỆT
-        </Badge>
-      );
-    case 'REJECTED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-rose-600/10 text-rose-600 border-rose-600/30 text-xs font-mono font-semibold'
-        >
-          TỪ CHỐI
-        </Badge>
-      );
-    case 'FAILED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/30 text-xs font-mono'
-        >
-          THẤT BẠI
-        </Badge>
-      );
-    case 'DELIVERED':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-teal-500/10 text-teal-700 dark:text-teal-400 border-teal-500/30 text-xs font-mono font-semibold'
-        >
-          ĐÃ PHÂN PHỐI
-        </Badge>
-      );
-    case 'FETCHING':
-    case 'SCANNING':
-    case 'POLICY_EVALUATION':
-    case 'RESOLVING_COMMIT':
-      return (
-        <Badge
-          variant='outline'
-          className='bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-xs font-mono animate-pulse'
-        >
-          ĐANG QUÉT & CÁCH LY
-        </Badge>
-      );
-    default:
-      return (
-        <Badge variant='outline' className='text-xs font-mono'>
-          {status}
-        </Badge>
-      );
-  }
+function CloneStatusBadge({ req }: { req: RepositoryGuardRequest }) {
+  const meta = getCloneStatusMeta(resolveCloneStatus(req));
+  return (
+    <Badge variant='outline' className={`${meta.className} text-xs font-mono font-semibold`}>
+      {meta.label}
+    </Badge>
+  );
+}
+
+function PostCloneReviewBadge({ req }: { req: RepositoryGuardRequest }) {
+  const meta = getPostCloneReviewMeta(resolvePostCloneReviewStatus(req));
+  return (
+    <Badge variant='outline' className={`${meta.className} text-xs font-mono font-semibold`}>
+      {meta.label}
+    </Badge>
+  );
 }
 
 export function SecurityManagementView() {
@@ -106,19 +59,39 @@ export function SecurityManagementView() {
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [decisionType, setDecisionType] = useState<'APPROVED' | 'REJECTED'>('APPROVED');
   const [decisionReason, setDecisionReason] = useState('');
+  const [rescanningId, setRescanningId] = useState<string | null>(null);
 
   // Form submit state
   const [repoUrl, setRepoUrl] = useState('');
   const [ref, setRef] = useState('HEAD');
 
   // KPIs
-  const autoApprovedCount = requests.filter(
-    (r) => r.state === 'AUTO_APPROVED' || r.state === 'DELIVERED'
+  const clonedCount = requests.filter((r) => resolveCloneStatus(r) === 'CLONED').length;
+  const reviewRequiredCount = requests.filter(
+    (r) => resolvePostCloneReviewStatus(r) === 'REVIEW_REQUIRED'
   ).length;
-  const reviewRequiredCount = requests.filter((r) => r.state === 'REVIEW_REQUIRED').length;
-  const rejectedCount = requests.filter((r) => r.state === 'REJECTED').length;
-  const failedCount = requests.filter((r) => r.state === 'FAILED').length;
+  const rejectedCount = requests.filter(
+    (r) => resolvePostCloneReviewStatus(r) === 'REJECTED' || resolveCloneStatus(r) === 'BLOCKED'
+  ).length;
+  const failedCount = requests.filter(
+    (r) => resolvePostCloneReviewStatus(r) === 'SCAN_FAILED' || resolveCloneStatus(r) === 'FAILED'
+  ).length;
   const cacheHitCount = requests.filter((r) => r.cache_hit).length;
+
+  const handleRescan = async (reqId: string) => {
+    setRescanningId(reqId);
+    try {
+      const res = await labopsCall(`repositories/requests/${reqId}/rescan`, { method: 'POST' });
+      if (!res.ok) {
+        toast.error('Không thể quét lại hậu kiểm', { description: res.error });
+        return;
+      }
+      toast.success('Đã gửi yêu cầu quét lại hậu kiểm');
+      void fetchRequests();
+    } finally {
+      setRescanningId(null);
+    }
+  };
 
   const handleSubmit = (e: React.SyntheticEvent) => {
     e.preventDefault();
@@ -178,13 +151,15 @@ export function SecurityManagementView() {
       <div className='grid grid-cols-2 sm:grid-cols-5 gap-3'>
         <Card className='p-3.5 bg-card border shadow-xs'>
           <span className='text-xs text-muted-foreground font-medium'>
-            Tự động duyệt (Auto-Approved)
+            Clone thành công (Cloned)
           </span>
           <div className='text-xl font-bold mt-0.5 text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5'>
             <Icons.check className='size-5' />
-            {autoApprovedCount}
+            {clonedCount}
           </div>
-          <span className='text-xs text-muted-foreground'>Đạt 100% tiêu chuẩn chính sách</span>
+          <span className='text-xs text-muted-foreground'>
+            Cho phép tiếp tục làm việc / hậu kiểm
+          </span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
@@ -195,7 +170,9 @@ export function SecurityManagementView() {
             <Icons.warning className='size-5' />
             {reviewRequiredCount}
           </div>
-          <span className='text-xs text-muted-foreground'>Phát hiện rủi ro mức High</span>
+          <span className='text-xs text-muted-foreground'>
+            Có cảnh báo CVE, Secrets hoặc Misconfig
+          </span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
@@ -204,7 +181,9 @@ export function SecurityManagementView() {
             <Icons.close className='size-5' />
             {rejectedCount}
           </div>
-          <span className='text-xs text-muted-foreground'>Phát hiện Secrets hoặc Critical</span>
+          <span className='text-xs text-muted-foreground'>
+            Admin từ chối hoặc vi phạm chính sách
+          </span>
         </Card>
 
         <Card className='p-3.5 bg-card border shadow-xs'>
@@ -233,9 +212,17 @@ export function SecurityManagementView() {
             <h4 className='text-sm font-bold tracking-tight'>
               Cổng Kiểm duyệt Mã nguồn Tự động (Repository Security Gateway)
             </h4>
-            <Badge variant='outline' className='text-xs font-mono'>
-              KIỂM DUYỆT CÁCH LY (REPO GUARD)
-            </Badge>
+            <div className='flex items-center gap-1.5'>
+              <Badge
+                variant='outline'
+                className='text-xs font-mono bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30'
+              >
+                CHẾ ĐỘ GIÁM SÁT (AUDIT-ONLY)
+              </Badge>
+              <Badge variant='outline' className='text-xs font-mono'>
+                REPO GUARD
+              </Badge>
+            </div>
           </div>
           <div className='grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 pt-1 text-center text-xs'>
             {[
@@ -301,7 +288,8 @@ export function SecurityManagementView() {
                   <th className='py-2.5 px-3'>Commit SHA</th>
                   <th className='py-2.5 px-3'>Người gửi</th>
                   <th className='py-2.5 px-3'>Phát hiện rủi ro</th>
-                  <th className='py-2.5 px-3'>Trạng thái</th>
+                  <th className='py-2.5 px-3 whitespace-nowrap'>Trạng thái Clone</th>
+                  <th className='py-2.5 px-3 whitespace-nowrap'>Kiểm duyệt sau Clone</th>
                   <th className='py-2.5 px-3'>Thời gian</th>
                   <th className='py-2.5 px-3 text-right'>Hành động</th>
                 </tr>
@@ -309,7 +297,7 @@ export function SecurityManagementView() {
               <tbody className='divide-y divide-border/60'>
                 {requests.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className='py-8 text-center text-muted-foreground'>
+                    <td colSpan={8} className='py-8 text-center text-muted-foreground'>
                       Chưa có yêu cầu kiểm duyệt kho mã nào. Bấm &quot;Gửi Repo Kiểm duyệt&quot;
                       hoặc sử dụng CLI <code className='font-mono'>gitaiot clone</code> trong
                       terminal.
@@ -383,7 +371,13 @@ export function SecurityManagementView() {
                         )}
                       </td>
 
-                      <td className='py-3 px-3'>{getSecurityStatusBadge(r.state)}</td>
+                      <td className='py-3 px-3 whitespace-nowrap'>
+                        <CloneStatusBadge req={r} />
+                      </td>
+
+                      <td className='py-3 px-3 whitespace-nowrap'>
+                        <PostCloneReviewBadge req={r} />
+                      </td>
 
                       <td className='py-3 px-3 text-xs text-muted-foreground'>
                         {r.submitted_at ? new Date(r.submitted_at).toLocaleTimeString() : '—'}
@@ -399,7 +393,19 @@ export function SecurityManagementView() {
                           >
                             Chi tiết
                           </Button>
-                          {r.state === 'REVIEW_REQUIRED' && (
+                          {(resolvePostCloneReviewStatus(r) === 'SCAN_FAILED' ||
+                            r.state === 'FAILED') && (
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              disabled={rescanningId === r.id}
+                              onClick={() => void handleRescan(r.id)}
+                              className='h-7 text-xs px-2'
+                            >
+                              {rescanningId === r.id ? 'Đang quét...' : 'Quét lại'}
+                            </Button>
+                          )}
+                          {resolvePostCloneReviewStatus(r) === 'REVIEW_REQUIRED' && (
                             <Button
                               size='sm'
                               onClick={() => {
@@ -453,8 +459,16 @@ export function SecurityManagementView() {
                   <span className='font-mono'>@{selectedReq.submitted_by}</span>
                 </div>
                 <div>
-                  <span className='text-xs text-muted-foreground block'>Trạng thái</span>
-                  <div className='mt-0.5'>{getSecurityStatusBadge(selectedReq.state)}</div>
+                  <span className='text-xs text-muted-foreground block'>Trạng thái Clone</span>
+                  <div className='mt-0.5'>
+                    <CloneStatusBadge req={selectedReq} />
+                  </div>
+                </div>
+                <div>
+                  <span className='text-xs text-muted-foreground block'>Kiểm duyệt sau Clone</span>
+                  <div className='mt-0.5'>
+                    <PostCloneReviewBadge req={selectedReq} />
+                  </div>
                 </div>
               </div>
 
@@ -529,7 +543,7 @@ export function SecurityManagementView() {
             </div>
 
             <DialogFooter className='gap-2 sm:gap-0'>
-              {selectedReq.state === 'REVIEW_REQUIRED' && (
+              {resolvePostCloneReviewStatus(selectedReq) === 'REVIEW_REQUIRED' && (
                 <div className='flex items-center gap-2 mr-auto'>
                   <Button
                     size='sm'
@@ -539,7 +553,7 @@ export function SecurityManagementView() {
                     }}
                     className='bg-emerald-600 hover:bg-emerald-700 text-white text-xs'
                   >
-                    Duyệt ngoại lệ
+                    Duyệt hậu kiểm
                   </Button>
                   <Button
                     size='sm'

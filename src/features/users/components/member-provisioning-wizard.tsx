@@ -161,6 +161,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
     setFullName('');
     setUsername('');
     setEmail('');
+    setRole('RESEARCHER');
     setResearchGroup('');
     setExpiresAt('');
     setWorkspaceName('');
@@ -616,22 +617,34 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             </div>
             <div className='space-y-1.5'>
               <Label>Vai trò</Label>
-              <div className='grid grid-cols-2 gap-2'>
-                {(['RESEARCHER', 'ADMIN'] as const).map((value) => (
+              <div className='grid grid-cols-1 sm:grid-cols-3 gap-2'>
+                {(
+                  [
+                    {
+                      value: 'RESEARCHER',
+                      label: 'Nghiên cứu viên',
+                      desc: 'Truy cập SSH vào Workspace cô lập được cấp'
+                    },
+                    {
+                      value: 'STUDENT',
+                      label: 'Sinh viên',
+                      desc: 'Truy cập SSH vào Workspace cô lập phục vụ học tập & thực hành'
+                    },
+                    {
+                      value: 'ADMIN',
+                      label: 'Quản trị viên',
+                      desc: 'Quản trị hạ tầng và phê duyệt bảo mật'
+                    }
+                  ] as const
+                ).map((item) => (
                   <button
-                    key={value}
+                    key={item.value}
                     type='button'
-                    onClick={() => setRole(value)}
-                    className={`rounded-md border p-3 text-left text-sm ${role === value ? 'border-primary bg-primary/10' : 'border-border'}`}
+                    onClick={() => setRole(item.value)}
+                    className={`rounded-md border p-3 text-left text-sm ${role === item.value ? 'border-primary bg-primary/10' : 'border-border'}`}
                   >
-                    <span className='font-semibold'>
-                      {value === 'ADMIN' ? 'Quản trị viên' : 'Nghiên cứu viên'}
-                    </span>
-                    <span className='mt-1 block text-xs text-muted-foreground'>
-                      {value === 'ADMIN'
-                        ? 'Quản trị hạ tầng và phê duyệt bảo mật'
-                        : 'Truy cập SSH vào Workspace cô lập được cấp'}
-                    </span>
+                    <span className='font-semibold'>{item.label}</span>
+                    <span className='mt-1 block text-xs text-muted-foreground'>{item.desc}</span>
                   </button>
                 ))}
               </div>
@@ -752,19 +765,16 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                               {drive.isDefault && (
                                 <Badge
                                   variant='outline'
-                                  className='text-[10px] border-primary/40 text-primary bg-primary/5'
+                                  className='text-xs border-primary/40 text-primary bg-primary/5'
                                 >
                                   Mặc định
                                 </Badge>
                               )}
-                              <Badge
-                                variant='secondary'
-                                className='text-[10px] font-mono uppercase'
-                              >
+                              <Badge variant='secondary' className='text-xs font-mono uppercase'>
                                 {drive.filesystem} · {drive.device}
                               </Badge>
                             </div>
-                            <div className='text-[11px] font-mono text-muted-foreground truncate mt-0.5'>
+                            <div className='text-xs font-mono text-muted-foreground truncate mt-0.5'>
                               Mount: {drive.mountPoint}
                             </div>
                             <p className='text-xs text-muted-foreground mt-0.5'>
@@ -862,10 +872,10 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             {/* Auto-calculated paths preview */}
             <Card className='p-3.5 bg-muted/30 border-dashed space-y-2 text-xs'>
               <div className='flex items-center justify-between'>
-                <span className='font-semibold text-muted-foreground uppercase tracking-wider text-[11px]'>
+                <span className='font-semibold text-muted-foreground uppercase tracking-wider text-xs'>
                   Đường dẫn thư mục riêng trên Host:
                 </span>
-                <Badge variant='outline' className='text-[10px] text-primary border-primary/30'>
+                <Badge variant='outline' className='text-xs text-primary border-primary/30'>
                   Quyền cách ly: 0700
                 </Badge>
               </div>
@@ -955,7 +965,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
               </div>
               <div className='grid grid-cols-3 gap-2 py-1 text-center text-xs'>
                 <div className='rounded bg-muted/40 p-2'>
-                  <span className='block text-muted-foreground text-[10px] uppercase'>
+                  <span className='block text-muted-foreground text-xs uppercase'>
                     Tổng RAM Host
                   </span>
                   <span className='font-semibold text-sm'>
@@ -963,7 +973,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   </span>
                 </div>
                 <div className='rounded bg-amber-500/10 p-2 border border-amber-500/20'>
-                  <span className='block text-amber-700 dark:text-amber-300 text-[10px] uppercase font-medium'>
+                  <span className='block text-amber-700 dark:text-amber-300 text-xs uppercase font-medium'>
                     Dự trữ an toàn OS
                   </span>
                   <span className='font-semibold text-sm text-amber-700 dark:text-amber-300'>
@@ -971,7 +981,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                   </span>
                 </div>
                 <div className='rounded bg-emerald-500/10 p-2 border border-emerald-500/20'>
-                  <span className='block text-emerald-700 dark:text-emerald-300 text-[10px] uppercase font-medium'>
+                  <span className='block text-emerald-700 dark:text-emerald-300 text-xs uppercase font-medium'>
                     Ngân sách Containers
                   </span>
                   <span className='font-semibold text-sm text-emerald-700 dark:text-emerald-300'>
@@ -1169,7 +1179,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
             >
               <div className='flex items-center justify-between gap-2'>
                 <span className='font-semibold'>Trạng thái WireGuard VPN Gateway (wg-easy):</span>
-                <Badge variant='outline' className='font-mono text-[10px]'>
+                <Badge variant='outline' className='font-mono text-xs'>
                   {vpnOverview?.status || 'ĐANG KIỂM TRA...'}
                 </Badge>
               </div>
@@ -1226,7 +1236,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                         </code>
                       </p>
                       {created.sshLoginUser && created.sshLoginUser !== created.username && (
-                        <p className='text-[11px] font-sans text-muted-foreground'>
+                        <p className='text-xs font-sans text-muted-foreground'>
                           Ghi chú cách ly: sshd không đặc quyền đăng nhập qua OS user{' '}
                           <code>{created.sshLoginUser}</code> và ánh xạ ForceCommand vào thư mục
                           workspace cô lập của @{created.username}.
@@ -1248,7 +1258,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     >
                       <div className='flex items-center justify-between gap-2'>
                         <p className='font-semibold text-foreground'>Trạng thái WireGuard VPN:</p>
-                        <Badge variant='outline' className='font-mono text-[10px]'>
+                        <Badge variant='outline' className='font-mono text-xs'>
                           {created.wireguard.status}
                         </Badge>
                       </div>
@@ -1490,7 +1500,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 <div className='rounded-md border p-2.5 bg-muted/20 space-y-1.5 text-xs'>
                   <div className='flex items-center justify-between'>
                     <span className='font-semibold text-foreground'>Ổ đĩa & Hạn ngạch:</span>
-                    <Badge variant='outline' className='text-[10px] font-mono'>
+                    <Badge variant='outline' className='text-xs font-mono'>
                       {selectedDrive
                         ? selectedDrive.quotaSupported && selectedDrive.quotaEnforced
                           ? `${selectedDrive.quotaBackend} (Cưỡng chế cứng)`
@@ -1507,7 +1517,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                     </strong>{' '}
                     · Hạn ngạch: <strong className='text-primary'>{storageQuotaGb} GiB</strong>
                   </p>
-                  <p className='text-muted-foreground font-mono text-[11px] break-all'>
+                  <p className='text-muted-foreground font-mono text-xs break-all'>
                     Host dir:{' '}
                     {selectedDrive
                       ? `${selectedDrive.mountPoint}/labops/users/${username || 'username'}`
@@ -1519,7 +1529,7 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 <div className='rounded-md border p-2.5 bg-muted/20 space-y-1 text-xs'>
                   <div className='flex items-center justify-between gap-2'>
                     <span className='font-semibold text-foreground'>WireGuard VPN Gateway:</span>
-                    <Badge variant='outline' className='text-[10px] font-mono'>
+                    <Badge variant='outline' className='text-xs font-mono'>
                       {vpnOverview?.status || 'CHƯA RÕ'}
                     </Badge>
                   </div>
@@ -1533,13 +1543,13 @@ export function MemberProvisioningWizard({ open, onOpenChange }: MemberProvision
                 <div className='rounded-md border p-2.5 bg-muted/20 space-y-1 text-xs'>
                   <span className='font-semibold text-foreground'>Chính sách CPU / RAM / GPU:</span>
                   <div className='flex flex-wrap gap-1.5 pt-0.5'>
-                    <Badge variant='secondary' className='text-[10px]'>
+                    <Badge variant='secondary' className='text-xs'>
                       CPU: SHARED_WEIGHTED (Trọng số 100/1024 · 4096 PIDs)
                     </Badge>
-                    <Badge variant='secondary' className='text-[10px]'>
+                    <Badge variant='secondary' className='text-xs'>
                       RAM: SHARED_HOST_PROTECTED (Bảo vệ 20% Host OS)
                     </Badge>
-                    <Badge variant='secondary' className='text-[10px]'>
+                    <Badge variant='secondary' className='text-xs'>
                       GPU:{' '}
                       {selectedGpu === 'NONE' ? 'Chỉ CPU' : `${selectedGpu} (${gpuAllocationMode})`}
                     </Badge>

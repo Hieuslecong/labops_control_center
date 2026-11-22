@@ -40,36 +40,46 @@ class StorageInventoryService:
         self._custom_pools[host_id].append(pool)
 
     def get_storage_pools(self, host_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        target_host = (host_id or settings.LOCAL_HOST_ID or "workstation").lower()
+        local_host = (settings.LOCAL_HOST_ID or "workstation").lower()
+        target_host = (host_id or local_host).lower()
 
         # 1. Trả về custom pools nếu đã được mock trong test
         if target_host in self._custom_pools:
             return [dict(p) for p in self._custom_pools[target_host]]
 
-        # 2. Thử truy vấn Node Agent cục bộ
-        token = settings.LABOPS_NODE_AGENT_TOKEN or settings.LABOPS_AGENT_SECRET or ""
-        agent_url = "http://127.0.0.1:9100/api/v1/agent/storage"
-        try:
-            req = urllib.request.Request(agent_url)
-            if token:
-                req.add_header("X-LabOps-Agent-Secret", token)
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode())
-                    pools = data.get("storage_pools", [])
-                    if pools:
-                        # Match host_id
-                        for p in pools:
-                            p["host_id"] = target_host
-                        return pools
-        except Exception as e:
-            logger.debug(f"Không thể kết nối Node Agent qua HTTP ({agent_url}): {e}")
+        # 2. Chỉ truy vấn Node Agent cục bộ cho đúng host cục bộ (không áp nhầm sang remote node như 'track')
+        if target_host in (local_host, "local", "localhost"):
+            token = settings.LABOPS_NODE_AGENT_TOKEN or settings.LABOPS_AGENT_SECRET or ""
+            agent_url = "http://127.0.0.1:9100/api/v1/agent/storage"
+            try:
+                req = urllib.request.Request(agent_url)
+                if token:
+                    req.add_header("X-LabOps-Agent-Secret", token)
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode())
+                        pools = data.get("storage_pools", [])
+                        if pools:
+                            resolved_host = local_host
+                            result_pools: List[Dict[str, Any]] = []
+                            for p in pools:
+                                entry = dict(p)
+                                agent_host = str(entry.get("server_id") or entry.get("host_id") or resolved_host).lower()
+                                if target_host not in ("local", "localhost") and agent_host != target_host:
+                                    continue
+                                entry["host_id"] = resolved_host
+                                result_pools.append(entry)
+                            if result_pools:
+                                return result_pools
+            except Exception as e:
+                logger.debug(f"Không thể kết nối Node Agent qua HTTP ({agent_url}): {e}")
 
-        # 3. Fallback: Thu thập nội bộ từ hệ thống host thực tế
+        # 3. Fallback: Thu thập nội bộ từ hệ thống host thực tế (trả [] cho remote node chưa xác minh)
         return self._collect_local_storage_pools(target_host)
 
     def _collect_local_storage_pools(self, host_id: str) -> List[Dict[str, Any]]:
         pools = []
+        local_host = (settings.LOCAL_HOST_ID or "workstation").lower()
         approved_roots = ["/mnt/HDD3", "/media/LabOps-Data", "/tank/workspaces", "/mnt/labops-data", "/data"]
         ignored_fs = {
             "cgroup", "cgroup2", "sysfs", "proc", "devpts", "tmpfs", "securityfs",
@@ -78,12 +88,8 @@ class StorageInventoryService:
             "configfs", "binfmt_misc", "nsfs", "overlay", "ramfs",
         }
 
-        # Chỉ đọc mount/pool thực tế hoặc pool đã đăng ký cho host này (không giả lập ZFS hay ổ đĩa không tồn tại)
-        if host_id not in ("workstation", "local", "localhost") and not os.path.exists(f"/proc/mounts"):
-            return pools
-        if host_id == "track":
-            # Với remote host khi chưa nhận telemetry thật từ Go Agent qua tunnel, chỉ trả pool đăng ký thực (nếu có)
-            pools.sort(key=lambda p: (not p.get("eligible", False), not p.get("is_default", False), -float(p.get("allocatable_gib", 0.0))))
+        # Chỉ đọc mount/pool thực tế cho host cục bộ; remote host chưa có telemetry trả []
+        if host_id.lower() not in (local_host, "local", "localhost") or not os.path.exists("/proc/mounts"):
             return pools
 
         # Quét /proc/mounts cho workstation (hoặc host hiện tại)

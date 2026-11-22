@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     LABOPS_WORKSPACE_BIND_IP: str = os.getenv("LABOPS_WORKSPACE_BIND_IP", "192.168.167.251")
     LABOPS_WORKSPACE_IMAGE_REF: str = os.getenv("LABOPS_WORKSPACE_IMAGE_REF", "")
     LABOPS_WORKSPACE_IMAGE_DIGEST: str = os.getenv("LABOPS_WORKSPACE_IMAGE_DIGEST", "")
+    LABOPS_ALLOW_SOFT_STORAGE_QUOTA: bool = os.getenv("LABOPS_ALLOW_SOFT_STORAGE_QUOTA", "false").lower() == "true"
+    LABOPS_AUTO_ACTIVATE_SSH_ON_PROVISION: bool = os.getenv("LABOPS_AUTO_ACTIVATE_SSH_ON_PROVISION", "false").lower() == "true"
     LABOPS_ADMIN_USERNAME: str = os.getenv("LABOPS_ADMIN_USERNAME", "admin")
     LABOPS_ADMIN_PASSWORD: str = os.getenv("LABOPS_ADMIN_PASSWORD", "")
 

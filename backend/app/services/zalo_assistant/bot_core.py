@@ -8,6 +8,7 @@ and provides single-consumer polling lease protection.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -69,11 +70,21 @@ class ZaloBotEngine:
         bot_token: Optional[str] = None,
         authorized_users: Optional[List[str]] = None,
         allowed_chat_ids: Optional[List[str]] = None,
+        config_path: Optional[str] = None,
     ):
         self.quota_ledger = quota_ledger
         self.ai_client = ai_client
         self.report_generator = report_generator
         self.bot_token = bot_token if bot_token is not None else os.getenv("ZALO_BOT_TOKEN", "")
+        self._explicit_allowlist = (authorized_users is not None or allowed_chat_ids is not None)
+        if config_path is not None:
+            self._config_path: Optional[str] = config_path
+        elif not self._explicit_allowlist and getattr(quota_ledger, "data_dir", None):
+            self._config_path = os.path.join(quota_ledger.data_dir, "zalo_config.json")
+        else:
+            self._config_path = None
+        self._config_mtime: Optional[float] = None
+
         if authorized_users is not None:
             cleaned_users = [str(u).strip() for u in authorized_users if str(u).strip()]
             if "*" in cleaned_users:
@@ -105,8 +116,74 @@ class ZaloBotEngine:
         self.message_history: List[Dict[str, Any]] = []
         self._ask_lock = threading.Lock()
         self._ask_timestamps: Dict[str, List[float]] = defaultdict(list)
+        if self._config_path and not self._explicit_allowlist:
+            self.reload_persisted_config(force=True)
+
+    def reload_persisted_config(self, force: bool = False) -> bool:
+        """Tự động nạp lại cấu hình allowlist/AI từ zalo_config.json khi file thay đổi."""
+        if not self._config_path or not os.path.exists(self._config_path):
+            return False
+        try:
+            mtime = os.path.getmtime(self._config_path)
+        except OSError:
+            return False
+        if not force and self._config_mtime is not None and mtime == self._config_mtime:
+            return False
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return False
+            if isinstance(data.get("authorized_users"), list):
+                self.authorized_users = [
+                    str(u).strip()
+                    for u in data["authorized_users"]
+                    if str(u).strip() and str(u).strip() != "*"
+                ]
+            if isinstance(data.get("allowed_chat_ids"), list):
+                self.allowed_chat_ids = [
+                    str(c).strip()
+                    for c in data["allowed_chat_ids"]
+                    if str(c).strip() and str(c).strip() != "*"
+                ]
+            if data.get("ai_model"):
+                self.ai_client.model = str(data["ai_model"]).strip()
+            if data.get("timeout_seconds") is not None:
+                try:
+                    t_val = int(data["timeout_seconds"])
+                    if 1 <= t_val <= 120:
+                        self.ai_client.timeout = t_val
+                except (ValueError, TypeError):
+                    pass
+            self._config_mtime = mtime
+            return True
+        except Exception as exc:
+            logger.warning("Không thể đọc cấu hình %s: %s", self._config_path, exc)
+            return False
+
+    def save_persisted_config(self) -> None:
+        """Lưu allowlist và tùy chọn AI ra zalo_config.json (KHÔNG lưu bot_token)."""
+        if not self._config_path:
+            return
+        os.makedirs(os.path.dirname(self._config_path), exist_ok=True)
+        payload = {
+            "authorized_users": [u for u in (self.authorized_users or []) if u and u != "*"],
+            "allowed_chat_ids": [c for c in (self.allowed_chat_ids or []) if c and c != "*"],
+            "ai_model": self.ai_client.model,
+            "timeout_seconds": self.ai_client.timeout,
+            "updated_at": _now(),
+        }
+        tmp_path = f"{self._config_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, self._config_path)
+        try:
+            self._config_mtime = os.path.getmtime(self._config_path)
+        except OSError:
+            pass
 
     def is_authorized(self, user_id: str) -> bool:
+        self.reload_persisted_config()
         uid = str(user_id or "").strip()
         if not uid or uid == "*":
             return False
@@ -118,6 +195,7 @@ class ZaloBotEngine:
         return uid in allowed
 
     def is_chat_allowed(self, chat_id: Optional[str], sender_id: Optional[str] = None) -> bool:
+        self.reload_persisted_config()
         cid = str(chat_id or "").strip()
         if not cid or cid == "*":
             return False
@@ -580,6 +658,7 @@ class ZaloBotEngine:
             "has_token": bool(self.bot_token),
             "token_masked": f"{self.bot_token[:6]}...{self.bot_token[-4:]}" if len(self.bot_token) > 10 else "(Chưa cấu hình)",
             "last_heartbeat": self.last_polling_heartbeat,
+            "authorized_users_count": len(self.authorized_users or []),
             "enabled_read_tools": self.ENABLED_READ_TOOLS,
             "disabled_write_tools": self.DISABLED_WRITE_TOOLS,
         }

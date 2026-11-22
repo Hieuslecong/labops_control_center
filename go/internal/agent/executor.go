@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -36,20 +37,20 @@ type ExecuteCommandRequest struct {
 
 // ExecuteCommandResponse chuẩn hóa kết quả trả về cho Control Plane.
 type ExecuteCommandResponse struct {
-	CommandID        string          `json:"command_id"`
-	RequestID        string          `json:"request_id"`
-	NodeID           string          `json:"node_id"`
-	Action           string          `json:"action"`
-	Success          bool            `json:"success"`
-	Status           string                       `json:"status"`
+	CommandID        string                           `json:"command_id"`
+	RequestID        string                           `json:"request_id"`
+	NodeID           string                           `json:"node_id"`
+	Action           string                           `json:"action"`
+	Success          bool                             `json:"success"`
+	Status           string                           `json:"status"`
 	ProtoStatus      pb.CommandResponse_CommandStatus `json:"-"`
-	IdempotentReplay bool            `json:"idempotent_replay,omitempty"`
-	ErrorCode        string          `json:"error_code,omitempty"`
-	ErrorMessage     string          `json:"error_message,omitempty"`
-	Result           any             `json:"result,omitempty"`
-	ResultPayload    json.RawMessage `json:"-"`
-	ExecutedAtUnix   int64           `json:"executed_at_unix"`
-	DurationMs       int64           `json:"execution_duration_ms"`
+	IdempotentReplay bool                             `json:"idempotent_replay,omitempty"`
+	ErrorCode        string                           `json:"error_code,omitempty"`
+	ErrorMessage     string                           `json:"error_message,omitempty"`
+	Result           any                              `json:"result,omitempty"`
+	ResultPayload    json.RawMessage                  `json:"-"`
+	ExecutedAtUnix   int64                            `json:"executed_at_unix"`
+	DurationMs       int64                            `json:"execution_duration_ms"`
 }
 
 // CommandExecutor dùng chung giữa gRPC Tunnel và HTTP /api/v1/agent/execute.
@@ -142,8 +143,8 @@ func (e *CommandExecutor) Execute(ctx context.Context, req *ExecuteCommandReques
 
 	// 3. Xác thực DelegationToken + Action Authorization + Nonce Replay
 	actorScope := strings.TrimSpace(req.ActorID)
-	paramsHash := gateway.ComputeParamsHash(params)
-	if strings.TrimSpace(e.cfg.DelegationSecret) != "" || strings.TrimSpace(req.AuthorizationContext) != "" {
+	paramsHash := idempotencyParamsHash(req.Action, params)
+	if !unsignedTelemetryAllowed(req.Action) || strings.TrimSpace(req.AuthorizationContext) != "" {
 		claims, err := gateway.VerifyDelegationToken(e.cfg.DelegationSecret, req.AuthorizationContext, time.Now())
 		if err != nil {
 			resp.Status = "REJECTED_UNAUTHORIZED"
@@ -151,6 +152,13 @@ func (e *CommandExecutor) Execute(ctx context.Context, req *ExecuteCommandReques
 			resp.ErrorCode = "DELEGATION_INVALID"
 			resp.ErrorMessage = err.Error()
 			resp.DurationMs = time.Since(start).Milliseconds()
+			return resp
+		}
+		if claims.ParamsSHA256 == "" || claims.RequestID != reqID || actorScope != claims.ActorID || e.replayGuard == nil {
+			resp.Status = "REJECTED_UNAUTHORIZED"
+			resp.ProtoStatus = pb.CommandResponse_REJECTED_UNAUTHORIZED
+			resp.ErrorCode = "DELEGATION_SCOPE_INVALID"
+			resp.ErrorMessage = "Delegation requires matching request and actor, parameter digest, and replay protection"
 			return resp
 		}
 		if err := gateway.ActionAuthorizationCheck(claims, e.cfg.ServerID, req.Action, params); err != nil {
@@ -485,4 +493,30 @@ func (e *CommandExecutor) Execute(ctx context.Context, req *ExecuteCommandReques
 
 	resp.DurationMs = time.Since(start).Milliseconds()
 	return resp
+}
+
+// Idempotency covers workspace configuration. The complete original parameters
+// are still checked against the delegation signature on each invocation.
+func idempotencyParamsHash(action string, params map[string]string) string {
+	if action == "PROVISION_DOCKER_WORKSPACE" {
+		var spec map[string]json.RawMessage
+		if json.Unmarshal([]byte(params["spec_json"]), &spec) == nil && spec["repository_token"] != nil {
+			delete(spec, "repository_token")
+			delete(spec, "correlation_id")
+			if normalized, err := json.Marshal(spec); err == nil {
+				params = maps.Clone(params)
+				params["spec_json"] = string(normalized)
+			}
+		}
+	}
+	return gateway.ComputeParamsHash(params)
+}
+
+func unsignedTelemetryAllowed(action string) bool {
+	switch action {
+	case "INSPECT_HOST", "INSPECT_GPUS", "COLLECT_TELEMETRY", "LIST_STORAGE_POOLS", "INSPECT_STORAGE_POOL", "GET_RESOURCE_PROFILE":
+		return true
+	default:
+		return false
+	}
 }

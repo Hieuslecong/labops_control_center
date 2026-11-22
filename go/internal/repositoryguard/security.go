@@ -380,11 +380,7 @@ func BuildGitBundleAndManifest(ctx context.Context, gitDir, bundleStageDir, repo
 
 	bundlePath := filepath.Join(metaDir, BundleFileName)
 	if _, err := runGit(ctx, gitDir, "bundle", "create", bundlePath, "refs/heads/main"); err != nil {
-		// Fallback if shallow boundary blocked direct bundle creation
-		_, _ = runGit(ctx, gitDir, "fetch", "--unshallow")
-		if _, errRetry := runGit(ctx, gitDir, "bundle", "create", bundlePath, "refs/heads/main"); errRetry != nil {
-			return nil, fmt.Errorf("failed creating git bundle: %w", errRetry)
-		}
+		return nil, fmt.Errorf("failed creating git bundle: %w", err)
 	}
 
 	if err := os.Chmod(bundlePath, 0440); err != nil {

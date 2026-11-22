@@ -264,6 +264,13 @@ class HostMonitorAdapter:
                     data["age_seconds"] = age_s
                     data["telemetry_source"] = "go_node_agent"
                     data["freshness_status"] = f_status
+                    disk_info = self._get_disk_telemetry()
+                    if float(disk_info.get("disk_total_tb") or 0) >= float(data.get("disk_total_tb") or 0) and float(disk_info.get("disk_total_tb") or 0) > 0:
+                        data["disk_total_tb"] = disk_info["disk_total_tb"]
+                        data["disk_used_tb"] = disk_info["disk_used_tb"]
+                        data["disk_usage_percent"] = disk_info["disk_usage_percent"]
+                        data["disk_type"] = disk_info["disk_type"]
+                        data["partitions"] = disk_info.get("partitions", [])
                     return data
         except Exception:
             pass

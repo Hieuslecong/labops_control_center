@@ -627,3 +627,94 @@ func TestProvisionImageValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifySSHReachability_RetriesUntilBannerReady(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer lis.Close()
+
+	go func() {
+		attempts := 0
+		for {
+			c, aErr := lis.Accept()
+			if aErr != nil {
+				return
+			}
+			attempts++
+			if attempts == 1 {
+				// Mô phỏng docker-proxy nhận TCP trước khi sshd hoàn tất ssh-keygen -> EOF lần đầu
+				_ = c.Close()
+				continue
+			}
+			_, _ = c.Write([]byte("SSH-2.0-OpenSSH_9.6 LabOpsRetryTest\r\n"))
+			_ = c.Close()
+		}
+	}()
+
+	port := lis.Addr().(*net.TCPAddr).Port
+	ok, banner := VerifySSHReachability("127.0.0.1", port, 2*time.Second)
+	if !ok || !strings.Contains(banner, "SSH-2.0-OpenSSH_9.6") {
+		t.Fatalf("expected VerifySSHReachability to succeed on retry, got ok=%v banner=%q", ok, banner)
+	}
+}
+
+func TestWorkspaceSSHDConfigSupportsVSCodeRemoteSSH(t *testing.T) {
+	ctrl := NewControllerWithRegistry(
+		"",
+		"workstation",
+		NewInMemoryRegistry(),
+	)
+	ctrl.SetRuntimeRoot(t.TempDir())
+
+	runtimeFiles, err := ctrl.prepareWorkspaceRuntimeDir(
+		"ws-vscode-test",
+		"testacc",
+		20001,
+		20001,
+		"/workspace",
+	)
+	if err != nil {
+		t.Fatalf("prepare runtime failed: %v", err)
+	}
+
+	data, err := os.ReadFile(runtimeFiles.sshdCfg)
+	if err != nil {
+		t.Fatalf("read sshd_config failed: %v", err)
+	}
+	cfg := string(data)
+
+	required := []string{
+		"AllowTcpForwarding local",
+		"PermitOpen 127.0.0.1:* localhost:*",
+		"AllowStreamLocalForwarding no",
+		"GatewayPorts no",
+		"X11Forwarding no",
+		"PasswordAuthentication no",
+		"PubkeyAuthentication yes",
+		"PermitRootLogin no",
+		"Subsystem sftp internal-sftp",
+	}
+	for _, directive := range required {
+		if !strings.Contains(cfg, directive+"\n") {
+			t.Errorf("required SSH directive missing: %s", directive)
+		}
+	}
+
+	forbidden := []string{
+		"AllowTcpForwarding yes",
+		"AllowTcpForwarding no",
+		"PermitOpen any",
+		"AllowStreamLocalForwarding yes",
+		"GatewayPorts yes",
+		"X11Forwarding yes",
+		"PasswordAuthentication yes",
+		"PermitRootLogin yes",
+	}
+	for _, directive := range forbidden {
+		if strings.Contains(cfg, directive+"\n") {
+			t.Errorf("unsafe SSH directive found: %s", directive)
+		}
+	}
+}

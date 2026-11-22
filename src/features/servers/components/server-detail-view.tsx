@@ -268,9 +268,15 @@ export function ServerDetailView() {
                 <div className='text-2xl font-bold font-mono mt-1'>
                   {Math.round(server.ramUsedGb)} / {server.ramTotalGb} GB
                 </div>
-                <span className='text-xs text-muted-foreground'>
+                <span className='text-xs text-muted-foreground block'>
                   {server.ramUsagePercent}% đã sử dụng
                 </span>
+                {server.ramTotalGb > 0 && (
+                  <span className='text-xs text-emerald-700 dark:text-emerald-400 font-medium block mt-0.5'>
+                    Ngưỡng an toàn: Trần 80% ({(server.ramTotalGb * 0.8).toFixed(1)} GB) • Dự phòng
+                    OS 20% ({(server.ramTotalGb * 0.2).toFixed(1)} GB)
+                  </span>
+                )}
               </div>
               <CircularGauge
                 value={server.ramUsagePercent}
@@ -281,12 +287,17 @@ export function ServerDetailView() {
             </Card>
 
             <Card className='p-4 flex items-center justify-between bg-card'>
-              <div>
+              <div className='min-w-0 pr-2'>
                 <span className='text-xs font-medium text-muted-foreground'>Ổ đĩa đã báo cáo</span>
                 <div className='text-2xl font-bold font-mono mt-1'>
-                  {server.diskUsedTb.toFixed(1)} / {server.diskTotalTb} TB
+                  {server.diskUsedTb.toFixed(2)} / {server.diskTotalTb} TB
                 </div>
-                <span className='text-xs text-muted-foreground'>{server.diskType}</span>
+                <span
+                  className='text-xs text-muted-foreground line-clamp-2'
+                  title={server.diskType}
+                >
+                  {server.diskType}
+                </span>
               </div>
               <CircularGauge
                 value={server.diskUsagePercent}

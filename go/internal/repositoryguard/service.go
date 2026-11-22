@@ -18,6 +18,10 @@ import (
 // ErrPermissionDenied indicates the caller does not own the request and is not an Admin.
 var ErrPermissionDenied = errors.New("PERMISSION_DENIED: caller is not authorized for this repository request")
 
+var ErrScanCapacity = errors.New("repository guard is busy; retry later")
+
+const maxConcurrentScans = 2
+
 type GuardService struct {
 	dataDir               string
 	quarantineDir         string
@@ -29,6 +33,7 @@ type GuardService struct {
 	scanFn                func(ctx context.Context, sourceDir string) (*ScanReport, error)
 	mu                    sync.RWMutex
 	requests              map[string]*RepositoryRequest
+	scanSlots             chan struct{}
 }
 
 func NewGuardService(dataDir string) (*GuardService, error) {
@@ -61,6 +66,7 @@ func NewGuardService(dataDir string) (*GuardService, error) {
 		requestsPath:  filepath.Join(dataDir, "requests.json"),
 		scanFn:        RunTrivyScan,
 		requests:      make(map[string]*RepositoryRequest),
+		scanSlots:     make(chan struct{}, maxConcurrentScans),
 	}
 
 	if err := svc.loadRequests(); err != nil {
@@ -277,8 +283,47 @@ func (s *GuardService) validateRepoInput(rawURL string) (canonical, owner, repo 
 	return canonical, parts[0], parts[1], nil
 }
 
+type SubmitOptions struct {
+	Source                string
+	LocalRepoRelPath      string
+	VerifiedWorkspaceRoot string
+}
+
+func reportHasSecurityConcerns(report *ScanReport) bool {
+	if report == nil {
+		return true
+	}
+	cov := report.Coverage
+	return report.SecretsCount > 0 ||
+		report.Vulnerabilities.Critical > 0 ||
+		report.Vulnerabilities.High > 0 ||
+		report.MisconfigHighCount > 0 ||
+		cov.Submodules != "NOT_PRESENT" ||
+		cov.LFS != "NOT_PRESENT" ||
+		cov.OverallCoverage != "POLICY_COMPLETE"
+}
+
+func deriveReviewStatus(verdict ScanState, report *ScanReport) string {
+	switch verdict {
+	case StateRejected:
+		return ReviewStatusRejected
+	case StateReviewRequired:
+		return ReviewStatusReviewRequired
+	default:
+		if reportHasSecurityConcerns(report) {
+			return ReviewStatusReviewRequired
+		}
+		return ReviewStatusClean
+	}
+}
+
 // SubmitRequest tiếp nhận yêu cầu clone repo từ Researcher hoặc Admin.
 func (s *GuardService) SubmitRequest(ctx context.Context, rawURL, ref, submitter, targetWorkspace string) (*RepositoryRequest, error) {
+	return s.SubmitRequestWithOptions(ctx, rawURL, ref, submitter, targetWorkspace, SubmitOptions{})
+}
+
+// SubmitRequestWithOptions tiếp nhận yêu cầu kiểm duyệt với tùy chọn hậu kiểm từ workspace local.
+func (s *GuardService) SubmitRequestWithOptions(ctx context.Context, rawURL, ref, submitter, targetWorkspace string, opts SubmitOptions) (*RepositoryRequest, error) {
 	submitter = strings.TrimSpace(submitter)
 	if submitter == "" {
 		return nil, errors.New("submitter identity is required")
@@ -287,6 +332,17 @@ func (s *GuardService) SubmitRequest(ctx context.Context, rawURL, ref, submitter
 	canonicalURL, owner, repo, err := s.validateRepoInput(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("URL không hợp lệ: %w", err)
+	}
+
+	source := strings.TrimSpace(opts.Source)
+	if source != SourceWorkspaceClone {
+		source = SourceGateway
+	}
+	cloneStatus := CloneStatusCloning
+	reviewStatus := ReviewStatusNotStarted
+	if source == SourceWorkspaceClone {
+		cloneStatus = CloneStatusCloned
+		reviewStatus = ReviewStatusScanning
 	}
 
 	reqID := s.generateID()
@@ -301,6 +357,10 @@ func (s *GuardService) SubmitRequest(ctx context.Context, rawURL, ref, submitter
 		RequestedRef:    ref,
 		Submitter:       submitter,
 		TargetWorkspace: targetWorkspace,
+		Source:          source,
+		CloneStatus:     cloneStatus,
+		ReviewStatus:    reviewStatus,
+		LocalRepoPath:   strings.TrimSpace(opts.LocalRepoRelPath),
 		SubmittedAt:     now,
 		UpdatedAt:       now,
 		State:           StateRequested,
@@ -308,8 +368,32 @@ func (s *GuardService) SubmitRequest(ctx context.Context, rawURL, ref, submitter
 	}
 
 	s.mu.Lock()
+	if strings.HasPrefix(targetWorkspace, "managed:") {
+		for _, prior := range s.requests {
+			if prior.Submitter != submitter || prior.TargetWorkspace != targetWorkspace ||
+				prior.CanonicalRepo != canonicalURL || prior.RequestedRef != ref ||
+				(prior.ExpiresAt != nil && !now.Before(*prior.ExpiresAt)) {
+				continue
+			}
+			switch prior.State {
+			case StateFailed, StateExpired, StateDelivered, StateRevoked:
+				continue
+			default:
+				reused := cloneRequest(prior)
+				s.mu.Unlock()
+				return reused, nil
+			}
+		}
+	}
+	select {
+	case s.scanSlots <- struct{}{}:
+	default:
+		s.mu.Unlock()
+		return nil, ErrScanCapacity
+	}
 	s.requests[reqID] = req
 	if saveErr := s.saveRequestsLocked(); saveErr != nil {
+		<-s.scanSlots
 		delete(s.requests, reqID)
 		s.mu.Unlock()
 		return nil, fmt.Errorf("không thể lưu trạng thái yêu cầu: %w", saveErr)
@@ -318,9 +402,80 @@ func (s *GuardService) SubmitRequest(ctx context.Context, rawURL, ref, submitter
 	s.mu.Unlock()
 
 	s.audit.LogEvent(submitter, "REPO_REQUEST_SUBMITTED", "REPOSITORY", canonicalURL, "SUCCESS",
-		fmt.Sprintf("Yêu cầu kiểm duyệt repo %s (ref: %s)", canonicalURL, ref))
+		fmt.Sprintf("Yêu cầu kiểm duyệt repo %s (ref: %s, source: %s)", canonicalURL, ref, source))
 
-	go s.processRequest(context.Background(), reqID)
+	go func() {
+		defer func() { <-s.scanSlots }()
+		s.processRequestWithOptions(context.Background(), reqID, opts)
+	}()
+
+	return snap, nil
+}
+
+// RescanRequest chạy lại quy trình quét bảo mật cho yêu cầu đang ở trạng thái FAILED hoặc SCAN_FAILED.
+func (s *GuardService) RescanRequest(ctx context.Context, reqID string, opts SubmitOptions) (*RepositoryRequest, error) {
+	s.mu.Lock()
+	req, ok := s.requests[reqID]
+	if !ok || req == nil {
+		s.mu.Unlock()
+		return nil, errors.New("không tìm thấy yêu cầu")
+	}
+	if req.State != StateFailed && req.ReviewStatus != ReviewStatusScanFailed {
+		curr := req.State
+		s.mu.Unlock()
+		return nil, fmt.Errorf("INVALID_STATE_TRANSITION: chỉ có thể quét lại yêu cầu đang ở trạng thái FAILED/SCAN_FAILED (hiện tại: %s)", curr)
+	}
+	select {
+	case s.scanSlots <- struct{}{}:
+	default:
+		s.mu.Unlock()
+		return nil, ErrScanCapacity
+	}
+
+	source := strings.TrimSpace(opts.Source)
+	if source == "" {
+		source = strings.TrimSpace(req.Source)
+	}
+	if source != SourceWorkspaceClone {
+		source = SourceGateway
+	}
+	relPath := strings.TrimSpace(opts.LocalRepoRelPath)
+	if relPath == "" {
+		relPath = strings.TrimSpace(req.LocalRepoPath)
+	}
+	opts.Source = source
+	opts.LocalRepoRelPath = relPath
+
+	req.Source = source
+	req.LocalRepoPath = relPath
+	if source == SourceWorkspaceClone {
+		req.CloneStatus = CloneStatusCloned
+	} else {
+		req.CloneStatus = CloneStatusCloning
+	}
+	req.ReviewStatus = ReviewStatusScanning
+	req.State = StateRequested
+	req.Error = ""
+	req.Report = nil
+	req.Decision = nil
+	req.UpdatedAt = time.Now()
+	if saveErr := s.saveRequestsLocked(); saveErr != nil {
+		<-s.scanSlots
+		s.mu.Unlock()
+		return nil, fmt.Errorf("không thể lưu trạng thái quét lại: %w", saveErr)
+	}
+	snap := cloneRequest(req)
+	canonicalRepo := req.CanonicalRepo
+	submitter := req.Submitter
+	s.mu.Unlock()
+
+	s.audit.LogEvent(submitter, "REPO_RESCAN_REQUESTED", "REPOSITORY", canonicalRepo, "SUCCESS",
+		fmt.Sprintf("Yêu cầu quét lại %s (%s)", reqID, source))
+
+	go func() {
+		defer func() { <-s.scanSlots }()
+		s.processRequestWithOptions(context.Background(), reqID, opts)
+	}()
 
 	return snap, nil
 }
@@ -350,18 +505,38 @@ func (s *GuardService) getRequestMeta(reqID string) (canonicalRepo, requestedRef
 }
 
 func (s *GuardService) processRequest(ctx context.Context, reqID string) {
-	s.updateRequest(reqID, func(r *RepositoryRequest) { r.State = StateResolvingCommit })
+	s.processRequestWithOptions(ctx, reqID, SubmitOptions{})
+}
+
+func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID string, opts SubmitOptions) {
+	isWorkspaceClone := opts.Source == SourceWorkspaceClone
+	s.updateRequest(reqID, func(r *RepositoryRequest) {
+		r.State = StateResolvingCommit
+		if isWorkspaceClone {
+			r.CloneStatus = CloneStatusCloned
+			r.ReviewStatus = ReviewStatusScanning
+		} else {
+			r.CloneStatus = CloneStatusCloning
+		}
+	})
 
 	canonicalRepo, requestedRef, ok := s.getRequestMeta(reqID)
 	if !ok {
 		return
 	}
 
-	commitSHA, err := ResolveCommitSHA(ctx, canonicalRepo, requestedRef)
+	commitSHA, checkoutRef, err := resolveCheckoutRef(ctx, canonicalRepo, requestedRef)
 	if err != nil {
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateFailed
 			r.Error = fmt.Sprintf("Lỗi phân giải commit SHA: %v", err)
+			if isWorkspaceClone {
+				r.CloneStatus = CloneStatusCloned
+				r.ReviewStatus = ReviewStatusScanFailed
+			} else {
+				r.CloneStatus = CloneStatusFailed
+				r.ReviewStatus = ReviewStatusNotStarted
+			}
 		})
 		s.audit.LogEvent("SYSTEM", "COMMIT_RESOLUTION_FAILED", "REPOSITORY", canonicalRepo, "FAILED", err.Error())
 		return
@@ -369,41 +544,61 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 
 	s.updateRequest(reqID, func(r *RepositoryRequest) {
 		r.CommitSHA = commitSHA
+		r.CheckoutRef = checkoutRef
 		r.State = StateCheckingCache
 	})
 
-	// 2. Kiểm tra Approved Cache
-	if entry, hit := s.store.GetApproved(canonicalRepo, commitSHA); hit {
-		expires := entry.ApprovedAt.Add(30 * 24 * time.Hour)
-		s.updateRequest(reqID, func(r *RepositoryRequest) {
-			r.State = StateAutoApproved
-			r.CacheHit = true
-			r.ArtifactDigest = entry.ArtifactDigest
-			r.ArtifactSize = entry.ArtifactSize
-			r.ScannerVersion = entry.ScannerVersion
-			r.DBVersion = entry.DBVersion
-			r.ArtifactProvenance = fmt.Sprintf("store:%s@%s", entry.CommitSHA, entry.ArtifactDigest)
-			r.ExpiresAt = &expires
-		})
-		s.audit.LogEvent("SYSTEM", "CACHE_HIT", "COMMIT", commitSHA, "SUCCESS",
-			fmt.Sprintf("Tái sử dụng artifact đã phê duyệt (Digest: %s)", entry.ArtifactDigest))
-		return
+	// 2. Kiểm tra Approved Cache (chỉ áp dụng cho gateway clone; workspace_clone quét riêng trên workspace, không chia sẻ private cache)
+	if !isWorkspaceClone {
+		if entry, hit := s.store.GetApproved(canonicalRepo, commitSHA); hit {
+			expires := entry.ApprovedAt.Add(30 * 24 * time.Hour)
+			s.updateRequest(reqID, func(r *RepositoryRequest) {
+				r.State = StateAutoApproved
+				r.CloneStatus = CloneStatusCloned
+				r.ReviewStatus = ReviewStatusClean
+				r.CacheHit = true
+				r.ArtifactDigest = entry.ArtifactDigest
+				r.ArtifactSize = entry.ArtifactSize
+				r.ScannerVersion = entry.ScannerVersion
+				r.DBVersion = entry.DBVersion
+				r.ArtifactProvenance = fmt.Sprintf("store:%s@%s", entry.CommitSHA, entry.ArtifactDigest)
+				r.ExpiresAt = &expires
+			})
+			s.audit.LogEvent("SYSTEM", "CACHE_HIT", "COMMIT", commitSHA, "SUCCESS",
+				fmt.Sprintf("Tái sử dụng artifact đã phê duyệt (Digest: %s)", entry.ArtifactDigest))
+			return
+		}
 	}
 
-	// 3. Tải về vùng Quarantine độc lập & đóng gói Git Bundle
+	// 3. Tải về vùng Quarantine độc lập (ưu tiên trích xuất cục bộ an toàn cho workspace_clone)
 	s.updateRequest(reqID, func(r *RepositoryRequest) { r.State = StateFetching })
-	qw, err := PrepareQuarantineWithCanonical(ctx, s.quarantineDir, reqID, canonicalRepo, canonicalRepo, commitSHA)
+	var qw *QuarantineWorkspace
+	if isWorkspaceClone && strings.TrimSpace(opts.VerifiedWorkspaceRoot) != "" && strings.TrimSpace(opts.LocalRepoRelPath) != "" {
+		qw, err = PrepareQuarantineFromLocalGit(ctx, s.quarantineDir, reqID, opts.VerifiedWorkspaceRoot, opts.LocalRepoRelPath, canonicalRepo, commitSHA)
+	} else {
+		qw, err = PrepareQuarantineWithCanonical(ctx, s.quarantineDir, reqID, canonicalRepo, canonicalRepo, commitSHA)
+	}
 	if err != nil {
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateFailed
 			r.Error = fmt.Sprintf("Lỗi tải về quarantine: %v", err)
+			if isWorkspaceClone {
+				r.CloneStatus = CloneStatusCloned
+				r.ReviewStatus = ReviewStatusScanFailed
+			} else {
+				r.CloneStatus = CloneStatusFailed
+				r.ReviewStatus = ReviewStatusNotStarted
+			}
 		})
 		s.audit.LogEvent("SYSTEM", "QUARANTINE_FETCH_FAILED", "REPOSITORY", canonicalRepo, "FAILED", err.Error())
 		return
 	}
 
 	// 4. Quét bảo mật
-	s.updateRequest(reqID, func(r *RepositoryRequest) { r.State = StateScanning })
+	s.updateRequest(reqID, func(r *RepositoryRequest) {
+		r.State = StateScanning
+		r.ReviewStatus = ReviewStatusScanning
+	})
 	s.mu.RLock()
 	scanner := s.scanFn
 	s.mu.RUnlock()
@@ -417,6 +612,12 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateFailed
 			r.Error = fmt.Sprintf("Lỗi tiến trình quét bảo mật: %v", err)
+			r.ReviewStatus = ReviewStatusScanFailed
+			if isWorkspaceClone {
+				r.CloneStatus = CloneStatusCloned
+			} else {
+				r.CloneStatus = CloneStatusFailed
+			}
 		})
 		s.audit.LogEvent("SYSTEM", "SCAN_FAILED", "COMMIT", commitSHA, "FAILED", err.Error())
 		return
@@ -440,19 +641,45 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 	verdict, reasons := EvaluatePolicy(report)
 	report.Verdict = verdict
 	report.PolicyReasons = reasons
+	reviewStatus := deriveReviewStatus(verdict, report)
 
 	artifactDigest := qw.DigestSHA256
 	artifactSize := qw.TotalSize
 	provenance := fmt.Sprintf("quarantine:%s", qw.DigestSHA256)
 	var expiresAt *time.Time
 
+	if isWorkspaceClone {
+		// Không đưa mã nguồn từ workspace vào kho cache dùng chung (bảo vệ private repo giữa các thành viên)
+		_ = qw.PurgeAll()
+		provenance = fmt.Sprintf("workspace_local:%s@%s", commitSHA, qw.DigestSHA256)
+		s.updateRequest(reqID, func(r *RepositoryRequest) {
+			r.State = verdict
+			r.CloneStatus = CloneStatusCloned
+			r.ReviewStatus = reviewStatus
+			r.Report = report
+			r.ArtifactDigest = artifactDigest
+			r.ArtifactSize = artifactSize
+			r.ScannerVersion = report.ScannerVersion
+			r.DBVersion = report.DBVersion
+			r.ArtifactProvenance = provenance
+			r.Error = ""
+		})
+		s.audit.LogEvent("BOT_SECURITY", string(verdict), "COMMIT", commitSHA, "SUCCESS",
+			fmt.Sprintf("Kết quả kiểm duyệt hậu kiểm cho %s: %s (review_status=%s)", canonicalRepo, verdict, reviewStatus))
+		return
+	}
+
+	cloneStatus := CloneStatusPending
 	switch verdict {
 	case StateAutoApproved:
+		cloneStatus = CloneStatusCloned
 		entry, errStore := s.store.StoreApproved(canonicalRepo, commitSHA, report.ScannerVersion, report.DBVersion, "BOT_AUTO_APPROVAL", qw)
 		_ = qw.PurgeAll()
 		if errStore != nil {
 			s.updateRequest(reqID, func(r *RepositoryRequest) {
 				r.State = StateFailed
+				r.CloneStatus = CloneStatusFailed
+				r.ReviewStatus = ReviewStatusScanFailed
 				r.Report = report
 				r.Error = fmt.Sprintf("STORE_APPROVED_FAILED: %v", errStore)
 			})
@@ -466,15 +693,23 @@ func (s *GuardService) processRequest(ctx context.Context, reqID string) {
 		expiresAt = &exp
 
 	case StateReviewRequired:
+		cloneStatus = CloneStatusPending
 		// Xóa mã nguồn bung thô, giữ lại archive 0440 trong quarantine chờ Admin phê duyệt
 		_ = qw.Cleanup()
 
 	default:
+		if verdict == StateRejected {
+			cloneStatus = CloneStatusBlocked
+		} else {
+			cloneStatus = CloneStatusFailed
+		}
 		_ = qw.PurgeAll()
 	}
 
 	s.updateRequest(reqID, func(r *RepositoryRequest) {
 		r.State = verdict
+		r.CloneStatus = cloneStatus
+		r.ReviewStatus = reviewStatus
 		r.Report = report
 		r.ArtifactDigest = artifactDigest
 		r.ArtifactSize = artifactSize
@@ -504,15 +739,48 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 		s.mu.Unlock()
 		return nil, errors.New("không tìm thấy yêu cầu")
 	}
-	if req.State != StateReviewRequired {
+	isPostCloneReview := req.Decision == nil &&
+		(req.State == StateAutoApproved || req.State == StateDelivered) &&
+		(req.ReviewStatus == ReviewStatusReviewRequired || reportHasSecurityConcerns(req.Report))
+	if req.State != StateReviewRequired && !isPostCloneReview {
 		currentState := req.State
 		s.mu.Unlock()
 		return nil, fmt.Errorf("INVALID_STATE_TRANSITION: yêu cầu đang ở trạng thái %s, chỉ có thể quyết định khi là REVIEW_REQUIRED", currentState)
 	}
 
 	now := time.Now()
+	if isPostCloneReview {
+		verdictState := StateManuallyApproved
+		reviewStatus := ReviewStatusApproved
+		if decision == "REJECTED" {
+			verdictState = StateRejected
+			reviewStatus = ReviewStatusRejected
+		}
+		req.State = verdictState
+		req.ReviewStatus = reviewStatus
+		if req.CloneStatus == "" {
+			req.CloneStatus = CloneStatusCloned
+		}
+		req.UpdatedAt = now
+		req.Decision = &DecisionRecord{
+			Verdict:    verdictState,
+			Reviewer:   reviewer,
+			ReviewedAt: now,
+			Reason:     reason,
+		}
+		_ = s.saveRequestsLocked()
+		snap := cloneRequest(req)
+		s.mu.Unlock()
+
+		s.audit.LogEvent(reviewer, fmt.Sprintf("ADMIN_POST_CLONE_%s", decision), "REQUEST", reqID, "SUCCESS",
+			fmt.Sprintf("Admin %s đã %s kiểm duyệt sau clone (Lý do: %s)", reviewer, decision, reason))
+		return snap, nil
+	}
+
 	if decision == "REJECTED" {
 		req.State = StateRejected
+		req.CloneStatus = CloneStatusBlocked
+		req.ReviewStatus = ReviewStatusRejected
 		req.UpdatedAt = now
 		req.Decision = &DecisionRecord{
 			Verdict:    StateRejected,
@@ -597,6 +865,8 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 	decisionTime := time.Now()
 	updated := s.updateRequest(reqID, func(r *RepositoryRequest) {
 		r.State = StateManuallyApproved
+		r.CloneStatus = CloneStatusCloned
+		r.ReviewStatus = ReviewStatusApproved
 		r.ArtifactDigest = entry.ArtifactDigest
 		r.ArtifactSize = entry.ArtifactSize
 		r.ScannerVersion = scannerVer
@@ -652,6 +922,10 @@ func (s *GuardService) Deliver(reqID, destDir string) error {
 
 // DeliverAuthorized enforces ownership/approval state and performs atomic CAS transition + strict Git delivery.
 func (s *GuardService) DeliverAuthorized(reqID, actor string, isAdmin bool, destDir string) error {
+	return s.deliverAuthorized(reqID, actor, isAdmin, destDir, "", nil)
+}
+
+func (s *GuardService) deliverAuthorized(reqID, actor string, isAdmin bool, destDir, workspaceID string, workspace *WorkspaceDelivery) error {
 	s.mu.Lock()
 	req, ok := s.requests[reqID]
 	if !ok || req == nil {
@@ -659,7 +933,9 @@ func (s *GuardService) DeliverAuthorized(reqID, actor string, isAdmin bool, dest
 		return errors.New("không tìm thấy yêu cầu")
 	}
 
-	if !isAdmin && (strings.TrimSpace(actor) == "" || req.Submitter != actor) {
+	if (workspace != nil && (req.TargetWorkspace != "managed:"+workspaceID || req.Submitter != actor)) ||
+		(workspace == nil && strings.HasPrefix(req.TargetWorkspace, "managed:")) ||
+		(!isAdmin && (strings.TrimSpace(actor) == "" || req.Submitter != actor)) {
 		s.mu.Unlock()
 		s.audit.LogEvent(actor, "DELIVERY_DENIED", "REQUEST", reqID, "DENIED",
 			"Caller attempted to deliver another user's repository request")
@@ -691,12 +967,14 @@ func (s *GuardService) DeliverAuthorized(reqID, actor string, isAdmin bool, dest
 
 	canonicalRepo := req.CanonicalRepo
 	commitSHA := req.CommitSHA
+	checkoutRef := req.CheckoutRef
+	approvedDigest := req.ArtifactDigest
 	allowedRoots := append([]string(nil), s.allowedWorkspaceRoots...)
 	s.mu.Unlock()
 
 	entry, found := s.store.GetApproved(canonicalRepo, commitSHA)
-	if !found {
-		err := errors.New("không tìm thấy gói artifact đã được duyệt trong kho lưu trữ an toàn")
+	if !found || (workspace != nil && (entry.ArtifactDigest != approvedDigest || !sha40Regex.MatchString(commitSHA))) {
+		err := errors.New("không tìm thấy gói artifact khớp với phê duyệt")
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateDeliveryFailed
 			r.DeliveryStatus = "FAILED"
@@ -706,7 +984,13 @@ func (s *GuardService) DeliverAuthorized(reqID, actor string, isAdmin bool, dest
 		return err
 	}
 
-	if err := DeliverArtifactStrict(context.Background(), entry.ArtifactPath, entry.ArtifactDigest, commitSHA, destDir, allowedRoots); err != nil {
+	var deliveryErr error
+	if workspace != nil {
+		deliveryErr = deliverToWorkspace(context.Background(), entry.ArtifactPath, entry.ArtifactDigest, commitSHA, checkoutRef, canonicalRepo, destDir, *workspace)
+	} else {
+		deliveryErr = DeliverArtifactStrict(context.Background(), entry.ArtifactPath, entry.ArtifactDigest, commitSHA, destDir, allowedRoots)
+	}
+	if err := deliveryErr; err != nil {
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateDeliveryFailed
 			r.DeliveryStatus = "FAILED"

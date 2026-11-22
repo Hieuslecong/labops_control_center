@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -26,6 +27,41 @@ from app.adapters.vpn_provider import VPNProvider, VPNProviderError
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_HANDSHAKE_ONLINE_TTL_SECONDS = 180
+
+
+def _parse_handshake_age_seconds(raw_ts: Any, now_ts: Optional[float] = None) -> Optional[int]:
+    """Chuyển đổi timestamp handshake (ISO-8601 hoặc epoch s/ms) thành số giây đã trôi qua."""
+    if raw_ts is None or raw_ts == "" or raw_ts == 0:
+        return None
+    ts: Optional[float] = None
+    if isinstance(raw_ts, (int, float)):
+        val = float(raw_ts)
+        if val <= 0:
+            return None
+        ts = val / 1000.0 if val > 1e12 else val
+    elif isinstance(raw_ts, str):
+        s = raw_ts.strip()
+        if not s or s == "0":
+            return None
+        try:
+            num = float(s)
+            if num <= 0:
+                return None
+            ts = num / 1000.0 if num > 1e12 else num
+        except ValueError:
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+            except ValueError:
+                return None
+    if ts is None:
+        return None
+    ref = now_ts if now_ts is not None else time.time()
+    return int(max(0.0, ref - ts))
 
 
 class WgEasyAdapter(VPNProvider):
@@ -50,6 +86,10 @@ class WgEasyAdapter(VPNProvider):
         self.vpn_subnet = vpn_subnet or getattr(settings, "WG_EASY_VPN_SUBNET", "10.88.40.0/24")
         self.container_name = container_name or getattr(settings, "WG_EASY_CONTAINER_NAME", "labops-wg-easy")
         self.timeout = timeout
+        self.online_ttl_seconds = max(
+            30,
+            int(os.getenv("WG_EASY_ONLINE_TTL_SECONDS", str(DEFAULT_HANDSHAKE_ONLINE_TTL_SECONDS))),
+        )
         self._circuit_open_until = 0.0
         self._failure_count = 0
         self._cached_interface_info: Optional[Dict[str, Any]] = None
@@ -165,7 +205,11 @@ class WgEasyAdapter(VPNProvider):
         for c in raw_list:
             if not isinstance(c, dict):
                 continue
-            has_handshake = bool(c.get("latestHandshakeAt")) and bool(c.get("enabled", True))
+            enabled = bool(c.get("enabled", True))
+            last_handshake_raw = c.get("latestHandshakeAt")
+            has_handshake = bool(last_handshake_raw) and enabled
+            handshake_age = _parse_handshake_age_seconds(last_handshake_raw) if enabled else None
+            is_online = bool(enabled and handshake_age is not None and handshake_age <= self.online_ttl_seconds)
             devices.append({
                 "id": str(c.get("id")),
                 "provider": self.name,
@@ -173,10 +217,12 @@ class WgEasyAdapter(VPNProvider):
                 "name": str(c.get("name") or "Device"),
                 "vpn_ip": str(c.get("ipv4Address") or c.get("address") or "").split("/")[0],
                 "public_key": str(c.get("publicKey") or ""),
-                "enabled": bool(c.get("enabled", True)),
-                "status": "ACTIVE" if c.get("enabled", True) else "DISABLED",
+                "enabled": enabled,
+                "status": "ACTIVE" if enabled else "DISABLED",
                 "handshake_status": "HANDSHAKE_VERIFIED" if has_handshake else "NO_HANDSHAKE",
-                "last_handshake": c.get("latestHandshakeAt"),
+                "last_handshake": last_handshake_raw,
+                "is_online": is_online,
+                "handshake_age_seconds": handshake_age,
                 "transfer_rx": int(c.get("transferRx") or 0),
                 "transfer_tx": int(c.get("transferTx") or 0),
                 "created_at": c.get("createdAt"),
@@ -399,7 +445,8 @@ class WgEasyAdapter(VPNProvider):
 
             iface_name = str(iface.get("name") or "wg0") if isinstance(iface, dict) else "wg0"
             runtime_probe = self.inspect_runtime_network(iface_name)
-            active_handshakes = sum(
+            active_handshakes = sum(1 for c in clients if c.get("is_online"))
+            ever_connected_clients = sum(
                 1 for c in clients if c.get("last_handshake") and c.get("status") == "ACTIVE"
             )
             total_rx = sum(int(c.get("transfer_rx", 0)) for c in clients)
@@ -455,6 +502,8 @@ class WgEasyAdapter(VPNProvider):
                 "server_public_key": server_pub,
                 "total_clients": len(clients),
                 "active_handshakes": active_handshakes,
+                "ever_connected_clients": ever_connected_clients,
+                "handshake_ttl_seconds": self.online_ttl_seconds,
                 "tunnel_traffic_verified": state_flags["VPN_DATA_PATH_VERIFIED"],
                 "total_rx_bytes": total_rx,
                 "total_tx_bytes": total_tx,
@@ -485,6 +534,8 @@ class WgEasyAdapter(VPNProvider):
                 "error": str(e),
                 "total_clients": 0,
                 "active_handshakes": 0,
+                "ever_connected_clients": 0,
+                "handshake_ttl_seconds": self.online_ttl_seconds,
                 "total_rx_bytes": 0,
                 "total_tx_bytes": 0,
                 "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

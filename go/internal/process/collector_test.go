@@ -114,3 +114,143 @@ func TestProcessClassification_Rules(t *testing.T) {
 	}
 }
 
+func intPtr(v int) *int {
+	return &v
+}
+
+func TestAggregateWorkloadTrees_RollsUpChildGPUVRAM(t *testing.T) {
+	procs := []ProcessInfo{
+		{
+			PID:            555432,
+			PPID:           1,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassResearchJob,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     0.0,
+			MemoryRSSMB:    15.7,
+			IsGPU:          false,
+			VRAMMB:         0,
+		},
+		{
+			PID:            555445,
+			PPID:           555432,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassResearchJob,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     0.2,
+			MemoryRSSMB:    100.0,
+		},
+		{
+			PID:            772470,
+			PPID:           555445,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassResearchJob,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     0.3,
+			MemoryRSSMB:    80.0,
+		},
+		{
+			PID:            772500,
+			PPID:           772470,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassGPUProcess,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     1.3,
+			MemoryRSSMB:    500.0,
+			IsGPU:          true,
+			GPUIndex:       intPtr(1),
+			GPUUUID:        "GPU-1111",
+			VRAMMB:         1024,
+			TotalVRAMMB:    1024,
+			TreeIsGPU:      true,
+			TreeGPUIndex:   intPtr(1),
+			TreeGPUUUID:    "GPU-1111",
+		},
+		{
+			PID:            772511,
+			PPID:           772470,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassGPUProcess,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     4.3,
+			MemoryRSSMB:    2557.3,
+			IsGPU:          true,
+			GPUIndex:       intPtr(0),
+			GPUUUID:        "GPU-0000",
+			VRAMMB:         2960,
+			TotalVRAMMB:    2960,
+			TreeIsGPU:      true,
+			TreeGPUIndex:   intPtr(0),
+			TreeGPUUUID:    "GPU-0000",
+		},
+		{
+			PID:            772739,
+			PPID:           772511,
+			User:           "vinh_test",
+			Name:           "python",
+			Classification: ClassResearchJob,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     1.0,
+			MemoryRSSMB:    400.0,
+		},
+		{
+			// Tiến trình thuộc user khác không được gộp vào cây của vinh_test
+			PID:            888888,
+			PPID:           555432,
+			User:           "other_user",
+			Name:           "python",
+			Classification: ClassGPUProcess,
+			IsUserWorkload: true,
+			IsRootWorkload: true,
+			CPUPercent:     50.0,
+			MemoryRSSMB:    1024.0,
+			IsGPU:          true,
+			GPUIndex:       intPtr(2),
+			GPUUUID:        "GPU-2222",
+			VRAMMB:         8192,
+			TotalVRAMMB:    8192,
+			TreeIsGPU:      true,
+			TreeGPUIndex:   intPtr(2),
+			TreeGPUUUID:    "GPU-2222",
+		},
+	}
+
+	aggregateWorkloadTrees(procs)
+
+	root := procs[0]
+	if root.ChildrenCount != 5 {
+		t.Fatalf("Kỳ vọng ChildrenCount=5, nhận được: %d", root.ChildrenCount)
+	}
+	if root.TotalVRAMMB != 3984 {
+		t.Fatalf("Kỳ vọng TotalVRAMMB=3984, nhận được: %d", root.TotalVRAMMB)
+	}
+	if !root.TreeIsGPU {
+		t.Fatalf("Kỳ vọng TreeIsGPU=true")
+	}
+	if root.TreeGPUIndex == nil || *root.TreeGPUIndex != 0 {
+		t.Fatalf("Kỳ vọng TreeGPUIndex=0, nhận được: %v", root.TreeGPUIndex)
+	}
+	if root.TreeGPUUUID != "GPU-0000" {
+		t.Fatalf("Kỳ vọng TreeGPUUUID=GPU-0000, nhận được: %s", root.TreeGPUUUID)
+	}
+	// Không được ghi đè các trường raw trên root để tránh double-counting khi filter=all hoặc GetProcessTree
+	if root.VRAMMB != 0 || root.IsGPU {
+		t.Fatalf("Kỳ vọng raw VRAMMB=0 và IsGPU=false trên root, nhận được: VRAMMB=%d IsGPU=%v", root.VRAMMB, root.IsGPU)
+	}
+	// User khác vẫn giữ nguyên root riêng và không gộp vào cây vinh_test
+	if !procs[6].IsRootWorkload || procs[6].ParentWorkloadPID != 0 {
+		t.Fatalf("Tiến trình của user khác không được gộp vào cây của vinh_test")
+	}
+}
+

@@ -25,6 +25,7 @@ type AgentConfig struct {
 	ProcessInterval       time.Duration `json:"process_interval"`
 	IsContainerized       bool          `json:"is_containerized"`
 	RepoGuardDataDir      string        `json:"repo_guard_data_dir"`
+	RepoPermissiveMode    bool          `json:"repo_permissive_mode"`
 	GatewayEnabled        bool          `json:"gateway_enabled"`
 	GatewayURL            string        `json:"gateway_url"`
 	GatewayCertPath       string        `json:"gateway_cert_path"`
@@ -49,20 +50,30 @@ func (c *AgentConfig) Validate() error {
 
 // LoadFromEnv nạp cấu hình từ biến môi trường và phát hiện môi trường host thực tế.
 func LoadFromEnv() *AgentConfig {
+	secretToken, hasAgentSecret := os.LookupEnv("LABOPS_AGENT_SECRET")
+	if !hasAgentSecret {
+		secretToken = os.Getenv("LABOPS_NODE_AGENT_TOKEN")
+	}
+	brokerSecret := strings.TrimSpace(os.Getenv("LABOPS_BROKER_VERIFY_SECRET"))
+	if brokerSecret == "" {
+		brokerSecret = strings.TrimSpace(os.Getenv("LABOPS_REPO_BROKER_SECRET"))
+	}
+
 	cfg := &AgentConfig{
 		ServerID:              getEnv("LABOPS_SERVER_ID", "track"),
 		ServerName:            getEnv("LABOPS_SERVER_NAME", "Server 01 — Server Rack (aiotlab-rack • Cục bộ)"),
 		BindAddr:              getEnv("LABOPS_AGENT_BIND_ADDR", "127.0.0.1"),
 		Port:                  getEnvInt("LABOPS_AGENT_PORT", 9100),
-		SecretToken:           strings.TrimSpace(os.Getenv("LABOPS_AGENT_SECRET")),
+		SecretToken:           strings.TrimSpace(secretToken),
 		DelegationSecret:      strings.TrimSpace(os.Getenv("LABOPS_DELEGATION_SECRET")),
-		BrokerVerifySecret:    strings.TrimSpace(os.Getenv("LABOPS_REPO_BROKER_SECRET")),
+		BrokerVerifySecret:    brokerSecret,
 		WorkspaceRegistryPath: getEnv("LABOPS_WORKSPACE_REGISTRY_PATH", "/var/lib/labops/workspace_registry.json"),
 		DockerSocket:          getEnv("DOCKER_HOST", "/var/run/docker.sock"),
 		HostInterval:          5 * time.Second,
 		GPUInterval:           5 * time.Second,
 		ProcessInterval:       10 * time.Second,
 		RepoGuardDataDir:      getEnv("LABOPS_REPO_GUARD_DATA_DIR", "/var/lib/labops/repositoryguard"),
+		RepoPermissiveMode:    getEnvBool("LABOPS_REPO_PERMISSIVE_MODE", false) || getEnvBool("LABOPS_REPO_AUDIT_ONLY", false),
 		GatewayEnabled:        getEnvBool("LABOPS_GATEWAY_ENABLED", false),
 		GatewayURL:            getEnv("LABOPS_GATEWAY_URL", "192.168.167.250:9443"),
 		GatewayCertPath:       getEnv("LABOPS_GATEWAY_CERT_PATH", "/etc/labops/certs/client.crt"),

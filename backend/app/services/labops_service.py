@@ -8,17 +8,21 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.core.security import get_revocation_store
 from app.db.atomic_json import atomic_write_json, safe_load_json
 from app.db.idempotency import IdempotencyStore
-from app.db.models import AuditEventRecord, MemberRecord
+from app.db.models import AuditEventRecord, DeletionOperationRecord, MemberRecord, PersistenceRecoveryRecord
 from app.db.session import DatabaseManager
 from app.adapters.host_monitor_adapter import HostMonitorAdapter, get_real_root_mount_info
 from app.adapters.nvml_adapter import NvmlAdapter
-from app.services.gpu_scheduler import GpuScheduler, SchedulerError
+from app.services.gpu_scheduler import ACTIVE_STATES as GPU_ACTIVE_STATES, GpuScheduler, SchedulerError
 from app.services.member_lifecycle import MemberLifecycleManager
 from app.services.security_scanner import SecurityScanner
 from app.services.host_registry import HostRegistry
@@ -121,6 +125,66 @@ def validate_mount_path(path: str, username: str) -> None:
             f"Thư mục mount '{path}' không hợp lệ. Chỉ chấp nhận các đường dẫn được phê duyệt: /workspace, /home/{username}, hoặc /data."
         )
 
+
+class MemberConflictError(ValueError):
+    """Typed domain conflict (HTTP 409) inheriting ValueError for backward compatibility."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        http_status: int = 409,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        self.details = details or {}
+
+
+class MemberPersistenceError(RuntimeError):
+    """Typed fail-closed persistence/schema error (HTTP 503 / 409)."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        http_status: int = 503,
+        recovery_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        self.recovery_id = recovery_id
+
+
+def _member_dict_from_db_row(row: MemberRecord) -> Dict[str, Any]:
+    payload = dict(row.payload_json) if isinstance(row.payload_json, dict) else {}
+    payload["id"] = row.id
+    payload["username"] = row.username
+    payload["email"] = row.email
+    payload["full_name"] = row.full_name
+    payload["role"] = row.role
+    payload["status"] = row.status
+    payload["provisioning_state"] = row.provisioning_state
+    payload["assigned_server"] = row.assigned_server
+    payload["workspace_name"] = row.workspace_name
+    payload["workspace_dir"] = row.workspace_dir
+    payload["ssh_port"] = row.ssh_port
+    payload["storage_quota_gb"] = row.storage_quota_gb
+    payload["cpu_limit_cores"] = row.cpu_limit_cores
+    payload["ram_limit_gb"] = row.ram_limit_gb
+    payload["vram_quota_gb"] = row.vram_quota_gb
+    payload["gpu_permissions"] = list(row.gpu_permissions_json or payload.get("gpu_permissions") or [])
+    payload["archived_at"] = row.archived_at
+    if row.archive_manifest_json is not None:
+        payload["archive_manifest"] = row.archive_manifest_json
+    payload["version"] = row.version
+    payload["created_at"] = row.created_at
+    return payload
+
 class LabOpsDataService:
     """
     Core data service for LabOps Control Center.
@@ -128,6 +192,10 @@ class LabOpsDataService:
     """
     def __init__(self, demo_mode: Optional[bool] = None, data_dir: Optional[str] = None):
         self.demo_mode = settings.DEMO_MODE if demo_mode is None else demo_mode
+        self._provision_lock = threading.RLock()
+        self._persist_lock = threading.RLock()
+        self._inflight_usernames: set[str] = set()
+        self._legacy_unsynced_member_ids: set[str] = set()
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
         self.process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
@@ -173,10 +241,27 @@ class LabOpsDataService:
         self.teleport_adapter = TeleportAdapter()
         self._init_data()
         self.lifecycle = MemberLifecycleManager(self)
+        self._normalize_loaded_members()
         self._sync_initial_db_state()
+        self._normalize_loaded_members()
         for entry in self.audit_logs:
             if isinstance(entry, dict) and not entry.get("correlation_id"):
                 entry["correlation_id"] = entry.get("correlationId") or f"corr-{entry.get('id', 'legacy')}"
+        # Bảo mật P0-1: TUYỆT ĐỐI không tự khởi chạy host SSHD dưới UID quản trị khi khởi động Control Plane.
+        if self._is_live_production_data_dir:
+            for member in self.members:
+                pid_file = os.path.join(
+                    str(member.get("workspace_dir") or ""), ".ssh", "canary_sshd.pid"
+                )
+                if pid_file and os.path.isfile(pid_file):
+                    logger.warning(
+                        "Phát hiện tệp PID host SSHD cũ cho @%s (%s) — từ chối tự khởi chạy; yêu cầu chuyển sang Docker workspace cô lập.",
+                        member.get("username"),
+                        pid_file,
+                    )
+
+    def _normalize_loaded_members(self) -> None:
+        """Strip legacy inline WireGuard secrets and demote unverified legacy ACTIVE records."""
         for member in self.members:
             profile = member.get("wireguard") or {}
             profile.pop("config_content", None)
@@ -199,40 +284,124 @@ class LabOpsDataService:
                 member["security_isolation_level"] = "NOT_VERIFIED"
                 if isinstance(member.get("privilege_validation"), dict):
                     member["privilege_validation"]["status"] = "NOT_VERIFIED"
-        # Bảo mật P0-1: TUYỆT ĐỐI không tự khởi chạy host SSHD dưới UID quản trị khi khởi động Control Plane.
-        if self._is_live_production_data_dir:
-            for member in self.members:
-                pid_file = os.path.join(
-                    str(member.get("workspace_dir") or ""), ".ssh", "canary_sshd.pid"
-                )
-                if pid_file and os.path.isfile(pid_file):
-                    logger.warning(
-                        "Phát hiện tệp PID host SSHD cũ cho @%s (%s) — từ chối tự khởi chạy; yêu cầu chuyển sang Docker workspace cô lập.",
-                        member.get("username"),
-                        pid_file,
-                    )
 
     def _sync_initial_db_state(self) -> None:
-        if not hasattr(self, "db") or self.db is None:
+        if self.demo_mode:
             return
+        self.reconcile_persistence_state()
+
+    def reconcile_persistence_state(self) -> Dict[str, Any]:
+        """Reconcile RAM, JSON mirrors, DB state, and pending persistence recovery records."""
+        summary: Dict[str, Any] = {
+            "pruned_deleted": 0,
+            "recovered_from_db": 0,
+            "resolved_conflicts": 0,
+            "synced_legacy_to_db": 0,
+            "recovered_records": 0,
+        }
+        if self.demo_mode or not hasattr(self, "db") or self.db is None:
+            return summary
+
+        self._legacy_unsynced_member_ids = set()
+        needs_json_rewrite = False
         try:
             with self.db.session_scope() as s:
+                rows = s.query(MemberRecord).all()
+                db_deleted_ids = {
+                    row.id for row in rows
+                    if row.status == "DELETED" and bool((row.deleted_at or "").strip())
+                }
+                db_active_by_id = {row.id: row for row in rows if row.id not in db_deleted_ids}
+                db_active_by_uname = {
+                    (row.username or "").strip().lower(): row
+                    for row in db_active_by_id.values()
+                }
+
+                # 1. Never revive DB-deleted tombstones from stale JSON
+                kept_members: List[Dict[str, Any]] = []
+                for m in self.members:
+                    if m.get("id") in db_deleted_ids:
+                        summary["pruned_deleted"] += 1
+                        needs_json_rewrite = True
+                        continue
+                    kept_members.append(m)
+                self.members = kept_members
+
+                # 2. Recover DB-committed active/pending members missing from JSON (e.g. prior JSON write failure)
+                ram_by_id = {m.get("id"): m for m in self.members if m.get("id")}
+                for mid, row in db_active_by_id.items():
+                    if mid not in ram_by_id:
+                        recovered = _member_dict_from_db_row(row)
+                        self.members.insert(0, recovered)
+                        ram_by_id[mid] = recovered
+                        summary["recovered_from_db"] += 1
+                        needs_json_rewrite = True
+                        if row.status not in {
+                            "SUSPENDED", "ARCHIVED", "DELETE_ELIGIBLE",
+                            "DELETION_IN_PROGRESS", "DELETION_PARTIAL_FAILURE", "DELETED", "REVOKED"
+                        }:
+                            get_revocation_store().register_active_member(row.username, row.id)
+                    else:
+                        cur_m = ram_by_id[mid]
+                        if int(row.version or 1) > int(cur_m.get("version") or 1):
+                            rebuilt = _member_dict_from_db_row(row)
+                            cur_m.clear()
+                            cur_m.update(rebuilt)
+                            needs_json_rewrite = True
+
+                # 3. Sync legacy JSON-only members into DB (or quarantine stale duplicate JSON against DB owner)
+                cleaned_after_conflict: List[Dict[str, Any]] = []
                 for m in self.members:
                     mid = m.get("id")
-                    uname = m.get("username")
-                    if not mid or not uname or s.get(MemberRecord, mid) is not None:
+                    uname = (m.get("username") or "").strip().lower()
+                    if not mid or not uname:
+                        cleaned_after_conflict.append(m)
                         continue
+                    if mid in db_active_by_id:
+                        cleaned_after_conflict.append(m)
+                        continue
+                    existing_owner = db_active_by_uname.get(uname)
+                    if existing_owner is not None:
+                        summary["resolved_conflicts"] += 1
+                        needs_json_rewrite = True
+                        if self.db.has_recovery_table:
+                            s.add(
+                                PersistenceRecoveryRecord(
+                                    id=f"rec-{uuid.uuid4().hex[:12]}",
+                                    entity_type="MEMBER",
+                                    entity_id=mid,
+                                    username=m.get("username"),
+                                    operation="CONFLICT_PRUNE_STALE_JSON",
+                                    status="RECOVERED",
+                                    error_detail=f"Removed duplicate JSON record {mid}; DB active record {existing_owner.id} retained.",
+                                    payload_json={"kept_id": existing_owner.id, "removed_id": mid},
+                                    resolved_at=datetime.now(timezone.utc),
+                                )
+                            )
+                        continue
+
+                    if any(r.username.lower() == uname for r in rows if r.id in db_deleted_ids) and self.db.has_legacy_username_unique_index:
+                        # Legacy DB still holds unconditional unique index for a deleted member; do not crash startup or wipe JSON.
+                        logger.warning(
+                            "Phát hiện bản ghi JSON chưa đồng bộ DB (%s / @%s) trong khi DB vẫn dùng unique index cũ.",
+                            mid,
+                            m.get("username"),
+                        )
+                        self._legacy_unsynced_member_ids.add(mid)
+                        cleaned_after_conflict.append(m)
+                        continue
+
                     s.add(
                         MemberRecord(
                             id=mid,
-                            username=uname,
+                            username=m["username"],
                             email=str(m.get("email") or ""),
                             full_name=str(m.get("full_name") or ""),
                             role=str(m.get("role") or "RESEARCHER"),
                             status=str(m.get("status") or "ACTIVE"),
                             provisioning_state=str(m.get("provisioning_state") or "PENDING"),
                             assigned_server=str(m.get("assigned_server") or settings.LOCAL_HOST_ID),
-                            workspace_name=str(m.get("workspace_name") or f"ws-{uname}"),
+                            workspace_name=str(m.get("workspace_name") or f"ws-{m['username']}"),
                             workspace_dir=m.get("workspace_dir"),
                             ssh_port=m.get("ssh_port"),
                             storage_quota_gb=int(m.get("storage_quota_gb") or 100),
@@ -242,73 +411,194 @@ class LabOpsDataService:
                             gpu_permissions_json=list(m.get("gpu_permissions") or []),
                             archived_at=m.get("archived_at"),
                             archive_manifest_json=m.get("archive_manifest"),
+                            deleted_at=m.get("deleted_at"),
                             version=int(m.get("version") or 1),
                             payload_json=dict(m),
                             created_at=str(m.get("created_at") or ""),
                         )
                     )
+                    summary["synced_legacy_to_db"] += 1
+                    cleaned_after_conflict.append(m)
+                self.members = cleaned_after_conflict
+
+                pending_recs: List[PersistenceRecoveryRecord] = []
+                if self.db.has_recovery_table:
+                    pending_recs = (
+                        s.query(PersistenceRecoveryRecord)
+                        .filter(PersistenceRecoveryRecord.status == "PENDING_RECOVERY")
+                        .all()
+                    )
+
+            if not self.demo_mode and (needs_json_rewrite or pending_recs):
+                atomic_write_json(os.path.join(self.data_dir, "members.json"), self.members, mode=0o600)
+                if pending_recs and self.db.has_recovery_table:
+                    now_dt = datetime.now(timezone.utc)
+                    with self.db.session_scope() as s2:
+                        for pr in pending_recs:
+                            row_pr = s2.get(PersistenceRecoveryRecord, pr.id)
+                            if row_pr is not None and row_pr.status == "PENDING_RECOVERY":
+                                row_pr.status = "RECOVERED"
+                                row_pr.resolved_at = now_dt
+                                summary["recovered_records"] += 1
         except Exception as exc:
-            logger.warning("Initial DB sync skipped cleanly: %s", exc)
+            logger.warning("Initial DB sync / reconcile skipped cleanly: %s", exc)
+        return summary
 
-    def _save_persistent_data(self):
-        try:
-            atomic_write_json(os.path.join(self.data_dir, "members.json"), self.members, mode=0o600)
-            atomic_write_json(os.path.join(self.data_dir, "ssh_policies.json"), self.ssh_policies, mode=0o600)
-            atomic_write_json(os.path.join(self.data_dir, "audit_logs.json"), self.audit_logs, mode=0o600)
-            atomic_write_json(os.path.join(self.data_dir, "storage_allocations.json"), self.storage_allocations, mode=0o600)
-            atomic_write_json(os.path.join(self.data_dir, "ssh_endpoints.json"), self.ssh_endpoints, mode=0o600)
+    def _save_persistent_data(self, *, audit_only: bool = False) -> None:
+        """
+        Persist DB FIRST, then write atomic JSON mirrors.
+        - If DB fails (e.g. IntegrityError / outage), JSON files are NEVER mutated.
+        - If DB succeeds and JSON write fails, record a durable PersistenceRecoveryRecord in DB
+          and raise MemberPersistenceError(503) with recovery_id (never silently succeed).
+        """
+        with self._persist_lock:
+            has_db = hasattr(self, "db") and self.db is not None
+            if has_db:
+                try:
+                    with self.db.session_scope() as s:
+                        if not audit_only:
+                            legacy_idx = getattr(self.db, "has_legacy_username_unique_index", False)
+                            legacy_ids = getattr(self, "_legacy_unsynced_member_ids", set())
+                            for m in self.members:
+                                mid = m.get("id")
+                                uname = m.get("username")
+                                if not mid or not uname:
+                                    continue
+                                if mid in legacy_ids and legacy_idx:
+                                    continue
+                                row = s.get(MemberRecord, mid)
+                                if row is None:
+                                    row = MemberRecord(id=mid, username=uname)
+                                    s.add(row)
+                                elif row.status == "DELETED" and row.deleted_at:
+                                    raise MemberConflictError(
+                                        "DELETED_TOMBSTONE_IMMUTABLE",
+                                        f"Bản ghi lịch sử '{mid}' (@{uname}) đã bị xóa vĩnh viễn và không thể bị ghi đè.",
+                                        409,
+                                    )
+                                row.email = str(m.get("email") or "")
+                                row.full_name = str(m.get("full_name") or "")
+                                row.role = str(m.get("role") or "RESEARCHER")
+                                row.status = str(m.get("status") or "ACTIVE")
+                                row.provisioning_state = str(m.get("provisioning_state") or "PENDING")
+                                row.assigned_server = str(m.get("assigned_server") or settings.LOCAL_HOST_ID)
+                                row.workspace_name = str(m.get("workspace_name") or f"ws-{uname}")
+                                row.workspace_dir = m.get("workspace_dir")
+                                row.ssh_port = m.get("ssh_port")
+                                row.storage_quota_gb = int(m.get("storage_quota_gb") or 100)
+                                row.cpu_limit_cores = int(m.get("cpu_limit_cores") or 8)
+                                row.ram_limit_gb = int(m.get("ram_limit_gb") or 16)
+                                row.vram_quota_gb = int(m.get("vram_quota_gb") or 12)
+                                row.gpu_permissions_json = list(m.get("gpu_permissions") or [])
+                                row.archived_at = m.get("archived_at")
+                                row.archive_manifest_json = m.get("archive_manifest")
+                                row.deleted_at = m.get("deleted_at")
+                                row.version = int(m.get("version") or 1)
+                                row.payload_json = dict(m)
+                                row.created_at = str(m.get("created_at") or "")
 
-            if hasattr(self, "db") and self.db is not None:
-                with self.db.session_scope() as s:
-                    for m in self.members:
-                        mid = m.get("id")
-                        uname = m.get("username")
-                        if not mid or not uname:
-                            continue
-                        row = s.get(MemberRecord, mid)
-                        if row is None:
-                            row = MemberRecord(id=mid, username=uname)
-                            s.add(row)
-                        row.email = str(m.get("email") or "")
-                        row.full_name = str(m.get("full_name") or "")
-                        row.role = str(m.get("role") or "RESEARCHER")
-                        row.status = str(m.get("status") or "ACTIVE")
-                        row.provisioning_state = str(m.get("provisioning_state") or "PENDING")
-                        row.assigned_server = str(m.get("assigned_server") or settings.LOCAL_HOST_ID)
-                        row.workspace_name = str(m.get("workspace_name") or f"ws-{uname}")
-                        row.workspace_dir = m.get("workspace_dir")
-                        row.ssh_port = m.get("ssh_port")
-                        row.storage_quota_gb = int(m.get("storage_quota_gb") or 100)
-                        row.cpu_limit_cores = int(m.get("cpu_limit_cores") or 8)
-                        row.ram_limit_gb = int(m.get("ram_limit_gb") or 16)
-                        row.vram_quota_gb = int(m.get("vram_quota_gb") or 12)
-                        row.gpu_permissions_json = list(m.get("gpu_permissions") or [])
-                        row.archived_at = m.get("archived_at")
-                        row.archive_manifest_json = m.get("archive_manifest")
-                        row.version = int(m.get("version") or 1)
-                        row.payload_json = dict(m)
-                        row.created_at = str(m.get("created_at") or "")
-
-                    for entry in self.audit_logs[:25]:
-                        eid = entry.get("id")
-                        if not eid or s.get(AuditEventRecord, eid) is not None:
-                            continue
-                        s.add(
-                            AuditEventRecord(
-                                id=eid,
-                                timestamp=str(entry.get("timestamp") or ""),
-                                actor=str(entry.get("actor") or "system"),
-                                action=str(entry.get("action") or "EVENT"),
-                                target_type=str(entry.get("target_type") or "SYSTEM"),
-                                target_id=str(entry.get("target_id") or ""),
-                                result=str(entry.get("result") or "SUCCESS"),
-                                correlation_id=str(entry.get("correlation_id") or "corr-legacy"),
-                                details=str(entry.get("details") or ""),
+                        for entry in self.audit_logs[:25]:
+                            eid = entry.get("id")
+                            if not eid or s.get(AuditEventRecord, eid) is not None:
+                                continue
+                            s.add(
+                                AuditEventRecord(
+                                    id=eid,
+                                    timestamp=str(entry.get("timestamp") or ""),
+                                    actor=str(entry.get("actor") or "system"),
+                                    action=str(entry.get("action") or "EVENT"),
+                                    target_type=str(entry.get("target_type") or "SYSTEM"),
+                                    target_id=str(entry.get("target_id") or ""),
+                                    result=str(entry.get("result") or "SUCCESS"),
+                                    correlation_id=str(entry.get("correlation_id") or "corr-legacy"),
+                                    details=str(entry.get("details") or ""),
+                                )
                             )
+                except MemberConflictError:
+                    raise
+                except IntegrityError as ie:
+                    logger.warning("Database IntegrityError during persistence (JSON untouched): %s", ie)
+                    err_lower = str(ie).lower()
+                    if any(tok in err_lower for tok in ("members.username", "uq_members_active_username", "ix_members_username", "unique constraint")):
+                        raise MemberConflictError(
+                            "USERNAME_CONFLICT",
+                            "Tên người dùng hoặc workspace đã tồn tại trong cơ sở dữ liệu.",
+                            409,
+                        ) from ie
+                    raise MemberPersistenceError(
+                        "DB_INTEGRITY_ERROR",
+                        "Xung đột ràng buộc cơ sở dữ liệu khi lưu trạng thái.",
+                        409,
+                    ) from ie
+                except Exception as db_exc:
+                    logger.exception("Database persistence failed before writing JSON files")
+                    raise MemberPersistenceError(
+                        "DB_PERSISTENCE_FAILED",
+                        "Không thể ghi dữ liệu vào cơ sở dữ liệu; chưa ghi thay đổi ra tệp JSON.",
+                        503,
+                    ) from db_exc
+
+            try:
+                if audit_only:
+                    atomic_write_json(os.path.join(self.data_dir, "audit_logs.json"), self.audit_logs, mode=0o600)
+                else:
+                    atomic_write_json(os.path.join(self.data_dir, "members.json"), self.members, mode=0o600)
+                    atomic_write_json(os.path.join(self.data_dir, "ssh_policies.json"), self.ssh_policies, mode=0o600)
+                    atomic_write_json(os.path.join(self.data_dir, "audit_logs.json"), self.audit_logs, mode=0o600)
+                    atomic_write_json(os.path.join(self.data_dir, "storage_allocations.json"), self.storage_allocations, mode=0o600)
+                    atomic_write_json(os.path.join(self.data_dir, "ssh_endpoints.json"), self.ssh_endpoints, mode=0o600)
+            except Exception as json_exc:
+                recovery_id = f"rec-{uuid.uuid4().hex[:12]}"
+                logger.exception("JSON mirror write failed after DB commit (recovery_id=%s)", recovery_id)
+                if has_db and getattr(self.db, "has_recovery_table", False):
+                    try:
+                        with self.db.session_scope() as s_rec:
+                            s_rec.add(
+                                PersistenceRecoveryRecord(
+                                    id=recovery_id,
+                                    entity_type="PERSISTENCE",
+                                    entity_id=recovery_id,
+                                    username=None,
+                                    operation="SAVE_PERSISTENT_DATA",
+                                    status="PENDING_RECOVERY",
+                                    error_detail=str(json_exc),
+                                    payload_json={
+                                        "failed_stage": "json_write",
+                                        "member_ids": [m.get("id") for m in self.members if m.get("id")],
+                                    },
+                                )
+                            )
+                    except Exception:
+                        logger.exception("Failed to write PersistenceRecoveryRecord %s", recovery_id)
+                raise MemberPersistenceError(
+                    "JSON_PERSISTENCE_FAILED",
+                    f"Cơ sở dữ liệu đã lưu nhưng đồng bộ tệp JSON thất bại (recovery_id={recovery_id}). Hệ thống sẽ tự hòa giải khi khởi động lại hoặc đồng bộ lại.",
+                    503,
+                    recovery_id=recovery_id,
+                ) from json_exc
+
+            if has_db and getattr(self.db, "has_recovery_table", False):
+                try:
+                    with self.db.session_scope() as s_ok:
+                        pending = (
+                            s_ok.query(PersistenceRecoveryRecord)
+                            .filter(
+                                PersistenceRecoveryRecord.operation == "SAVE_PERSISTENT_DATA",
+                                PersistenceRecoveryRecord.status == "PENDING_RECOVERY",
+                            )
+                            .all()
                         )
-        except Exception as e:
-            logger.exception("Failed to persist LabOps data")
-            raise RuntimeError("Could not persist LabOps data") from e
+                        if pending:
+                            now_dt = datetime.now(timezone.utc)
+                            for pr in pending:
+                                pr.status = "RECOVERED"
+                                pr.resolved_at = now_dt
+                except Exception:
+                    pass
+
+    def save_audit_logs(self) -> None:
+        """Persist audit logs cleanly without rewriting unrelated member/endpoint mirrors."""
+        self._save_persistent_data(audit_only=True)
 
     @property
     def workspaces(self) -> List[Dict[str, Any]]:
@@ -1917,14 +2207,304 @@ class LabOpsDataService:
             return port
         raise ValueError(f"Không còn cổng SSH khả dụng trên máy chủ {server_id}")
 
-    def provision_member(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    @contextmanager
+    def _username_creation_guard(self, username: str):
+        uname = (username or "").strip().lower()
+        with self._provision_lock:
+            if uname in self._inflight_usernames:
+                raise MemberConflictError(
+                    "USERNAME_PROVISIONING_IN_PROGRESS",
+                    f"Tên người dùng '{username}' đang được khởi tạo bởi một yêu cầu đồng thời khác.",
+                    409,
+                )
+            self._inflight_usernames.add(uname)
+        try:
+            yield
+        finally:
+            with self._provision_lock:
+                self._inflight_usernames.discard(uname)
+
+    def _verify_username_available_for_creation(
+        self,
+        username: str,
+        *,
+        workspace_name: Optional[str] = None,
+    ) -> None:
+        """
+        Verify strictly BEFORE creating any side effects that `username` may be provisioned cleanly:
+        - Rejects any existing active/suspended/archived/incomplete member record (RAM or DB).
+        - Allows reuse ONLY when every historical DB record for `username` has status='DELETED',
+          provisioning_state='DELETED', non-empty deleted_at, a verified COMPLETED deletion operation
+          (when non-dry-run deletion ops exist), and the DB schema supports deleted-member reuse.
+        - Rejects residual uncleaned containers, active GPU reservations, or active unrevoked SSH keys.
+        """
+        uname = (username or "").strip().lower()
+        incomplete_states = {"DELETION_IN_PROGRESS", "DELETION_PARTIAL_FAILURE"}
+
+        for existing in self.members:
+            if (existing.get("username") or "").strip().lower() == uname:
+                st = str(existing.get("status") or "UNKNOWN")
+                if st in incomplete_states:
+                    raise MemberConflictError(
+                        "MEMBER_DELETION_INCOMPLETE",
+                        f"Tên người dùng '{username}' có quá trình xóa chưa hoàn tất ({st}); chưa thể tạo lại.",
+                        409,
+                        {"existing_member_id": existing.get("id"), "status": st},
+                    )
+                raise MemberConflictError(
+                    "USERNAME_ALREADY_EXISTS",
+                    f"Tên người dùng '{username}' đã tồn tại trong hệ thống",
+                    409,
+                    {"existing_member_id": existing.get("id"), "status": st},
+                )
+            if workspace_name and existing.get("workspace_name") == workspace_name:
+                raise MemberConflictError(
+                    "WORKSPACE_NAME_EXISTS",
+                    f"Workspace '{workspace_name}' đã tồn tại",
+                    409,
+                )
+
+        if hasattr(self, "db") and self.db is not None:
+            try:
+                with self.db.session_scope() as s:
+                    rows = (
+                        s.query(MemberRecord)
+                        .filter(func.lower(MemberRecord.username) == uname)
+                        .all()
+                    )
+                    has_deleted_rows = False
+                    for row in rows:
+                        is_deleted_tombstone = (
+                            row.status == "DELETED"
+                            and row.provisioning_state == "DELETED"
+                            and bool((row.deleted_at or "").strip())
+                        )
+                        if not is_deleted_tombstone:
+                            if row.status in incomplete_states:
+                                raise MemberConflictError(
+                                    "MEMBER_DELETION_INCOMPLETE",
+                                    f"Tên người dùng '{username}' có quá trình xóa chưa hoàn tất trong DB ({row.status}, ID: {row.id}).",
+                                    409,
+                                    {"existing_member_id": row.id, "status": row.status},
+                                )
+                            raise MemberConflictError(
+                                "USERNAME_ALREADY_EXISTS",
+                                f"Tên người dùng '{username}' đã tồn tại trong cơ sở dữ liệu (ID: {row.id}, trạng thái: {row.status}).",
+                                409,
+                                {"existing_member_id": row.id, "status": row.status},
+                            )
+
+                        has_deleted_rows = True
+                        ops_for_member = (
+                            s.query(DeletionOperationRecord)
+                            .filter(
+                                DeletionOperationRecord.member_id == row.id,
+                                DeletionOperationRecord.dry_run.is_(False),
+                            )
+                            .order_by(DeletionOperationRecord.created_at.asc())
+                            .all()
+                        )
+                        if ops_for_member:
+                            latest_op = ops_for_member[-1]
+                            if latest_op.status != "COMPLETED" or latest_op.completed_at is None:
+                                raise MemberConflictError(
+                                    "MEMBER_DELETION_UNVERIFIED",
+                                    f"Xóa tài khoản cũ '{row.id}' (@{username}) chưa hoàn tất xác minh ({latest_op.status}); không thể tạo lại.",
+                                    409,
+                                    {"existing_member_id": row.id, "operation_id": latest_op.op_id},
+                                )
+                            steps = latest_op.steps_json if isinstance(latest_op.steps_json, dict) else {}
+                            bad_steps = [
+                                k for k, v in steps.items()
+                                if isinstance(v, dict)
+                                and v.get("status") in {"FAILED", "PARTIAL_FAILURE", "BLOCKED_BY_INFRASTRUCTURE"}
+                            ]
+                            if bad_steps:
+                                raise MemberConflictError(
+                                    "MEMBER_DELETION_UNVERIFIED",
+                                    f"Thao tác xóa tài khoản cũ '{row.id}' còn bước lỗi ({', '.join(bad_steps)}); không thể tạo lại.",
+                                    409,
+                                    {"existing_member_id": row.id, "failed_steps": bad_steps},
+                                )
+
+                    # Check DeletionOperationRecord by username for any unfinished deletion even if MemberRecord is missing/mid-flight
+                    all_ops = (
+                        s.query(DeletionOperationRecord)
+                        .filter(
+                            func.lower(DeletionOperationRecord.username) == uname,
+                            DeletionOperationRecord.dry_run.is_(False),
+                        )
+                        .order_by(DeletionOperationRecord.created_at.asc())
+                        .all()
+                    )
+                    latest_by_member: Dict[str, DeletionOperationRecord] = {}
+                    for op in all_ops:
+                        latest_by_member[op.member_id] = op
+                    for mid, op in latest_by_member.items():
+                        if op.status != "COMPLETED" or op.completed_at is None:
+                            raise MemberConflictError(
+                                "MEMBER_DELETION_INCOMPLETE",
+                                f"Phát hiện tác vụ xóa chưa hoàn tất cho @{username} (ID: {mid}, trạng thái: {op.status}).",
+                                409,
+                                {"existing_member_id": mid, "operation_id": op.op_id},
+                            )
+
+                    if workspace_name:
+                        ws_conflict = (
+                            s.query(MemberRecord)
+                            .filter(
+                                MemberRecord.workspace_name == workspace_name,
+                                MemberRecord.status != "DELETED",
+                            )
+                            .first()
+                        )
+                        if ws_conflict is not None:
+                            raise MemberConflictError(
+                                "WORKSPACE_NAME_EXISTS",
+                                f"Workspace '{workspace_name}' đã tồn tại",
+                                409,
+                            )
+
+                    if has_deleted_rows and getattr(self.db, "has_legacy_username_unique_index", False):
+                        raise MemberPersistenceError(
+                            "SCHEMA_MIGRATION_REQUIRED",
+                            f"Cơ sở dữ liệu vẫn dùng ràng buộc UNIQUE cũ trên members.username cho bản ghi đã xóa của '{username}'; cần chạy migration 0002 trước khi tạo lại.",
+                            503,
+                        )
+            except (MemberConflictError, MemberPersistenceError):
+                raise
+            except Exception as db_exc:
+                raise MemberPersistenceError(
+                    "DB_PRECHECK_FAILED",
+                    "Không thể truy vấn cơ sở dữ liệu để xác minh tính khả dụng của username.",
+                    503,
+                ) from db_exc
+
+        active_gpu = [
+            r for r in self.gpu_scheduler.list_reservations(owner=uname)
+            if r.get("state") in GPU_ACTIVE_STATES
+        ]
+        if active_gpu:
+            raise MemberConflictError(
+                "ACTIVE_GPU_RESERVATION_EXISTS",
+                f"Thành viên @{username} cũ vẫn còn giữ chỗ GPU đang hoạt động ({len(active_gpu)}).",
+                409,
+            )
+
+        active_containers = [
+            w for w in self.workspace_controller.list_workspaces(owner=uname)
+            if w.get("owner") == uname and w.get("runtime_type") == "DOCKER" and w.get("container_id")
+        ]
+        if active_containers:
+            raise MemberConflictError(
+                "RESIDUAL_WORKSPACE_CONTAINER_EXISTS",
+                f"Vẫn còn workspace container chưa thu hồi gắn với @{username}; hãy dọn dẹp an toàn trước khi tạo lại.",
+                409,
+            )
+
+        active_keys = [
+            k for k in self.ssh_key_registry.list_keys(username=uname)
+            if k.get("desired_state") == "ACTIVE"
+        ]
+        if active_keys:
+            raise MemberConflictError(
+                "RESIDUAL_SSH_KEY_EXISTS",
+                f"Vẫn còn khóa SSH đang ACTIVE chưa thu hồi cho @{username}; chưa thể tạo lại tài khoản mới.",
+                409,
+            )
+
+    def _compensate_failed_provisioning(
+        self,
+        fx: Dict[str, Any],
+        pre_members: List[Dict[str, Any]],
+        pre_endpoints: List[Dict[str, Any]],
+        pre_audits: List[Dict[str, Any]],
+        *,
+        pre_account: Optional[Dict[str, Any]] = None,
+        username: Optional[str] = None,
+        member_id: Optional[str] = None,
+    ) -> None:
+        """
+        Compensate partial provisioning side effects without EVER deleting user files on disk.
+        """
+        self.members[:] = pre_members
+        self.ssh_endpoints[:] = pre_endpoints
+        self.audit_logs[:] = pre_audits
+
+        if member_id:
+            try:
+                self.ssh_access_manager.vault.invalidate_member(member_id)
+            except Exception:
+                pass
+
+        resv = fx.get("storage_reserved")
+        if isinstance(resv, tuple) and len(resv) == 2:
+            pool_id, quota_gib = resv
+            cur = storage_service._reservations.get(pool_id, 0)
+            new_val = max(0, int(cur) - int(quota_gib))
+            if new_val > 0:
+                storage_service._reservations[pool_id] = new_val
+            else:
+                storage_service._reservations.pop(pool_id, None)
+
+        created_key_id = fx.get("created_key_id")
+        if created_key_id:
+            try:
+                self.ssh_key_registry.mark_provisioning_rolled_back(created_key_id)
+            except Exception:
+                pass
+
+        created_ws_id = fx.get("created_ws_id")
+        has_container = bool(fx.get("has_container"))
+        if created_ws_id and not has_container:
+            try:
+                self.workspace_controller.remove_workspace_by_id(created_ws_id, require_no_container=True)
+            except Exception:
+                pass
+        elif created_ws_id and has_container:
+            # Never lose track of a real Docker container if DB commit failed afterward
+            try:
+                rec_path = os.path.join(self.data_dir, "provisioning_recovery.json")
+                existing = safe_load_json(rec_path, list)
+                if not isinstance(existing, list):
+                    existing = []
+                existing.append({
+                    "id": f"provrec-{uuid.uuid4().hex[:12]}",
+                    "member_id": member_id,
+                    "username": username,
+                    "workspace_id": created_ws_id,
+                    "container_id": fx.get("container_id"),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": "DB/persistence failure after container creation; preserved for reconciliation.",
+                })
+                atomic_write_json(rec_path, existing, mode=0o600)
+            except Exception:
+                pass
+
+        if pre_account is not None and username:
+            try:
+                self.ssh_access_manager.restore_account_state(
+                    username,
+                    pre_account,
+                    expected_new_member_id=member_id,
+                )
+            except Exception:
+                pass
+
+    def provision_member(
+        self,
+        payload: Dict[str, Any],
+        *,
+        _defer_persist: bool = False,
+        _skip_username_lock: bool = False,
+        _side_effects: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Record an access request; external workspace and identity services must verify activation."""
-        if payload.get("provision_ssh_access") or payload.get("provisionSshAccess"):
+        if not _defer_persist and (payload.get("provision_ssh_access") or payload.get("provisionSshAccess")):
             return self.provision_member_ssh_access(payload)
+
         username = payload.get("username", "")
         validate_linux_username(username)
-        if any(member.get("username") == username for member in self.members):
-            raise ValueError(f"Tên người dùng '{username}' đã tồn tại trong hệ thống")
 
         email = (payload.get("email") or "").strip()
         if email and "@" not in email and re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", email):
@@ -1937,8 +2517,8 @@ class LabOpsDataService:
         if not isinstance(full_name, str) or not full_name.strip() or len(full_name.strip()) > 120:
             raise ValueError("Tên hiển thị phải có từ 1 đến 120 ký tự")
         role = payload.get("role", "RESEARCHER")
-        if role not in {"RESEARCHER", "ADMIN"}:
-            raise ValueError("Role chỉ được là RESEARCHER hoặc ADMIN")
+        if role not in {"RESEARCHER", "STUDENT", "ADMIN"}:
+            raise ValueError("Role chỉ được là RESEARCHER, STUDENT hoặc ADMIN")
 
         server_id = payload.get("assigned_server") or payload.get("assignedServer") or settings.LOCAL_HOST_ID
         server = next((item for item in self.servers if item["id"] == server_id), None)
@@ -1968,47 +2548,11 @@ class LabOpsDataService:
         storage_quota_gb = payload.get("storage_quota_gb", payload.get("storageQuotaGb", 250))
         if not isinstance(storage_quota_gb, int) or storage_quota_gb <= 0:
             raise ValueError("Dung lượng yêu cầu phải là số nguyên dương")
-        
+
         free_limit = pool.get("free_gb", pool.get("free_gib", pool.get("allocatable_gib", 0.0))) if pool else 0.0
         if pool and storage_quota_gb > free_limit:
             raise ValueError("Dung lượng yêu cầu vượt quá dung lượng khả dụng")
 
-        storage_result = {}
-        if pool:
-            s_id = pool.get("storage_id") or pool.get("id")
-            if not storage_service.get_storage_pool_by_id(server_id, s_id):
-                pool_mnt = pool.get("mount_point", "/mnt/HDD3")
-                pool_fs = pool.get("driver", "ext4")
-                q_supp = bool(pool.get("quota_supported", False))
-                q_enf = bool(pool.get("quota_enforced", False))
-                storage_service.register_custom_pool(server_id, {
-                    "host_id": server_id,
-                    "storage_id": s_id,
-                    "device": pool.get("disk_identifier", "/dev/sdc"),
-                    "filesystem_uuid": hashlib.sha256(f"{server_id}:{s_id}".encode()).hexdigest()[:36],
-                    "mount_point": pool_mnt,
-                    "filesystem": pool_fs,
-                    "capacity_gib": float(pool.get("capacity_gb", pool.get("capacity_gib", 1000.0))),
-                    "used_gib": float(pool.get("used_gb", pool.get("used_gib", 100.0))),
-                    "free_gib": float(pool.get("free_gb", pool.get("free_gib", 900.0))),
-                    "allocatable_gib": float(pool.get("free_gb", pool.get("allocatable_gib", 900.0))),
-                    "reserved_gib": 100.0,
-                    "quota_backend": "PROJECT_QUOTA" if q_supp else "NONE",
-                    "quota_supported": q_supp,
-                    "quota_enforced": q_enf,
-                    "read_only": False,
-                    "mounted": True,
-                    "eligible": pool_mnt != "/",
-                    "ineligibility_reason": "Root filesystem bị cấm" if pool_mnt == "/" else None,
-                    "last_verified_at": datetime.now(timezone.utc).isoformat(),
-                    "verification_status": "VERIFIED" if q_enf else "QUOTA_NOT_ENFORCEABLE",
-                })
-            storage_result = storage_service.provision_member_storage(
-                host_id=server_id,
-                storage_id=s_id,
-                username=username,
-                quota_gib=storage_quota_gb,
-            )
         cpu_limit = payload.get("cpu_limit_cores", payload.get("cpuLimitCores", 8))
         ram_limit = payload.get("ram_limit_gb", payload.get("ramLimitGb", 32))
         vram_quota = payload.get("vram_quota_gb", payload.get("vramQuotaGb", 12))
@@ -2023,151 +2567,250 @@ class LabOpsDataService:
             raise ValueError("Danh sách GPU không hợp lệ")
 
         gpu_mode = payload.get("gpu_allocation_mode", payload.get("gpuAllocationMode", "EXCLUSIVE")) if gpu_permissions else "NONE"
-        if gpu_permissions and gpu_mode == "EXCLUSIVE":
-            for existing in self.members:
-                if existing.get("assigned_server") == server_id:
-                    existing_gpus = existing.get("gpu_permissions", [])
-                    existing_mode = existing.get("gpu_allocation_mode", "SHARED")
-                    if existing_mode == "EXCLUSIVE" and any(g in existing_gpus for g in gpu_permissions):
-                        conflict_gpus = [g for g in gpu_permissions if g in existing_gpus]
-                        raise ValueError(f"Xung đột cấp phát GPU: GPU '{conflict_gpus}' đã được cấp phát độc quyền (EXCLUSIVE) cho thành viên @{existing.get('username')}")
-
         mount_path = payload.get("mount_path", payload.get("mountPath", "/workspace"))
         validate_mount_path(mount_path, username)
 
         workspace_name = payload.get("workspace_name") or payload.get("workspaceName") or f"ws-{username}"
         if not re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", workspace_name):
             raise ValueError("Workspace name không hợp lệ")
-        if any(member.get("workspace_name") == workspace_name for member in self.members):
-            raise ValueError(f"Workspace '{workspace_name}' đã tồn tại")
 
         raw_ssh_key = (payload.get("ssh_public_key") or payload.get("sshPublicKey") or "").strip()
         ssh_key_label = (payload.get("ssh_key_label") or payload.get("sshKeyLabel") or "Khóa SSH mặc định").strip()
         actor_id = payload.get("_actor_id", "labops-api")
-        registered_key = None
-        allocated_port = None
-        ssh_ip = None
-        workspace_status = "NOT_VERIFIED"
-
         if raw_ssh_key:
-            registered_key = self.ssh_key_registry.register_key(
-                username=username,
-                label=ssh_key_label,
-                public_key=raw_ssh_key,
-                actor=actor_id,
-            )
-            allocated_port = self.get_next_available_ssh_port(server_id)
-            ssh_ip = (
-                server.get("vpn_ip")
-                or server.get("ip_address")
-                or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
-            )
-            ws_record = self.workspace_controller.request_workspace(
+            compute_ssh_fingerprint(raw_ssh_key)
+            WorkspaceController.validate_security_constraints(
                 owner=username,
-                host_id=server_id,
                 ssh_public_key=raw_ssh_key,
-                cpu_cores=min(cpu_limit, 64),
-                ram_mb=min(ram_limit * 1024, 262144),
-                storage_quota_gb=min(storage_quota_gb, 2000),
+                cpu_cores=min(cpu_limit, 48) if cpu_limit else 8,
+                ram_mb=max(1024, min(ram_limit * 1024, 131072)),
             )
-            workspace_status = ws_record.get("verification", "PENDING_VERIFICATION")
 
-        member_id = f"mem-{uuid.uuid4().hex[:12]}"
-        if allocated_port is not None:
-            self.ssh_endpoints.append({
-                "id": f"ep-{uuid.uuid4().hex[:8]}",
+        guard_cm = contextmanager(lambda: (yield))() if _skip_username_lock else self._username_creation_guard(username)
+        with guard_cm:
+            if not (_defer_persist and _skip_username_lock):
+                self._verify_username_available_for_creation(username, workspace_name=workspace_name)
+
+            if gpu_permissions and gpu_mode == "EXCLUSIVE":
+                for existing in self.members:
+                    if existing.get("assigned_server") == server_id:
+                        existing_gpus = existing.get("gpu_permissions", [])
+                        existing_mode = existing.get("gpu_allocation_mode", "SHARED")
+                        if existing_mode == "EXCLUSIVE" and any(g in existing_gpus for g in gpu_permissions):
+                            conflict_gpus = [g for g in gpu_permissions if g in existing_gpus]
+                            raise ValueError(f"Xung đột cấp phát GPU: GPU '{conflict_gpus}' đã được cấp phát độc quyền (EXCLUSIVE) cho thành viên @{existing.get('username')}")
+
+            pre_members = list(self.members)
+            pre_endpoints = list(self.ssh_endpoints)
+            pre_audits = list(self.audit_logs)
+            member_id = f"mem-{uuid.uuid4().hex[:12]}"
+            fx: Dict[str, Any] = {
                 "member_id": member_id,
-                "server_id": server_id,
-                "listen_address": ssh_ip,
-                "listen_port": allocated_port,
-                "container_port": 22,
-                "protocol": "tcp",
-                "status": "RESERVED",
+                "storage_reserved": None,
+                "created_key_id": None,
+                "created_ws_id": None,
+                "has_container": False,
+            }
+
+            try:
+                storage_result: Dict[str, Any] = {}
+                if pool:
+                    s_id = pool.get("storage_id") or pool.get("id")
+                    if not storage_service.get_storage_pool_by_id(server_id, s_id):
+                        pool_mnt = pool.get("mount_point", "/mnt/HDD3")
+                        pool_fs = pool.get("driver", "ext4")
+                        q_supp = bool(pool.get("quota_supported", False))
+                        q_enf = bool(pool.get("quota_enforced", False))
+                        storage_service.register_custom_pool(server_id, {
+                            "host_id": server_id,
+                            "storage_id": s_id,
+                            "device": pool.get("disk_identifier", "/dev/sdc"),
+                            "filesystem_uuid": hashlib.sha256(f"{server_id}:{s_id}".encode()).hexdigest()[:36],
+                            "mount_point": pool_mnt,
+                            "filesystem": pool_fs,
+                            "capacity_gib": float(pool.get("capacity_gb", pool.get("capacity_gib", 1000.0))),
+                            "used_gib": float(pool.get("used_gb", pool.get("used_gib", 100.0))),
+                            "free_gib": float(pool.get("free_gb", pool.get("free_gib", 900.0))),
+                            "allocatable_gib": float(pool.get("free_gb", pool.get("allocatable_gib", 900.0))),
+                            "reserved_gib": 100.0,
+                            "quota_backend": "PROJECT_QUOTA" if q_supp else "NONE",
+                            "quota_supported": q_supp,
+                            "quota_enforced": q_enf,
+                            "read_only": False,
+                            "mounted": True,
+                            "eligible": pool_mnt != "/",
+                            "ineligibility_reason": "Root filesystem bị cấm" if pool_mnt == "/" else None,
+                            "last_verified_at": datetime.now(timezone.utc).isoformat(),
+                            "verification_status": "VERIFIED" if q_enf else "QUOTA_NOT_ENFORCEABLE",
+                        })
+                    storage_result = storage_service.provision_member_storage(
+                        host_id=server_id,
+                        storage_id=s_id,
+                        username=username,
+                        quota_gib=storage_quota_gb,
+                    )
+                    fx["storage_reserved"] = (s_id, storage_quota_gb)
+
+                registered_key = None
+                allocated_port = None
+                ssh_ip = None
+                workspace_status = "NOT_VERIFIED"
+
+                if raw_ssh_key:
+                    registered_key = self.ssh_key_registry.register_key(
+                        username=username,
+                        label=ssh_key_label,
+                        public_key=raw_ssh_key,
+                        actor=actor_id,
+                        member_id=member_id,
+                    )
+                    fx["created_key_id"] = registered_key["id"]
+                    allocated_port = self.get_next_available_ssh_port(server_id)
+                    ssh_ip = (
+                        server.get("vpn_ip")
+                        or server.get("ip_address")
+                        or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
+                    )
+                    ws_record = self.workspace_controller.request_workspace(
+                        owner=username,
+                        host_id=server_id,
+                        ssh_public_key=raw_ssh_key,
+                        cpu_cores=min(cpu_limit, 48),
+                        ram_mb=max(1024, min(ram_limit * 1024, 131072)),
+                        storage_quota_gb=min(storage_quota_gb, 2000),
+                        storage_path=storage_result.get("member_storage_directory"),
+                        member_storage_dir=storage_result.get("member_storage_directory"),
+                        member_id=member_id,
+                    )
+                    fx["created_ws_id"] = ws_record["id"]
+                    workspace_status = ws_record.get("verification", "PENDING_VERIFICATION")
+            except Exception:
+                self._compensate_failed_provisioning(
+                    fx, pre_members, pre_endpoints, pre_audits, username=username, member_id=member_id
+                )
+                raise
+
+            if allocated_port is not None:
+                self.ssh_endpoints.append({
+                    "id": f"ep-{uuid.uuid4().hex[:8]}",
+                    "member_id": member_id,
+                    "server_id": server_id,
+                    "listen_address": ssh_ip,
+                    "listen_port": allocated_port,
+                    "container_port": 22,
+                    "protocol": "tcp",
+                    "status": "RESERVED",
+                })
+
+            now = datetime.now().isoformat(timespec="seconds")
+            member = {
+                "id": member_id,
+                "full_name": full_name.strip(),
+                "username": username,
+                "email": email,
+                "role": role,
+                "research_group": payload.get("research_group") or payload.get("researchGroup") or "AI Research Lab",
+                "assigned_server": server_id,
+                "workspace_name": workspace_name,
+                "status": "PENDING_PROVISIONING",
+                "provisioning_state": "SSH_KEY_ENROLLED" if registered_key else "PENDING",
+                "workspace_status": workspace_status,
+                "teleport_status": "NOT_CONFIGURED",
+                "storage_pool_id": pool.get("storage_id") or pool.get("id") if pool else None,
+                "storage_pool_label": pool.get("label", pool.get("mount_point", "NOT_VERIFIED")) if pool else "NOT_VERIFIED",
+                "storage_id": pool.get("storage_id") or pool.get("id") if pool else None,
+                "host_storage_root": storage_result.get("host_storage_root"),
+                "member_storage_directory": storage_result.get("member_storage_directory"),
+                "workspace_dir": storage_result.get("member_storage_directory"),
+                "container_mount_path": "/workspace",
+                "storage_quota_backend": storage_result.get("quota_backend", "PROJECT_QUOTA"),
+                "storage_quota_enforcement": storage_result.get("verification_status", "VERIFIED"),
+                "mount_path": mount_path,
+                "storage_quota_gb": storage_quota_gb,
+                "storage_used_gb": 0.0,
+                "backup_policy": payload.get("backup_policy", payload.get("backupPolicy", "DAILY_SNAPSHOT")),
+                "shared_datasets": payload.get("shared_datasets", payload.get("sharedDatasets", ["/shared/datasets"])),
+                "ssh_status": "READY_PENDING_RUNTIME" if registered_key else "OFFLINE",
+                "ssh_sessions_count": 0,
+                "ssh_ip": ssh_ip,
+                "ssh_port": allocated_port,
+                "ssh_key_status": "ACTIVE" if registered_key else "NOT_CONFIGURED",
+                "ssh_fingerprint": registered_key["fingerprint"] if registered_key else None,
+                "ssh_public_key_preview": f"{raw_ssh_key[:42]}..." if registered_key else "Chưa đăng ký khóa OpenSSH",
+                "ssh_public_key": raw_ssh_key if registered_key else None,
+                "ssh_auth_mode": "OPENSSH_PUBLIC_KEY" if registered_key else "TELEPORT_CERTIFICATE_PENDING",
+                "password_status": "NOT_APPLICABLE",
+                "failed_login_attempts": 0,
+                "last_successful_login": None,
+                "last_login_source_ip": None,
+                "sudo_privilege": "DENIED",
+                "security_isolation_level": "NOT_VERIFIED",
+                "privilege_validation": {
+                    "unprivileged_container": False,
+                    "sudo_test_failed_as_expected": False,
+                    "no_sudo_group_membership": False,
+                    "no_docker_socket_access": False,
+                    "no_incus_socket_access": False,
+                    "verification_timestamp": None,
+                    "status": "NOT_VERIFIED",
+                },
+                "cpu_limit_cores": cpu_limit,
+                "ram_limit_gb": ram_limit,
+                "cpu_policy": payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED",
+                "cpu_weight": int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100),
+                "memory_policy": payload.get("memory_policy") or payload.get("memoryPolicy") or "SHARED_HOST_PROTECTED",
+                "vram_enforcement_status": "POLICY_ONLY",
+                "gpu_permissions": gpu_permissions,
+                "vram_policy": payload.get("vram_policy", payload.get("vramPolicy", "Quota 12GB (Shared)")),
+                "vram_quota_gb": vram_quota,
+                "gpu_allocation_mode": payload.get("gpu_allocation_mode", payload.get("gpuAllocationMode", "SHARED")),
+                "max_runtime_hours": 48,
+                "active_jobs_count": 0,
+                "total_gpu_hours": 0.0,
+                "created_at": datetime.now().strftime("%Y-%m-%d"),
+                "expires_at": payload.get("expires_at", payload.get("expiresAt")),
+                "wireguard": {"status": "NOT_CONFIGURED", "devices": []},
+            }
+            self.members.insert(0, member)
+            self.audit_logs.insert(0, {
+                "id": f"aud-{uuid.uuid4().hex[:12]}",
+                "actor": actor_id,
+                "action": "ACCESS_REQUEST_CREATED",
+                "target_type": "MEMBER",
+                "target_id": username,
+                "timestamp": now,
+                "result": "SSH_ENROLLED" if registered_key else "PENDING",
+                "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
+                "details": (
+                    f"Access request recorded for workspace {workspace_name} on {server_id} (member_id: {member_id})"
+                    + (f" with OpenSSH port {allocated_port} ({registered_key['fingerprint']})." if registered_key else "; provisioning is not verified.")
+                ),
             })
 
-        now = datetime.now().isoformat(timespec="seconds")
-        member = {
-            "id": member_id,
-            "full_name": full_name.strip(),
-            "username": username,
-            "email": email,
-            "role": role,
-            "research_group": payload.get("research_group") or payload.get("researchGroup") or "AI Research Lab",
-            "assigned_server": server_id,
-            "workspace_name": workspace_name,
-            "status": "PENDING_PROVISIONING",
-            "provisioning_state": "SSH_KEY_ENROLLED" if registered_key else "PENDING",
-            "workspace_status": workspace_status,
-            "teleport_status": "NOT_CONFIGURED",
-            "storage_pool_id": pool.get("storage_id") or pool.get("id") if pool else None,
-            "storage_pool_label": pool.get("label", pool.get("mount_point", "NOT_VERIFIED")) if pool else "NOT_VERIFIED",
-            "storage_id": pool.get("storage_id") or pool.get("id") if pool else None,
-            "host_storage_root": storage_result.get("host_storage_root"),
-            "member_storage_directory": storage_result.get("member_storage_directory"),
-            "workspace_dir": storage_result.get("member_storage_directory"),
-            "container_mount_path": "/workspace",
-            "storage_quota_backend": storage_result.get("quota_backend", "PROJECT_QUOTA"),
-            "storage_quota_enforcement": storage_result.get("verification_status", "VERIFIED"),
-            "mount_path": mount_path,
-            "storage_quota_gb": storage_quota_gb,
-            "storage_used_gb": 0.0,
-            "backup_policy": payload.get("backup_policy", payload.get("backupPolicy", "DAILY_SNAPSHOT")),
-            "shared_datasets": payload.get("shared_datasets", payload.get("sharedDatasets", ["/shared/datasets"])),
-            "ssh_status": "READY_PENDING_RUNTIME" if registered_key else "OFFLINE",
-            "ssh_sessions_count": 0,
-            "ssh_ip": ssh_ip,
-            "ssh_port": allocated_port,
-            "ssh_key_status": "ACTIVE" if registered_key else "NOT_CONFIGURED",
-            "ssh_fingerprint": registered_key["fingerprint"] if registered_key else None,
-            "ssh_public_key_preview": f"{raw_ssh_key[:42]}..." if registered_key else "Chưa đăng ký khóa OpenSSH",
-            "ssh_public_key": raw_ssh_key if registered_key else None,
-            "ssh_auth_mode": "OPENSSH_PUBLIC_KEY" if registered_key else "TELEPORT_CERTIFICATE_PENDING",
-            "password_status": "NOT_APPLICABLE",
-            "failed_login_attempts": 0,
-            "last_successful_login": None,
-            "last_login_source_ip": None,
-            "sudo_privilege": "DENIED",
-            "security_isolation_level": "NOT_VERIFIED",
-            "privilege_validation": {
-                "unprivileged_container": False,
-                "sudo_test_failed_as_expected": False,
-                "no_sudo_group_membership": False,
-                "no_docker_socket_access": False,
-                "no_incus_socket_access": False,
-                "verification_timestamp": None,
-                "status": "NOT_VERIFIED",
-            },
-            "cpu_limit_cores": cpu_limit,
-            "ram_limit_gb": ram_limit,
-            "cpu_policy": payload.get("cpu_policy") or payload.get("cpuPolicy") or "SHARED_WEIGHTED",
-            "cpu_weight": int(payload.get("cpu_weight") or payload.get("cpuWeight") or 100),
-            "memory_policy": payload.get("memory_policy") or payload.get("memoryPolicy") or "SHARED_HOST_PROTECTED",
-            "vram_enforcement_status": "POLICY_ONLY",
-            "gpu_permissions": gpu_permissions,
-            "vram_policy": payload.get("vram_policy", payload.get("vramPolicy", "Quota 12GB (Shared)")),
-            "vram_quota_gb": vram_quota,
-            "gpu_allocation_mode": payload.get("gpu_allocation_mode", payload.get("gpuAllocationMode", "SHARED")),
-            "max_runtime_hours": 48,
-            "active_jobs_count": 0,
-            "total_gpu_hours": 0.0,
-            "created_at": datetime.now().strftime("%Y-%m-%d"),
-            "expires_at": payload.get("expires_at", payload.get("expiresAt")),
-            "wireguard": {"status": "NOT_CONFIGURED", "devices": []},
-        }
-        self.members.insert(0, member)
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor_id,
-            "action": "ACCESS_REQUEST_CREATED",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": now,
-            "result": "SSH_ENROLLED" if registered_key else "PENDING",
-            "correlation_id": f"corr-{uuid.uuid4().hex[:12]}",
-            "details": f"Access request recorded for workspace {workspace_name} on {server_id}" + (f" with OpenSSH port {allocated_port} ({registered_key['fingerprint']})." if registered_key else "; provisioning is not verified."),
-        })
-        self._save_persistent_data()
-        return member
+            if _defer_persist:
+                if _side_effects is not None:
+                    _side_effects.update(fx)
+                return member
+
+            try:
+                self._save_persistent_data()
+            except MemberPersistenceError as mp_err:
+                if mp_err.code == "JSON_PERSISTENCE_FAILED":
+                    # DB already committed this member_id; keep it active in revocation tracking & prevent duplicate retries
+                    get_revocation_store().register_active_member(username, member_id)
+                    raise
+                self._compensate_failed_provisioning(
+                    fx, pre_members, pre_endpoints, pre_audits, username=username, member_id=member_id
+                )
+                raise
+            except Exception:
+                self._compensate_failed_provisioning(
+                    fx, pre_members, pre_endpoints, pre_audits, username=username, member_id=member_id
+                )
+                raise
+
+            get_revocation_store().register_active_member(username, member_id)
+            return member
 
     def enroll_member_ssh_key(self, username: str, label: str, public_key: str, actor: str) -> Dict[str, Any]:
         """Đăng ký khóa OpenSSH cho thành viên và tự động cấp cổng/workspace SSH nếu thành viên đã tồn tại."""
@@ -2541,7 +3184,9 @@ class LabOpsDataService:
                 "sudo_inside_workspace": "DENIED",
                 "docker_socket_mounted": False,
             },
-            "account_security": self.ssh_access_manager.get_account_security_state(username),
+            "account_security": self.ssh_access_manager.get_account_security_state(
+                username, expected_member_id=member["id"] if member else None
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -2703,6 +3348,41 @@ class LabOpsDataService:
                 return candidate
         raise RuntimeError("Hết dải IP WireGuard 10.88.40.10-249 khả dụng")
 
+    def _build_gpu_uuid_map(self, server_id: str) -> Dict[str, str]:
+        """Ánh xạ ID GPU nội bộ (VD: workstation-gpu-01) sang UUID phần cứng NVIDIA (GPU-...)."""
+        gpu_map: Dict[str, str] = {}
+        for g in self.gpus:
+            if g.get("server_id") != server_id:
+                continue
+            uuid_val = str(g.get("uuid") or "").strip()
+            if not uuid_val.startswith(("GPU-", "MIG-")):
+                continue
+            gid = str(g.get("id") or "").strip()
+            if gid:
+                gpu_map[gid] = uuid_val
+                gpu_map[gid.lower()] = uuid_val
+                canon = canonicalize_gpu_id(gid)
+                if canon:
+                    gpu_map[canon] = uuid_val
+                    gpu_map[canon.lower()] = uuid_val
+            gpu_map[uuid_val] = uuid_val
+        if server_id == settings.LOCAL_HOST_ID and "workstation-gpu-01" not in gpu_map:
+            try:
+                inspected = self.node_agent.local_executor._inspect_gpus()
+                for idx, gpu in enumerate(inspected.get("gpus") or []):
+                    uuid_val = str(gpu.get("uuid") or "").strip()
+                    if not uuid_val.startswith(("GPU-", "MIG-")):
+                        continue
+                    g_idx = int(gpu.get("index", idx)) + 1
+                    canon_id = f"{server_id}-gpu-{g_idx:02d}"
+                    gpu_map.setdefault(canon_id, uuid_val)
+                    gpu_map.setdefault(canon_id.lower(), uuid_val)
+                    if g_idx == 1 and server_id == "workstation":
+                        gpu_map.setdefault("ws-gpu-01", uuid_val)
+            except Exception:
+                pass
+        return gpu_map
+
     def _sync_member_ssh_authorization(
         self,
         member: Dict[str, Any],
@@ -2720,7 +3400,14 @@ class LabOpsDataService:
         server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
         server = next((s for s in self.servers if s["id"] == server_id), None)
         host_online = self._is_host_online(server_id)
-        account_security = self.ssh_access_manager.get_account_security_state(username)
+        self.ssh_access_manager.reconcile_container_activation_marker(
+            username,
+            expected_member_id=member.get("id"),
+            member_storage_dir=member.get("member_storage_directory"),
+        )
+        account_security = self.ssh_access_manager.get_account_security_state(
+            username, expected_member_id=member.get("id")
+        )
         vpn_overview = {"status": (member.get("wireguard") or {}).get("status")}
 
         gate = evaluate_ssh_authorization_gate(
@@ -2749,6 +3436,14 @@ class LabOpsDataService:
                         actor_role="ADMIN",
                     )
                     synced_ok = True
+                    if server_id == settings.LOCAL_HOST_ID:
+                        self.ssh_access_manager.sync_container_first_login_gate(
+                            workspace_id=str(member["workspace_id"]),
+                            username=username,
+                            member_id=str(member.get("id") or ""),
+                            keys=keys_to_sync,
+                            member_storage_dir=member.get("member_storage_directory"),
+                        )
                 except Exception as sync_exc:
                     if keys_to_sync:
                         gate["ssh_authorized"] = False
@@ -2776,10 +3471,14 @@ class LabOpsDataService:
             rv = member.get("runtime_verification")
             if isinstance(rv, dict):
                 rv["ssh_key_installed"] = "VERIFIED"
+                quota_gate_status = (gate.get("gates") or {}).get("storage_quota", {}).get("status")
+                storage_ok = rv.get("storage_quota") == "VERIFIED" or (
+                    rv.get("storage_quota") == "NOT_ENFORCEABLE" and quota_gate_status == "POLICY_ONLY"
+                )
                 if all(
                     rv.get(k) == "VERIFIED"
-                    for k in ("docker_running", "directory_isolation", "privilege_isolation", "cpu_ram_limits", "storage_quota", "ssh_runtime")
-                ) and rv.get("gpu_isolation") in ("VERIFIED", "NOT_APPLICABLE"):
+                    for k in ("docker_running", "directory_isolation", "privilege_isolation", "cpu_ram_limits", "ssh_runtime")
+                ) and storage_ok and rv.get("gpu_isolation") in ("VERIFIED", "NOT_APPLICABLE"):
                     rv["overall_status"] = "READY"
 
         member["activation_status"] = gate["activation_status"]
@@ -2819,9 +3518,17 @@ class LabOpsDataService:
         username = (payload.get("username") or "").strip().lower()
         validate_linux_username(username)
 
-        existing_member = next((m for m in self.members if m.get("username") == username), None)
-        if existing_member and not payload.get("allow_existing_member"):
-            raise ValueError(f"Tên người dùng '{username}' đã tồn tại trong hệ thống")
+        existing_member = next(
+            (m for m in self.members if (m.get("username") or "").lower() == username), None
+        )
+        allow_existing = bool(payload.get("allow_existing_member"))
+        if existing_member and not allow_existing:
+            raise MemberConflictError(
+                "USERNAME_ALREADY_EXISTS",
+                f"Tên người dùng '{username}' đã tồn tại trong hệ thống",
+                409,
+                {"existing_member_id": existing_member.get("id"), "status": existing_member.get("status")},
+            )
 
         server_id = payload.get("assigned_server") or payload.get("assignedServer") or settings.LOCAL_HOST_ID
         server = next((item for item in self.servers if item["id"] == server_id), None)
@@ -2838,436 +3545,504 @@ class LabOpsDataService:
 
         client_pubkey = str(payload.get("ssh_public_key") or payload.get("sshPublicKey") or "").strip()
         if client_pubkey:
-            meta = compute_ssh_fingerprint(client_pubkey)
-            public_key = client_pubkey
-            fingerprint = meta["fingerprint_sha256"]
-            encrypted_private_key = ""
-            passphrase = ""
-            ssh_key_enrollment_mode = "CLIENT_ENROLLED_PUBKEY"
-            ssh_key_passphrase_mode = "CLIENT_ENROLLED_KEY"
-        else:
-            require_passphrase = payload.get("require_passphrase")
-            if require_passphrase is None:
-                require_passphrase = payload.get("requirePassphrase", True)
-            require_passphrase = bool(require_passphrase)
-            generated = self.ssh_access_manager.generate_encrypted_ed25519_keypair(
-                username, workspace_name, require_passphrase=require_passphrase
-            )
-            public_key = generated["public_key"]
-            fingerprint = generated["fingerprint"]
-            encrypted_private_key = generated["encrypted_private_key"]
-            passphrase = generated["passphrase"]
-            ssh_key_enrollment_mode = "SERVER_GENERATED_ENCRYPTED_KEY"
-            ssh_key_passphrase_mode = (
-                "PASSPHRASE_VERIFIED" if require_passphrase else "NO_PASSPHRASE_SERVER_GENERATED"
-            )
+            compute_ssh_fingerprint(client_pubkey)
 
-        # Tạo thư mục workspace cô lập (0700) nhưng GIỮ authorized_keys RỖNG tới khi kích hoạt & pass gate
-        ws_fs = self.ssh_access_manager.setup_isolated_workspace_filesystem(
-            host_id=server_id,
-            username=username,
-            workspace_name=workspace_name,
-            public_key=public_key,
-            cpu_limit_cores=cpu_limit,
-            ram_limit_gb=ram_limit,
-            storage_quota_gb=storage_quota_gb,
-            gpu_permissions=gpu_permissions,
-            extra_mounts=payload.get("extra_mounts"),
-            authorize_ssh_key=False,
-        )
+        guard_cm = contextmanager(lambda: (yield))() if (existing_member and allow_existing) else self._username_creation_guard(username)
+        with guard_cm:
+            if not existing_member:
+                self._verify_username_available_for_creation(username, workspace_name=workspace_name)
 
-        # Nếu là thành viên mới, khởi tạo bản ghi thành viên qua provision_member cơ bản (bỏ cờ provision_ssh_access)
-        if not existing_member:
-            base_payload = dict(payload)
-            base_payload.pop("provision_ssh_access", None)
-            base_payload.pop("provisionSshAccess", None)
-            base_payload["ssh_public_key"] = public_key
-            base_payload["ssh_key_label"] = (
-                payload.get("ssh_key_label")
-                or payload.get("sshKeyLabel")
-                or ("Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key")
+            pre_members = list(self.members)
+            pre_endpoints = list(self.ssh_endpoints)
+            pre_audits = list(self.audit_logs)
+            pre_account = (
+                self.ssh_access_manager.snapshot_account_state(username)
+                if not existing_member
+                else None
             )
-            member = self.provision_member(base_payload)
-        else:
-            member = existing_member
-            key_rec = self.ssh_key_registry.register_key(
-                username=username,
-                label="Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key",
-                public_key=public_key,
-                actor=actor_id,
-            )
-            if not member.get("ssh_port"):
-                member["ssh_port"] = self.get_next_available_ssh_port(server_id)
-                member["ssh_ip"] = (
-                    server.get("vpn_ip")
-                    or server.get("ip_address")
-                    or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
+            fx: Dict[str, Any] = {
+                "storage_reserved": None,
+                "created_key_id": None,
+                "created_ws_id": None,
+                "has_container": False,
+            }
+
+            if client_pubkey:
+                meta = compute_ssh_fingerprint(client_pubkey)
+                public_key = client_pubkey
+                fingerprint = meta["fingerprint_sha256"]
+                encrypted_private_key = ""
+                passphrase = ""
+                ssh_key_enrollment_mode = "CLIENT_ENROLLED_PUBKEY"
+                ssh_key_passphrase_mode = "CLIENT_ENROLLED_KEY"
+            else:
+                require_passphrase = payload.get("require_passphrase")
+                if require_passphrase is None:
+                    require_passphrase = payload.get("requirePassphrase", True)
+                require_passphrase = bool(require_passphrase)
+                generated = self.ssh_access_manager.generate_encrypted_ed25519_keypair(
+                    username, workspace_name, require_passphrase=require_passphrase
                 )
-            member["ssh_fingerprint"] = key_rec["fingerprint"]
-            member["ssh_public_key"] = public_key
-            member["ssh_public_key_preview"] = f"{public_key[:42]}..."
-            member["ssh_key_status"] = "ACTIVE"
-            for storage_field in (
-                "storage_pool_id",
-                "storage_id",
-                "host_storage_root",
-                "member_storage_directory",
-                "storage_pool_label",
-                "mount_path",
-            ):
-                if payload.get(storage_field) and not member.get(storage_field):
-                    member[storage_field] = payload[storage_field]
-
-        member["ssh_key_enrollment_mode"] = ssh_key_enrollment_mode
-        member["ssh_key_passphrase_mode"] = ssh_key_passphrase_mode
-        member["_canary_mode"] = enforce_canary_runtime
-        member["cpu_policy"] = cpu_policy
-        member["cpu_weight"] = cpu_weight
-
-        # Cấp mật khẩu tạm cho lần đăng nhập đầu tiên (chỉ lưu scrypt hash, trạng thái PENDING_ACTIVATION)
-        temp_password, pw_meta = self.ssh_access_manager.issue_temporary_password(
-            member_id=member["id"],
-            username=username,
-            actor=actor_id,
-            ttl_seconds=temp_password_ttl_seconds,
-        )
-        member["activation_status"] = "PENDING_ACTIVATION"
-        member["password_status"] = "CHANGE_REQUIRED"
-        member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
-
-        host_online = self._is_host_online(server_id)
-        agent_verification_rec: Optional[Dict[str, Any]] = None
-        if enforce_canary_runtime:
-            is_test_ctx = "PYTEST_CURRENT_TEST" in os.environ or os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") == "1"
-            if self._is_live_production_data_dir or not is_test_ctx:
-                raise PermissionError(
-                    "CANARY_SSHD_FORBIDDEN_IN_PRODUCTION: Không được phép bật host canary SSHD trong môi trường production."
+                public_key = generated["public_key"]
+                fingerprint = generated["fingerprint"]
+                encrypted_private_key = generated["encrypted_private_key"]
+                passphrase = generated["passphrase"]
+                ssh_key_enrollment_mode = "SERVER_GENERATED_ENCRYPTED_KEY"
+                ssh_key_passphrase_mode = (
+                    "PASSPHRASE_VERIFIED" if require_passphrase else "NO_PASSPHRASE_SERVER_GENERATED"
                 )
-            if host_online:
-                canary = self.ssh_access_manager.start_canary_sshd_for_workspace(
-                    server_id,
-                    username,
-                    port=int(member.get("ssh_port") or 0),
-                    workspace_dir=ws_fs.get("workspace_dir"),
-                    listen_address="127.0.0.1",
+
+            if not existing_member:
+                base_payload = dict(payload)
+                base_payload.pop("provision_ssh_access", None)
+                base_payload.pop("provisionSshAccess", None)
+                base_payload["ssh_public_key"] = public_key
+                base_payload["ssh_key_label"] = (
+                    payload.get("ssh_key_label")
+                    or payload.get("sshKeyLabel")
+                    or ("Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key")
+                )
+                member = self.provision_member(
+                    base_payload,
+                    _defer_persist=True,
+                    _skip_username_lock=True,
+                    _side_effects=fx,
+                )
+            else:
+                member = existing_member
+                key_rec = self.ssh_key_registry.register_key(
+                    username=username,
+                    label="Client-Enrolled Public Key" if client_pubkey else "Admin-Managed Ed25519 Key",
+                    public_key=public_key,
+                    actor=actor_id,
+                    member_id=member["id"],
+                )
+                if not member.get("ssh_port"):
+                    member["ssh_port"] = self.get_next_available_ssh_port(server_id)
+                    member["ssh_ip"] = (
+                        server.get("vpn_ip")
+                        or server.get("ip_address")
+                        or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
+                    )
+                member["ssh_fingerprint"] = key_rec["fingerprint"]
+                member["ssh_public_key"] = public_key
+                member["ssh_public_key_preview"] = f"{public_key[:42]}..."
+                member["ssh_key_status"] = "ACTIVE"
+                for storage_field in (
+                    "storage_pool_id",
+                    "storage_id",
+                    "host_storage_root",
+                    "member_storage_directory",
+                    "storage_pool_label",
+                    "mount_path",
+                ):
+                    if payload.get(storage_field) and not member.get(storage_field):
+                        member[storage_field] = payload[storage_field]
+
+            created_new_member = not existing_member
+            try:
+                # Tạo thư mục workspace cô lập (0700) nhưng GIỮ authorized_keys RỖNG tới khi kích hoạt & pass gate
+                ws_fs = self.ssh_access_manager.setup_isolated_workspace_filesystem(
+                    host_id=server_id,
+                    username=username,
                     workspace_name=workspace_name,
+                    public_key=public_key,
+                    cpu_limit_cores=cpu_limit,
+                    ram_limit_gb=ram_limit,
+                    storage_quota_gb=storage_quota_gb,
+                    gpu_permissions=gpu_permissions,
+                    extra_mounts=payload.get("extra_mounts"),
+                    authorize_ssh_key=False,
                 )
-                member["ssh_port"] = canary["port"]
-        else:
-            # Ủy quyền cấp phát Docker workspace qua Go Node Agent/Gateway; FastAPI không tự chạy docker run trực tiếp.
-            existing_ws = [
-                w for w in self.workspace_controller.list_workspaces(owner=username)
-                if w.get("owner") == username and w.get("runtime_type") == "DOCKER"
-            ]
-            ws_rec = existing_ws[0] if existing_ws else None
-            if ws_rec is None:
-                try:
-                    ws_rec = self.workspace_controller.request_workspace(
-                        owner=username,
-                        host_id=server_id,
-                        ssh_public_key=public_key,
-                        cpu_cores=cpu_limit,
-                        ram_mb=ram_limit * 1024,
-                        storage_quota_gb=storage_quota_gb,
-                        gpu_uuid=(gpu_permissions[0] if gpu_permissions else None),
-                        extra_mounts=payload.get("extra_mounts"),
-                        storage_path=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
-                        member_storage_dir=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
-                        container_mount_path="/workspace",
-                        resource_mode=cpu_policy,
-                        cpu_weight=cpu_weight,
-                    )
-                except Exception as ws_exc:
-                    logger.warning("Workspace controller validation note for %s: %s", username, ws_exc)
-                    ws_rec = None
 
-            if ws_rec is not None and host_online:
-                try:
-                    spec = self.workspace_controller.build_provision_workspace_spec(
-                        member=member,
-                        workspace=ws_rec,
-                        correlation_id=f"prov-{uuid.uuid4().hex[:12]}",
-                        actor=actor_id,
-                        image_ref=payload.get("image_ref") or payload.get("imageRef"),
-                        image_digest=payload.get("image_digest") or payload.get("imageDigest"),
-                    )
-                    member["uid"] = spec["uid"]
-                    member["gid"] = spec["gid"]
-                    member["workspace_id"] = spec["workspace_id"]
-                    agent_res = self.node_agent.dispatch(
-                        server,
-                        "PROVISION_DOCKER_WORKSPACE",
-                        params={
-                            "spec_json": json.dumps(spec),
-                            "workspace_id": spec["workspace_id"],
-                            "name": spec["name"],
-                            "owner": username,
-                            "member_id": member["id"],
-                            "ssh_port": str(spec["ssh_port"]),
-                        },
-                        idempotency_key=f"ws-prov-{spec['workspace_id']}-gen{spec['generation']}",
-                        actor_id=actor_id,
-                        actor_role="ADMIN",
-                    )
-                    agent_rec = agent_res.get("result") or {}
-                    member["workspace_delegation_status"] = (
-                        "VERIFIED" if agent_rec.get("observed_state") == "ACTIVE" else "PARTIAL_PROVISIONING"
-                    )
-                    member["workspace_agent_request_id"] = agent_res.get("request_id")
-                    if agent_rec.get("canonical_container_id"):
-                        member["container_id"] = agent_rec["canonical_container_id"]
+                member["ssh_key_enrollment_mode"] = ssh_key_enrollment_mode
+                member["ssh_key_passphrase_mode"] = ssh_key_passphrase_mode
+                member["_canary_mode"] = enforce_canary_runtime
+                member["cpu_policy"] = cpu_policy
+                member["cpu_weight"] = cpu_weight
+
+                # Cấp mật khẩu tạm cho lần đăng nhập đầu tiên (chỉ lưu scrypt hash, trạng thái PENDING_ACTIVATION)
+                temp_password, pw_meta = self.ssh_access_manager.issue_temporary_password(
+                    member_id=member["id"],
+                    username=username,
+                    actor=actor_id,
+                    ttl_seconds=temp_password_ttl_seconds,
+                )
+                member["activation_status"] = "PENDING_ACTIVATION"
+                member["password_status"] = "CHANGE_REQUIRED"
+                member["temp_password_expires_at"] = pw_meta["temp_password_expires_at"]
+
+                host_online = self._is_host_online(server_id)
+                agent_verification_rec: Optional[Dict[str, Any]] = None
+                if enforce_canary_runtime:
+                    is_test_ctx = "PYTEST_CURRENT_TEST" in os.environ or os.getenv("LABOPS_ALLOW_TEST_CANARY_SSHD") == "1"
+                    if self._is_live_production_data_dir or not is_test_ctx:
+                        raise PermissionError(
+                            "CANARY_SSHD_FORBIDDEN_IN_PRODUCTION: Không được phép bật host canary SSHD trong môi trường production."
+                        )
+                    if host_online:
+                        canary = self.ssh_access_manager.start_canary_sshd_for_workspace(
+                            server_id,
+                            username,
+                            port=int(member.get("ssh_port") or 0),
+                            workspace_dir=ws_fs.get("workspace_dir"),
+                            listen_address="127.0.0.1",
+                            workspace_name=workspace_name,
+                        )
+                        member["ssh_port"] = canary["port"]
+                else:
+                    # Ủy quyền cấp phát Docker workspace qua Go Node Agent/Gateway; FastAPI không tự chạy docker run trực tiếp.
+                    existing_ws = [
+                        w for w in self.workspace_controller.list_workspaces(owner=username)
+                        if w.get("owner") == username
+                        and w.get("member_id") in (member["id"], None, "")
+                        and w.get("runtime_type") == "DOCKER"
+                    ]
+                    ws_rec = existing_ws[0] if existing_ws else None
+                    if ws_rec is None:
                         try:
-                            ver_res = self.node_agent.dispatch(
+                            ws_rec = self.workspace_controller.request_workspace(
+                                owner=username,
+                                host_id=server_id,
+                                ssh_public_key=public_key,
+                                cpu_cores=cpu_limit,
+                                ram_mb=ram_limit * 1024,
+                                storage_quota_gb=storage_quota_gb,
+                                gpu_uuid=(gpu_permissions[0] if gpu_permissions else None),
+                                extra_mounts=payload.get("extra_mounts"),
+                                storage_path=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
+                                member_storage_dir=member.get("member_storage_directory") or ws_fs.get("workspace_dir"),
+                                container_mount_path="/workspace",
+                                resource_mode=cpu_policy,
+                                cpu_weight=cpu_weight,
+                                member_id=member["id"],
+                            )
+                            fx["created_ws_id"] = fx.get("created_ws_id") or ws_rec["id"]
+                        except Exception as ws_exc:
+                            logger.warning("Workspace controller validation note for %s: %s", username, ws_exc)
+                            ws_rec = None
+
+                    if ws_rec is not None and host_online:
+                        try:
+                            spec = self.workspace_controller.build_provision_workspace_spec(
+                                member=member,
+                                workspace=ws_rec,
+                                correlation_id=f"prov-{uuid.uuid4().hex[:12]}",
+                                actor=actor_id,
+                                image_ref=payload.get("image_ref") or payload.get("imageRef"),
+                                image_digest=payload.get("image_digest") or payload.get("imageDigest"),
+                                gpu_id_to_uuid=self._build_gpu_uuid_map(server_id),
+                            )
+                            member["uid"] = spec["uid"]
+                            member["gid"] = spec["gid"]
+                            member["workspace_id"] = spec["workspace_id"]
+                            agent_res = self.node_agent.dispatch(
                                 server,
-                                "VERIFY_DOCKER_WORKSPACE",
+                                "PROVISION_DOCKER_WORKSPACE",
                                 params={
+                                    "spec_json": json.dumps(spec),
                                     "workspace_id": spec["workspace_id"],
-                                    "container_id": agent_rec["canonical_container_id"],
-                                    "uid": str(spec["uid"]),
-                                    "gid": str(spec["gid"]),
+                                    "name": spec["name"],
+                                    "owner": username,
+                                    "member_id": member["id"],
                                     "ssh_port": str(spec["ssh_port"]),
-                                    "resource_mode": spec.get("resource_mode") or cpu_policy,
-                                    "vpn_bind_ip": spec.get("vpn_bind_ip") or "",
                                 },
-                                idempotency_key=f"ws-ver-{spec['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                                idempotency_key=f"ws-prov-{spec['workspace_id']}-gen{spec['generation']}",
                                 actor_id=actor_id,
                                 actor_role="ADMIN",
                             )
-                            ver_payload = ver_res.get("result") or {}
-                            if isinstance(ver_payload, dict) and ver_payload.get("checks"):
-                                agent_verification_rec = ver_payload
-                        except Exception as ver_err:
-                            logger.warning("VERIFY_DOCKER_WORKSPACE failed for %s: %s", username, ver_err)
-                except Exception as prov_err:
-                    # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent hoặc Spec lỗi
-                    err_code = getattr(prov_err, "code", "")
-                    err_msg = getattr(prov_err, "message", str(prov_err))
-                    delegation_status = (
-                        "AGENT_UNAVAILABLE"
-                        if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
-                        else "PROVISION_FAILED"
-                    )
-                    member["workspace_delegation_status"] = delegation_status
-                    member["workspace_delegation_reason"] = err_msg
-            else:
-                member["workspace_delegation_status"] = "AGENT_UNAVAILABLE" if not host_online else "PROVISION_FAILED"
+                            agent_rec = agent_res.get("result") or {}
+                            member["workspace_delegation_status"] = (
+                                "VERIFIED" if agent_rec.get("observed_state") == "ACTIVE" else "PARTIAL_PROVISIONING"
+                            )
+                            member["workspace_agent_request_id"] = agent_res.get("request_id")
+                            if agent_rec.get("canonical_container_id"):
+                                member["container_id"] = agent_rec["canonical_container_id"]
+                                fx["has_container"] = True
+                                fx["container_id"] = agent_rec["canonical_container_id"]
+                                try:
+                                    ver_res = self.node_agent.dispatch(
+                                        server,
+                                        "VERIFY_DOCKER_WORKSPACE",
+                                        params={
+                                            "workspace_id": spec["workspace_id"],
+                                            "container_id": agent_rec["canonical_container_id"],
+                                            "uid": str(spec["uid"]),
+                                            "gid": str(spec["gid"]),
+                                            "ssh_port": str(spec["ssh_port"]),
+                                            "resource_mode": spec.get("resource_mode") or cpu_policy,
+                                            "vpn_bind_ip": spec.get("vpn_bind_ip") or "",
+                                        },
+                                        idempotency_key=f"ws-ver-{spec['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                                        actor_id=actor_id,
+                                        actor_role="ADMIN",
+                                    )
+                                    ver_payload = ver_res.get("result") or {}
+                                    if isinstance(ver_payload, dict) and ver_payload.get("checks"):
+                                        agent_verification_rec = ver_payload
+                                except Exception as ver_err:
+                                    logger.warning("VERIFY_DOCKER_WORKSPACE failed for %s: %s", username, ver_err)
+                        except Exception as prov_err:
+                            # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent hoặc Spec lỗi
+                            err_code = getattr(prov_err, "code", "")
+                            err_msg = getattr(prov_err, "message", str(prov_err))
+                            delegation_status = (
+                                "AGENT_UNAVAILABLE"
+                                if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
+                                else "PROVISION_FAILED"
+                            )
+                            member["workspace_delegation_status"] = delegation_status
+                            member["workspace_delegation_reason"] = err_msg
+                    else:
+                        member["workspace_delegation_status"] = "AGENT_UNAVAILABLE" if not host_online else "PROVISION_FAILED"
 
-        known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
-            g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
-        ]
-        candidate_ws_dir = str(member.get("workspace_dir") or "").strip()
-        if candidate_ws_dir and os.path.isfile(os.path.join(candidate_ws_dir, ".ssh", "authorized_keys")):
-            effective_ws_dir = candidate_ws_dir
-        else:
-            effective_ws_dir = ws_fs["workspace_dir"]
+                known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
+                    g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
+                ]
+                candidate_ws_dir = str(member.get("workspace_dir") or "").strip()
+                if candidate_ws_dir and os.path.isfile(os.path.join(candidate_ws_dir, ".ssh", "authorized_keys")):
+                    effective_ws_dir = candidate_ws_dir
+                else:
+                    effective_ws_dir = ws_fs["workspace_dir"]
 
-        verification = self.ssh_access_manager.verify_workspace_and_runtime(
-            host_id=server_id,
-            host_online=host_online,
-            username=username,
-            workspace_name=workspace_name,
-            expected_public_key=public_key,
-            ssh_port=int(member.get("ssh_port") or 22001),
-            cpu_limit_cores=cpu_limit,
-            ram_limit_gb=ram_limit,
-            storage_quota_gb=storage_quota_gb,
-            gpu_permissions=gpu_permissions,
-            known_gpu_ids=known_gpu_ids,
-            enforce_canary_runtime=enforce_canary_runtime,
-            workspace_dir=effective_ws_dir,
-            agent_verification=agent_verification_rec,
-            cpu_policy=cpu_policy,
-            cpu_weight=cpu_weight,
-            expected_uid=member.get("uid"),
-            require_authorized_key_present=False,
-        )
-
-        member["ssh_key_status"] = "ACTIVE" if host_online else "PENDING_SYNC"
-        member["workspace_dir"] = effective_ws_dir
-        member["runtime_verification"] = verification
-        member["privilege_validation"] = {
-            "unprivileged_container": verification["privilege_isolation"] == "VERIFIED",
-            "sudo_test_failed_as_expected": verification["privilege_isolation"] == "VERIFIED",
-            "no_sudo_group_membership": verification["privilege_isolation"] == "VERIFIED",
-            "no_docker_socket_access": verification["privilege_isolation"] == "VERIFIED",
-            "no_incus_socket_access": verification["privilege_isolation"] == "VERIFIED",
-            "verification_timestamp": verification["verified_at"],
-            "status": "VERIFIED_SAFE" if verification["privilege_isolation"] == "VERIFIED" else "NOT_VERIFIED",
-        }
-
-        ssh_host = (
-            member.get("ssh_ip")
-            or server.get("ip_address")
-            or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
-        )
-        ssh_port = int(member.get("ssh_port") or 22001)
-
-        # WireGuard VPN Configuration: Tích hợp tự động qua wg-easy v15 & Dynamic Route Resolver
-        wg_profile = None
-        wg_registered_on_gateway = False
-        wg_gateway_error: Optional[str] = None
-        assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or "workstation"
-        matching_workspaces = [
-            w for w in self.workspaces
-            if (w.get("owner") == username or w.get("username") == username)
-            and (w.get("host_id") == assigned_host or w.get("server_id") == assigned_host)
-        ]
-        resolved_route = self.vpn_manager.route_resolver.resolve_routes_for_member(
-            member=member,
-            actor_role="ADMIN",
-            workspaces=matching_workspaces,
-            requested_host_id=assigned_host,
-        )
-        target_server_id = resolved_route.target_hosts[0].id if resolved_route.target_hosts else assigned_host
-        dynamic_allowed_ips = resolved_route.allowed_ips
-
-        if getattr(settings, "WG_EASY_ENABLED", True):
-            try:
-                gw_status = self.vpn_manager.wg_easy.get_connection_status()
-                if gw_status.get("status") == "UNAVAILABLE":
-                    raise RuntimeError(gw_status.get("error") or "VPN_PROVIDER_UNAVAILABLE")
-                if gw_status.get("service_health") == "VPN_ROUTING_MISCONFIGURED" or gw_status.get("routing_issues"):
-                    raise RuntimeError(
-                        f"VPN_ROUTING_MISCONFIGURED: {'; '.join(gw_status.get('routing_issues') or [])}"
-                    )
-                wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính")
-                profile_res = self.vpn_manager.build_dynamic_client_profile(
-                    actor={"username": username, "role": member.get("role", "RESEARCHER")},
-                    member=member,
-                    device=wg_dev,
-                    workspaces=matching_workspaces,
+                verification = self.ssh_access_manager.verify_workspace_and_runtime(
+                    host_id=server_id,
+                    host_online=host_online,
+                    username=username,
+                    workspace_name=workspace_name,
+                    expected_public_key=public_key,
+                    ssh_port=int(member.get("ssh_port") or 22001),
+                    cpu_limit_cores=cpu_limit,
+                    ram_limit_gb=ram_limit,
+                    storage_quota_gb=storage_quota_gb,
+                    gpu_permissions=gpu_permissions,
+                    known_gpu_ids=known_gpu_ids,
+                    enforce_canary_runtime=enforce_canary_runtime,
+                    workspace_dir=effective_ws_dir,
+                    agent_verification=agent_verification_rec,
+                    cpu_policy=cpu_policy,
+                    cpu_weight=cpu_weight,
+                    expected_uid=member.get("uid"),
+                    require_authorized_key_present=False,
+                    storage_dir=member.get("member_storage_directory") or effective_ws_dir,
                 )
-                custom_conf = profile_res.get("wireguard_conf", "")
-                if custom_conf and "[Interface]" in custom_conf:
-                    wg_registered_on_gateway = True
-                    wg_client_ip = profile_res.get("vpn_ip") or wg_dev.get("vpn_ip") or ""
-                    wg_server_endpoint = profile_res.get("server_endpoint") or ""
-                    dynamic_allowed_ips = profile_res.get("allowed_ips") or dynamic_allowed_ips
+
+                member["ssh_key_status"] = "ACTIVE" if host_online else "PENDING_SYNC"
+                member["workspace_dir"] = effective_ws_dir
+                member["runtime_verification"] = verification
+                member["privilege_validation"] = {
+                    "unprivileged_container": verification["privilege_isolation"] == "VERIFIED",
+                    "sudo_test_failed_as_expected": verification["privilege_isolation"] == "VERIFIED",
+                    "no_sudo_group_membership": verification["privilege_isolation"] == "VERIFIED",
+                    "no_docker_socket_access": verification["privilege_isolation"] == "VERIFIED",
+                    "no_incus_socket_access": verification["privilege_isolation"] == "VERIFIED",
+                    "verification_timestamp": verification["verified_at"],
+                    "status": "VERIFIED_SAFE" if verification["privilege_isolation"] == "VERIFIED" else "NOT_VERIFIED",
+                }
+
+                ssh_host = (
+                    member.get("ssh_ip")
+                    or server.get("ip_address")
+                    or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
+                )
+                ssh_port = int(member.get("ssh_port") or 22001)
+
+                # WireGuard VPN Configuration: Tích hợp tự động qua wg-easy v15 & Dynamic Route Resolver
+                wg_profile = None
+                wg_registered_on_gateway = False
+                wg_gateway_error: Optional[str] = None
+                assigned_host = member.get("assigned_server") or member.get("server_id") or member.get("host_id") or "workstation"
+                matching_workspaces = [
+                    w for w in self.workspaces
+                    if (w.get("owner") == username or w.get("username") == username)
+                    and (w.get("host_id") == assigned_host or w.get("server_id") == assigned_host)
+                ]
+                resolved_route = self.vpn_manager.route_resolver.resolve_routes_for_member(
+                    member=member,
+                    actor_role="ADMIN",
+                    workspaces=matching_workspaces,
+                    requested_host_id=assigned_host,
+                )
+                target_server_id = resolved_route.target_hosts[0].id if resolved_route.target_hosts else assigned_host
+                dynamic_allowed_ips = resolved_route.allowed_ips
+
+                if getattr(settings, "WG_EASY_ENABLED", True):
+                    try:
+                        gw_status = self.vpn_manager.wg_easy.get_connection_status()
+                        if gw_status.get("status") == "UNAVAILABLE":
+                            raise RuntimeError(gw_status.get("error") or "VPN_PROVIDER_UNAVAILABLE")
+                        if gw_status.get("service_health") == "VPN_ROUTING_MISCONFIGURED" or gw_status.get("routing_issues"):
+                            raise RuntimeError(
+                                f"VPN_ROUTING_MISCONFIGURED: {'; '.join(gw_status.get('routing_issues') or [])}"
+                            )
+                        wg_dev = self.vpn_manager.create_member_device(username, "Thiết bị chính")
+                        profile_res = self.vpn_manager.build_dynamic_client_profile(
+                            actor={"username": username, "role": member.get("role", "RESEARCHER")},
+                            member=member,
+                            device=wg_dev,
+                            workspaces=matching_workspaces,
+                        )
+                        custom_conf = profile_res.get("wireguard_conf", "")
+                        if custom_conf and "[Interface]" in custom_conf:
+                            wg_registered_on_gateway = True
+                            wg_client_ip = profile_res.get("vpn_ip") or wg_dev.get("vpn_ip") or ""
+                            wg_server_endpoint = profile_res.get("server_endpoint") or ""
+                            dynamic_allowed_ips = profile_res.get("allowed_ips") or dynamic_allowed_ips
+                            wg_profile = {
+                                "wireguard_conf": custom_conf,
+                                "client_ip": wg_client_ip,
+                                "wg_public_key": wg_dev.get("public_key") or "",
+                                "server_endpoint": wg_server_endpoint,
+                                "allowed_ips": dynamic_allowed_ips,
+                            }
+                            wg_profile_data = member.setdefault("wireguard", {"status": "ACTIVE", "devices": []})
+                            existing_devs = [
+                                d for d in (wg_profile_data.get("devices") or [])
+                                if not self._is_pending_placeholder_device(d)
+                            ]
+                            existing_devs.append({
+                                "device_id": f"dev-{wg_dev.get('external_id') or wg_dev['id']}",
+                                "external_id": wg_dev.get("external_id") or wg_dev["id"],
+                                "provider": "wg-easy",
+                                "name": "Thiết bị chính",
+                                "client_ip": wg_client_ip,
+                                "vpn_ip": wg_client_ip,
+                                "public_key": wg_dev.get("public_key"),
+                                "server_id": target_server_id,
+                                "server_public_key": profile_res.get("server_public_key") or self.vpn_manager.get_server_public_key(),
+                                "server_endpoint": wg_server_endpoint,
+                                "allowed_subnets": dynamic_allowed_ips,
+                                "status": "ACTIVE",
+                                "enabled": True,
+                                "enrolled_at": datetime.now(timezone.utc).isoformat(),
+                            })
+                            wg_profile_data["devices"] = existing_devs
+                            wg_profile_data["status"] = "ACTIVE"
+                    except Exception as e:
+                        wg_gateway_error = str(e)
+                        logger.error(f"Lỗi tạo peer wg-easy tự động: {e}")
+
+                if wg_profile is None or not (wg_profile.get("wireguard_conf") and "[Interface]" in wg_profile["wireguard_conf"]):
+                    if not wg_gateway_error and not getattr(settings, "WG_EASY_ENABLED", True):
+                        wg_gateway_error = "WG_EASY_DISABLED: Tính năng wg-easy đang tắt trên hệ thống."
+                    wg_status_label = (
+                        "VPN_ROUTING_MISCONFIGURED"
+                        if wg_gateway_error and "VPN_ROUTING_MISCONFIGURED" in wg_gateway_error
+                        else "PENDING_PROVISIONING"
+                    )
                     wg_profile = {
-                        "wireguard_conf": custom_conf,
-                        "client_ip": wg_client_ip,
-                        "wg_public_key": wg_dev.get("public_key") or "",
-                        "server_endpoint": wg_server_endpoint,
+                        "wireguard_conf": "",
+                        "client_ip": "",
+                        "wg_public_key": "",
+                        "server_endpoint": "",
                         "allowed_ips": dynamic_allowed_ips,
+                        "status": wg_status_label,
                     }
-                    wg_profile_data = member.setdefault("wireguard", {"status": "ACTIVE", "devices": []})
-                    existing_devs = [
-                        d for d in (wg_profile_data.get("devices") or [])
-                        if not self._is_pending_placeholder_device(d)
-                    ]
-                    existing_devs.append({
-                        "device_id": f"dev-{wg_dev.get('external_id') or wg_dev['id']}",
-                        "external_id": wg_dev.get("external_id") or wg_dev["id"],
-                        "provider": "wg-easy",
-                        "name": "Thiết bị chính",
-                        "client_ip": wg_client_ip,
-                        "vpn_ip": wg_client_ip,
-                        "public_key": wg_dev.get("public_key"),
-                        "server_id": target_server_id,
-                        "server_public_key": profile_res.get("server_public_key") or self.vpn_manager.get_server_public_key(),
-                        "server_endpoint": wg_server_endpoint,
-                        "allowed_subnets": dynamic_allowed_ips,
-                        "status": "ACTIVE",
-                        "enabled": True,
-                        "enrolled_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    wg_profile_data["devices"] = existing_devs
-                    wg_profile_data["status"] = "ACTIVE"
-            except Exception as e:
-                wg_gateway_error = str(e)
-                logger.error(f"Lỗi tạo peer wg-easy tự động: {e}")
+                existing_devices = (member.get("wireguard") or {}).get("devices") or []
+                has_active_gateway_dev = any(
+                    d.get("status") == "ACTIVE" and not self._is_pending_placeholder_device(d)
+                    for d in existing_devices
+                )
+                member["wireguard"] = {
+                    **(member.get("wireguard") or {}),
+                    "client_ip": wg_profile["client_ip"],
+                    "vpn_ip": wg_profile["client_ip"],
+                    "public_key": wg_profile["wg_public_key"],
+                    "server_endpoint": wg_profile["server_endpoint"],
+                    "allowed_subnets": wg_profile["allowed_ips"],
+                    "status": (
+                        "ACTIVE"
+                        if (wg_registered_on_gateway or has_active_gateway_dev)
+                        else wg_profile.get("status", "PENDING_PROVISIONING")
+                    ),
+                    "registered_on_gateway": wg_registered_on_gateway or has_active_gateway_dev,
+                    "gateway_error": None if (wg_registered_on_gateway or has_active_gateway_dev) else wg_gateway_error,
+                }
 
-        if wg_profile is None or not (wg_profile.get("wireguard_conf") and "[Interface]" in wg_profile["wireguard_conf"]):
-            if not wg_gateway_error and not getattr(settings, "WG_EASY_ENABLED", True):
-                wg_gateway_error = "WG_EASY_DISABLED: Tính năng wg-easy đang tắt trên hệ thống."
-            wg_status_label = (
-                "VPN_ROUTING_MISCONFIGURED"
-                if wg_gateway_error and "VPN_ROUTING_MISCONFIGURED" in wg_gateway_error
-                else "PENDING_PROVISIONING"
-            )
-            wg_profile = {
-                "wireguard_conf": "",
-                "client_ip": "",
-                "wg_public_key": "",
-                "server_endpoint": "",
-                "allowed_ips": dynamic_allowed_ips,
-                "status": wg_status_label,
-            }
-        existing_devices = (member.get("wireguard") or {}).get("devices") or []
-        has_active_gateway_dev = any(
-            d.get("status") == "ACTIVE" and not self._is_pending_placeholder_device(d)
-            for d in existing_devices
-        )
-        member["wireguard"] = {
-            **(member.get("wireguard") or {}),
-            "client_ip": wg_profile["client_ip"],
-            "vpn_ip": wg_profile["client_ip"],
-            "public_key": wg_profile["wg_public_key"],
-            "server_endpoint": wg_profile["server_endpoint"],
-            "allowed_subnets": wg_profile["allowed_ips"],
-            "status": (
-                "ACTIVE"
-                if (wg_registered_on_gateway or has_active_gateway_dev)
-                else wg_profile.get("status", "PENDING_PROVISIONING")
-            ),
-            "registered_on_gateway": wg_registered_on_gateway or has_active_gateway_dev,
-            "gateway_error": None if (wg_registered_on_gateway or has_active_gateway_dev) else wg_gateway_error,
-        }
+                effective_ssh_user = self._resolve_effective_ssh_login_user(username, server_id)
+                member["ssh_login_user"] = effective_ssh_user
+                vpn_guide = (
+                    f"1. [VPN WireGuard] Mở ứng dụng WireGuard -> 'Import tunnel(s) from file' -> chọn tệp '{username}-labops-wg0.conf' -> Bật kết nối (Activate).\n"
+                    f"2. [Tự động cài SSH Config] Chạy lệnh: bash setup-ssh-{username}.sh (tự động cài khóa riêng và ~/.ssh/config).\n"
+                    f"3. [Kết nối SSH nhanh] Gõ trực tiếp: ssh labops-{username} (hoặc ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {effective_ssh_user}@{ssh_host}).\n"
+                    f"4. Nhập Passphrase mở khóa riêng (do Admin gửi qua kênh riêng) và đổi mật khẩu tạm ở lần đăng nhập đầu tiên."
+                )
 
-        effective_ssh_user = self._resolve_effective_ssh_login_user(username, server_id)
-        member["ssh_login_user"] = effective_ssh_user
-        vpn_guide = (
-            f"1. [VPN WireGuard] Mở ứng dụng WireGuard -> 'Import tunnel(s) from file' -> chọn tệp '{username}-labops-wg0.conf' -> Bật kết nối (Activate).\n"
-            f"2. [Tự động cài SSH Config] Chạy lệnh: bash setup-ssh-{username}.sh (tự động cài khóa riêng và ~/.ssh/config).\n"
-            f"3. [Kết nối SSH nhanh] Gõ trực tiếp: ssh labops-{username} (hoặc ssh -i ~/.ssh/id_ed25519_{username} -p {ssh_port} {effective_ssh_user}@{ssh_host}).\n"
-            f"4. Nhập Passphrase mở khóa riêng (do Admin gửi qua kênh riêng) và đổi mật khẩu tạm ở lần đăng nhập đầu tiên."
-        )
+                vault_info = self.ssh_access_manager.vault.store_provisioned_package(
+                    member_id=member["id"],
+                    username=username,
+                    ssh_host=ssh_host,
+                    ssh_port=ssh_port,
+                    workspace_name=workspace_name,
+                    workspace_path=ws_fs["work_dir"],
+                    fingerprint=fingerprint,
+                    encrypted_private_key=encrypted_private_key,
+                    passphrase=passphrase,
+                    temporary_password=temp_password,
+                    temp_password_expires_at=pw_meta["temp_password_expires_at"],
+                    vpn_guide=vpn_guide,
+                    wireguard_conf=wg_profile["wireguard_conf"],
+                    wireguard_client_ip=wg_profile["client_ip"],
+                    wireguard_public_key=wg_profile["wg_public_key"],
+                    wireguard_server_endpoint=wg_profile["server_endpoint"],
+                    ssh_login_user=effective_ssh_user,
+                )
+                member["one_time_package"] = vault_info
 
-        vault_info = self.ssh_access_manager.vault.store_provisioned_package(
-            member_id=member["id"],
-            username=username,
-            ssh_host=ssh_host,
-            ssh_port=ssh_port,
-            workspace_name=workspace_name,
-            workspace_path=ws_fs["work_dir"],
-            fingerprint=fingerprint,
-            encrypted_private_key=encrypted_private_key,
-            passphrase=passphrase,
-            temporary_password=temp_password,
-            temp_password_expires_at=pw_meta["temp_password_expires_at"],
-            vpn_guide=vpn_guide,
-            wireguard_conf=wg_profile["wireguard_conf"],
-            wireguard_client_ip=wg_profile["client_ip"],
-            wireguard_public_key=wg_profile["wg_public_key"],
-            wireguard_server_endpoint=wg_profile["server_endpoint"],
-            ssh_login_user=effective_ssh_user,
-        )
-        member["one_time_package"] = vault_info
+                gate = self._sync_member_ssh_authorization(
+                    member,
+                    actor=actor_id,
+                    allow_canary_local_sync=enforce_canary_runtime,
+                    save=False,
+                )
 
-        gate = self._sync_member_ssh_authorization(
-            member,
-            actor=actor_id,
-            allow_canary_local_sync=enforce_canary_runtime,
-            save=False,
-        )
+                op_id = f"op-prov-{uuid.uuid4().hex[:12]}"
+                self.audit_logs.insert(0, {
+                    "id": f"aud-{uuid.uuid4().hex[:12]}",
+                    "actor": actor_id,
+                    "action": "SSH_ACCESS_PROVISIONED",
+                    "target_type": "MEMBER",
+                    "target_id": username,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "result": gate["overall_readiness"],
+                    "correlation_id": op_id,
+                    "details": (
+                        f"Đã khởi tạo khóa OpenSSH ({ssh_key_enrollment_mode}, {fingerprint}) và mật khẩu tạm lần đầu "
+                        f"cho @{username} (ID: {member['id']}) trên host '{server_id}' (cổng {ssh_port}). Trạng thái tổng thể: {gate['overall_readiness']}."
+                    ),
+                })
+                self._save_persistent_data()
+            except MemberPersistenceError as mp_err:
+                if created_new_member and mp_err.code == "JSON_PERSISTENCE_FAILED":
+                    get_revocation_store().register_active_member(username, member["id"])
+                    raise
+                if created_new_member:
+                    self._compensate_failed_provisioning(
+                        fx,
+                        pre_members,
+                        pre_endpoints,
+                        pre_audits,
+                        pre_account=pre_account,
+                        username=username,
+                        member_id=member["id"],
+                    )
+                raise
+            except Exception:
+                if created_new_member:
+                    self._compensate_failed_provisioning(
+                        fx,
+                        pre_members,
+                        pre_endpoints,
+                        pre_audits,
+                        pre_account=pre_account,
+                        username=username,
+                        member_id=member["id"],
+                    )
+                raise
 
-        op_id = f"op-prov-{uuid.uuid4().hex[:12]}"
-        self.audit_logs.insert(0, {
-            "id": f"aud-{uuid.uuid4().hex[:12]}",
-            "actor": actor_id,
-            "action": "SSH_ACCESS_PROVISIONED",
-            "target_type": "MEMBER",
-            "target_id": username,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "result": gate["overall_readiness"],
-            "correlation_id": op_id,
-            "details": (
-                f"Đã khởi tạo khóa OpenSSH ({ssh_key_enrollment_mode}, {fingerprint}) và mật khẩu tạm lần đầu "
-                f"cho @{username} trên host '{server_id}' (cổng {ssh_port}). Trạng thái tổng thể: {gate['overall_readiness']}."
-            ),
-        })
-        self._save_persistent_data()
-        return member
+            if created_new_member:
+                get_revocation_store().register_active_member(username, member["id"])
+            return member
 
     def rotate_member_ssh_keypair(
         self, member_id_or_username: str, actor: str, require_passphrase: bool = True
@@ -3280,8 +4055,8 @@ class LabOpsDataService:
         username = member["username"]
         server_id = member.get("assigned_server") or settings.LOCAL_HOST_ID
 
-        # Thu hồi các khóa cũ trong SshKeyRegistry
-        for old_key in self.ssh_key_registry.list_keys(username=username):
+        # Thu hồi các khóa cũ thuộc đúng member_id trong SshKeyRegistry
+        for old_key in self.ssh_key_registry.list_keys(username=username, member_id=member["id"]):
             if old_key.get("desired_state") != "REVOKED":
                 self.ssh_key_registry.revoke_key(old_key["id"], actor=actor, is_admin=True)
 
@@ -3672,6 +4447,7 @@ class LabOpsDataService:
                 username=member["username"],
                 temporary_password=temporary_password,
                 new_password=new_password,
+                expected_member_id=member.get("id"),
             )
             member["password_status"] = "ACTIVE"
             member["activation_status"] = "ACTIVATED"
@@ -3717,7 +4493,11 @@ class LabOpsDataService:
 
     def verify_member_workspace_password(self, username: str, password: str) -> Dict[str, Any]:
         member = self._find_member(username)
-        res = self.ssh_access_manager.verify_workspace_password_login(member["username"], password)
+        res = self.ssh_access_manager.verify_workspace_password_login(
+            member["username"],
+            password,
+            expected_member_id=member.get("id"),
+        )
         member["password_status"] = res["password_status"]
         member["activation_status"] = res.get("activation_status") or member.get("activation_status") or "PENDING_ACTIVATION"
         self._save_persistent_data()
@@ -3745,7 +4525,9 @@ class LabOpsDataService:
             "authorization_gate": member.get("authorization_gate"),
             "runtime_verification": member.get("runtime_verification"),
             "one_time_package": self.ssh_access_manager.vault.get_availability(member["id"]),
-            "account_security": self.ssh_access_manager.get_account_security_state(username),
+            "account_security": self.ssh_access_manager.get_account_security_state(
+                username, expected_member_id=member["id"] if member else None
+            ),
         }
 
     def reverify_member_workspace(self, member_id_or_username: str, actor: str) -> Dict[str, Any]:
@@ -3756,6 +4538,81 @@ class LabOpsDataService:
         server = next((s for s in self.servers if s["id"] == server_id), None)
         host_online = self._is_host_online(server_id)
         agent_ver_rec: Optional[Dict[str, Any]] = None
+
+        if (
+            host_online
+            and server is not None
+            and not member.get("container_id")
+            and not member.get("_canary_mode")
+            and member.get("status") not in {"SUSPENDED", "REVOKED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETED"}
+        ):
+            try:
+                existing_ws = [
+                    w for w in self.workspace_controller.list_workspaces(owner=username)
+                    if w.get("owner") == username
+                    and w.get("member_id") in (member.get("id"), None, "")
+                    and w.get("runtime_type") == "DOCKER"
+                ]
+                ws_rec = existing_ws[0] if existing_ws else None
+                if ws_rec is None and member.get("ssh_public_key"):
+                    ws_rec = self.workspace_controller.request_workspace(
+                        owner=username,
+                        host_id=server_id,
+                        ssh_public_key=str(member.get("ssh_public_key") or ""),
+                        cpu_cores=int(member.get("cpu_limit_cores") or 8),
+                        ram_mb=int(member.get("ram_limit_gb") or 32) * 1024,
+                        storage_quota_gb=int(member.get("storage_quota_gb") or 200),
+                        gpu_uuid=(member.get("gpu_permissions") or [None])[0],
+                        storage_path=member.get("member_storage_directory") or member.get("workspace_dir"),
+                        member_storage_dir=member.get("member_storage_directory") or member.get("workspace_dir"),
+                        container_mount_path="/workspace",
+                        resource_mode=member.get("cpu_policy") or "SHARED_WEIGHTED",
+                        cpu_weight=int(member.get("cpu_weight") or 100),
+                        member_id=member.get("id"),
+                    )
+                if ws_rec is not None:
+                    spec = self.workspace_controller.build_provision_workspace_spec(
+                        member=member,
+                        workspace=ws_rec,
+                        correlation_id=f"prov-{uuid.uuid4().hex[:12]}",
+                        actor=actor,
+                        gpu_id_to_uuid=self._build_gpu_uuid_map(server_id),
+                    )
+                    member["uid"] = spec["uid"]
+                    member["gid"] = spec["gid"]
+                    member["workspace_id"] = spec["workspace_id"]
+                    agent_res = self.node_agent.dispatch(
+                        server,
+                        "PROVISION_DOCKER_WORKSPACE",
+                        params={
+                            "spec_json": json.dumps(spec),
+                            "workspace_id": spec["workspace_id"],
+                            "name": spec["name"],
+                            "owner": username,
+                            "member_id": str(member.get("id") or ""),
+                            "ssh_port": str(spec["ssh_port"]),
+                        },
+                        idempotency_key=f"ws-prov-{spec['workspace_id']}-gen{spec['generation']}",
+                        actor_id=actor,
+                        actor_role="ADMIN",
+                    )
+                    agent_rec = agent_res.get("result") or {}
+                    member["workspace_delegation_status"] = (
+                        "VERIFIED" if agent_rec.get("observed_state") == "ACTIVE" else "PARTIAL_PROVISIONING"
+                    )
+                    member["workspace_delegation_reason"] = None
+                    member["workspace_agent_request_id"] = agent_res.get("request_id")
+                    if agent_rec.get("canonical_container_id"):
+                        member["container_id"] = agent_rec["canonical_container_id"]
+            except Exception as exc:
+                err_code = getattr(exc, "code", "")
+                err_msg = getattr(exc, "message", str(exc))
+                member["workspace_delegation_status"] = (
+                    "AGENT_UNAVAILABLE"
+                    if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
+                    else "PROVISION_FAILED"
+                )
+                member["workspace_delegation_reason"] = err_msg
 
         if host_online and member.get("workspace_id") and member.get("container_id") and server is not None:
             try:
@@ -3769,7 +4626,14 @@ class LabOpsDataService:
                         "gid": str(member.get("gid") or 0),
                         "ssh_port": str(member.get("ssh_port") or 0),
                         "resource_mode": member.get("cpu_policy") or "SHARED_WEIGHTED",
-                        "vpn_bind_ip": str((member.get("wireguard") or {}).get("client_ip") or ""),
+                        "vpn_bind_ip": str(
+                            member.get("ssh_ip")
+                            or (
+                                getattr(settings, "LABOPS_WORKSPACE_BIND_IP", "192.168.167.251")
+                                if server_id == "workstation"
+                                else "192.168.167.250"
+                            )
+                        ),
                     },
                     idempotency_key=f"ws-reverify-{member['workspace_id']}-{uuid.uuid4().hex[:8]}",
                     actor_id=actor,
@@ -3790,7 +4654,11 @@ class LabOpsDataService:
         known_gpu_ids = [g["id"] for g in self.gpus if g.get("server_id") == server_id] + [
             g["uuid"] for g in self.gpus if g.get("server_id") == server_id and g.get("uuid")
         ]
-        ws_dir = str(member.get("workspace_dir") or "") or self.ssh_access_manager.member_workspace_dir(server_id, username)
+        candidate_ws_dir = str(member.get("workspace_dir") or "").strip()
+        if candidate_ws_dir and os.path.isfile(os.path.join(candidate_ws_dir, ".ssh", "authorized_keys")):
+            ws_dir = candidate_ws_dir
+        else:
+            ws_dir = self.ssh_access_manager.member_workspace_dir(server_id, username)
         verification = self.ssh_access_manager.verify_workspace_and_runtime(
             host_id=server_id,
             host_online=host_online,
@@ -3810,6 +4678,7 @@ class LabOpsDataService:
             cpu_weight=int(member.get("cpu_weight") or 100),
             expected_uid=member.get("uid"),
             require_authorized_key_present=False,
+            storage_dir=member.get("member_storage_directory") or ws_dir,
         )
         member["runtime_verification"] = verification
         gate = self._sync_member_ssh_authorization(
@@ -3871,6 +4740,8 @@ class LabOpsDataService:
                     d["status"] = live.get("status", d.get("status"))
                     d["enabled"] = live.get("enabled", d.get("enabled"))
                     d["last_handshake"] = live.get("last_handshake")
+                    d["is_online"] = bool(live.get("is_online", False))
+                    d["handshake_age_seconds"] = live.get("handshake_age_seconds")
                     d["transfer_rx"] = live.get("transfer_rx", 0)
                     d["transfer_tx"] = live.get("transfer_tx", 0)
                     has_hs = bool(live.get("last_handshake")) and bool(live.get("enabled", True))

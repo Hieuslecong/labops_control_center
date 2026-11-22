@@ -1,6 +1,6 @@
 import PageContainer from '@/components/layout/page-container';
 import { requireAdmin } from '@/lib/auth-guard';
-import AIAssistantView from '@/features/ai-assistant/components/ai-assistant-view';
+import AISREControlView from '@/features/ai-assistant/components/ai-sre-control-view';
 
 export const metadata = {
   title: 'Trợ lý AI & Zalo Assistant - LabOps Control Center',
@@ -16,7 +16,7 @@ export default async function AIAssistantPage() {
       pageTitle='Trợ lý AI & Zalo Bot Control Plane'
       pageDescription='Hệ thống trợ lý vận hành AI đa phương thức và Zalo Bot với cơ chế kiểm soát hạn mức, báo cáo tuần tự động và bảo vệ hạ tầng Workstation Primary'
     >
-      <AIAssistantView />
+      <AISREControlView />
     </PageContainer>
   );
 }

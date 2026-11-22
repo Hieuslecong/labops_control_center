@@ -6,7 +6,6 @@ import Link from 'next/link';
 import {
   IconSparkles,
   IconCheck,
-  IconAlertTriangle,
   IconAlertCircle,
   IconFileText,
   IconSend,
@@ -16,7 +15,6 @@ import {
   IconHistory,
   IconDownload,
   IconServer,
-  IconBan,
   IconKey,
   IconUserCheck,
   IconTrash

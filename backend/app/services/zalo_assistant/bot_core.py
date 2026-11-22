@@ -1,9 +1,10 @@
 """
-Zalo Bot Core Engine
-Handles 7 primary commands:
-/start, /help, /ask, /status, /jobs, /report, /quota (plus /gpu alias).
-Consolidates metrics into single responses, enforces strict quota ledger,
-and provides single-consumer polling lease protection.
+Zalo Bot Core Engine (LabOps AI SRE Agent v2)
+Handles operational commands and schema-validated AI tool investigations:
+/start, /help, /ask, /status, /gpu, /jobs, /myjobs, /myworkspace, /alloc,
+/incidents, /incident <id>, /ack <id>, /report [today|week], /security,
+/quota, /link <CODE>.
+Enforces LabOps identity-bound RBAC, rate limiting, and quota accounting.
 """
 from __future__ import annotations
 
@@ -11,17 +12,19 @@ import asyncio
 import json
 import logging
 import os
-import shutil
-import subprocess
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.services.zalo_assistant.ai_gateway_client import AIGatewayClient
-from app.services.zalo_assistant.quota_ledger import QuotaLedger, QuotaExceededError
+from app.services.zalo_assistant.identity_rbac import ZaloIdentityRBACService, ZaloPrincipal
+from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+from app.services.zalo_assistant.quota_ledger import QuotaExceededError, QuotaLedger
 from app.services.zalo_assistant.report_generator import ReportGenerator
+from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
+from app.services.zalo_assistant.tool_registry import SREAgentRunner, SREToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -32,26 +35,25 @@ def _now() -> str:
 
 class ZaloBotEngine:
     COMMANDS = {
-        "/start": "Khởi động và giới thiệu trợ lý LabOps",
-        "/help": "Xem danh sách các lệnh hỗ trợ",
-        "/ask": "Hỏi đáp thông minh với AI (/ask <câu hỏi>)",
-        "/status": "Tổng hợp trạng thái toàn bộ máy chủ, CPU, RAM, GPU, Ổ cứng và Cảnh báo",
-        "/jobs": "Danh sách các tác vụ tính toán và tiến trình GPU đang chạy",
-        "/report": "Xem hoặc tạo báo cáo tuần tổng hợp hoạt động của Lab",
-        "/quota": "Kiểm tra hạn mức tin nhắn Zalo Basic (3.000 tin/tháng) và AI requests",
-        "/alloc": "Bảng thống kê tài khoản nào đang được cấp cho GPU nào (/allocations)",
-        "/gpu": "Truy vấn nhanh thông tin GPU (Alias của /status)",
+        "/start": "Khởi động và giới thiệu trợ lý AI SRE v2",
+        "/help": "Xem danh sách lệnh hỗ trợ theo phân quyền",
+        "/status": "Trạng thái máy chủ, GPU (UUID), lưu trữ và freshness thời gian thực",
+        "/gpu": "Truy vấn nhanh GPU theo từng máy chủ",
+        "/jobs": "Tác vụ tính toán đang chạy (Admin: toàn cụm; Researcher: của bạn)",
+        "/myjobs": "Danh sách tác vụ tính toán và lịch sử job của bạn",
+        "/myworkspace": "Trạng thái Docker workspace, quota đĩa và RAM của bạn",
+        "/alloc": "Phân bổ GPU theo thành viên",
+        "/incidents": "Danh sách sự cố hạ tầng/bảo mật đang mở",
+        "/incident": "Chi tiết sự cố (/incident <incident_id>)",
+        "/ack": "Xác nhận đang xử lý sự cố (/ack <incident_id>)",
+        "/report": "Báo cáo tổng hợp (/report today hoặc /report week)",
+        "/security": "Tổng hợp an ninh kho mã & cảnh báo (Chỉ Admin)",
+        "/quota": "Kiểm tra hạn mức tin nhắn nội bộ Zalo & AI requests",
+        "/link": "Liên kết tài khoản Zalo với LabOps (/link <MÃ>)",
+        "/ask": "Điều tra hạ tầng bằng AI Agent (/ask <câu hỏi>)",
     }
 
-    # Chỉ bật các công cụ ĐỌC (Read-only tools). Khóa toàn bộ công cụ ghi/phá hủy.
-    ENABLED_READ_TOOLS = [
-        "inspect_host_status",
-        "inspect_gpu_telemetry",
-        "list_running_jobs",
-        "generate_weekly_report",
-        "check_message_quota",
-        "query_ai_knowledge",
-    ]
+    ENABLED_READ_TOOLS = list(SREToolRegistry.TOOL_SPECS.keys())
     DISABLED_WRITE_TOOLS = [
         "execute_arbitrary_shell",
         "sudo_system_commands",
@@ -71,11 +73,30 @@ class ZaloBotEngine:
         authorized_users: Optional[List[str]] = None,
         allowed_chat_ids: Optional[List[str]] = None,
         config_path: Optional[str] = None,
+        identity_rbac: Optional[ZaloIdentityRBACService] = None,
+        telemetry_collector: Optional[UnifiedTelemetryCollector] = None,
+        incident_engine: Optional[UnifiedIncidentEngine] = None,
+        tool_registry: Optional[SREToolRegistry] = None,
     ):
         self.quota_ledger = quota_ledger
         self.ai_client = ai_client
         self.report_generator = report_generator
         self.bot_token = bot_token if bot_token is not None else os.getenv("ZALO_BOT_TOKEN", "")
+        self.data_dir = getattr(quota_ledger, "data_dir", None) or getattr(report_generator, "data_dir", "/tmp")
+
+        db_mgr = getattr(report_generator, "db", None)
+        self.identity_rbac = identity_rbac or ZaloIdentityRBACService(self.data_dir, db_manager=db_mgr)
+        self.telemetry_collector = telemetry_collector or UnifiedTelemetryCollector(self.data_dir, db_manager=db_mgr)
+        self.incident_engine = incident_engine or UnifiedIncidentEngine(self.data_dir, db_manager=db_mgr)
+        self.tool_registry = tool_registry or SREToolRegistry(
+            self.data_dir,
+            db_manager=db_mgr,
+            telemetry_collector=self.telemetry_collector,
+            incident_engine=self.incident_engine,
+            report_generator=self.report_generator,
+        )
+        self.agent_runner = SREAgentRunner(self.tool_registry)
+
         self._explicit_allowlist = (authorized_users is not None or allowed_chat_ids is not None)
         if config_path is not None:
             self._config_path: Optional[str] = config_path
@@ -120,7 +141,6 @@ class ZaloBotEngine:
             self.reload_persisted_config(force=True)
 
     def reload_persisted_config(self, force: bool = False) -> bool:
-        """Tự động nạp lại cấu hình allowlist/AI từ zalo_config.json khi file thay đổi."""
         if not self._config_path or not os.path.exists(self._config_path):
             return False
         try:
@@ -162,7 +182,6 @@ class ZaloBotEngine:
             return False
 
     def save_persisted_config(self) -> None:
-        """Lưu allowlist và tùy chọn AI ra zalo_config.json (KHÔNG lưu bot_token)."""
         if not self._config_path:
             return
         os.makedirs(os.path.dirname(self._config_path), exist_ok=True)
@@ -182,17 +201,15 @@ class ZaloBotEngine:
         except OSError:
             pass
 
-    def is_authorized(self, user_id: str) -> bool:
+    def resolve_principal(self, sender_id: str) -> ZaloPrincipal:
         self.reload_persisted_config()
-        uid = str(user_id or "").strip()
-        if not uid or uid == "*":
-            return False
-        allowed = {
-            str(u).strip()
-            for u in (self.authorized_users or [])
-            if str(u).strip() and str(u).strip() != "*"
-        }
-        return uid in allowed
+        return self.identity_rbac.resolve_zalo_principal(
+            sender_id,
+            fallback_authorized_users=self.authorized_users,
+        )
+
+    def is_authorized(self, user_id: str) -> bool:
+        return self.resolve_principal(user_id).is_authorized
 
     def is_chat_allowed(self, chat_id: Optional[str], sender_id: Optional[str] = None) -> bool:
         self.reload_persisted_config()
@@ -231,6 +248,7 @@ class ZaloBotEngine:
         source: str = "zalo",
         principal_role: Optional[str] = None,
         defer_outbox_commit: bool = False,
+        sender_name: str = "",
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(
             self.handle_command,
@@ -241,6 +259,7 @@ class ZaloBotEngine:
             source=source,
             principal_role=principal_role,
             defer_outbox_commit=defer_outbox_commit,
+            sender_name=sender_name,
         )
 
     def handle_command(
@@ -253,10 +272,8 @@ class ZaloBotEngine:
         source: str = "zalo",
         principal_role: Optional[str] = None,
         defer_outbox_commit: bool = False,
+        sender_name: str = "",
     ) -> Dict[str, Any]:
-        """
-        Process user message or command with RBAC, rate limiting, and quota reservation.
-        """
         text = command_text.strip()
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower() if parts else ""
@@ -265,8 +282,36 @@ class ZaloBotEngine:
         src = (source or "zalo").strip().lower()
         role_upper = str(principal_role or "").strip().upper()
 
+        # Allow /link <CODE> even before sender_id is in allowlist
+        if cmd == "/link" and src != "dashboard":
+            claim_res = self.identity_rbac.claim_link_code(
+                zalo_user_id=sender_id,
+                code=arg,
+                display_name=sender_name,
+            )
+            if claim_res.get("success"):
+                reply = (
+                    "✅ Đã liên kết danh tính Zalo với LabOps!\n"
+                    f"• Tài khoản: @{claim_res['username']} ({claim_res['role']})\n"
+                    f"• Zalo ID: {sender_id}\n"
+                    "Bạn có thể sử dụng /help để xem các lệnh được phân quyền."
+                )
+                return {
+                    "success": True,
+                    "message_id": f"link-{os.urandom(4).hex()}",
+                    "command": "/link",
+                    "reply": reply,
+                    "identity": claim_res,
+                }
+            return {
+                "success": False,
+                "error": claim_res.get("error") or "INVALID_LINK_CODE",
+                "command": "/link",
+                "reply": f"⛔ {claim_res.get('message') or 'Mã liên kết không hợp lệ.'}",
+            }
+
         if src == "dashboard":
-            if role_upper not in ("ADMIN", "RESEARCHER"):
+            if role_upper not in ("ADMIN", "RESEARCHER", "STUDENT"):
                 return {
                     "success": False,
                     "error": "UNAUTHORIZED",
@@ -274,19 +319,46 @@ class ZaloBotEngine:
                     "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant.",
                     "command": cmd,
                 }
+            principal = ZaloPrincipal(
+                zalo_user_id=sender_id,
+                username=sender_id,
+                member_id="",
+                role=role_upper,
+                display_name=sender_id,
+                is_authorized=True,
+                is_linked=True,
+            )
         else:
-            if not self.is_authorized(sender_id) or (
+            principal = self.resolve_principal(sender_id)
+            if not principal.is_authorized or (
                 chat_id is not None and not self.is_chat_allowed(chat_id, sender_id=sender_id)
             ):
                 return {
                     "success": False,
                     "error": "UNAUTHORIZED",
                     "suppress_outbound": True,
-                    "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant. Vui lòng liên hệ quản trị viên.",
+                    "reply": "⛔ Bạn không có quyền truy cập LabOps AI Assistant. Nếu đã có mã liên kết trên Dashboard, hãy gõ `/link <MÃ>`.",
                     "command": cmd,
                 }
 
-        known_cmds = {"/start", "/help", "/status", "/gpu", "/alloc", "/allocations", "/gpus", "/jobs", "/report", "/quota"}
+        known_cmds = {
+            "/start",
+            "/help",
+            "/status",
+            "/gpu",
+            "/alloc",
+            "/allocations",
+            "/gpus",
+            "/jobs",
+            "/myjobs",
+            "/myworkspace",
+            "/incidents",
+            "/incident",
+            "/ack",
+            "/report",
+            "/security",
+            "/quota",
+        }
         is_ask = cmd == "/ask" or cmd not in known_cmds
         if is_ask and not self._check_ask_rate_limit(sender_id):
             return {
@@ -297,43 +369,62 @@ class ZaloBotEngine:
                 "command": cmd or "/ask",
             }
 
-        # 1. Routing commands
+        agent_meta: Dict[str, Any] = {}
+
         if cmd == "/start":
-            reply = self._cmd_start()
+            reply = self._cmd_start(principal)
         elif cmd == "/help":
-            reply = self._cmd_help()
+            reply = self._cmd_help(principal)
         elif cmd in ("/status", "/gpu"):
             reply = self._cmd_status()
         elif cmd in ("/alloc", "/allocations", "/gpus"):
-            reply = self._cmd_allocations()
+            reply = self._cmd_allocations(principal)
         elif cmd == "/jobs":
-            reply = self._cmd_jobs()
-        elif cmd == "/report":
-            wants_generate = any(w in arg.lower() for w in ["tạo", "new", "gen", "generate"])
-            if wants_generate and src == "dashboard" and role_upper != "ADMIN":
+            reply = self._cmd_jobs(principal, own_only=not principal.is_admin)
+        elif cmd == "/myjobs":
+            reply = self._cmd_jobs(principal, own_only=True)
+        elif cmd == "/myworkspace":
+            reply = self._cmd_myworkspace(principal)
+        elif cmd == "/incidents":
+            reply = self._cmd_incidents(principal)
+        elif cmd == "/incident":
+            reply = self._cmd_incident_detail(arg, principal)
+        elif cmd == "/ack":
+            reply = self._cmd_ack(arg, principal)
+        elif cmd == "/security":
+            if not principal.is_admin:
                 return {
                     "success": False,
                     "error": "FORBIDDEN",
-                    "suppress_outbound": True,
-                    "reply": "⛔ Chỉ quản trị viên mới được phép khởi tạo báo cáo tuần mới.",
+                    "suppress_outbound": src != "zalo",
+                    "reply": "⛔ Lệnh /security chỉ dành cho Quản trị viên (Admin).",
+                    "command": "/security",
+                }
+            reply = self._cmd_security()
+        elif cmd == "/report":
+            wants_generate = any(w in arg.lower() for w in ["tạo", "new", "gen", "generate"])
+            if wants_generate and not principal.is_admin:
+                return {
+                    "success": False,
+                    "error": "FORBIDDEN",
+                    "suppress_outbound": src != "zalo",
+                    "reply": "⛔ Chỉ quản trị viên mới được phép khởi tạo báo cáo mới.",
                     "command": cmd,
                 }
-            reply = self._cmd_report(arg)
+            reply = self._cmd_report(arg, principal)
         elif cmd == "/quota":
             reply = self._cmd_quota()
         elif cmd == "/ask":
-            reply = self._cmd_ask(arg)
+            reply, agent_meta = self._cmd_ask(arg, principal, source=src)
         else:
-            # Nếu người dùng gửi tin nhắn không có prefix lệnh, chuyển tiếp tới AI Ask
-            reply = self._cmd_ask(text)
+            reply, agent_meta = self._cmd_ask(text, principal, source=src)
 
-        # 2. Record in Quota Ledger ONLY for external Zalo messages (not internal dashboard API)
         if src == "dashboard":
             msg_id = f"dash-{os.urandom(6).hex()}"
         else:
             try:
                 if defer_outbox_commit:
-                    success, msg_id, quota_snapshot = self.quota_ledger.reserve_outbox(
+                    _, msg_id, _ = self.quota_ledger.reserve_outbox(
                         recipient_id=sender_id,
                         message_text=reply,
                         is_critical_alert=False,
@@ -341,7 +432,7 @@ class ZaloBotEngine:
                         metadata={"command": cmd or "/ask", "sender": sender_id, "chat_id": chat_id or ""},
                     )
                 else:
-                    success, msg_id, quota_snapshot = self.quota_ledger.reserve_and_send(
+                    _, msg_id, _ = self.quota_ledger.reserve_and_send(
                         recipient_id=sender_id,
                         message_text=reply,
                         is_critical_alert=False,
@@ -364,10 +455,11 @@ class ZaloBotEngine:
                     "suppress_outbound": True,
                 }
 
-        # Save into in-memory recent message history
         history_item = {
             "id": msg_id,
             "sender_id": sender_id,
+            "username": principal.username,
+            "role": principal.role,
             "source": src,
             "incoming_text": command_text,
             "reply_snippet": reply[:100],
@@ -378,224 +470,249 @@ class ZaloBotEngine:
         if len(self.message_history) > 100:
             self.message_history = self.message_history[-100:]
 
-        return {
+        res = {
             "success": True,
             "message_id": msg_id,
             "command": cmd or "/ask",
             "reply": reply,
             "quota_status": self.quota_ledger.get_status(),
+            "principal": {"username": principal.username, "role": principal.role, "is_linked": principal.is_linked},
         }
+        if agent_meta:
+            res.update(agent_meta)
+        return res
 
     # ---------------- Command Handlers ----------------
 
-    def _cmd_start(self) -> str:
+    def _cmd_start(self, principal: ZaloPrincipal) -> str:
         return (
-            "🚀 Chào mừng bạn đến với LabOps AI Assistant!\n\n"
-            "Tôi là trợ lý vận hành hạ tầng AIoT Lab. Các chức năng khả dụng:\n"
-            "• /status: Kiểm tra trạng thái máy chủ & GPU A30\n"
-            "• /jobs: Danh sách tác vụ đang chạy\n"
-            "• /report: Báo cáo tuần tổng hợp\n"
-            "• /quota: Kiểm tra hạn mức tin nhắn Zalo\n"
-            "• /ask <nội dung>: Hỏi đáp kỹ thuật trực tiếp\n"
-            "• /help: Hướng dẫn chi tiết"
+            f"🚀 Chào mừng @{principal.username} ({principal.role}) đến với LabOps AI SRE Agent v2!\n\n"
+            "Tôi hỗ trợ giám sát máy chủ, GPU, sự cố, báo cáo ngày/tuần và phân tích điều tra bằng AI Agent.\n"
+            "Gõ `/help` để xem danh sách lệnh theo phân quyền của bạn."
         )
 
-    def _cmd_help(self) -> str:
-        lines = ["📖 DANH SÁCH LỆNH LABOPS AI ASSISTANT:"]
+    def _cmd_help(self, principal: ZaloPrincipal) -> str:
+        lines = [f"📖 DANH SÁCH LỆNH LABOPS AI SRE v2 ({principal.role}):"]
         for c, desc in self.COMMANDS.items():
+            if c == "/security" and not principal.is_admin:
+                continue
             lines.append(f"• {c}: {desc}")
-        lines.append("\nWorkstation `aiot-ws1` là máy chủ điều hành chính (Primary).")
+        lines.append("\nQuyền dữ liệu được kiểm soát chặt tại backend theo tài khoản LabOps.")
         return "\n".join(lines)
 
     def _cmd_status(self) -> str:
-        """Consolidated /status: Rack & WS, CPU, RAM, GPU A30, Disk, Services, Alerts."""
-        # 1. Host CPU & Memory
-        cpu_pct = 0.0
-        ram_used = 0.0
-        ram_total = 0.0
-        try:
-            import psutil
-            cpu_pct = round(psutil.cpu_percent(interval=0.1), 1)
-            vm = psutil.virtual_memory()
-            ram_used = round(vm.used / (1024**3), 1)
-            ram_total = round(vm.total / (1024**3), 1)
-        except Exception:
-            pass
-
-        # 2. GPU Telemetry
-        gpu_info = "NVIDIA A30 24GB: Đang kiểm tra..."
-        vram_pct = 0
-        temp_c = 0
-        try:
-            res = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                parts = [p.strip() for p in res.stdout.strip().split(",")]
-                if len(parts) >= 5:
-                    used_mb = int(float(parts[1]))
-                    total_mb = int(float(parts[2]))
-                    util_pct = int(float(parts[3]))
-                    vram_pct = round((used_mb / total_mb) * 100) if total_mb > 0 else 0
-                    temp_c = round(float(parts[4]))
-                    gpu_info = f"{parts[0]}: {used_mb:,} / {total_mb:,} MiB ({util_pct}% util, {temp_c}°C)"
-        except Exception:
-            pass
-
-        # 3. Disk Space (Tất cả 4 ổ đĩa vật lý)
-        disk_info = "Khả dụng"
-        try:
-            import psutil
-            total_disk_bytes = 0
-            free_disk_bytes = 0
-            seen_devs = set()
-            disk_breakdown = []
-            parts = psutil.disk_partitions(all=False)
-            for p in parts:
-                dev = p.device
-                mnt = p.mountpoint
-                fstype = p.fstype
-                if not dev or not mnt or not fstype:
-                    continue
-                if dev.startswith("/dev/loop") or fstype in ("vfat", "iso9660", "squashfs", "tmpfs", "devtmpfs", "swap"):
-                    continue
-                if not os.path.exists(mnt) or dev in seen_devs:
-                    continue
-                seen_devs.add(dev)
-                try:
-                    u = psutil.disk_usage(mnt)
-                    total_disk_bytes += u.total
-                    free_disk_bytes += u.free
-                    if "HDD3" in mnt or os.path.basename(dev) == "sdc":
-                        lbl = "/mnt/HDD3 (AI Data)"
-                    elif mnt == "/":
-                        lbl = "/ (Root SSD)"
-                    else:
-                        lbl = os.path.basename(dev).upper()
-                    disk_breakdown.append(f"  • {lbl}: {round(u.free / (1024**3), 1)} GiB trống / {round(u.total / (1024**3), 1)} GiB")
-                except Exception:
-                    continue
-            total_tb = round(total_disk_bytes / (1024**4), 2)
-            free_tb = round(free_disk_bytes / (1024**4), 2)
-            disk_info = f"{free_tb} TiB trống / {total_tb} TiB ({len(disk_breakdown)} ổ đĩa):\n" + "\n".join(disk_breakdown)
-        except Exception:
-            try:
-                total, used, free = shutil.disk_usage("/")
-                disk_info = f"{round(free / (1024**3), 1)} GiB khả dụng / {round(total / (1024**3), 1)} GiB"
-            except Exception:
-                pass
-
-        # 4. AI Gateway status
+        """Dynamic runtime telemetry from UnifiedTelemetryCollector (NEVER hardcoded)."""
+        snap = self.telemetry_collector.collect_snapshot()
+        hosts = snap.get("hosts") or []
+        gpus = snap.get("gpus") or []
         r_health = self.ai_client.check_health()
-        r_str = f"{r_health['status']}"
+        open_incs = [i for i in self.incident_engine.list_incidents(limit=50) if i.get("status") != "RESOLVED"]
 
-        # 5. Cảnh báo động theo chỉ số thời gian thực
-        alerts = [
-            "• Server Rack (aiotlab-rack): Ngoại tuyến; Workstation là Primary Control Plane."
+        lines = [
+            "📊 TỔNG HỢP TRẠNG THÁI HẠ TẦNG (THỜI GIAN THỰC)",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"• Sức khỏe cụm: {snap.get('overall_health', 'UNKNOWN')} | Timestamp: {snap.get('collected_at', 'N/A')}",
+            "🖥️ MÁY CHỦ:",
         ]
-        if vram_pct >= 90:
-            alerts.append(f"• VRAM GPU A30 đang tải cao (~{vram_pct}% dung lượng).")
-        if temp_c >= 85:
-            alerts.append(f"• Nhiệt độ GPU A30 ở mức cao ({temp_c}°C).")
-        if len(alerts) == 1:
-            alerts.append("• Tài nguyên phần cứng và GPU hoạt động bình thường, an toàn.")
-
-        alert_text = "\n".join(alerts)
-
-        return (
-            "📊 TỔNG HỢP TRẠNG THÁI LABOPS\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🖥️ HẠ TẦNG:\n"
-            "• Workstation (aiot-ws1): ONLINE [PRIMARY]\n"
-            "• Server Rack (aiotlab-rack): OFFLINE (Mất kết nối)\n"
-            f"• CPU / RAM: {cpu_pct}% | {ram_used}/{ram_total} GiB\n"
-            f"• GPU: {gpu_info}\n"
-            f"• Ổ cứng (Toàn bộ):\n{disk_info}\n"
-            f"• AI Gateway: {r_str}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔔 CẢNH BÁO:\n"
-            f"{alert_text}"
-        )
-
-    def _cmd_jobs(self) -> str:
-        summary = self.report_generator._get_active_jobs_summary()
-        count = summary["running_count"]
-        lines = [f"⚙️ TÁC VỤ NGHIÊN CỨU ĐANG CHẠY ({count} tác vụ):", "━━━━━━━━━━━━━━━━━━━━"]
-        if summary["jobs"]:
-            for idx, j in enumerate(summary["jobs"], 1):
-                lines.append(f"{idx}. {j['display']} (PID: {j['pid']})")
+        if not hosts:
+            lines.append("• Chưa có dữ liệu máy chủ (UNKNOWN)")
         else:
-            lines.append("• Hiện không có tác vụ tính toán của người dùng.")
-        lines.append("━━━━━━━━━━━━━━━━━━━━\nGợi ý: Sử dụng `/status` để xem tổng quan máy chủ.")
+            for h in hosts:
+                st = h.get("status", "UNKNOWN")
+                fresh = h.get("freshness_status", "UNKNOWN")
+                cpu = f"{h['cpu_usage_percent']}%" if h.get("cpu_usage_percent") is not None else "N/A"
+                ram = (
+                    f"{h['ram_used_gb']}/{h['ram_total_gb']} GiB"
+                    if h.get("ram_total_gb")
+                    else "N/A"
+                )
+                disk = (
+                    f"{h['disk_used_tb']}/{h['disk_total_tb']} TB ({h['disk_usage_percent']}%)"
+                    if h.get("disk_total_tb")
+                    else "N/A"
+                )
+                src = h.get("source", "unknown")
+                if st in {"ONLINE", "DEGRADED"}:
+                    lines.append(
+                        f"• {h.get('display_name')} ({h.get('hostname')}): {st} [{fresh}, src={src}]\n"
+                        f"  CPU {cpu} | RAM {ram} | Disk {disk}"
+                    )
+                else:
+                    lines.append(
+                        f"• {h.get('display_name')} ({h.get('hostname')}): {st} [fresh={fresh}, last_hb={h.get('last_heartbeat_at') or 'N/A'}]"
+                    )
+
+        lines.append("🎮 GPU TELEMETRY:")
+        if not gpus:
+            lines.append("• Chưa ghi nhận GPU khả dụng.")
+        else:
+            for g in gpus:
+                if g.get("host_online"):
+                    lines.append(
+                        f"• {g['gpu_key']} ({g['model']}): "
+                        f"{int(g.get('vram_used_mb') or 0):,}/{int(g.get('vram_total_mb') or 0):,} MiB "
+                        f"({g.get('utilization_gpu')}% util, {g.get('temp_celsius')}°C)"
+                    )
+                else:
+                    lines.append(f"• {g['gpu_key']} ({g['model']}): HOST KHÔNG KHẢ DỤNG")
+
+        lines.append(f"• AI Gateway: {r_health.get('status', 'UNKNOWN')}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🔔 SỰ CỐ ĐANG MỞ ({len(open_incs)}):")
+        if open_incs:
+            for inc in open_incs[:3]:
+                lines.append(f"• [{inc['severity']}] {inc['incident_id']}: {inc['title']}")
+        else:
+            lines.append("• Không có sự cố đang mở được ghi nhận.")
         return "\n".join(lines)
 
-    def _cmd_allocations(self) -> str:
-        """Thống kê chi tiết tài khoản nào đang được cấp quyền theo từng thiết bị GPU."""
-        try:
-            from app.services.labops_service import service
-            groups = service.get_gpu_allocations_by_device()
-            lines = [
-                "📋 THỐNG KÊ TÀI KHOẢN THEO TỪNG GPU:",
-                "━━━━━━━━━━━━━━━━━━━━"
-            ]
-            if groups:
-                for g in groups:
-                    if g.get("is_online"):
-                        header_status = f"ONLINE | {g.get('vram_used_gb', 0)}/{g.get('vram_total_gb', 24.0)} GB VRAM"
-                    else:
-                        header_status = "HOST NGOẠI TUYẾN"
-                    lines.append(f"\n🖥️ {g.get('gpu_label')} • {g.get('gpu_model')} ({header_status})")
-                    accounts = g.get("accounts") or []
-                    if not accounts:
-                        lines.append("  • Chưa cấp phát tài khoản")
-                        continue
-                    lines.append(f"  Có {len(accounts)} tài khoản được cấp:")
-                    for a in accounts:
-                        st = a.get("status", "IDLE")
-                        icon = (
-                            "🟢" if st == "IN_USE"
-                            else "🟣" if st == "RESERVED"
-                            else "🔵" if st == "IDLE"
-                            else "⚪"
-                        )
-                        vram_gb = a.get("vram_used_gb", 0)
-                        if st == "IN_USE":
-                            detail = f"Đang dùng {vram_gb}GB [{a.get('primary_script')}]"
-                        elif st == "RESERVED":
-                            detail = f"Đang giữ chỗ [{a.get('primary_script')}]"
-                        elif st == "OFFLINE_HOST":
-                            detail = a.get("status_label") or "Máy chủ Ngoại tuyến"
-                        else:
-                            detail = f"{a.get('status_label') or 'Sẵn sàng'} (0GB)"
-                        lines.append(
-                            f"  • {icon} @{a.get('username')} ({a.get('full_name')}) — "
-                            f"{a.get('allocation_mode')} | Quota {a.get('vram_quota_gb')}GB | {detail}"
-                        )
-            else:
-                lines.append("• Chưa có thiết bị GPU nào được cấu hình.")
-            lines.append("\n━━━━━━━━━━━━━━━━━━━━\nGợi ý: Dùng `/jobs` để xem chi tiết tiến trình.")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"❌ Lỗi truy vấn bảng phân bổ GPU: {e}"
+    def _cmd_jobs(self, principal: ZaloPrincipal, *, own_only: bool = False) -> str:
+        res = self.tool_registry.execute_tool("get_active_jobs", {}, principal, source="zalo")
+        jobs = list(res.get("jobs") or [])
+        # Also include psutil live summary if registry list empty & admin or matching user
+        if not jobs:
+            ps_summary = self.report_generator._get_active_jobs_summary()
+            for j in ps_summary.get("jobs") or []:
+                if not own_only or principal.is_admin or j.get("user") == principal.username:
+                    if not (not principal.is_admin and j.get("user") != principal.username):
+                        jobs.append(j)
+        if own_only and not principal.is_admin:
+            jobs = [j for j in jobs if (j.get("owner") or j.get("user")) == principal.username]
 
-    def _cmd_report(self, arg: str) -> str:
-        # Nếu có chữ "tạo" hoặc "generate" thì tạo mới, ngược lại lấy báo cáo gần nhất
-        if any(w in arg.lower() for w in ["tạo", "new", "gen", "generate"]):
+        scope_lbl = f"của @{principal.username}" if (own_only or not principal.is_admin) else "toàn hệ thống"
+        lines = [f"⚙️ TÁC VỤ ĐANG CHẠY ({scope_lbl}: {len(jobs)} tác vụ):", "━━━━━━━━━━━━━━━━━━━━"]
+        if jobs:
+            for idx, j in enumerate(jobs[:12], 1):
+                title = j.get("display") or f"{j.get('owner') or 'user'} • {j.get('name')} [{j.get('status') or 'RUNNING'}]"
+                lines.append(f"{idx}. {title}")
+        else:
+            lines.append("• Không có tác vụ tính toán đang chạy trong phạm vi quyền của bạn.")
+        return "\n".join(lines)
+
+    def _cmd_myworkspace(self, principal: ZaloPrincipal) -> str:
+        res = self.tool_registry.execute_tool("get_workspace_usage", {}, principal, source="zalo")
+        wss = res.get("workspaces") or []
+        if not principal.is_admin:
+            wss = [w for w in wss if w.get("owner") == principal.username]
+        if not wss:
+            return f"📦 Không tìm thấy Docker Workspace nào thuộc tài khoản @{principal.username}."
+        lines = [f"📦 WORKSPACE CỦA @{principal.username}:", "━━━━━━━━━━━━━━━━━━━━"]
+        for w in wss[:5]:
+            lines.append(
+                f"• {w.get('name')} ({w.get('host_id')}): state={w.get('container_state')} | "
+                f"CPU {w.get('cpu_cores_limit')}c | RAM {w.get('ram_mb_limit')}MB | "
+                f"Disk {w.get('storage_used_gb') or 'N/A'}/{w.get('storage_quota_gb')}GB | "
+                f"OOM={w.get('oom_killed')} | Restart={w.get('restart_count')}"
+            )
+        return "\n".join(lines)
+
+    def _cmd_allocations(self, principal: ZaloPrincipal) -> str:
+        res = self.tool_registry.execute_tool("get_gpu_metrics", {}, principal, source="zalo")
+        gpus = res.get("gpus") or []
+        lines = ["📋 PHÂN BỔ GPU THEO QUYỀN TRUY CẬP:", "━━━━━━━━━━━━━━━━━━━━"]
+        if not gpus:
+            lines.append("• Chưa có thiết bị GPU nào.")
+            return "\n".join(lines)
+        for g in gpus:
+            st = "ONLINE" if g.get("host_online") else "OFFLINE/UNKNOWN"
+            lines.append(f"\n🖥️ {g['gpu_key']} • {g['model']} ({st})")
+            accs = g.get("allocations") or []
+            if not accs:
+                lines.append("  • Không có phân bổ hiển thị trong phạm vi quyền.")
+                continue
+            for a in accs:
+                lines.append(
+                    f"  • @{a.get('username')} — {a.get('mode')} | Quota {a.get('vram_quota_gb')}GB | {a.get('status')}"
+                )
+        return "\n".join(lines)
+
+    def _cmd_incidents(self, principal: ZaloPrincipal) -> str:
+        owner_f = None if principal.is_admin else principal.username
+        incs = self.incident_engine.list_incidents(owner_id=owner_f, limit=15)
+        open_incs = [i for i in incs if i.get("status") != "RESOLVED"]
+        lines = [f"🚨 SỰ CỐ ĐANG MỞ ({len(open_incs)}):", "━━━━━━━━━━━━━━━━━━━━"]
+        if not open_incs:
+            lines.append("• Không có sự cố đang mở trong phạm vi quyền của bạn.")
+            return "\n".join(lines)
+        for inc in open_incs[:10]:
+            lines.append(
+                f"• `{inc['incident_id']}` [{inc['severity']}/{inc['confidence']}] ({inc['status']}) `{inc.get('resource_id')}`: {inc['title']}"
+            )
+        lines.append("\nDùng `/incident <id>` để xem bằng chứng hoặc `/ack <id>` để xác nhận.")
+        return "\n".join(lines)
+
+    def _cmd_incident_detail(self, arg: str, principal: ZaloPrincipal) -> str:
+        inc_id = str(arg or "").strip()
+        if not inc_id:
+            return "Vui lòng nhập mã sự cố. Ví dụ: `/incident inc-abc123`"
+        inc = self.incident_engine.get_incident(inc_id)
+        if inc is None:
+            return f"❌ Không tìm thấy sự cố `{inc_id}`."
+        if not principal.is_admin and inc.get("owner_id") != principal.username:
+            return "⛔ Bạn không có quyền xem sự cố của thành viên khác."
+        return (
+            f"📌 CHI TIẾT SỰ CỐ `{inc['incident_id']}`\n"
+            f"• Tiêu đề: {inc['title']}\n"
+            f"• Mức độ: {inc['severity']} ({inc['confidence']}) | Trạng thái: {inc['status']}\n"
+            f"• Nguồn: {inc['source']} | Tài nguyên: {inc['resource_id']} | Chủ sở hữu: {inc.get('owner_id') or 'N/A'}\n"
+            f"• Phát hiện: {inc['detected_at']} | Lần cuối: {inc['last_observed_at']} (Lặp: {inc['occurrence_count']})\n"
+            f"• Khuyến nghị: {inc.get('recommended_action') or 'N/A'}"
+        )
+
+    def _cmd_ack(self, arg: str, principal: ZaloPrincipal) -> str:
+        inc_id = str(arg or "").strip()
+        if not inc_id:
+            return "Vui lòng nhập mã sự cố cần xác nhận. Ví dụ: `/ack inc-abc123`"
+        try:
+            updated = self.incident_engine.acknowledge_incident(
+                inc_id, actor=principal.username, role=principal.role, note="Acknowledged via Zalo Bot"
+            )
+            return f"✅ @{principal.username} đã xác nhận (ACKNOWLEDGED) sự cố `{updated['incident_id']}`."
+        except PermissionError as p_err:
+            return f"⛔ {p_err}"
+        except Exception as exc:
+            return f"❌ Không thể xác nhận sự cố: {exc}"
+
+    def _cmd_security(self) -> str:
+        res = self.tool_registry.execute_tool("get_security_events", {"limit": 10}, ZaloPrincipal("admin", "admin", "", "ADMIN", "Admin", True, True))
+        sec_incs = res.get("security_incidents") or []
+        open_sec = [i for i in sec_incs if i.get("status") != "RESOLVED"]
+        lines = [
+            f"🛡️ TỔNG QUAN AN NINH HỆ THỐNG ({len(open_sec)} sự cố repo đang mở):",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for i in open_sec[:5]:
+            lines.append(f"• `{i['incident_id']}` [{i['severity']}] {i['title']}")
+        if not open_sec:
+            lines.append("• Hiện không có sự cố Repository Guard đang mở.")
+        lines.append(f"\nSự kiện Audit gần đây: {len(res.get('audit_events') or [])} mục.")
+        return "\n".join(lines)
+
+    def _cmd_report(self, arg: str, principal: ZaloPrincipal) -> str:
+        lower = arg.lower().strip()
+        if lower.startswith("today") or "hôm nay" in lower or "daily" in lower:
+            if not principal.is_admin:
+                return "⛔ Báo cáo điều hành hằng ngày toàn hệ thống chỉ dành cho Quản trị viên."
+            force_gen = any(w in lower for w in ("tạo", "new", "gen", "force"))
+            rep = self.report_generator.generate_daily_executive_briefing(
+                ai_client=self.ai_client,
+                telemetry_collector=self.telemetry_collector,
+                incident_engine=self.incident_engine,
+                force=force_gen,
+                author=f"Admin ({principal.username})",
+            )
+            return rep.get("zalo_summary") or rep.get("content", "")[:1500]
+
+        if any(w in lower for w in ["tạo", "new", "gen", "generate"]):
             report = self.report_generator.generate_weekly_report(author="Zalo User Request")
-            return f"✅ Đã tạo báo cáo mới: {report['title']}\n\n{report['content'][:600]}...\n\n(Tải báo cáo đầy đủ tại Dashboard)."
+            return f"✅ Đã tạo báo cáo mới: {report['title']}\n\n{report['content'][:600]}..."
 
         reports = self.report_generator.list_reports()
         if reports:
             latest = reports[0]
-            snippet = latest["content"][:700]
-            return f"📑 {latest['title']}\n━━━━━━━━━━━━━━━━━━━━\n{snippet}...\n\n(Xem toàn bộ tại /dashboard/ai-assistant)."
-        else:
-            # Tự động tạo bản đầu tiên
-            report = self.report_generator.generate_weekly_report()
-            return f"📑 {report['title']}\n━━━━━━━━━━━━━━━━━━━━\n{report['content'][:700]}..."
+            return f"📑 {latest['title']}\n━━━━━━━━━━━━━━━━━━━━\n{latest['content'][:700]}..."
+        report = self.report_generator.generate_weekly_report()
+        return f"📑 {report['title']}\n━━━━━━━━━━━━━━━━━━━━\n{report['content'][:700]}..."
 
     def _cmd_quota(self) -> str:
         st = self.quota_ledger.get_status()
@@ -605,51 +722,38 @@ class ZaloBotEngine:
         std_lim = f"{st['standard_limit']:,}".replace(",", ".")
         crit_rem = f"{st['critical_remaining']:,}".replace(",", ".")
         crit_res = f"{st['critical_reserve']:,}".replace(",", ".")
+        warn = "\n⚠️ CẢNH BÁO: Hạn mức tin nhắn nội bộ đã vượt 85% hoặc quỹ khẩn cấp sắp hết!" if st.get("is_quota_warning") else ""
 
         return (
-            "📈 HẠN MỨC TIN NHẮN ZALO & AI\n"
+            "📈 HẠN MỨC TIN NHẮN NỘI BỘ ZALO & AI\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"• Tháng: {st['current_month']}\n"
             f"• Đã gửi: {tot_sent} / {tot_lim} tin ({st['percent_used']}%)\n"
             f"• Tin thông thường còn lại: {std_rem} / {std_lim}\n"
             f"• Tin dự phòng khẩn cấp: {crit_rem} / {crit_res}\n"
             f"• Lượt gọi AI 9Router: {st['ai_requests']} lượt\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Hạn mức được kiểm soát nghiêm ngặt theo quy tắc Zalo Basic Quota."
+            "• Lưu ý: Hạn mức do cấu hình nội bộ LabOps theo dõi, không phải xác nhận từ Zalo API."
+            f"{warn}"
         )
 
-    def _cmd_ask(self, question: str) -> str:
+    def _cmd_ask(self, question: str, principal: ZaloPrincipal, *, source: str = "zalo") -> tuple[str, Dict[str, Any]]:
         if not question:
-            return "Vui lòng nhập câu hỏi sau lệnh /ask. Ví dụ: `/ask Cách kiểm tra VRAM GPU A30?`"
+            return "Vui lòng nhập câu hỏi sau lệnh /ask. Ví dụ: `/ask Tại sao Workstation hôm nay chậm?`", {}
 
-        # Record AI request count
         self.quota_ledger.record_ai_request()
-
-        # Cung cấp ngữ cảnh thực tế của hệ thống để AI trả lời chính xác mà không cần gọi tool
-        live_telemetry = self._cmd_status()
-        live_jobs = self._cmd_jobs()
-        live_allocs = self._cmd_allocations()
-        context_msg = (
-            f"DỮ LIỆU THỜI GIAN THỰC TỪ MÁY CHỦ WORKSTATION AIOT-WS1:\n\n"
-            f"{live_telemetry}\n\n"
-            f"{live_jobs}\n\n"
-            f"{live_allocs}\n\n"
-            f"QUY TẮC PHẢN HỒI:\n"
-            f"1. Trả lời trực tiếp, tự nhiên bằng tiếng Việt dựa trên dữ liệu thực tế ở trên.\n"
-            f"2. Tuyệt đối không sinh tool_calls hoặc lệnh shell vì dữ liệu phần cứng và tác vụ đã có đủ."
+        inv = self.agent_runner.run_investigation(
+            question,
+            principal,
+            ai_client=self.ai_client,
+            source=source,
         )
-
-        ai_reply = self.ai_client.generate_chat_response(
-            messages=[
-                {"role": "system", "content": context_msg},
-                {"role": "user", "content": question},
-            ],
-            temperature=0.2,
-            max_tokens=600,
-        )
-        return f"🤖 Trợ lý AI:\n{ai_reply}"
-
-    # ---------------- Single Polling Consumer Guard ----------------
+        return f"🤖 Trợ lý AI SRE v2:\n{inv['reply']}", {
+            "tool_traces": inv.get("tool_traces", []),
+            "evidence_timestamps": inv.get("evidence_timestamps", []),
+            "context_scope": inv.get("context_scope"),
+            "ai_used": inv.get("ai_used", False),
+            "correlation_id": inv.get("correlation_id"),
+        }
 
     def get_consumer_status(self) -> Dict[str, Any]:
         return {

@@ -40,16 +40,34 @@ class QuotaExceededError(Exception):
 
 
 class QuotaLedger:
-    TOTAL_MONTHLY_LIMIT = 3000
-    STANDARD_LIMIT = 2800
-    CRITICAL_ALERT_RESERVE = 200
+    DEFAULT_TOTAL_MONTHLY_LIMIT = 3000
+    DEFAULT_STANDARD_LIMIT = 2800
+    DEFAULT_CRITICAL_ALERT_RESERVE = 200
+    # Backward-compatible class attributes
+    TOTAL_MONTHLY_LIMIT = DEFAULT_TOTAL_MONTHLY_LIMIT
+    STANDARD_LIMIT = DEFAULT_STANDARD_LIMIT
+    CRITICAL_ALERT_RESERVE = DEFAULT_CRITICAL_ALERT_RESERVE
 
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
+        self.TOTAL_MONTHLY_LIMIT = self._env_int("ZALO_MONTHLY_QUOTA_LIMIT", self.DEFAULT_TOTAL_MONTHLY_LIMIT)
+        self.STANDARD_LIMIT = self._env_int("ZALO_STANDARD_QUOTA_LIMIT", self.DEFAULT_STANDARD_LIMIT)
+        self.CRITICAL_ALERT_RESERVE = self._env_int("ZALO_CRITICAL_RESERVE_LIMIT", self.DEFAULT_CRITICAL_ALERT_RESERVE)
         self.ledger_path = os.path.join(data_dir, "zalo_quota_ledger.json")
         self.lock_path = self.ledger_path + ".lock"
         os.makedirs(data_dir, exist_ok=True)
         self._ensure_bootstrap()
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return default
+        try:
+            val = int(raw)
+            return val if val >= 0 else default
+        except ValueError:
+            return default
 
     @contextmanager
     def _locked(self):
@@ -137,9 +155,14 @@ class QuotaLedger:
                 "standard_remaining": standard_left,
                 "critical_remaining": critical_left,
                 "total_remaining": total_left,
-                "percent_used": round((usage["total_sent"] / self.TOTAL_MONTHLY_LIMIT) * 100, 2),
+                "percent_used": round((usage["total_sent"] / self.TOTAL_MONTHLY_LIMIT) * 100, 2) if self.TOTAL_MONTHLY_LIMIT > 0 else 0.0,
                 "is_standard_exhausted": standard_left <= 0,
                 "is_critical_exhausted": critical_left <= 0,
+                "is_quota_warning": (
+                    (self.TOTAL_MONTHLY_LIMIT > 0 and (usage["total_sent"] / self.TOTAL_MONTHLY_LIMIT) >= 0.85)
+                    or critical_left <= 40
+                ),
+                "provider_confirmed": False,
                 "daily_usage": state.get("daily_usage", {}),
                 "last_updated": state["last_updated"],
             }
@@ -320,6 +343,50 @@ class QuotaLedger:
 
             state["last_updated"] = now_iso
             return dict(entry)
+
+    def mark_delivery_unknown(self, msg_id: str, error: str) -> Dict[str, Any]:
+        """Phase 2c: provider timed out or response was lost. Keep quota deducted to avoid overspend and record DELIVERY_UNKNOWN."""
+        with self._locked() as state:
+            entry = next((e for e in state.get("outbox", []) if e.get("id") == msg_id), None)
+            if entry is None:
+                raise LookupError(f"Outbox message '{msg_id}' not found")
+            if entry.get("status") == "SENT":
+                return dict(entry)
+
+            now_iso = _now()
+            entry["status"] = "DELIVERY_UNKNOWN"
+            entry["unknown_at"] = now_iso
+            entry["error"] = str(error)[:300]
+
+            for rec in state.get("idempotency_keys", {}).values():
+                if isinstance(rec, dict) and rec.get("message_id") == msg_id:
+                    rec["status"] = "DELIVERY_UNKNOWN"
+
+            state["last_updated"] = now_iso
+            return dict(entry)
+
+    def get_idempotency_record(self, recipient_id: str, idempotency_key: str) -> Optional[Dict[str, Any]]:
+        norm_key = idempotency_key.strip() if idempotency_key and str(idempotency_key).strip() else None
+        if not norm_key:
+            return None
+        scoped_key = f"{recipient_id}:{norm_key}"
+        with self._locked() as state:
+            stored = state.get("idempotency_keys", {}).get(scoped_key)
+            if isinstance(stored, dict):
+                return dict(stored)
+            if isinstance(stored, str) and stored:
+                return {"message_id": stored, "status": "SENT"}
+            return None
+
+    def is_already_dispatched(self, msg_id: str) -> bool:
+        """True if outbox entry was already SENT or DELIVERY_UNKNOWN (prevents duplicate transport sends)."""
+        if not msg_id:
+            return False
+        with self._locked() as state:
+            entry = next((e for e in state.get("outbox", []) if e.get("id") == msg_id), None)
+            if entry is None:
+                return False
+            return str(entry.get("status") or "").upper() in {"SENT", "DELIVERY_UNKNOWN"}
 
     def reserve_and_send(
         self,

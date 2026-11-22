@@ -1,0 +1,26 @@
+[Unit]
+Description=LabOps AI SRE Agent v2 Autonomous Zalo & Telemetry Worker
+After=network-online.target postgresql.service labops-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aiot-ws1
+Group=aiot-ws1
+WorkingDirectory=/home/aiot-ws1/projects/labops_control_center
+EnvironmentFile=/home/aiot-ws1/projects/labops_control_center/.env.local
+Environment=PYTHONPATH=/home/aiot-ws1/projects/labops_control_center/backend
+ExecStart=/home/aiot-ws1/projects/labops_control_center/backend/.venv/bin/python -m app.services.zalo_assistant.worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+NoNewPrivileges=true
+MemoryMax=1G
+CPUQuota=100%
+
+StandardOutput=append:/home/aiot-ws1/projects/labops_control_center/backend/zalo_worker.log
+StandardError=append:/home/aiot-ws1/projects/labops_control_center/backend/zalo_worker.log
+
+[Install]
+WantedBy=multi-user.target

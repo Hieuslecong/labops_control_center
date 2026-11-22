@@ -91,6 +91,39 @@ services:
     networks:
       - labops_internal
 
+  sre-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: labops-sre-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.services.zalo_assistant.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      PYTHONPATH: /app
+      LABOPS_MODE: ${LABOPS_MODE:-production}
+      LABOPS_LOCAL_HOST_ID: ${LABOPS_LOCAL_HOST_ID:-workstation}
+      LABOPS_AGENT_SECRET: ${LABOPS_AGENT_SECRET:?Bắt buộc thiết lập LABOPS_AGENT_SECRET}
+      LABOPS_BROKER_VERIFY_SECRET: ${LABOPS_BROKER_VERIFY_SECRET:-}
+      ZALO_BOT_TOKEN: ${ZALO_BOT_TOKEN:-}
+      ZALO_AUTHORIZED_USERS: ${ZALO_AUTHORIZED_USERS:-}
+      ZALO_ALERT_ADMIN_IDS: ${ZALO_ALERT_ADMIN_IDS:-}
+      ROUTER_BASE_URL: ${ROUTER_BASE_URL:-http://127.0.0.1:20128/v1}
+      ROUTER_MODEL: ${ROUTER_MODEL:-model_free}
+      LABOPS_PUBLIC_DASHBOARD_URL: ${LABOPS_PUBLIC_DASHBOARD_URL:-https://aiotserver.fitdnu.id.vn}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-labops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-labops_db}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/app/data/zalo_worker_status.json')); sys.exit(0 if d.get('is_polling') else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - labops_internal
+
 networks:
   labops_internal:
     driver: bridge

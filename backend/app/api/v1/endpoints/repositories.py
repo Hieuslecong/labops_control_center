@@ -405,6 +405,13 @@ def rescan_repository_request(
         f"Admin {p.username} yêu cầu quét lại hậu kiểm cho {request_id}.",
     )
     getattr(service, "save_audit_logs", service._save_persistent_data)()
+    try:
+        from app.services.zalo_assistant import zalo_assistant_service
+
+        if isinstance(res, dict) and res.get("id"):
+            zalo_assistant_service.repo_alert_monitor.push_event(res)
+    except Exception:
+        pass
     return res
 
 
@@ -587,6 +594,16 @@ def _sync_workspace_cloned_repositories(principal: Principal, existing_requests:
 
     if submitted_any:
         getattr(service, "save_audit_logs", service._save_persistent_data)()
+        try:
+            from app.services.zalo_assistant import zalo_assistant_service
+
+            monitor = getattr(zalo_assistant_service, "repo_alert_monitor", None)
+            if monitor is not None:
+                for req_obj in existing_by_exact.values():
+                    if isinstance(req_obj, dict) and req_obj.get("id"):
+                        monitor.push_event(req_obj)
+        except Exception:
+            pass
     return submitted_any
 
 
@@ -699,6 +716,13 @@ def rescan_repository_request(
         f"Admin {p.username} yêu cầu quét lại hậu kiểm cho {request_id}.",
     )
     getattr(service, "save_audit_logs", service._save_persistent_data)()
+    try:
+        from app.services.zalo_assistant import zalo_assistant_service
+
+        if isinstance(res, dict) and res.get("id"):
+            zalo_assistant_service.repo_alert_monitor.push_event(res)
+    except Exception:
+        pass
     return res
 
 
@@ -803,6 +827,13 @@ def rescan_repository_request(
         f"Admin {p.username} yêu cầu quét lại hậu kiểm cho {request_id}.",
     )
     getattr(service, "save_audit_logs", service._save_persistent_data)()
+    try:
+        from app.services.zalo_assistant import zalo_assistant_service
+
+        if isinstance(res, dict) and res.get("id"):
+            zalo_assistant_service.repo_alert_monitor.push_event(res)
+    except Exception:
+        pass
     return res
 
 

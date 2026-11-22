@@ -2,6 +2,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   IconSparkles,
   IconCheck,
@@ -14,104 +15,69 @@ import {
   IconShield,
   IconHistory,
   IconDownload,
-  IconCpu,
   IconServer,
+  IconBan,
   IconKey,
   IconUserCheck,
-  IconBan,
-  IconTerminal2
+  IconTrash
 } from '@tabler/icons-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  CardFooter
-} from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-interface OverviewData {
-  zalo_status: string;
-  consumer: {
-    consumer_id: string;
-    is_polling: boolean;
-    has_token: boolean;
-    token_masked: string;
-    enabled_read_tools: string[];
-    disabled_write_tools: string[];
-  };
-  quota: {
-    current_month: string;
-    total_limit: number;
-    standard_limit: number;
-    critical_reserve: number;
-    total_sent: number;
-    standard_sent: number;
-    critical_sent: number;
-    ai_requests: number;
-    standard_remaining: number;
-    critical_remaining: number;
-    total_remaining: number;
-    percent_used: number;
-  };
-  ai_gateway: {
-    status: string;
-    base_url: string;
-    model: string;
-    model_available: boolean;
-  };
-  active_model: string;
-  reports_count: number;
-  latest_report?: {
-    id: string;
-    title: string;
-    created_at: string;
-    content: string;
-  };
-  recent_alerts: Array<{
-    id: string;
-    level: string;
-    message: string;
-    timestamp: string;
-  }>;
+interface ChatEntry {
+  sender: string;
+  text: string;
+  tool_traces?: Array<{ tool: string; status: string }>;
+  evidence_timestamps?: string[];
+  context_scope?: string;
 }
 
 export default function AIAssistantView() {
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
-  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [overview, setOverview] = useState<any>(null);
   const [reports, setReports] = useState<any[]>([]);
+  const [incidents, setIncidents] = useState<any[]>([]);
+  const [identityLinks, setIdentityLinks] = useState<any[]>([]);
+  const [subscriptions, setSubscriptions] = useState<any[]>([]);
   const [config, setConfig] = useState<any>(null);
   const [tools, setTools] = useState<any>(null);
   const [history, setHistory] = useState<any>(null);
 
-  // Quick test state
   const [chatInput, setChatInput] = useState('');
-  const [chatLog, setChatLog] = useState<Array<{ sender: string; text: string }>>([
+  const [chatLog, setChatLog] = useState<ChatEntry[]>([
     {
       sender: 'assistant',
-      text: 'Xin chào! Tôi là LabOps AI Assistant. Bạn có thể thử các lệnh /status, /jobs, /report, /quota hoặc đặt câu hỏi kỹ thuật về hệ thống.'
+      text: 'Xin chào! Tôi là LabOps AI SRE Agent v2. Bạn có thể chạy /status, /incidents, /report today, /security, /quota hoặc đặt câu hỏi điều tra hạ tầng bằng công cụ thực.'
     }
   ]);
   const [sending, setSending] = useState(false);
   const [reportGenLoading, setReportGenLoading] = useState(false);
+  const [dailyGenLoading, setDailyGenLoading] = useState(false);
+  const [evalLoading, setEvalLoading] = useState(false);
   const [saveConfigSuccess, setSaveConfigSuccess] = useState(false);
 
-  // Form states
+  // Config & Identity forms
   const [editToken, setEditToken] = useState('');
   const [editUsers, setEditUsers] = useState('');
   const [editModel, setEditModel] = useState('model_free');
 
+  const [linkUsername, setLinkUsername] = useState('');
+  const [linkRole, setLinkRole] = useState('RESEARCHER');
+  const [generatedCodeInfo, setGeneratedCodeInfo] = useState<any>(null);
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [ovRes, repRes, cfgRes, toolRes, histRes] = await Promise.all([
+      const [ovRes, repRes, incRes, linkRes, subRes, cfgRes, toolRes, histRes] = await Promise.all([
         fetch('/api/labops/ai-assistant/overview'),
         fetch('/api/labops/ai-assistant/reports'),
+        fetch('/api/labops/ai-assistant/incidents?limit=50'),
+        fetch('/api/labops/ai-assistant/identity-links'),
+        fetch('/api/labops/ai-assistant/subscriptions'),
         fetch('/api/labops/ai-assistant/config'),
         fetch('/api/labops/ai-assistant/tools'),
         fetch('/api/labops/ai-assistant/history')
@@ -122,6 +88,18 @@ export default function AIAssistantView() {
         const rData = await repRes.json();
         setReports(rData.reports || []);
       }
+      if (incRes.ok) {
+        const iData = await incRes.json();
+        setIncidents(iData.incidents || []);
+      }
+      if (linkRes.ok) {
+        const lData = await linkRes.json();
+        setIdentityLinks(lData.links || []);
+      }
+      if (subRes.ok) {
+        const sData = await subRes.json();
+        setSubscriptions(sData.subscriptions || []);
+      }
       if (cfgRes.ok) {
         const cData = await cfgRes.json();
         setConfig(cData);
@@ -131,7 +109,7 @@ export default function AIAssistantView() {
       if (toolRes.ok) setTools(await toolRes.json());
       if (histRes.ok) setHistory(await histRes.json());
     } catch (e) {
-      console.error('Lỗi tải dữ liệu AI Assistant:', e);
+      console.error('Lỗi tải dữ liệu AI SRE v2:', e);
     } finally {
       setLoading(false);
     }
@@ -160,63 +138,114 @@ export default function AIAssistantView() {
         ...prev,
         {
           sender: 'assistant',
-          text: data.reply || (data.success ? 'Đã thực thi thành công.' : 'Lỗi thực thi lệnh.')
+          text: data.reply || (data.success ? 'Đã thực thi thành công.' : 'Lỗi thực thi lệnh.'),
+          tool_traces: data.tool_traces,
+          evidence_timestamps: data.evidence_timestamps,
+          context_scope: data.context_scope
         }
       ]);
       fetchData();
     } catch {
       setChatLog((prev) => [
         ...prev,
-        { sender: 'assistant', text: '❌ Lỗi kết nối tới dịch vụ AI Assistant backend.' }
+        { sender: 'assistant', text: '❌ Lỗi kết nối tới dịch vụ AI SRE Assistant backend.' }
       ]);
     } finally {
       setSending(false);
     }
   };
 
-  const handleGenerateReport = async () => {
-    setReportGenLoading(true);
+  const handleGenerateReport = async (daily = false) => {
+    if (daily) setDailyGenLoading(true);
+    else setReportGenLoading(true);
     try {
-      const res = await fetch('/api/labops/ai-assistant/reports/generate', { method: 'POST' });
-      if (res.ok) {
-        await fetchData();
-      }
-    } catch (e) {
-      console.error('Lỗi tạo báo cáo:', e);
+      const endpoint = daily
+        ? '/api/labops/ai-assistant/reports/generate-daily?force=true'
+        : '/api/labops/ai-assistant/reports/generate';
+      const res = await fetch(endpoint, { method: 'POST' });
+      if (res.ok) await fetchData();
     } finally {
+      setDailyGenLoading(false);
       setReportGenLoading(false);
     }
+  };
+
+  const handleIncidentAction = async (incidentId: string, action: 'ack' | 'resolve') => {
+    const res = await fetch(`/api/labops/ai-assistant/incidents/${incidentId}/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: `${action.toUpperCase()} via SRE Dashboard` })
+    });
+    if (res.ok) await fetchData();
+  };
+
+  const handleEvaluateNow = async () => {
+    setEvalLoading(true);
+    try {
+      await fetch('/api/labops/ai-assistant/incidents/evaluate', { method: 'POST' });
+      await fetchData();
+    } finally {
+      setEvalLoading(false);
+    }
+  };
+
+  const handleGenerateLinkCode = async (e: React.SyntheticEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!linkUsername.trim()) return;
+    const res = await fetch('/api/labops/ai-assistant/identity-links/code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: linkUsername.trim(), role: linkRole, ttl_minutes: 15 })
+    });
+    if (res.ok) {
+      setGeneratedCodeInfo(await res.json());
+      setLinkUsername('');
+      await fetchData();
+    }
+  };
+
+  const handleRevokeLink = async (linkId: string) => {
+    const res = await fetch(`/api/labops/ai-assistant/identity-links/${linkId}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) await fetchData();
+  };
+
+  const handleToggleSub = async (recipientZaloId: string, field: string, value: boolean) => {
+    const res = await fetch('/api/labops/ai-assistant/subscriptions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient_zalo_id: recipientZaloId, [field]: value })
+    });
+    if (res.ok) await fetchData();
   };
 
   const handleSaveConfig = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSaveConfigSuccess(false);
-    try {
-      const payload: any = {
-        ai_model: editModel,
-        authorized_users: editUsers
-          .split(',')
-          .map((u) => u.trim())
-          .filter(Boolean)
-      };
-      if (editToken.trim()) {
-        payload.bot_token = editToken.trim();
-      }
-      const res = await fetch('/api/labops/ai-assistant/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (res.ok) {
-        setSaveConfigSuccess(true);
-        setEditToken('');
-        fetchData();
-        setTimeout(() => setSaveConfigSuccess(false), 3000);
-      }
-    } catch (e) {
-      console.error('Lỗi lưu cấu hình:', e);
+    const payload: any = {
+      ai_model: editModel,
+      authorized_users: editUsers
+        .split(',')
+        .map((u) => u.trim())
+        .filter(Boolean)
+    };
+    if (editToken.trim()) payload.bot_token = editToken.trim();
+    const res = await fetch('/api/labops/ai-assistant/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      setSaveConfigSuccess(true);
+      setEditToken('');
+      fetchData();
+      setTimeout(() => setSaveConfigSuccess(false), 3000);
     }
   };
+
+  const repoIncidents = incidents.filter((i) => i.source === 'repository_guard');
+  const openIncidentsCount = overview?.open_incidents_count ?? 0;
 
   return (
     <div className='space-y-6'>
@@ -227,188 +256,201 @@ export default function AIAssistantView() {
             <IconSparkles className='h-6 w-6' />
           </div>
           <div>
-            <h2 className='text-lg font-bold'>Trợ lý AI & Zalo Bot Control Plane</h2>
+            <h2 className='text-lg font-bold'>LabOps AI SRE Agent v2 &amp; Zalo Operations</h2>
             <p className='text-xs text-muted-foreground'>
-              Vận hành trên Workstation Primary (`aiot-ws1`) • LabOps AI Control Plane
+              Giám sát thời gian thực • Incident Engine • Daily Brief 08:00 ICT • RBAC Danh tính
+              Zalo
             </p>
           </div>
         </div>
-        <div className='flex items-center gap-2'>
+        <div className='flex flex-wrap items-center gap-2'>
           <Button variant='outline' size='sm' onClick={fetchData} disabled={loading}>
             <IconRefresh className={`h-4 w-4 mr-1 ${loading ? 'animate-spin' : ''}`} />
             Làm mới
           </Button>
-          <Badge
-            variant='outline'
-            className='bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono text-xs'
-          >
-            AI Gateway: ONLINE
+          <Badge variant='outline' className='font-mono text-xs'>
+            Health: {overview?.system_health || 'UNKNOWN'}
           </Badge>
-          <Badge
-            variant='outline'
-            className='bg-primary/10 text-primary border-primary/20 font-mono text-xs'
-          >
-            Trạng thái: SẴN SÀNG
+          <Badge variant='outline' className='font-mono text-xs'>
+            AI Gateway: {overview?.ai_gateway?.status || 'UNKNOWN'}
+          </Badge>
+          <Badge variant='outline' className='font-mono text-xs'>
+            Zalo: {overview?.zalo_status || 'CHECKING'}
           </Badge>
         </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className='w-full'>
-        <TabsList className='grid grid-cols-2 sm:grid-cols-5 w-full'>
-          <TabsTrigger value='overview' className='text-xs sm:text-sm'>
-            <IconServer className='h-4 w-4 mr-1.5' />
-            Tổng quan
+        <TabsList className='grid grid-cols-2 sm:grid-cols-6 w-full h-auto'>
+          <TabsTrigger value='overview' className='text-xs py-2'>
+            <IconServer className='h-3.5 w-3.5 mr-1' />
+            Tổng quan &amp; AI
           </TabsTrigger>
-          <TabsTrigger value='config' className='text-xs sm:text-sm'>
-            <IconSettings className='h-4 w-4 mr-1.5' />
-            Cấu hình
+          <TabsTrigger value='incidents' className='text-xs py-2'>
+            <IconAlertCircle className='h-3.5 w-3.5 mr-1' />
+            Sự cố ({openIncidentsCount})
           </TabsTrigger>
-          <TabsTrigger value='reports' className='text-xs sm:text-sm'>
-            <IconFileText className='h-4 w-4 mr-1.5' />
-            Báo cáo tuần
+          <TabsTrigger value='repo-security' className='text-xs py-2'>
+            <IconShield className='h-3.5 w-3.5 mr-1' />
+            An ninh Repo ({repoIncidents.length})
           </TabsTrigger>
-          <TabsTrigger value='tools' className='text-xs sm:text-sm'>
-            <IconShield className='h-4 w-4 mr-1.5' />
-            Quyền & Công cụ
+          <TabsTrigger value='reports' className='text-xs py-2'>
+            <IconFileText className='h-3.5 w-3.5 mr-1' />
+            Báo cáo
           </TabsTrigger>
-          <TabsTrigger value='history' className='text-xs sm:text-sm'>
-            <IconHistory className='h-4 w-4 mr-1.5' />
-            Lịch sử & Quota
+          <TabsTrigger value='config' className='text-xs py-2'>
+            <IconUserCheck className='h-3.5 w-3.5 mr-1' />
+            Định danh &amp; Cấu hình
+          </TabsTrigger>
+          <TabsTrigger value='history' className='text-xs py-2'>
+            <IconHistory className='h-3.5 w-3.5 mr-1' />
+            Outbox &amp; Tools
           </TabsTrigger>
         </TabsList>
 
-        {/* TAB 1: TỔNG QUAN */}
+        {/* TAB 1: TỔNG QUAN & AI AGENT CHAT */}
         <TabsContent value='overview' className='space-y-4 pt-3'>
-          <div className='grid gap-4 md:grid-cols-3'>
-            {/* Quota Card */}
+          <div className='grid gap-4 md:grid-cols-4'>
             <Card>
               <CardHeader className='pb-2'>
-                <div className='flex justify-between items-center'>
-                  <CardTitle className='text-sm font-semibold'>Zalo Outbound Quota</CardTitle>
-                  <Badge variant='secondary' className='text-xs font-mono'>
-                    Tháng {overview?.quota?.current_month}
-                  </Badge>
-                </div>
+                <CardTitle className='text-sm font-semibold'>Zalo Outbound Quota</CardTitle>
                 <CardDescription className='text-xs'>
-                  Hạn mức cứng 3.000 tin nhắn/tháng
+                  Cấu hình nội bộ ({overview?.quota?.total_limit || 3000}/tháng)
                 </CardDescription>
               </CardHeader>
-              <CardContent className='space-y-3 pt-1'>
-                <div>
-                  <div className='flex justify-between text-xs mb-1 font-medium'>
-                    <span>Đã gửi: {overview?.quota?.total_sent || 0} / 3.000</span>
-                    <span>{overview?.quota?.percent_used || 0}%</span>
-                  </div>
-                  <div className='w-full h-2 rounded-full bg-muted overflow-hidden'>
-                    <div
-                      className='h-full bg-primary transition-all'
-                      style={{ width: `${Math.min(100, overview?.quota?.percent_used || 0)}%` }}
-                    />
-                  </div>
+              <CardContent className='space-y-2 text-xs'>
+                <div className='flex justify-between font-medium'>
+                  <span>Đã gửi: {overview?.quota?.total_sent || 0}</span>
+                  <span>{overview?.quota?.percent_used || 0}%</span>
                 </div>
-                <div className='grid grid-cols-2 gap-2 text-xs pt-1 border-t'>
-                  <div>
-                    <span className='text-muted-foreground block text-xs'>Tin thông thường:</span>
-                    <span className='font-mono font-bold'>
-                      {overview?.quota?.standard_remaining} / 2.800
-                    </span>
-                  </div>
-                  <div>
-                    <span className='text-muted-foreground block text-xs'>Dự phòng khẩn cấp:</span>
-                    <span className='font-mono font-bold text-amber-600'>
-                      {overview?.quota?.critical_remaining} / 200
-                    </span>
-                  </div>
+                <div className='w-full h-2 rounded-full bg-muted overflow-hidden'>
+                  <div
+                    className='h-full bg-primary transition-all'
+                    style={{ width: `${Math.min(100, overview?.quota?.percent_used || 0)}%` }}
+                  />
                 </div>
-              </CardContent>
-            </Card>
-
-            {/* AI Gateway Card */}
-            <Card>
-              <CardHeader className='pb-2'>
-                <div className='flex justify-between items-center'>
-                  <CardTitle className='text-sm font-semibold'>AI Gateway Engine</CardTitle>
-                  <Badge
-                    variant='outline'
-                    className='bg-emerald-500/10 text-emerald-600 font-mono text-xs'
-                  >
-                    {overview?.ai_gateway?.status || 'ONLINE'}
-                  </Badge>
-                </div>
-                <CardDescription className='text-xs'>
-                  Cổng kết nối mô hình ngôn ngữ AI
-                </CardDescription>
-              </CardHeader>
-              <CardContent className='space-y-2 text-xs pt-1'>
-                <div className='flex justify-between py-1 border-b'>
-                  <span className='text-muted-foreground'>Mô hình kích hoạt:</span>
-                  <span className='font-mono font-bold text-primary'>{overview?.active_model}</span>
-                </div>
-                <div className='flex justify-between py-1 border-b'>
-                  <span className='text-muted-foreground'>Đường dẫn (Endpoint):</span>
-                  <span className='font-mono text-xs'>http://127.0.0.1:20128/v1</span>
-                </div>
-                <div className='flex justify-between py-1'>
-                  <span className='text-muted-foreground'>Lượt gọi AI tháng này:</span>
-                  <span className='font-mono font-bold'>
-                    {overview?.quota?.ai_requests || 0} lượt
+                <div className='flex justify-between text-muted-foreground pt-1'>
+                  <span>Thường: {overview?.quota?.standard_remaining ?? 'N/A'}</span>
+                  <span className='text-amber-600'>
+                    Khẩn: {overview?.quota?.critical_remaining ?? 'N/A'}
                   </span>
                 </div>
               </CardContent>
             </Card>
 
-            {/* Zalo Polling Consumer Guard */}
             <Card>
               <CardHeader className='pb-2'>
-                <div className='flex justify-between items-center'>
-                  <CardTitle className='text-sm font-semibold'>Zalo Polling Consumer</CardTitle>
-                  <Badge
-                    variant='outline'
-                    className={
-                      overview?.consumer?.has_token
-                        ? 'bg-emerald-500/10 text-emerald-600 font-mono text-xs'
-                        : 'bg-amber-500/10 text-amber-600 font-mono text-xs'
-                    }
-                  >
-                    {overview?.consumer?.has_token ? 'ACTIVE' : 'STANDBY (Chưa token)'}
-                  </Badge>
+                <CardTitle className='text-sm font-semibold'>Incident Center</CardTitle>
+                <CardDescription className='text-xs'>Trạng thái sự cố đang mở</CardDescription>
+              </CardHeader>
+              <CardContent className='space-y-1.5 text-xs'>
+                <div className='text-2xl font-bold'>{openIncidentsCount}</div>
+                <div className='text-muted-foreground'>
+                  P0 Nghiêm trọng:{' '}
+                  <strong className='text-destructive'>{overview?.p0_incidents_count ?? 0}</strong>
                 </div>
+                <Button
+                  size='sm'
+                  variant='outline'
+                  className='h-7 text-xs w-full mt-1'
+                  onClick={() => setActiveTab('incidents')}
+                >
+                  Mở Incident Center
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-sm font-semibold'>AI Gateway Engine</CardTitle>
                 <CardDescription className='text-xs'>
-                  Cơ chế Single-Consumer Lease bảo vệ token
+                  Model: {overview?.active_model || 'N/A'}
                 </CardDescription>
               </CardHeader>
-              <CardContent className='space-y-2 text-xs pt-1'>
-                <div className='flex justify-between py-1 border-b'>
-                  <span className='text-muted-foreground'>Consumer Host:</span>
-                  <span className='font-mono font-medium'>aiot-ws1 (Primary)</span>
+              <CardContent className='space-y-1 text-xs'>
+                <div className='flex justify-between'>
+                  <span>Trạng thái:</span>
+                  <Badge variant='outline' className='font-mono text-xs'>
+                    {overview?.ai_gateway?.status || 'UNKNOWN'}
+                  </Badge>
                 </div>
-                <div className='flex justify-between py-1 border-b'>
-                  <span className='text-muted-foreground'>Rack Consumer:</span>
-                  <span className='font-mono text-muted-foreground'>ISOLATED / STOPPED</span>
+                <div className='flex justify-between'>
+                  <span>Lượt AI:</span>
+                  <span className='font-mono font-bold'>{overview?.quota?.ai_requests ?? 0}</span>
                 </div>
-                <div className='flex justify-between py-1'>
-                  <span className='text-muted-foreground'>Token trạng thái:</span>
-                  <span className='font-mono text-xs'>{overview?.consumer?.token_masked}</span>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-sm font-semibold'>SRE Worker &amp; Lease</CardTitle>
+                <CardDescription className='text-xs'>DB Lease chống chạy trùng</CardDescription>
+              </CardHeader>
+              <CardContent className='space-y-1 text-xs'>
+                <div className='flex justify-between'>
+                  <span>Polling:</span>
+                  <Badge variant='outline' className='font-mono text-xs'>
+                    {overview?.consumer?.is_polling ? 'ACTIVE' : 'OFFLINE'}
+                  </Badge>
+                </div>
+                <div className='flex justify-between'>
+                  <span>Identity Links:</span>
+                  <span className='font-mono font-bold'>
+                    {overview?.linked_identities_count ?? 0}
+                  </span>
                 </div>
               </CardContent>
             </Card>
           </div>
 
-          {/* Interactive Chat & Command Test Box */}
+          {/* Live Nodes Telemetry (Non-Hardcoded) */}
+          <Card>
+            <CardHeader className='pb-2'>
+              <CardTitle className='text-sm font-semibold'>
+                Trạng thái Node Thời gian thực (Telemetry Freshness)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className='grid gap-2 md:grid-cols-2 text-xs'>
+              {(overview?.hosts || []).length === 0 ? (
+                <p className='text-muted-foreground'>
+                  Chưa nhận được telemetry từ host nào (UNKNOWN).
+                </p>
+              ) : (
+                (overview?.hosts || []).map((h: any) => (
+                  <div
+                    key={h.host_id}
+                    className='p-2.5 rounded-lg border flex items-center justify-between'
+                  >
+                    <div>
+                      <div className='font-semibold'>{h.display_name || h.hostname}</div>
+                      <div className='text-muted-foreground font-mono text-xs'>
+                        id={h.host_id} • src={h.source} • hb={h.last_heartbeat_at || 'N/A'}
+                      </div>
+                    </div>
+                    <Badge variant='outline' className='font-mono'>
+                      {h.status} ({h.freshness_status})
+                    </Badge>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          {/* AI SRE Chat & Investigation Traces */}
           <Card>
             <CardHeader className='pb-2'>
               <div className='flex flex-wrap items-center justify-between gap-2'>
                 <div>
                   <CardTitle className='text-sm font-semibold'>
-                    Thử nghiệm Lệnh & Hỏi đáp AI Trực tiếp
+                    AI SRE Agent Investigation Chat
                   </CardTitle>
                   <CardDescription className='text-xs'>
-                    Tương tác kiểm thử bot theo đúng 7 lệnh chuẩn: /status, /jobs, /report, /quota,
-                    /ask
+                    Gọi công cụ đọc schema-validated có RBAC • Hiển thị tool traces &amp; evidence
+                    timestamps
                   </CardDescription>
                 </div>
                 <div className='flex flex-wrap gap-1'>
-                  {['/status', '/jobs', '/report', '/quota'].map((cmd) => (
+                  {['/status', '/incidents', '/jobs', '/report today', '/quota'].map((cmd) => (
                     <Button
                       key={cmd}
                       variant='outline'
@@ -424,7 +466,6 @@ export default function AIAssistantView() {
               </div>
             </CardHeader>
             <CardContent className='space-y-3'>
-              {/* Chat Log Window */}
               <div className='h-64 overflow-y-auto rounded-lg border bg-muted/30 p-3 space-y-3 text-xs font-mono'>
                 {chatLog.map((m, idx) => (
                   <div
@@ -432,27 +473,37 @@ export default function AIAssistantView() {
                     className={`flex flex-col ${m.sender === 'user' ? 'items-end' : 'items-start'}`}
                   >
                     <span className='text-xs text-muted-foreground mb-1'>
-                      {m.sender === 'user' ? 'Bạn' : 'LabOps AI Assistant'}
+                      {m.sender === 'user' ? 'Bạn' : 'LabOps AI SRE v2'}
+                      {m.context_scope ? ` (${m.context_scope})` : ''}
                     </span>
                     <div
-                      className={`max-w-[85%] rounded-lg p-2.5 whitespace-pre-wrap ${
+                      className={`max-w-[88%] rounded-lg p-2.5 whitespace-pre-wrap ${
                         m.sender === 'user'
                           ? 'bg-primary text-primary-foreground'
                           : 'bg-card border text-card-foreground'
                       }`}
                     >
                       {m.text}
+                      {m.tool_traces && m.tool_traces.length > 0 && (
+                        <div className='mt-2 pt-2 border-t text-xs text-muted-foreground'>
+                          <div>
+                            Tools: {m.tool_traces.map((t) => `${t.tool}[${t.status}]`).join(', ')}
+                          </div>
+                          {m.evidence_timestamps && m.evidence_timestamps.length > 0 && (
+                            <div>Evidence: {m.evidence_timestamps[0]}</div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
                 {sending && (
                   <div className='text-xs text-muted-foreground animate-pulse'>
-                    Đang xử lý và tạo phản hồi...
+                    Đang điều tra qua Read-Only Tools...
                   </div>
                 )}
               </div>
 
-              {/* Chat Input Bar */}
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -463,7 +514,7 @@ export default function AIAssistantView() {
                 <Input
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
-                  placeholder='Nhập lệnh (/status, /jobs, /quota) hoặc câu hỏi kỹ thuật...'
+                  placeholder='Ví dụ: Tại sao Workstation hôm nay chậm? hoặc /incidents'
                   className='text-xs font-mono'
                   disabled={sending}
                 />
@@ -474,158 +525,185 @@ export default function AIAssistantView() {
               </form>
             </CardContent>
           </Card>
-
-          {/* Recent Alerts List */}
-          <Card>
-            <CardHeader className='pb-2'>
-              <CardTitle className='text-sm font-semibold'>Thông báo & Cảnh báo gần đây</CardTitle>
-            </CardHeader>
-            <CardContent className='space-y-2 text-xs'>
-              {overview?.recent_alerts?.map((alt) => (
-                <div
-                  key={alt.id}
-                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border ${
-                    alt.level === 'CRITICAL'
-                      ? 'bg-destructive/10 border-destructive/20 text-destructive'
-                      : 'bg-muted/40 border-muted'
-                  }`}
-                >
-                  {alt.level === 'CRITICAL' ? (
-                    <IconAlertCircle className='h-4 w-4 shrink-0 mt-0.5' />
-                  ) : (
-                    <IconAlertTriangle className='h-4 w-4 shrink-0 mt-0.5 text-amber-500' />
-                  )}
-                  <div className='flex-1'>
-                    <p className='font-medium'>{alt.message}</p>
-                    <span className='text-xs text-muted-foreground'>{alt.timestamp}</span>
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
         </TabsContent>
 
-        {/* TAB 2: CẤU HÌNH */}
-        <TabsContent value='config' className='space-y-4 pt-3'>
-          <Card>
-            <CardHeader>
-              <CardTitle className='text-base font-semibold'>Cấu hình Bot & AI Gateway</CardTitle>
-              <CardDescription className='text-xs'>
-                Toàn bộ cấu hình được lưu qua API có xác thực quyền Admin. Tuyệt đối không phơi
-                token trong trình duyệt.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSaveConfig} className='space-y-4 max-w-xl text-xs'>
-                {saveConfigSuccess && (
-                  <div className='p-3 rounded-lg bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 flex items-center gap-2'>
-                    <IconCheck className='h-4 w-4' />
-                    <span>Đã cập nhật cấu hình thành công!</span>
-                  </div>
-                )}
-
-                <div className='space-y-1.5'>
-                  <label
-                    htmlFor='zalo-bot-token'
-                    className='font-semibold flex items-center justify-between'
-                  >
-                    <span>Zalo Bot Token (Cập nhật token mới an toàn):</span>
-                    <span className='text-muted-foreground font-mono text-xs'>
-                      Hiện tại: {config?.zalo_token_masked}
-                    </span>
-                  </label>
-                  <Input
-                    id='zalo-bot-token'
-                    type='password'
-                    value={editToken}
-                    onChange={(e) => setEditToken(e.target.value)}
-                    placeholder='Dán Zalo Bot Token mới nếu muốn thay đổi...'
-                    className='text-xs font-mono'
-                  />
-                  <p className='text-xs text-muted-foreground'>
-                    Để trống nếu giữ nguyên token hiện tại. Không bao giờ commit token vào kho mã
-                    nguồn.
-                  </p>
-                </div>
-
-                <div className='space-y-1.5'>
-                  <label htmlFor='zalo-auth-users' className='font-semibold'>
-                    Người dùng được phân quyền (Authorized User IDs):
-                  </label>
-                  <Input
-                    id='zalo-auth-users'
-                    value={editUsers}
-                    onChange={(e) => setEditUsers(e.target.value)}
-                    placeholder='admin, user1, user2...'
-                    className='text-xs font-mono'
-                  />
-                  <p className='text-xs text-muted-foreground'>
-                    Phân tách bằng dấu phẩy. Dùng `*` nếu cho phép toàn bộ thành viên trong Lab.
-                  </p>
-                </div>
-
-                <div className='space-y-1.5'>
-                  <label htmlFor='zalo-ai-model' className='font-semibold'>
-                    Mô hình AI trên 9Router (Model Name):
-                  </label>
-                  <Input
-                    id='zalo-ai-model'
-                    value={editModel}
-                    onChange={(e) => setEditModel(e.target.value)}
-                    placeholder='model_free'
-                    className='text-xs font-mono'
-                  />
-                  <p className='text-xs text-muted-foreground'>
-                    Mặc định: <code>model_free</code> (chạy trên 9Router cổng 20128).
-                  </p>
-                </div>
-
-                <div className='space-y-1.5'>
-                  <label htmlFor='zalo-ai-gateway-url' className='font-semibold'>
-                    AI Gateway URL:
-                  </label>
-                  <Input
-                    id='zalo-ai-gateway-url'
-                    value='http://127.0.0.1:20128/v1'
-                    disabled
-                    className='text-xs font-mono bg-muted'
-                  />
-                  <p className='text-xs text-muted-foreground'>
-                    Cố định loopback an toàn, không mở cổng công khai ra internet.
-                  </p>
-                </div>
-
-                <div className='pt-2'>
-                  <Button type='submit' size='sm'>
-                    Lưu thay đổi
-                  </Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* TAB 3: BÁO CÁO TUẦN */}
-        <TabsContent value='reports' className='space-y-4 pt-3'>
-          <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border bg-card'>
+        {/* TAB 2: TRUNG TÂM SỰ CỐ */}
+        <TabsContent value='incidents' className='space-y-4 pt-3'>
+          <div className='flex flex-wrap items-center justify-between gap-2 p-4 rounded-xl border bg-card'>
             <div>
-              <h3 className='text-sm font-bold'>Lịch Báo cáo Tự động Định kỳ</h3>
+              <h3 className='text-sm font-bold'>Unified Incident Center</h3>
               <p className='text-xs text-muted-foreground'>
-                Mặc định phát hành: <strong>Thứ Sáu, 17:00 (Asia/Ho_Chi_Minh)</strong>
+                Deduplicate theo fingerprint • Lifecycle: OPEN → ACKNOWLEDGED → INVESTIGATING →
+                RESOLVED
               </p>
             </div>
-            <Button size='sm' onClick={handleGenerateReport} disabled={reportGenLoading}>
-              <IconFileText className='h-4 w-4 mr-1' />
-              {reportGenLoading ? 'Đang tổng hợp...' : 'Tạo báo cáo tuần ngay'}
+            <Button size='sm' variant='outline' onClick={handleEvaluateNow} disabled={evalLoading}>
+              <IconRefresh className={`h-3.5 w-3.5 mr-1 ${evalLoading ? 'animate-spin' : ''}`} />
+              Đánh giá Telemetry ngay
             </Button>
           </div>
 
-          {/* Reports List */}
+          <div className='space-y-2.5'>
+            {incidents.length === 0 ? (
+              <Card>
+                <CardContent className='p-6 text-center text-xs text-muted-foreground'>
+                  Hiện chưa có sự cố nào được ghi nhận.
+                </CardContent>
+              </Card>
+            ) : (
+              incidents.map((inc) => (
+                <Card key={inc.incident_id}>
+                  <CardContent className='p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs'>
+                    <div className='space-y-1'>
+                      <div className='flex flex-wrap items-center gap-1.5'>
+                        <Badge
+                          variant={inc.severity === 'P0' ? 'destructive' : 'outline'}
+                          className='font-mono'
+                        >
+                          {inc.severity}
+                        </Badge>
+                        <Badge variant='outline' className='font-mono'>
+                          {inc.confidence}
+                        </Badge>
+                        <Badge variant='secondary' className='font-mono'>
+                          {inc.status}
+                        </Badge>
+                        <span className='font-mono font-bold text-primary'>{inc.incident_id}</span>
+                        <span className='font-semibold'>{inc.title}</span>
+                      </div>
+                      <div className='text-muted-foreground font-mono'>
+                        source={inc.source} • resource={inc.resource_id} • owner=
+                        {inc.owner_id || 'system'} • count={inc.occurrence_count}
+                      </div>
+                      {inc.recommended_action && (
+                        <div className='text-muted-foreground'>
+                          Khuyến nghị: {inc.recommended_action}
+                        </div>
+                      )}
+                    </div>
+                    <div className='flex items-center gap-1.5 shrink-0'>
+                      {inc.status === 'OPEN' && (
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          className='h-7 text-xs'
+                          onClick={() => handleIncidentAction(inc.incident_id, 'ack')}
+                        >
+                          Acknowledge
+                        </Button>
+                      )}
+                      {inc.status !== 'RESOLVED' && (
+                        <Button
+                          size='sm'
+                          className='h-7 text-xs'
+                          onClick={() => handleIncidentAction(inc.incident_id, 'resolve')}
+                        >
+                          Resolve
+                        </Button>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+        </TabsContent>
+
+        {/* TAB 3: REPOSITORY SECURITY MAPPING */}
+        <TabsContent value='repo-security' className='space-y-4 pt-3'>
+          <Card>
+            <CardHeader className='pb-2 flex flex-row items-center justify-between'>
+              <div>
+                <CardTitle className='text-sm font-bold'>
+                  Sự cố An ninh Kho mã (Repository Guard Incidents)
+                </CardTitle>
+                <CardDescription className='text-xs'>
+                  Mapping tự động giữa post-clone scan findings / scan failed với Incident Engine
+                  &amp; Zalo Admin Alerts
+                </CardDescription>
+              </div>
+              <Button
+                nativeButton={false}
+                render={
+                  <Link href='/dashboard/security' aria-label='Mở Security Center'>
+                    Mở Security Center
+                  </Link>
+                }
+                size='sm'
+                variant='outline'
+              />
+            </CardHeader>
+            <CardContent className='space-y-2 text-xs'>
+              {repoIncidents.length === 0 ? (
+                <p className='text-muted-foreground py-4 text-center'>
+                  Không có sự cố Repository Guard nào đang ghi nhận.
+                </p>
+              ) : (
+                repoIncidents.map((inc) => (
+                  <div
+                    key={inc.incident_id}
+                    className='p-2.5 rounded border flex flex-col sm:flex-row sm:items-center justify-between gap-2'
+                  >
+                    <div>
+                      <div className='font-semibold'>{inc.title}</div>
+                      <div className='text-muted-foreground font-mono'>
+                        {inc.incident_id} • {inc.severity} • {inc.status} • owner=@{inc.owner_id}
+                      </div>
+                    </div>
+                    {inc.status !== 'RESOLVED' && (
+                      <Button
+                        size='sm'
+                        variant='outline'
+                        className='h-7 text-xs'
+                        onClick={() => handleIncidentAction(inc.incident_id, 'ack')}
+                      >
+                        Xác nhận
+                      </Button>
+                    )}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* TAB 4: BÁO CÁO NGÀY & TUẦN */}
+        <TabsContent value='reports' className='space-y-4 pt-3'>
+          <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 rounded-xl border bg-card'>
+            <div>
+              <h3 className='text-sm font-bold'>
+                Báo cáo Điều hành Ngày (08:00 ICT) &amp; Báo cáo Tuần (Thứ 6 17:00)
+              </h3>
+              <p className='text-xs text-muted-foreground'>
+                KPI tính toán deterministic trước khi tổng hợp • Không trùng lặp sau restart
+              </p>
+            </div>
+            <div className='flex flex-wrap gap-2'>
+              <Button
+                size='sm'
+                onClick={() => handleGenerateReport(true)}
+                disabled={dailyGenLoading}
+              >
+                <IconFileText className='h-4 w-4 mr-1' />
+                {dailyGenLoading ? 'Đang tạo...' : 'Tạo Daily Brief (08:00)'}
+              </Button>
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => handleGenerateReport(false)}
+                disabled={reportGenLoading}
+              >
+                <IconFileText className='h-4 w-4 mr-1' />
+                {reportGenLoading ? 'Đang tổng hợp...' : 'Tạo Báo cáo Tuần'}
+              </Button>
+            </div>
+          </div>
+
           <div className='space-y-4'>
             {reports.length === 0 ? (
               <Card>
                 <CardContent className='p-6 text-center text-xs text-muted-foreground'>
-                  Chưa có báo cáo tuần nào được tạo. Hãy nhấn "Tạo báo cáo tuần ngay" bên trên.
+                  Chưa có báo cáo nào được tạo.
                 </CardContent>
               </Card>
             ) : (
@@ -635,9 +713,9 @@ export default function AIAssistantView() {
                     <div className='flex items-center justify-between'>
                       <CardTitle className='text-sm font-bold'>{rpt.title}</CardTitle>
                       <div className='flex items-center gap-2'>
-                        <span className='text-xs text-muted-foreground font-mono'>
-                          {rpt.created_at}
-                        </span>
+                        <Badge variant='outline' className='text-xs font-mono'>
+                          {rpt.report_type || 'WEEKLY'}
+                        </Badge>
                         <a
                           href={`/api/labops/ai-assistant/reports/${rpt.id}/download`}
                           target='_blank'
@@ -651,11 +729,11 @@ export default function AIAssistantView() {
                       </div>
                     </div>
                     <CardDescription className='text-xs'>
-                      Tác giả: {rpt.author} • Hạ tầng: {rpt.summary?.infrastructure}
+                      {rpt.author} • {rpt.created_at} • {rpt.summary?.infrastructure}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <div className='p-3.5 rounded-lg bg-muted/40 border text-xs font-mono whitespace-pre-wrap max-h-96 overflow-y-auto'>
+                    <div className='p-3.5 rounded-lg bg-muted/40 border text-xs font-mono whitespace-pre-wrap max-h-80 overflow-y-auto'>
                       {rpt.content}
                     </div>
                   </CardContent>
@@ -665,115 +743,273 @@ export default function AIAssistantView() {
           </div>
         </TabsContent>
 
-        {/* TAB 4: QUYỀN & CÔNG CỤ */}
-        <TabsContent value='tools' className='space-y-4 pt-3'>
+        {/* TAB 5: ĐỊNH DANH ZALO, SUBSCRIPTIONS & CẤU HÌNH */}
+        <TabsContent value='config' className='space-y-4 pt-3'>
           <div className='grid gap-4 md:grid-cols-2'>
-            {/* Read-Only Tools */}
+            {/* Identity Link Generator */}
             <Card>
-              <CardHeader className='pb-2'>
-                <div className='flex items-center gap-2'>
-                  <div className='p-1.5 rounded bg-emerald-500/10 text-emerald-600'>
-                    <IconCheck className='h-4 w-4' />
-                  </div>
-                  <div>
-                    <CardTitle className='text-sm font-semibold'>
-                      Công cụ Đọc được Kích hoạt (Read-Only)
-                    </CardTitle>
-                    <CardDescription className='text-xs'>
-                      An toàn tuyệt đối, không gây tác động hay thay đổi trạng thái máy chủ
-                    </CardDescription>
-                  </div>
-                </div>
+              <CardHeader>
+                <CardTitle className='text-sm font-semibold flex items-center gap-1.5'>
+                  <IconKey className='h-4 w-4' /> Liên kết Danh tính Zalo (Mã một lần)
+                </CardTitle>
+                <CardDescription className='text-xs'>
+                  Chống giả mạo: Người dùng phải gửi `/link MÃ` từ tài khoản Zalo thực của mình.
+                </CardDescription>
               </CardHeader>
-              <CardContent className='pt-2'>
-                <ul className='space-y-2 text-xs font-mono'>
-                  {tools?.read_only_tools?.map((t: string) => (
-                    <li key={t} className='flex items-center gap-2 p-2 rounded border bg-card'>
-                      <IconCheck className='h-3.5 w-3.5 text-emerald-600 shrink-0' />
-                      <span className='font-semibold'>{t}</span>
-                    </li>
+              <CardContent className='space-y-3 text-xs'>
+                <form onSubmit={handleGenerateLinkCode} className='flex flex-wrap gap-2'>
+                  <Input
+                    value={linkUsername}
+                    onChange={(e) => setLinkUsername(e.target.value)}
+                    placeholder='Username LabOps (vd: tranglt, admin)'
+                    className='text-xs font-mono flex-1'
+                    required
+                  />
+                  <select
+                    aria-label='Vai trò tài khoản LabOps'
+                    value={linkRole}
+                    onChange={(e) => setLinkRole(e.target.value)}
+                    className='border rounded px-2 py-1 text-xs bg-background'
+                  >
+                    <option value='RESEARCHER'>RESEARCHER</option>
+                    <option value='STUDENT'>STUDENT</option>
+                    <option value='ADMIN'>ADMIN</option>
+                  </select>
+                  <Button type='submit' size='sm'>
+                    Tạo mã
+                  </Button>
+                </form>
+
+                {generatedCodeInfo && (
+                  <div className='p-2.5 rounded border bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-mono'>
+                    <div>
+                      Mã liên kết cho @{generatedCodeInfo.username} ({generatedCodeInfo.role}):{' '}
+                      <strong>{generatedCodeInfo.code}</strong>
+                    </div>
+                    <div className='text-xs mt-1'>{generatedCodeInfo.instruction}</div>
+                  </div>
+                )}
+
+                <div className='space-y-1.5 pt-2'>
+                  <div className='font-semibold'>Danh sách liên kết:</div>
+                  {identityLinks.map((lk) => (
+                    <div
+                      key={lk.id}
+                      className='p-2 rounded border flex items-center justify-between'
+                    >
+                      <div>
+                        <span className='font-mono font-bold'>@{lk.username}</span> ({lk.role}) •
+                        Zalo: <span className='font-mono'>{lk.zalo_user_id || 'Chờ xác nhận'}</span>
+                        <Badge variant='outline' className='ml-1.5 text-xs'>
+                          {lk.status}
+                        </Badge>
+                      </div>
+                      {lk.status !== 'REVOKED' && (
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          className='h-6 px-2 text-destructive'
+                          onClick={() => handleRevokeLink(lk.id)}
+                        >
+                          <IconTrash className='h-3.5 w-3.5' />
+                        </Button>
+                      )}
+                    </div>
                   ))}
-                </ul>
+                </div>
               </CardContent>
             </Card>
 
-            {/* Disabled Write Tools */}
+            {/* Bot Config */}
             <Card>
-              <CardHeader className='pb-2'>
-                <div className='flex items-center gap-2'>
-                  <div className='p-1.5 rounded bg-destructive/10 text-destructive'>
-                    <IconBan className='h-4 w-4' />
-                  </div>
-                  <div>
-                    <CardTitle className='text-sm font-semibold'>
-                      Công cụ Ghi bị Khóa Chặt (Disabled)
-                    </CardTitle>
-                    <CardDescription className='text-xs'>
-                      Bảo vệ môi trường theo đúng chính sách Non-Disruptive
-                    </CardDescription>
-                  </div>
-                </div>
+              <CardHeader>
+                <CardTitle className='text-sm font-semibold flex items-center gap-1.5'>
+                  <IconSettings className='h-4 w-4' /> Cấu hình Bot &amp; AI Gateway
+                </CardTitle>
               </CardHeader>
-              <CardContent className='pt-2'>
-                <ul className='space-y-2 text-xs font-mono'>
-                  {tools?.disabled_write_tools?.map((t: string) => (
-                    <li
-                      key={t}
-                      className='flex items-center gap-2 p-2 rounded border bg-card text-muted-foreground'
-                    >
-                      <IconBan className='h-3.5 w-3.5 text-destructive shrink-0' />
-                      <span className='line-through'>{t}</span>
-                    </li>
-                  ))}
-                </ul>
+              <CardContent>
+                <form onSubmit={handleSaveConfig} className='space-y-3 text-xs'>
+                  {saveConfigSuccess && (
+                    <div className='p-2 rounded bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 flex items-center gap-1.5'>
+                      <IconCheck className='h-4 w-4' /> Đã cập nhật cấu hình!
+                    </div>
+                  )}
+                  <div className='space-y-1'>
+                    <label htmlFor='zalo-bot-token' className='font-semibold'>
+                      Zalo Bot Token (Hiện tại: {config?.zalo_token_masked})
+                    </label>
+                    <Input
+                      id='zalo-bot-token'
+                      type='password'
+                      value={editToken}
+                      onChange={(e) => setEditToken(e.target.value)}
+                      placeholder='Để trống nếu giữ nguyên...'
+                      className='text-xs font-mono'
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <label htmlFor='zalo-allowlist' className='font-semibold'>
+                      Allowlist dự phòng (Zalo User IDs)
+                    </label>
+                    <Input
+                      id='zalo-allowlist'
+                      value={editUsers}
+                      onChange={(e) => setEditUsers(e.target.value)}
+                      className='text-xs font-mono'
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <label htmlFor='zalo-ai-model' className='font-semibold'>
+                      AI Model (9Router)
+                    </label>
+                    <Input
+                      id='zalo-ai-model'
+                      value={editModel}
+                      onChange={(e) => setEditModel(e.target.value)}
+                      className='text-xs font-mono'
+                    />
+                  </div>
+                  <Button type='submit' size='sm'>
+                    Lưu cấu hình
+                  </Button>
+                </form>
               </CardContent>
             </Card>
           </div>
-        </TabsContent>
 
-        {/* TAB 5: LỊCH SỬ & QUOTA */}
-        <TabsContent value='history' className='space-y-4 pt-3'>
+          {/* Notification Subscriptions */}
           <Card>
             <CardHeader className='pb-2'>
               <CardTitle className='text-sm font-semibold'>
-                Nhật ký Hộp thư Outbox & Quota Ledger
+                Cài đặt Nhận Thông báo Theo Tài khoản
               </CardTitle>
-              <CardDescription className='text-xs'>
-                Ghi nhận chi tiết từng thông điệp outbound, đảm bảo tính bất biến (idempotency) và
-                không vượt 3.000 tin/tháng
-              </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className='space-y-2 text-xs font-mono'>
-                {history?.outbox?.length === 0 ? (
-                  <p className='text-muted-foreground p-4 text-center'>
-                    Chưa có tin nhắn outbound trong tháng.
-                  </p>
-                ) : (
-                  history?.outbox?.map((m: any) => (
-                    <div
-                      key={m.id}
-                      className='flex items-center justify-between p-2.5 rounded border bg-card'
-                    >
-                      <div className='space-y-0.5'>
-                        <div className='flex items-center gap-2'>
-                          <span className='font-bold text-primary'>{m.id}</span>
-                          <Badge variant='outline' className='text-xs'>
-                            {m.is_critical ? 'CRITICAL ALERT' : 'STANDARD'}
-                          </Badge>
-                          <span className='text-muted-foreground text-xs'>
-                            Tới: {m.recipient_id}
-                          </span>
-                        </div>
-                        <p className='text-muted-foreground text-xs'>{m.message_snippet}...</p>
-                      </div>
-                      <span className='text-xs text-muted-foreground shrink-0'>{m.created_at}</span>
+            <CardContent className='space-y-2 text-xs'>
+              {subscriptions.length === 0 ? (
+                <p className='text-muted-foreground'>Chưa có người nhận nào được liên kết.</p>
+              ) : (
+                subscriptions.map((sub) => (
+                  <div
+                    key={sub.id}
+                    className='p-2.5 rounded border flex flex-wrap items-center justify-between gap-2'
+                  >
+                    <div className='font-mono'>
+                      <strong>@{sub.username}</strong> ({sub.role}) • Zalo: {sub.recipient_zalo_id}
                     </div>
-                  ))
-                )}
-              </div>
+                    <div className='flex flex-wrap gap-1.5'>
+                      <Button
+                        size='sm'
+                        variant={sub.enabled ? 'default' : 'outline'}
+                        className='h-6 text-xs'
+                        onClick={() =>
+                          handleToggleSub(sub.recipient_zalo_id, 'enabled', !sub.enabled)
+                        }
+                      >
+                        {sub.enabled ? 'Enabled' : 'Disabled'}
+                      </Button>
+                      <Button
+                        size='sm'
+                        variant={sub.receive_p0 ? 'default' : 'outline'}
+                        className='h-6 text-xs'
+                        onClick={() =>
+                          handleToggleSub(sub.recipient_zalo_id, 'receive_p0', !sub.receive_p0)
+                        }
+                      >
+                        P0: {sub.receive_p0 ? 'ON' : 'OFF'}
+                      </Button>
+                      <Button
+                        size='sm'
+                        variant={sub.receive_daily_report ? 'default' : 'outline'}
+                        className='h-6 text-xs'
+                        onClick={() =>
+                          handleToggleSub(
+                            sub.recipient_zalo_id,
+                            'receive_daily_report',
+                            !sub.receive_daily_report
+                          )
+                        }
+                      >
+                        Daily: {sub.receive_daily_report ? 'ON' : 'OFF'}
+                      </Button>
+                      {sub.role === 'ADMIN' && (
+                        <Button
+                          size='sm'
+                          variant={sub.receive_repo_alerts ? 'default' : 'outline'}
+                          className='h-6 text-xs'
+                          onClick={() =>
+                            handleToggleSub(
+                              sub.recipient_zalo_id,
+                              'receive_repo_alerts',
+                              !sub.receive_repo_alerts
+                            )
+                          }
+                        >
+                          Repo Alerts: {sub.receive_repo_alerts ? 'ON' : 'OFF'}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* TAB 6: OUTBOX & TOOLS */}
+        <TabsContent value='history' className='space-y-4 pt-3'>
+          <div className='grid gap-4 md:grid-cols-2'>
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-sm font-semibold'>
+                  Read-Only Tools &amp; Tool Audit
+                </CardTitle>
+              </CardHeader>
+              <CardContent className='space-y-2 text-xs font-mono'>
+                <div className='flex flex-wrap gap-1'>
+                  {(tools?.read_only_tools || []).map((t: string) => (
+                    <Badge key={t} variant='outline' className='text-xs'>
+                      {t}
+                    </Badge>
+                  ))}
+                </div>
+                <div className='pt-2 space-y-1 max-h-56 overflow-y-auto'>
+                  {(tools?.tool_audit || []).map((a: any) => (
+                    <div key={a.id} className='p-1.5 rounded border flex justify-between'>
+                      <span>
+                        @{a.actor_username} → {a.tool_name}
+                      </span>
+                      <Badge variant='outline' className='text-xs'>
+                        {a.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-sm font-semibold'>
+                  Notification Outbox &amp; Delivery Attempts
+                </CardTitle>
+              </CardHeader>
+              <CardContent className='space-y-2 text-xs font-mono max-h-72 overflow-y-auto'>
+                {(history?.notification_outbox || history?.outbox || []).map((m: any) => (
+                  <div key={m.id} className='p-2 rounded border space-y-0.5'>
+                    <div className='flex justify-between'>
+                      <span className='font-bold'>{m.event_type || m.id}</span>
+                      <Badge variant='outline' className='text-xs'>
+                        {m.status}
+                      </Badge>
+                    </div>
+                    <div className='text-muted-foreground'>
+                      to={m.recipient_id} • {m.message_snippet}
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
       </Tabs>
     </div>

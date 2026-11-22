@@ -213,3 +213,219 @@ class ZaloOutboxRecord(Base):
     error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ZaloIdentityLinkRecord(Base):
+    __tablename__ = "zalo_identity_links"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    zalo_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="RESEARCHER")
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING_CODE", index=True)
+    link_code_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    code_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    linked_by: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NotificationSubscriptionRecord(Base):
+    __tablename__ = "notification_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    recipient_zalo_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="RESEARCHER")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    receive_p0: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    receive_p1: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    receive_daily_report: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    receive_weekly_report: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    receive_repo_alerts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    quiet_hours_start: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    quiet_hours_end: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    bypass_quiet_for_p0: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class NotificationOutboxRecord(Base):
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", "recipient_id", name="uq_notif_outbox_idem_recipient"),
+        Index("ix_notif_outbox_status_next_retry", "status", "next_retry_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="P1")
+    incident_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    report_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    is_critical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class NotificationDeliveryAttemptRecord(Base):
+    __tablename__ = "notification_delivery_attempts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    outbox_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    recipient_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class IncidentRecord(Base):
+    __tablename__ = "incidents"
+    __table_args__ = (
+        Index("ix_incidents_status_severity", "status", "severity"),
+        Index("ix_incidents_owner_status", "owner_id", "status"),
+    )
+
+    incident_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="P1", index=True)
+    confidence: Mapped[str] = mapped_column(String(24), nullable=False, default="CONFIRMED")
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    host_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    owner_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OPEN", index=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reopen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evidence_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    recommended_action: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    acknowledged_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class IncidentEventRecord(Base):
+    __tablename__ = "incident_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
+    from_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    details_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class ReportRunRecord(Base):
+    __tablename__ = "report_runs"
+    __table_args__ = (
+        UniqueConstraint("report_type", "period_key", name="uq_report_runs_type_period"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    report_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    period_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    window_start_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="GENERATED")
+    author: Mapped[str] = mapped_column(String(128), nullable=False, default="LabOps AI SRE v2")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    zalo_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    markdown_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    ai_insights_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    delivery_state_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class DailyReportSnapshotRecord(Base):
+    __tablename__ = "daily_report_snapshots"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    report_run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    host_id: Mapped[str] = mapped_column(String(64), nullable=False, default="cluster")
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    overall_health: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    kpis_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    raw_snapshot_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class TelemetryHistorySampleRecord(Base):
+    __tablename__ = "telemetry_history_samples"
+    __table_args__ = (
+        Index("ix_telemetry_samples_host_ts", "host_id", "collected_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    host_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    freshness_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    cpu_percent: Mapped[Optional[float]] = mapped_column(nullable=True)
+    ram_used_gb: Mapped[Optional[float]] = mapped_column(nullable=True)
+    ram_total_gb: Mapped[Optional[float]] = mapped_column(nullable=True)
+    disk_used_tb: Mapped[Optional[float]] = mapped_column(nullable=True)
+    disk_total_tb: Mapped[Optional[float]] = mapped_column(nullable=True)
+    gpus_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    services_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    workspaces_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    jobs_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+
+
+class AgentToolAuditRecord(Base):
+    __tablename__ = "agent_tool_audit"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    actor_username: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    actor_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    zalo_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    question_snippet: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    tool_name: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    tool_args_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    rbac_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="SUCCESS")
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class SchedulerLeaseRecord(Base):
+    __tablename__ = "scheduler_leases"
+
+    lease_name: Mapped[str] = mapped_column(String(96), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hostname: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

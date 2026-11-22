@@ -1,6 +1,8 @@
 """
-Unified Zalo Assistant & AI Gateway Service Facade
-Manages configuration, quota ledger, 9Router client, report generator, and bot engine.
+Unified Zalo Assistant & AI SRE Agent v2 Service Facade
+Connects QuotaLedger, DatabaseManager, SchedulerLeaseManager, ZaloIdentityRBACService,
+UnifiedTelemetryCollector, UnifiedIncidentEngine, NotificationDispatcher,
+RepoSecurityAlertMonitor, ReportGenerator, SREToolRegistry, and ZaloBotEngine.
 """
 from __future__ import annotations
 
@@ -9,10 +11,18 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from app.db.session import DatabaseManager
 from app.services.zalo_assistant.ai_gateway_client import AIGatewayClient
 from app.services.zalo_assistant.bot_core import ZaloBotEngine
+from app.services.zalo_assistant.identity_rbac import ZaloIdentityRBACService
+from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+from app.services.zalo_assistant.lease_manager import SchedulerLeaseManager
+from app.services.zalo_assistant.notification_dispatcher import NotificationDispatcher
 from app.services.zalo_assistant.quota_ledger import QuotaLedger
+from app.services.zalo_assistant.repo_alert_monitor import RepoSecurityAlertMonitor
 from app.services.zalo_assistant.report_generator import ReportGenerator
+from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
+from app.services.zalo_assistant.tool_registry import SREToolRegistry
 
 
 class ZaloAssistantService:
@@ -20,62 +30,45 @@ class ZaloAssistantService:
         base_dir = data_dir or os.getenv("LABOPS_DATA_DIR") or os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
         )
-        self.data_dir = base_dir
+        self.data_dir = os.path.abspath(base_dir)
+        self.db = DatabaseManager(self.data_dir)
         self.quota_ledger = QuotaLedger(self.data_dir)
         self.ai_client = AIGatewayClient()
-        self.report_generator = ReportGenerator(self.data_dir)
+        self.lease_manager = SchedulerLeaseManager(self.data_dir, db_manager=self.db)
+        self.identity_rbac = ZaloIdentityRBACService(self.data_dir, db_manager=self.db)
+        self.telemetry_collector = UnifiedTelemetryCollector(self.data_dir, db_manager=self.db)
+        self.incident_engine = UnifiedIncidentEngine(self.data_dir, db_manager=self.db)
+        self.report_generator = ReportGenerator(self.data_dir, db_manager=self.db)
+        self.notification_dispatcher = NotificationDispatcher(
+            self.data_dir,
+            quota_ledger=self.quota_ledger,
+            db_manager=self.db,
+        )
+        self.tool_registry = SREToolRegistry(
+            self.data_dir,
+            db_manager=self.db,
+            telemetry_collector=self.telemetry_collector,
+            incident_engine=self.incident_engine,
+            report_generator=self.report_generator,
+        )
         self.bot_engine = ZaloBotEngine(
             quota_ledger=self.quota_ledger,
             ai_client=self.ai_client,
             report_generator=self.report_generator,
             config_path=os.path.join(self.data_dir, "zalo_config.json"),
+            identity_rbac=self.identity_rbac,
+            telemetry_collector=self.telemetry_collector,
+            incident_engine=self.incident_engine,
+            tool_registry=self.tool_registry,
+        )
+        self.repo_alert_monitor = RepoSecurityAlertMonitor(
+            data_dir=self.data_dir,
+            quota_ledger=self.quota_ledger,
+            bot_engine=self.bot_engine,
+            identity_rbac=self.identity_rbac,
+            incident_engine=self.incident_engine,
         )
         self.bot_engine.reload_persisted_config(force=True)
-
-    def _build_dynamic_alerts(self, ai_health: Dict[str, Any]) -> List[Dict[str, Any]]:
-        alerts: List[Dict[str, Any]] = []
-        try:
-            from datetime import datetime, timezone
-            from app.services.labops_service import service as core_svc
-
-            now_iso = datetime.now(timezone.utc).isoformat()
-            for srv in getattr(core_svc, "servers", []) or []:
-                status = str(srv.get("status", "UNKNOWN")).upper()
-                name = srv.get("name") or srv.get("hostname") or srv.get("id")
-                if status in {"OFFLINE", "DISCONNECTED", "UNREACHABLE"}:
-                    alerts.append({
-                        "id": f"srv-{srv.get('id', 'node')}",
-                        "level": "CRITICAL",
-                        "message": f"Máy chủ {name} ({srv.get('hostname', '')}) hiện {status}.",
-                        "timestamp": srv.get("last_updated") or now_iso,
-                    })
-                elif status == "ONLINE":
-                    alerts.append({
-                        "id": f"srv-{srv.get('id', 'node')}",
-                        "level": "INFO",
-                        "message": f"Máy chủ {name} ({srv.get('hostname', '')}) đang hoạt động ONLINE.",
-                        "timestamp": srv.get("last_updated") or now_iso,
-                    })
-            for ev in (getattr(core_svc, "events", []) or [])[:5]:
-                ev_msg = str(ev.get("message") or ev.get("title") or ev.get("description") or "").strip()
-                if ev_msg:
-                    alerts.append({
-                        "id": str(ev.get("id", f"ev-{len(alerts)}")),
-                        "level": str(ev.get("severity", ev.get("level", "INFO"))).upper(),
-                        "message": ev_msg,
-                        "timestamp": ev.get("timestamp") or ev.get("date") or now_iso,
-                    })
-        except Exception:
-            pass
-
-        from datetime import datetime, timezone
-        alerts.append({
-            "id": "ai-gateway-health",
-            "level": "INFO" if ai_health.get("status") == "ONLINE" else "WARNING",
-            "message": f"AI Gateway: {ai_health.get('status')} sẵn sàng kết nối.",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        return alerts[:10]
 
     def _read_worker_health(self) -> Dict[str, Any]:
         status_file = os.path.join(self.data_dir, "zalo_worker_status.json")
@@ -113,17 +106,19 @@ class ZaloAssistantService:
                 dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                age = (datetime.now(timezone.utc) - dt).total_seconds()
-                hb_fresh = age <= 60.0
+                hb_fresh = (datetime.now(timezone.utc) - dt).total_seconds() <= 60.0
             except ValueError:
                 hb_fresh = False
 
-        is_polling = bool(data.get("is_polling")) and pid_alive and hb_fresh
+        lease = self.lease_manager.get_lease_status("zalo_sre_worker")
+        lease_active = bool(lease and lease.get("is_active"))
+        is_polling = lease_active or (bool(data.get("is_polling")) and pid_alive and hb_fresh)
         return {
-            "worker_pid": pid if pid_alive else None,
+            "worker_pid": pid if pid_alive else (lease.get("pid") if lease_active and lease else None),
             "pid_alive": pid_alive,
+            "lease": lease,
             "is_polling": is_polling,
-            "last_heartbeat": last_hb,
+            "last_heartbeat": (lease.get("heartbeat_at") if lease_active and lease else last_hb),
             "bot_name": data.get("bot_name"),
             "authorized_users_count": data.get("authorized_users_count"),
             "last_error": data.get("last_error"),
@@ -140,20 +135,48 @@ class ZaloAssistantService:
         consumer["is_polling"] = bool(worker_health.get("is_polling") or consumer.get("is_polling"))
         consumer["last_heartbeat"] = worker_health.get("last_heartbeat") or consumer.get("last_heartbeat")
         consumer["worker_pid"] = worker_health.get("worker_pid")
+        consumer["lease"] = worker_health.get("lease")
         if worker_health.get("bot_name"):
             consumer["bot_name"] = worker_health["bot_name"]
-        auth_count = len(self.bot_engine.authorized_users or [])
+
+        links = self.identity_rbac.list_links()
+        active_links = [lk for lk in links if lk.get("status") == "ACTIVE"]
+        auth_count = len(self.bot_engine.authorized_users or []) + len(active_links)
         consumer["authorized_users_count"] = auth_count
 
+        snap = self.telemetry_collector.collect_snapshot()
+        open_incidents = [i for i in self.incident_engine.list_incidents(limit=100) if i.get("status") != "RESOLVED"]
         reports = self.report_generator.list_reports()
+
         if not consumer["has_token"]:
             zalo_status = "STANDBY (Chưa nạp Token)"
         elif auth_count == 0:
-            zalo_status = "MISCONFIGURED (Chưa cấp quyền Zalo User ID)"
+            zalo_status = "MISCONFIGURED (Chưa cấp quyền / Liên kết Zalo ID)"
         elif not consumer["is_polling"]:
             zalo_status = "WORKER_OFFLINE"
         else:
             zalo_status = "READY"
+
+        recent_alerts = [
+            {
+                "id": inc["incident_id"],
+                "level": "CRITICAL" if inc["severity"] == "P0" else ("WARNING" if inc["severity"] == "P1" else "INFO"),
+                "message": f"[{inc['severity']}/{inc['status']}] {inc['title']}",
+                "timestamp": inc.get("last_observed_at") or inc.get("detected_at"),
+            }
+            for inc in open_incidents[:8]
+        ]
+        if not recent_alerts:
+            for h in snap.get("hosts") or []:
+                if h.get("status") not in {"ONLINE"}:
+                    recent_alerts.append(
+                        {
+                            "id": f"host-{h['host_id']}",
+                            "level": "WARNING" if h.get("status") in {"DEGRADED", "STALE"} else "CRITICAL",
+                            "message": f"Host {h['hostname']} ({h['host_id']}): {h['status']} (freshness={h['freshness_status']})",
+                            "timestamp": h.get("collected_at") or snap.get("collected_at"),
+                        }
+                    )
 
         return {
             "zalo_status": zalo_status,
@@ -163,7 +186,32 @@ class ZaloAssistantService:
             "active_model": self.ai_client.model,
             "reports_count": len(reports),
             "latest_report": reports[0] if reports else None,
-            "recent_alerts": self._build_dynamic_alerts(ai_health),
+            "recent_alerts": recent_alerts,
+            "system_health": snap.get("overall_health"),
+            "hosts": snap.get("hosts", []),
+            "open_incidents_count": len(open_incidents),
+            "p0_incidents_count": sum(1 for i in open_incidents if i.get("severity") == "P0"),
+            "linked_identities_count": len(active_links),
+        }
+
+    def get_heartbeat(self) -> Dict[str, Any]:
+        worker_health = self._read_worker_health()
+        db_health = self.lease_manager.db_healthcheck()
+        snap = self.telemetry_collector.collect_snapshot()
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "database": db_health,
+            "worker": worker_health,
+            "overall_health": snap.get("overall_health"),
+            "hosts": [
+                {
+                    "host_id": h["host_id"],
+                    "status": h["status"],
+                    "freshness_status": h["freshness_status"],
+                    "last_heartbeat_at": h["last_heartbeat_at"],
+                }
+                for h in snap.get("hosts", [])
+            ],
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -179,14 +227,15 @@ class ZaloAssistantService:
             "ai_model": self.ai_client.model,
             "ai_gateway_url": self.ai_client.base_url,
             "timeout_seconds": self.ai_client.timeout,
-            "monthly_quota_limit": QuotaLedger.TOTAL_MONTHLY_LIMIT,
-            "standard_quota_limit": QuotaLedger.STANDARD_LIMIT,
-            "critical_reserve": QuotaLedger.CRITICAL_ALERT_RESERVE,
-            "allowed_features": ["/start", "/help", "/ask", "/status", "/alloc", "/jobs", "/report", "/quota", "/gpu"],
+            "monthly_quota_limit": self.quota_ledger.TOTAL_MONTHLY_LIMIT,
+            "standard_quota_limit": self.quota_ledger.STANDARD_LIMIT,
+            "critical_reserve": self.quota_ledger.CRITICAL_ALERT_RESERVE,
+            "allowed_features": list(self.bot_engine.COMMANDS.keys()),
             "alert_thresholds": {
-                "gpu_temp_celsius": 90,
-                "vram_used_percent": 95,
-                "disk_free_gb": 50,
+                "gpu_temp_warn_c": self.incident_engine.thresholds.gpu_temp_warn_c,
+                "gpu_temp_crit_c": self.incident_engine.thresholds.gpu_temp_crit_c,
+                "disk_warn_percent": self.incident_engine.thresholds.disk_warn_percent,
+                "disk_crit_percent": self.incident_engine.thresholds.disk_crit_percent,
             },
         }
 
@@ -260,6 +309,7 @@ class ZaloAssistantService:
             "allowed_chat_ids": self.bot_engine.allowed_chat_ids,
             "read_only_tools": self.bot_engine.ENABLED_READ_TOOLS,
             "disabled_write_tools": self.bot_engine.DISABLED_WRITE_TOOLS,
+            "tool_audit": self.tool_registry.list_recent_tool_audit(30),
             "pending_approvals": [],
             "audit_history": audit_history,
         }
@@ -267,15 +317,18 @@ class ZaloAssistantService:
     def get_history(self) -> Dict[str, Any]:
         quota_status = self.quota_ledger.get_status()
         outbox = self.quota_ledger.get_recent_outbox(50)
+        db_outbox = self.notification_dispatcher.list_outbox_entries(50)
+        attempts = self.notification_dispatcher.list_delivery_attempts(50)
         messages = list(reversed(self.bot_engine.message_history))
 
         return {
             "quota": quota_status,
             "outbox": outbox,
+            "notification_outbox": db_outbox,
+            "delivery_attempts": attempts,
             "recent_messages": messages,
             "daily_breakdown": quota_status.get("daily_usage", {}),
         }
 
 
-# Singleton instance
 zalo_assistant_service = ZaloAssistantService()

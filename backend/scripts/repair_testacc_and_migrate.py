@@ -464,7 +464,7 @@ def verify_post_repair(data_dir: str) -> Dict[str, Any]:
     conn.row_factory = sqlite3.Row
     try:
         rev_row = conn.execute("SELECT version_num FROM alembic_version LIMIT 1").fetchone()
-        if not rev_row or rev_row[0] != "0002_member_username_reuse":
+        if not rev_row or rev_row[0] not in {"0002_member_username_reuse", "0003_labops_ai_sre_agent_v2", "0004_labops_mram_v1"}:
             errors.append(f"Unexpected alembic_version: {rev_row[0] if rev_row else None}")
         hist = conn.execute("SELECT id, status, deleted_at FROM members WHERE id = ?", (HISTORICAL_MEMBER_ID,)).fetchone()
         if not hist or hist["status"] != "DELETED" or not hist["deleted_at"]:

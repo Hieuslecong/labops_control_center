@@ -928,6 +928,18 @@ class ReportGenerator:
         ram_peak = f"{hist_24h['ram_peak_gb']} GiB" if hist_24h.get("ram_peak_gb") is not None else "N/A"
         ram_avg = f"{hist_24h['ram_avg_gb']} GiB" if hist_24h.get("ram_avg_gb") is not None else "N/A"
         backup_status = self._check_latest_backup_status()
+        try:
+            from app.services.mram_service import mram_service
+
+            mram_counters = mram_service.get_briefing_summary_counters()
+        except Exception:
+            mram_counters = {
+                "pending_ssh_requests": 0,
+                "expired_unreviewed_requests": 0,
+                "provisioning_failed": 0,
+                "expiring_ssh_accounts_7d": 0,
+                "web_only_members": 0,
+            }
 
         def _fmt_opt(val: Optional[int]) -> str:
             return str(val) if val is not None else "N/A"
@@ -985,6 +997,10 @@ class ReportGenerator:
             "history_samples": hist_24h.get("sample_count", 0),
             "repo_collector_ok": r_ok,
             "incident_collector_ok": inc_ok,
+            "mram_pending_requests": mram_counters["pending_ssh_requests"],
+            "mram_expired_requests": mram_counters["expired_unreviewed_requests"],
+            "mram_expiring_ssh_7d": mram_counters["expiring_ssh_accounts_7d"],
+            "mram_provisioning_failed": mram_counters["provisioning_failed"],
         }
 
         # G. Deterministic Insights (max 3) + AI phrasing (strictly grounded)
@@ -1136,6 +1152,7 @@ class ReportGenerator:
             f"• Repo mới clone: {_fmt_opt(repo_clones_24h)} | Chưa thấy findings: {_fmt_opt(repo_no_findings)}",
             f"• Cần kiểm duyệt: {_fmt_opt(repo_review_cnt)} | Scan thất bại: {_fmt_opt(repo_scan_failed)}",
             f"• Cảnh báo bảo mật đang mở: {_fmt_opt(kpis['security_incidents_open'])}",
+            f"• MRAM SSH: {mram_counters['pending_ssh_requests']} chờ duyệt | {mram_counters['expired_unreviewed_requests']} quá hạn 24h | {mram_counters['expiring_ssh_accounts_7d']} sắp hết hạn (<7d)",
             "",
             "🧠 AI OPERATIONAL INSIGHTS",
             *insights_lines,

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,6 +12,7 @@ import { toast } from 'sonner';
 import { labopsCall } from '@/features/labops/api';
 import { Icons } from '@/components/icons';
 import { RepositoryGuardRequest } from '@/types/labops';
+import { ServerAccessRequestItem } from '@/features/mram/types';
 
 interface SshKeyRecord {
   id: string;
@@ -105,26 +107,50 @@ interface ResearcherPortalViewProps {
 }
 
 export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPortalViewProps) {
-  const [activeTab, setActiveTab] = useState<string>(initialTab);
+  const [activeTab, setActiveTab] = useState<string>(
+    initialTab === 'connect' ? 'overview' : initialTab
+  );
   const [snapshot, setSnapshot] = useState<ResearcherSnapshot | null>(null);
   const [repoRequests, setRepoRequests] = useState<RepositoryGuardRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [keyLabel, setKeyLabel] = useState('Laptop Nghiên cứu');
-  const [publicKey, setPublicKey] = useState('');
-  const [submittingKey, setSubmittingKey] = useState(false);
   const [mustChangeBanner, setMustChangeBanner] = useState(false);
   const [tempPassword, setTempPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
+  const [authMe, setAuthMe] = useState<{
+    full_name?: string;
+    username?: string;
+    member_category?: string;
+    ssh_access_state?: string;
+    must_change_password?: boolean;
+  } | null>(null);
+  const [myRequests, setMyRequests] = useState<ServerAccessRequestItem[]>([]);
 
   const loadSnapshot = async () => {
     setLoading(true);
-    const [res, repoRes] = await Promise.all([
+    const [res, repoRes, meRes, reqRes] = await Promise.all([
       labopsCall<ResearcherSnapshot>('v2/researcher/me'),
-      labopsCall<RepositoryGuardRequest[]>('repositories/requests')
+      labopsCall<RepositoryGuardRequest[]>('repositories/requests'),
+      labopsCall<{
+        full_name?: string;
+        username?: string;
+        member_category?: string;
+        ssh_access_state?: string;
+        must_change_password?: boolean;
+      }>('auth/me'),
+      labopsCall<{ requests: ServerAccessRequestItem[] }>('me/ssh-requests')
     ]);
+    if (meRes.ok && meRes.data) {
+      setAuthMe(meRes.data);
+      if (meRes.data.must_change_password) {
+        setMustChangeBanner(true);
+      }
+    }
+    if (reqRes.ok && Array.isArray(reqRes.data?.requests)) {
+      setMyRequests(reqRes.data.requests);
+    }
     if (!res.ok || !res.data) {
       setErrorMsg(res.error || 'Chưa xác thực hoặc không thể tải dữ liệu Cổng nghiên cứu viên');
       setSnapshot(null);
@@ -143,7 +169,6 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       if (params.get('changePassword') === '1') {
-        setActiveTab('connect');
         setMustChangeBanner(true);
       }
     }
@@ -152,7 +177,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
 
   useEffect(() => {
     if (initialTab) {
-      setActiveTab(initialTab);
+      setActiveTab(initialTab === 'connect' ? 'overview' : initialTab);
     }
   }, [initialTab]);
   /* oxlint-enable react/set-state-in-effect, react/exhaustive-effect-dependencies */
@@ -172,13 +197,22 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
       return;
     }
     setChangingPassword(true);
-    const res = await labopsCall('v2/ssh-access/first-login-change-password', {
+    const webRes = await labopsCall('auth/change-web-password', {
       method: 'POST',
       body: {
-        temporary_password: tempPassword,
+        current_password: tempPassword,
         new_password: newPassword
       }
     });
+    const res = webRes.ok
+      ? webRes
+      : await labopsCall('v2/ssh-access/first-login-change-password', {
+          method: 'POST',
+          body: {
+            temporary_password: tempPassword,
+            new_password: newPassword
+          }
+        });
     setChangingPassword(false);
     if (!res.ok) {
       toast.error('Không thể đổi mật khẩu', { description: res.error });
@@ -194,58 +228,146 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
     void loadSnapshot();
   };
 
-  const handleRegisterKey = async (e: React.SyntheticEvent) => {
-    e.preventDefault();
-    if (!publicKey.trim()) return;
-    setSubmittingKey(true);
-    const res = await labopsCall('v2/ssh-keys', {
-      method: 'POST',
-      body: { label: keyLabel, public_key: publicKey }
-    });
-    setSubmittingKey(false);
-    if (!res.ok) {
-      toast.error('Không thể đăng ký khóa SSH công khai', { description: res.error });
-      return;
-    }
-    toast.success('Đã ghi nhận khóa công khai SSH thành công', {
-      description: 'Trạng thái: PENDING_SYNC. Hệ thống không bao giờ lưu trữ Private Key.'
-    });
-    setPublicKey('');
-    void loadSnapshot();
-  };
-
   // Primary workspace
   const primaryWorkspace = snapshot?.workspaces?.[0];
   const isWorkspaceReady =
     primaryWorkspace?.observed_state === 'RUNNING' && Boolean(primaryWorkspace?.ssh_host_port);
 
-  // Dynamic SSH command
-  const sshHost =
-    primaryWorkspace?.vpn_bind_ip ||
-    snapshot?.member?.vpn_ip ||
-    (primaryWorkspace?.host_id === 'track' ? '192.168.167.250' : '192.168.167.251');
-  const sshPort = primaryWorkspace?.ssh_host_port || snapshot?.member?.assigned_port;
   const username = snapshot?.username || 'researcher';
 
-  const dynamicSshCommand =
-    isWorkspaceReady && sshPort
-      ? `ssh -i ~/.ssh/id_ed25519 -p ${sshPort} ${username}@${sshHost}`
-      : '';
+  const latestReq = myRequests[0] || null;
+  const isSimplifiedOnboarding =
+    !loading && !isWorkspaceReady && authMe?.ssh_access_state !== 'VERIFIED_READY';
 
-  const vscodeRemoteSnippet =
-    isWorkspaceReady && sshPort
-      ? `Host labops-${username}
-    HostName ${sshHost}
-    Port ${sshPort}
-    User ${username}
-    IdentityFile ~/.ssh/id_ed25519
-    ServerAliveInterval 60`
-      : '';
+  if (isSimplifiedOnboarding) {
+    return (
+      <div className='max-w-3xl space-y-5'>
+        <Card>
+          <CardHeader>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div>
+                <CardTitle>
+                  Xin chào, {authMe?.full_name || snapshot?.username || 'Nghiên cứu viên'}
+                </CardTitle>
+                <CardDescription className='text-xs mt-1'>
+                  Hoàn thành 3 bước đơn giản dưới đây để bắt đầu sử dụng máy chủ Lab.
+                </CardDescription>
+              </div>
+              <Badge variant='outline'>
+                {authMe?.member_category === 'LECTURER' ? 'Giảng viên' : 'Sinh viên'}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className='space-y-3 text-sm'>
+            <div className='rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 flex items-center justify-between'>
+              <div>
+                <div className='font-semibold'>Bước 1: Tài khoản cổng Web</div>
+                <div className='text-xs text-muted-foreground'>
+                  Đã kích hoạt (@{authMe?.username || snapshot?.username})
+                </div>
+              </div>
+              <Badge className='bg-emerald-600 text-white'>Đã xong</Badge>
+            </div>
 
-  const copyToClipboard = (text: string, label: string) => {
-    void navigator.clipboard.writeText(text);
-    toast.success(`Đã sao chép ${label} vào bộ nhớ tạm!`);
-  };
+            <div className='rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3'>
+              <div className='space-y-0.5'>
+                <div className='font-semibold'>Bước 2: Gửi đơn xin cấp quyền SSH</div>
+                {latestReq ? (
+                  <div className='text-xs text-muted-foreground'>
+                    Đơn <strong>{latestReq.project_title}</strong> ({latestReq.status})
+                    {latestReq.supervisor_name ? ` • GVHD: ${latestReq.supervisor_name}` : ''}
+                    {latestReq.decision_reason ? ` • Phản hồi: ${latestReq.decision_reason}` : ''}
+                  </div>
+                ) : (
+                  <div className='text-xs text-muted-foreground'>
+                    Nhập tên giảng viên hướng dẫn, tên đề tài và lý do sử dụng máy chủ.
+                  </div>
+                )}
+              </div>
+              {latestReq?.status === 'PENDING_APPROVAL' ? (
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Badge variant='outline' className='text-amber-700 border-amber-400'>
+                    Đang chờ Admin duyệt (SLA 24h)
+                  </Badge>
+                  <Link href='/dashboard/researcher/requests'>
+                    <Button size='sm' variant='outline'>
+                      Xem đơn đã nộp ({myRequests.length})
+                    </Button>
+                  </Link>
+                </div>
+              ) : (
+                <div className='flex flex-wrap items-center gap-2'>
+                  {myRequests.length > 0 && (
+                    <Link href='/dashboard/researcher/requests'>
+                      <Button size='sm' variant='outline'>
+                        Xem đơn đã nộp ({myRequests.length})
+                      </Button>
+                    </Link>
+                  )}
+                  <Link href='/dashboard/researcher/ssh-request'>
+                    <Button size='sm'>{latestReq ? 'Gửi đơn mới' : 'Đăng ký cấp SSH ngay'}</Button>
+                  </Link>
+                </div>
+              )}
+            </div>
+
+            <div className='rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3 opacity-80'>
+              <div>
+                <div className='font-semibold'>Bước 3: Nhận thông tin kết nối SSH</div>
+                <div className='text-xs text-muted-foreground'>
+                  Sau khi Admin phê duyệt, thông tin SSH và mật khẩu tạm 1 lần sẽ mở tại đây.
+                </div>
+              </div>
+              <Link href='/dashboard/researcher/access'>
+                <Button size='sm' variant='outline'>
+                  Mở trang Kết nối SSH
+                </Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+
+        {mustChangeBanner && (
+          <Card className='border-amber-500/40 bg-amber-500/5'>
+            <CardHeader className='pb-2'>
+              <CardTitle className='text-base'>Đổi mật khẩu Web lần đầu</CardTitle>
+              <CardDescription className='text-xs'>
+                Tài khoản bạn đang dùng mật khẩu tạm do Admin cấp. Hãy đổi sang mật khẩu cá nhân
+                (tối thiểu 12 ký tự).
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleChangePassword} className='space-y-3 text-sm'>
+                <div className='grid grid-cols-1 sm:grid-cols-3 gap-2'>
+                  <Input
+                    type='password'
+                    placeholder='Mật khẩu hiện tại'
+                    value={tempPassword}
+                    onChange={(e) => setTempPassword(e.target.value)}
+                  />
+                  <Input
+                    type='password'
+                    placeholder='Mật khẩu mới (>= 12 ký tự)'
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                  <Input
+                    type='password'
+                    placeholder='Nhập lại mật khẩu mới'
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                  />
+                </div>
+                <Button type='submit' size='sm' disabled={changingPassword}>
+                  {changingPassword ? 'Đang cập nhật...' : 'Cập nhật mật khẩu'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className='flex flex-col gap-5'>
@@ -281,17 +403,83 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
       </Card>
 
       {mustChangeBanner && (
-        <Card className='border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-900 dark:text-amber-200'>
-          <div className='font-semibold flex items-center gap-1.5'>
-            <Icons.warning className='size-4 shrink-0 text-amber-600' />
-            Yêu cầu đổi mật khẩu lần đầu
+        <Card className='border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-900 dark:text-amber-200 space-y-3'>
+          <div>
+            <div className='font-semibold flex items-center gap-1.5'>
+              <Icons.warning className='size-4 shrink-0 text-amber-600' />
+              Yêu cầu đổi mật khẩu lần đầu
+            </div>
+            <p className='mt-1'>
+              Tài khoản của bạn đang sử dụng mật khẩu tạm ban đầu. Vui lòng đổi sang mật khẩu cá
+              nhân tối thiểu 12 ký tự ngay bên dưới.
+            </p>
           </div>
-          <p className='mt-1'>
-            Tài khoản của bạn đang sử dụng mật khẩu tạm ban đầu. Vui lòng đổi sang mật khẩu cá nhân
-            tối thiểu 12 ký tự ở mục <strong>Kết nối &amp; Bảo mật</strong> bên dưới.
-          </p>
+          <form
+            onSubmit={(e) => void handleChangePassword(e)}
+            className='grid grid-cols-1 md:grid-cols-4 gap-2'
+          >
+            <Input
+              type='password'
+              autoComplete='current-password'
+              value={tempPassword}
+              onChange={(e) => setTempPassword(e.target.value)}
+              placeholder='Mật khẩu tạm / hiện tại'
+              className='h-8 text-xs bg-background'
+            />
+            <Input
+              type='password'
+              autoComplete='new-password'
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder='Mật khẩu mới (>= 12 ký tự)'
+              className='h-8 text-xs bg-background'
+            />
+            <Input
+              type='password'
+              autoComplete='new-password'
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder='Nhập lại mật khẩu mới'
+              className='h-8 text-xs bg-background'
+            />
+            <Button type='submit' size='sm' className='h-8 text-xs' disabled={changingPassword}>
+              {changingPassword ? 'Đang lưu...' : 'Đổi mật khẩu'}
+            </Button>
+          </form>
         </Card>
       )}
+
+      {/* MRAM v1.0: Luồng Đăng ký & Bàn giao Quyền SSH */}
+      <Card className='border-emerald-500/30 bg-emerald-500/5 p-4 text-xs'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div className='space-y-1'>
+            <div className='font-semibold flex items-center gap-2'>
+              <span>Quyền Truy cập Máy chủ (MRAM v1.0)</span>
+              <Badge variant='outline'>{authMe?.member_category || 'STUDENT'}</Badge>
+              <Badge variant='outline'>SSH: {authMe?.ssh_access_state || 'NONE'}</Badge>
+            </div>
+            <p className='text-muted-foreground'>
+              Thành viên đăng nhập cổng Web trước, gửi đơn xin cấp quyền SSH (SLA 24h) và nhận mật
+              khẩu SSH tạm thời một lần sau khi Admin phê duyệt &amp; kiểm chứng runtime.
+            </p>
+          </div>
+          <div className='flex flex-wrap gap-2'>
+            <Link href='/dashboard/researcher/ssh-request'>
+              <Button size='sm'>Xin Cấp SSH</Button>
+            </Link>
+            <Link href='/dashboard/researcher/requests'>
+              <Button size='sm' variant='outline'>
+                Đơn đã nộp ({myRequests.length})
+              </Button>
+            </Link>
+            <Link href='/dashboard/researcher/access'>
+              <Button size='sm' variant='secondary'>
+                Bàn giao &amp; Bí mật SSH
+              </Button>
+            </Link>
+          </div>
+        </div>
+      </Card>
 
       {errorMsg && (
         <Card className='border-amber-300 bg-amber-50 p-4 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200'>
@@ -302,18 +490,15 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
 
       {/* Tabs điều hướng chính */}
       <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val)}>
-        <TabsList className='grid grid-cols-2 md:grid-cols-4 w-full h-auto p-1'>
+        <TabsList className='grid grid-cols-1 md:grid-cols-3 w-full h-auto p-1'>
           <TabsTrigger value='overview' className='py-2 text-xs font-medium'>
             1. Tổng quan của tôi
           </TabsTrigger>
-          <TabsTrigger value='connect' className='py-2 text-xs font-medium'>
-            2. Kết nối &amp; Bảo mật
-          </TabsTrigger>
           <TabsTrigger value='workspace' className='py-2 text-xs font-medium'>
-            3. Workspace của tôi
+            2. Workspace của tôi
           </TabsTrigger>
           <TabsTrigger value='jobs' className='py-2 text-xs font-medium'>
-            4. GPU &amp; Tác vụ của tôi
+            3. GPU &amp; Tác vụ của tôi
           </TabsTrigger>
         </TabsList>
 
@@ -400,9 +585,11 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 </p>
               </div>
               <div className='flex gap-2'>
-                <Button size='sm' onClick={() => setActiveTab('connect')} className='text-xs'>
-                  Xem lệnh kết nối SSH
-                </Button>
+                <Link href='/dashboard/researcher/access'>
+                  <Button size='sm' className='text-xs'>
+                    Mở Trung tâm Bàn giao SSH &amp; VPN
+                  </Button>
+                </Link>
                 <Button
                   size='sm'
                   variant='outline'
@@ -417,316 +604,7 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
         </TabsContent>
 
         {/* ============================================================== */}
-        {/* TAB 2: KẾT NỐI & BẢO MẬT (5-STEP CONNECTION FLOW)             */}
-        {/* ============================================================== */}
-        <TabsContent value='connect' className='mt-4 space-y-4'>
-          <Card className={mustChangeBanner ? 'border-amber-500/50' : undefined}>
-            <CardHeader className='pb-3'>
-              <CardTitle className='text-sm font-bold flex items-center gap-2'>
-                <Icons.key className='size-4 text-primary' />
-                Đổi mật khẩu Cổng Web &amp; Workspace (Bắt buộc lần đầu)
-              </CardTitle>
-              <CardDescription className='text-xs'>
-                Chuyển từ mật khẩu tạm do Quản trị viên cấp sang mật khẩu cá nhân tối thiểu 12 ký
-                tự. Mật khẩu tạm sẽ tự động hết hiệu lực ngay sau khi đổi.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form
-                onSubmit={(e) => void handleChangePassword(e)}
-                className='grid grid-cols-1 md:grid-cols-3 gap-3 text-xs'
-              >
-                <div className='space-y-1'>
-                  <Label htmlFor='researcher-temp-password' className='text-xs'>
-                    Mật khẩu tạm / mật khẩu hiện tại
-                  </Label>
-                  <Input
-                    id='researcher-temp-password'
-                    type='password'
-                    autoComplete='current-password'
-                    value={tempPassword}
-                    onChange={(e) => setTempPassword(e.target.value)}
-                    placeholder='Nhập mật khẩu tạm...'
-                    className='h-8 text-xs'
-                  />
-                </div>
-                <div className='space-y-1'>
-                  <Label htmlFor='researcher-new-password' className='text-xs'>
-                    Mật khẩu mới (tối thiểu 12 ký tự)
-                  </Label>
-                  <Input
-                    id='researcher-new-password'
-                    type='password'
-                    autoComplete='new-password'
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder='Tối thiểu 12 ký tự...'
-                    className='h-8 text-xs'
-                  />
-                </div>
-                <div className='space-y-1'>
-                  <Label htmlFor='researcher-confirm-password' className='text-xs'>
-                    Xác nhận mật khẩu mới
-                  </Label>
-                  <div className='flex gap-2'>
-                    <Input
-                      id='researcher-confirm-password'
-                      type='password'
-                      autoComplete='new-password'
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder='Nhập lại mật khẩu mới...'
-                      className='h-8 text-xs'
-                    />
-                    <Button
-                      type='submit'
-                      size='sm'
-                      className='h-8 text-xs shrink-0'
-                      disabled={changingPassword}
-                    >
-                      {changingPassword ? 'Đang lưu...' : 'Đổi mật khẩu'}
-                    </Button>
-                  </div>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className='pb-3'>
-              <CardTitle className='text-sm font-bold'>
-                Quy trình 5 Bước Kết nối An toàn vào Workspace
-              </CardTitle>
-              <CardDescription className='text-xs'>
-                Tuân thủ mô hình bảo mật Zero-Trust: Thiết bị cá nhân → WireGuard VPN nội bộ → Cổng
-                SSH cô lập → Container riêng
-              </CardDescription>
-            </CardHeader>
-            <CardContent className='space-y-5 text-xs'>
-              {/* BƯỚC 1: WIREGUARD VPN CONFIG */}
-              <div className='rounded-lg border p-4 space-y-2 bg-muted/20'>
-                <div className='flex items-center gap-2'>
-                  <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
-                    1
-                  </span>
-                  <span className='font-bold text-xs'>Cấu hình WireGuard VPN (.conf)</span>
-                </div>
-                <p className='text-muted-foreground pl-8 text-xs'>
-                  Cài đặt WireGuard client trên laptop (macOS/Windows/Linux) và import file cấu hình
-                  do Quản trị viên cấp. VPN kết nối thẳng vào mạng nội bộ của LabOps mà không mở
-                  cổng ra Internet công cộng.
-                </p>
-              </div>
-
-              {/* BƯỚC 2: BẬT KẾT NỐI VPN */}
-              <div className='rounded-lg border p-4 space-y-2 bg-muted/20'>
-                <div className='flex items-center gap-2'>
-                  <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
-                    2
-                  </span>
-                  <span className='font-bold text-xs'>
-                    Kích hoạt WireGuard VPN trên máy cá nhân
-                  </span>
-                </div>
-                <div className='pl-8 space-y-1 text-xs text-muted-foreground'>
-                  <p>
-                    Bật công tắc WireGuard client. Địa chỉ IP nội bộ của bạn trong mạng LabOps:{' '}
-                    <strong className='font-mono text-foreground'>
-                      {snapshot?.member?.vpn_ip || '10.88.40.x'}
-                    </strong>
-                    .
-                  </p>
-                </div>
-              </div>
-
-              {/* BƯỚC 3: ĐĂNG KÝ SSH PUBLIC KEY */}
-              <div className='rounded-lg border p-4 space-y-3 bg-muted/20'>
-                <div className='flex items-center gap-2'>
-                  <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
-                    3
-                  </span>
-                  <span className='font-bold text-xs'>
-                    Đăng ký Khóa công khai OpenSSH (Ed25519)
-                  </span>
-                </div>
-                <p className='text-muted-foreground pl-8 text-xs'>
-                  Tạo cặp khóa trên máy cá nhân:{' '}
-                  <code>ssh-keygen -t ed25519 -C &quot;{username}@labops&quot;</code>. Tuyệt đối{' '}
-                  <strong>không gửi Private Key</strong>. Chỉ đăng ký Public Key{' '}
-                  <code>id_ed25519.pub</code> bên dưới:
-                </p>
-
-                <form onSubmit={handleRegisterKey} className='pl-8 grid gap-3 md:grid-cols-3 pt-1'>
-                  <div>
-                    <Label className='text-xs'>Nhãn thiết bị</Label>
-                    <Input
-                      value={keyLabel}
-                      onChange={(e) => setKeyLabel(e.target.value)}
-                      placeholder='VD: MacBook Pro M3'
-                      className='mt-1 h-8 text-xs'
-                      required
-                    />
-                  </div>
-                  <div className='md:col-span-2'>
-                    <Label className='text-xs'>
-                      Khóa công khai OpenSSH (ssh-ed25519 AAAAC3N...)
-                    </Label>
-                    <div className='mt-1 flex gap-2'>
-                      <Input
-                        value={publicKey}
-                        onChange={(e) => setPublicKey(e.target.value)}
-                        placeholder='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@machine'
-                        className='h-8 font-mono text-xs'
-                        required
-                      />
-                      <Button
-                        type='submit'
-                        size='sm'
-                        disabled={submittingKey}
-                        className='h-8 text-xs'
-                      >
-                        Đăng ký
-                      </Button>
-                    </div>
-                  </div>
-                </form>
-
-                {/* Danh sách khóa hiện có */}
-                <div className='pl-8 pt-2'>
-                  <div className='text-xs font-semibold mb-1'>Khóa công khai đã đăng ký:</div>
-                  {(snapshot?.ssh_keys.length ?? 0) === 0 ? (
-                    <div className='text-xs text-muted-foreground'>
-                      Chưa có khóa nào được đăng ký.
-                    </div>
-                  ) : (
-                    <div className='space-y-1.5'>
-                      {snapshot?.ssh_keys.map((k) => (
-                        <div
-                          key={k.id}
-                          className='flex items-center justify-between rounded border bg-card px-3 py-1.5 text-xs'
-                        >
-                          <div>
-                            <span className='font-semibold'>{k.label}</span>{' '}
-                            <span className='font-mono text-xs text-muted-foreground'>
-                              ({k.fingerprint_sha256})
-                            </span>
-                          </div>
-                          <Badge variant='outline' className='font-mono text-xs'>
-                            {k.observed_state}
-                          </Badge>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* BƯỚC 4: KIỂM TRA TRẠNG THÁI WORKSPACE */}
-              <div className='rounded-lg border p-4 space-y-2 bg-muted/20'>
-                <div className='flex items-center gap-2'>
-                  <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
-                    4
-                  </span>
-                  <span className='font-bold text-xs'>Kiểm tra trạng thái Workspace cá nhân</span>
-                </div>
-                <div className='pl-8 flex items-center gap-3 text-xs'>
-                  <span>Trạng thái:</span>
-                  <Badge
-                    variant='outline'
-                    className={`font-mono text-xs ${
-                      isWorkspaceReady
-                        ? 'bg-emerald-500/10 text-emerald-700 border-emerald-300'
-                        : 'bg-amber-500/10 text-amber-800 border-amber-300'
-                    }`}
-                  >
-                    {primaryWorkspace?.observed_state || 'NOT_PROVISIONED'}
-                  </Badge>
-                  {isWorkspaceReady ? (
-                    <span className='text-emerald-700 dark:text-emerald-300 font-semibold'>
-                      ✓ Sẵn sàng nhận kết nối trên cổng {sshPort}
-                    </span>
-                  ) : (
-                    <span className='text-amber-700 dark:text-amber-300'>
-                      Workspace chưa hoạt động. Hãy yêu cầu Quản trị viên kích hoạt.
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* BƯỚC 5: LỆNH SSH & VSCODE REMOTE */}
-              <div className='rounded-lg border p-4 space-y-3 bg-muted/20'>
-                <div className='flex items-center gap-2'>
-                  <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
-                    5
-                  </span>
-                  <span className='font-bold text-xs'>Lệnh kết nối SSH cá nhân hóa (Tạo động)</span>
-                </div>
-
-                <div className='pl-8 space-y-3'>
-                  {isWorkspaceReady ? (
-                    <>
-                      {/* Lệnh Terminal */}
-                      <div>
-                        <div className='flex items-center justify-between mb-1'>
-                          <span className='text-xs font-semibold text-muted-foreground'>
-                            Lệnh SSH Terminal:
-                          </span>
-                          <Button
-                            size='sm'
-                            variant='outline'
-                            className='h-7 text-xs'
-                            onClick={() => copyToClipboard(dynamicSshCommand, 'Lệnh SSH')}
-                          >
-                            Sao chép lệnh
-                          </Button>
-                        </div>
-                        <div className='rounded border bg-background p-2.5 font-mono text-xs text-foreground select-all'>
-                          {dynamicSshCommand}
-                        </div>
-                      </div>
-
-                      {/* Cấu hình VSCode */}
-                      <div>
-                        <div className='flex items-center justify-between mb-1'>
-                          <span className='text-xs font-semibold text-muted-foreground'>
-                            Cấu hình VSCode Remote SSH (thêm vào <code>~/.ssh/config</code>):
-                          </span>
-                          <Button
-                            size='sm'
-                            variant='outline'
-                            className='h-7 text-xs'
-                            onClick={() =>
-                              copyToClipboard(vscodeRemoteSnippet, 'Cấu hình VSCode SSH')
-                            }
-                          >
-                            Sao chép config VSCode
-                          </Button>
-                        </div>
-                        <pre className='rounded border bg-background p-2.5 font-mono text-xs text-foreground overflow-x-auto select-all'>
-                          {vscodeRemoteSnippet}
-                        </pre>
-                      </div>
-                    </>
-                  ) : (
-                    <div className='rounded-md border border-amber-300 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200'>
-                      <div className='font-semibold'>Workspace chưa sẵn sàng kết nối</div>
-                      <p className='mt-1 text-xs'>
-                        Container workspace của bạn đang ở trạng thái{' '}
-                        <strong>{primaryWorkspace?.observed_state || 'PENDING'}</strong> hoặc chưa
-                        được phân bổ cổng SSH. Vui lòng nhấn{' '}
-                        <strong>&quot;Làm mới dữ liệu&quot;</strong> hoặc liên hệ Quản trị viên
-                        LabOps để khởi chạy.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* ============================================================== */}
-        {/* TAB 3: WORKSPACE CỦA TÔI                                      */}
+        {/* TAB 2: WORKSPACE CỦA TÔI                                      */}
         {/* ============================================================== */}
         <TabsContent value='workspace' className='mt-4 space-y-4'>
           <div className='grid grid-cols-1 gap-4 lg:grid-cols-2'>

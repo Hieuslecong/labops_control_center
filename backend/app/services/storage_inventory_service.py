@@ -21,6 +21,22 @@ FORBIDDEN_ROOTS = [
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def _pool_sort_key(p: Dict[str, Any]) -> tuple:
+    """Ưu tiên phân vùng đủ điều kiện, xếp /dev/sdd rồi /dev/sdb lên đầu trước các ổ khác."""
+    eligible = bool(p.get("eligible", False))
+    dev_base = os.path.basename(str(p.get("device") or "")).lower()
+    sid = str(p.get("storage_id") or p.get("id") or "").lower()
+    if dev_base.startswith("sdd") or sid == "5ce32377-6072-4c07-a066-807e89a5d48b":
+        rank = 0
+    elif dev_base.startswith("sdb") or sid == "159bacc4-38ae-4adb-bf25-7a5091c308ca":
+        rank = 1
+    elif p.get("is_default"):
+        rank = 2
+    else:
+        rank = 3
+    return (not eligible, rank, -float(p.get("allocatable_gib") or 0.0))
+
 class StorageInventoryService:
     """Quản lý kiểm kê ổ đĩa, xác thực tính đủ điều kiện và cấp phát thư mục storage riêng cho từng thành viên."""
 
@@ -70,6 +86,7 @@ class StorageInventoryService:
                                 entry["host_id"] = resolved_host
                                 result_pools.append(entry)
                             if result_pools:
+                                result_pools.sort(key=_pool_sort_key)
                                 return result_pools
             except Exception as e:
                 logger.debug(f"Không thể kết nối Node Agent qua HTTP ({agent_url}): {e}")
@@ -163,13 +180,13 @@ class StorageInventoryService:
                             eligible = True
 
                         dev_base = os.path.basename(dev)
-                        is_default = False
+                        is_default = dev_base in ("sdd", "sdb")
                         if mount == "/mnt/HDD3" or dev_base == "sdc":
                             if dev_base == "sdc" and os.path.ismount("/mnt/HDD3"):
                                 mount = "/mnt/HDD3"
                             storage_id = "pool-hdd3"
                             label = f"Ổ đĩa Nghiên cứu AI HDD3 (/mnt/HDD3 — {cap_gib} GiB)"
-                            is_default = True
+                            is_default = False
                             is_approved = True
                         elif mount == "/" or dev_base == "sda2":
                             storage_id = "pool-root"
@@ -238,7 +255,7 @@ class StorageInventoryService:
         pools.extend(pools_by_device.values())
         pools.extend(extra_pools)
 
-        pools.sort(key=lambda p: (not p.get("eligible", False), not p.get("is_default", False), -float(p.get("allocatable_gib", 0.0))))
+        pools.sort(key=_pool_sort_key)
         return pools
 
     def get_storage_pool_by_id(self, host_id: str, storage_id: str) -> Optional[Dict[str, Any]]:

@@ -343,6 +343,7 @@ class ZaloPollingWorker:
 
                 await self._check_repo_security_alerts(bot=bot)
                 await self._check_infra_telemetry_and_incidents(bot=bot)
+                await self._check_mram_sla_and_expiry()
                 await self._flush_notification_outbox(bot=bot)
                 await self._check_daily_report_schedule(bot=bot)
                 await self._check_weekly_report_schedule(bot=bot)
@@ -665,6 +666,15 @@ class ZaloPollingWorker:
             await self.repo_alert_monitor.check_and_notify(bot)
         except Exception as exc:
             logger.warning("Lỗi kiểm tra cảnh báo kiểm duyệt repo sau clone: %s", exc)
+
+    async def _check_mram_sla_and_expiry(self) -> None:
+        try:
+            from app.services.mram_service import mram_service
+
+            await asyncio.to_thread(mram_service.expire_overdue_requests)
+            await asyncio.to_thread(mram_service.sweep_expired_ssh_access)
+        except Exception as exc:
+            logger.debug("Lỗi kiểm tra MRAM 24h SLA / SSH expiry: %s", exc)
 
     def stop(self):
         self.is_running = False

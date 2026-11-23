@@ -546,7 +546,10 @@ class TestUsernameReuseAndPersistenceConsistency(unittest.TestCase):
 
             # Run explicit upgrade
             mig_res = upgrade_database_schema(f"sqlite:///{db_path}")
-            self.assertEqual(mig_res["current_revision"], "0002_member_username_reuse")
+            self.assertIn(
+                mig_res["current_revision"],
+                {"0002_member_username_reuse", "0003_labops_ai_sre_agent_v2", "0004_labops_mram_v1"},
+            )
             self.assertFalse(mig_res["after"]["has_legacy_username_unique_index"])
             self.assertTrue(mig_res["after"]["has_active_username_partial_index"])
 

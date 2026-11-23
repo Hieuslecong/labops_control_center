@@ -9,6 +9,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLabOpsStore } from '@/features/labops/store';
 import { MemberProvisioningWizard } from './member-provisioning-wizard';
 import { SafeMemberDeleteDialog } from './safe-member-delete-dialog';
+import { CreateWebAccountDialog } from '@/features/mram/components/create-web-account-dialog';
+import { SupervisorGroupsPanel } from '@/features/mram/components/supervisor-groups-panel';
+import { LecturerOption, SupervisorGroup } from '@/features/mram/types';
+import { labopsCall } from '@/features/labops/api';
 import { LabMember, WireGuardDevice, WireGuardVpnOverview } from '@/types/labops';
 import { toast } from 'sonner';
 
@@ -182,10 +186,26 @@ export function MemberManagementView() {
   const [tempPasswordInput, setTempPasswordInput] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [deleteTargetMember, setDeleteTargetMember] = useState<LabMember | null>(null);
+  const [webAccountDialogOpen, setWebAccountDialogOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'list' | 'supervisors'>('list');
+  const [supervisorGroups, setSupervisorGroups] = useState<SupervisorGroup[]>([]);
+  const [lecturers, setLecturers] = useState<LecturerOption[]>([]);
+  const [showVpnDevices, setShowVpnDevices] = useState(false);
 
   const refresh = useCallback(async () => {
     if (DEMO_MODE) return;
     await fetchAccessMembers();
+    try {
+      const supRes = await labopsCall<{ groups: SupervisorGroup[]; lecturers: LecturerOption[] }>(
+        'admin/supervisor-groups'
+      );
+      if (supRes.ok && supRes.data) {
+        setSupervisorGroups(supRes.data.groups || []);
+        setLecturers(supRes.data.lecturers || []);
+      }
+    } catch {
+      // ignore if endpoint unavailable
+    }
     try {
       const vpnRes = await fetch('/api/labops/v2/vpn/overview', { cache: 'no-store' });
       setVpnOverview(vpnRes.ok ? await vpnRes.json() : null);
@@ -604,15 +624,45 @@ export function MemberManagementView() {
             truy cập từ Dashboard
           </p>
         </div>
-        <div className='flex gap-2'>
+        <div className='flex flex-wrap gap-2'>
           <Button variant='outline' onClick={() => void refresh()} disabled={busy || DEMO_MODE}>
             Làm mới dữ liệu
+          </Button>
+          <Button
+            variant={viewMode === 'supervisors' ? 'default' : 'outline'}
+            onClick={() => setViewMode((v) => (v === 'list' ? 'supervisors' : 'list'))}
+          >
+            {viewMode === 'supervisors'
+              ? 'Xem Danh sách Thành viên'
+              : `Nhóm theo Giảng viên (${supervisorGroups.length})`}
+          </Button>
+          <Button
+            variant='secondary'
+            onClick={() => setWebAccountDialogOpen(true)}
+            disabled={DEMO_MODE}
+          >
+            + Tạo Tài khoản Web (SV/GV)
           </Button>
           <Button onClick={() => setWizardOpen(true)} disabled={DEMO_MODE}>
             + Tạo quyền truy cập SSH
           </Button>
         </div>
       </div>
+
+      <CreateWebAccountDialog
+        open={webAccountDialogOpen}
+        lecturers={lecturers}
+        onClose={() => setWebAccountDialogOpen(false)}
+        onCreated={() => void refresh()}
+      />
+
+      {viewMode === 'supervisors' && (
+        <SupervisorGroupsPanel
+          groups={supervisorGroups}
+          lecturers={lecturers}
+          onRefresh={() => void refresh()}
+        />
+      )}
 
       {DEMO_MODE && (
         <Card>
@@ -720,8 +770,17 @@ export function MemberManagementView() {
                 {vpnOverview?.public_endpoint || 'Chưa cấu hình Endpoint'}
               </div>
             </div>
-            <div className='rounded-md border p-2.5 bg-muted/20'>
-              <div className='text-muted-foreground'>Thiết bị VPN / Kết nối</div>
+            <button
+              type='button'
+              onClick={() => setShowVpnDevices((prev) => !prev)}
+              className='rounded-md border p-2.5 bg-muted/20 text-left hover:bg-muted/40 transition cursor-pointer w-full'
+            >
+              <div className='flex items-center justify-between gap-1 text-muted-foreground'>
+                <span>Thiết bị VPN / Kết nối</span>
+                <span className='text-primary font-medium'>
+                  {showVpnDevices ? 'Thu gọn ▴' : 'Xem chi tiết ▾'}
+                </span>
+              </div>
               <div
                 className={`font-mono font-medium text-sm mt-0.5 ${
                   vpnHealthy ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'
@@ -736,7 +795,7 @@ export function MemberManagementView() {
                   ? ` · từng nối: ${vpnOverview?.ever_connected_clients}`
                   : ''}
               </div>
-            </div>
+            </button>
             <div className='rounded-md border p-2.5 bg-muted/20'>
               <div className='text-muted-foreground'>Lưu lượng Mạng VPN</div>
               <div className='font-mono font-medium text-sm mt-0.5'>
@@ -755,6 +814,88 @@ export function MemberManagementView() {
               </div>
             </div>
           </div>
+
+          {showVpnDevices && (
+            <div className='rounded-md border bg-background p-3 space-y-2 text-xs'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <span className='font-semibold'>
+                  Danh sách Thiết bị WireGuard VPN ({vpnOverview?.devices?.length ?? 0} thiết bị)
+                </span>
+                <span className='text-muted-foreground'>
+                  Thiết bị có handshake trong vòng{' '}
+                  {Math.max(1, Math.round((vpnOverview?.handshake_ttl_seconds ?? 180) / 60))} phút
+                  được tính là ĐANG ONLINE
+                </span>
+              </div>
+              {!vpnOverview?.devices || vpnOverview.devices.length === 0 ? (
+                <div className='text-muted-foreground py-2'>
+                  Chưa có danh sách thiết bị từ wg-easy.
+                </div>
+              ) : (
+                <div className='overflow-x-auto'>
+                  <table className='w-full text-xs'>
+                    <thead>
+                      <tr className='border-b text-left text-muted-foreground'>
+                        <th className='py-1.5 pr-3'>Trạng thái</th>
+                        <th className='py-1.5 pr-3'>Tên thiết bị (wg-easy peer)</th>
+                        <th className='py-1.5 pr-3'>VPN IP</th>
+                        <th className='py-1.5 pr-3'>Handshake gần nhất</th>
+                        <th className='py-1.5 text-right'>Lưu lượng (↓ RX / ↑ TX)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vpnOverview.devices
+                        .toSorted((a, b) => {
+                          if (a.is_online !== b.is_online) return a.is_online ? -1 : 1;
+                          const ah = a.last_handshake ? 1 : 0;
+                          const bh = b.last_handshake ? 1 : 0;
+                          if (ah !== bh) return bh - ah;
+                          return a.name.localeCompare(b.name);
+                        })
+                        .map((dev) => {
+                          const ageMin =
+                            dev.handshake_age_seconds != null
+                              ? Math.floor(dev.handshake_age_seconds / 60)
+                              : null;
+                          return (
+                            <tr key={dev.id} className='border-b last:border-0'>
+                              <td className='py-1.5 pr-3'>
+                                {dev.is_online ? (
+                                  <Badge className='bg-emerald-600 text-white text-xs'>
+                                    ĐANG ONLINE
+                                  </Badge>
+                                ) : dev.last_handshake ? (
+                                  <Badge variant='outline' className='text-xs text-amber-700'>
+                                    Từng kết nối (Offline)
+                                  </Badge>
+                                ) : (
+                                  <Badge
+                                    variant='outline'
+                                    className='text-xs text-muted-foreground'
+                                  >
+                                    Chưa kết nối
+                                  </Badge>
+                                )}
+                              </td>
+                              <td className='py-1.5 pr-3 font-medium font-mono'>{dev.name}</td>
+                              <td className='py-1.5 pr-3 font-mono'>{dev.vpn_ip || '—'}</td>
+                              <td className='py-1.5 pr-3 text-muted-foreground'>
+                                {dev.last_handshake
+                                  ? `${ageMin !== null ? (ageMin < 1 ? 'vừa xong' : `${ageMin} phút trước`) : ''} (${new Date(dev.last_handshake).toLocaleString('vi-VN')})`
+                                  : 'Chưa từng handshake'}
+                              </td>
+                              <td className='py-1.5 text-right font-mono'>
+                                ↓ {formatBytes(dev.transfer_rx)} / ↑ {formatBytes(dev.transfer_tx)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 

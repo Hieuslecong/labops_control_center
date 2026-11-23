@@ -461,6 +461,17 @@ export interface WireGuardVpnOverview {
   };
   web_ui_internal?: string;
   legacy_interface?: string;
+  devices?: Array<{
+    id: string;
+    name: string;
+    vpn_ip: string;
+    enabled: boolean;
+    is_online: boolean;
+    handshake_age_seconds?: number | null;
+    last_handshake?: string | null;
+    transfer_rx: number;
+    transfer_tx: number;
+  }>;
 }
 
 export interface WireGuardProfile {

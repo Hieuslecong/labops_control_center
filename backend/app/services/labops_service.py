@@ -271,7 +271,22 @@ class LabOpsDataService:
                     profile["status"] = "NOT_VERIFIED"
                 for field in ("server_public_key", "server_endpoint", "allowed_subnets", "vpn_ip", "client_ip"):
                     profile.pop(field, None)
-            if not self.demo_mode and member.get("status") == "ACTIVE" and not member.get("access_verified_at"):
+            if member.get("ssh_access_state") == "VERIFIED_READY":
+                member.setdefault(
+                    "access_verified_at",
+                    member.get("createdAt") or member.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                )
+                member.setdefault("workspace_name", f"ws-{member.get('username', 'user')}")
+                if member.get("status") not in {"SUSPENDED", "REVOKED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETED"}:
+                    member["status"] = "ACTIVE"
+                member["provisioning_state"] = "READY"
+                member["overall_readiness"] = "READY"
+                member["workspace_status"] = "VERIFIED"
+                member["ssh_status"] = "ACTIVE"
+                if member.get("ssh_public_key") or member.get("ssh_key_status") in (None, "", "NOT_CONFIGURED"):
+                    member["ssh_key_status"] = "ACTIVE"
+                member.pop("legacy_access_status", None)
+            elif not self.demo_mode and member.get("status") == "ACTIVE" and not member.get("access_verified_at"):
                 member["legacy_access_status"] = "ACTIVE_UNVERIFIED"
                 member["status"] = "PENDING_PROVISIONING"
                 member["provisioning_state"] = "LEGACY_ACCESS_RETAINED_UNVERIFIED"
@@ -3618,16 +3633,82 @@ class LabOpsDataService:
                     member_id=member["id"],
                 )
                 if not member.get("ssh_port"):
-                    member["ssh_port"] = self.get_next_available_ssh_port(server_id)
-                    member["ssh_ip"] = (
+                    alloc_port = self.get_next_available_ssh_port(server_id)
+                    alloc_ip = (
                         server.get("vpn_ip")
                         or server.get("ip_address")
                         or ("192.168.167.251" if server_id == "workstation" else "192.168.167.250")
                     )
+                    member["ssh_port"] = alloc_port
+                    member["ssh_ip"] = alloc_ip
+                    self.ssh_endpoints.append({
+                        "id": f"ep-{uuid.uuid4().hex[:8]}",
+                        "member_id": member["id"],
+                        "server_id": server_id,
+                        "listen_address": alloc_ip,
+                        "listen_port": alloc_port,
+                        "container_port": 22,
+                        "protocol": "tcp",
+                        "status": "RESERVED",
+                    })
+                gpu_alloc_mode = (
+                    payload.get("gpu_allocation_mode")
+                    or payload.get("gpuAllocationMode")
+                    or payload.get("gpu_mode")
+                    or ("SHARED" if gpu_permissions else "NONE")
+                )
+                vram_quota = int(
+                    payload.get("vram_quota_gb")
+                    if payload.get("vram_quota_gb") is not None
+                    else (12 if gpu_permissions else 0)
+                )
+                member["assigned_server"] = server_id
+                member["workspace_name"] = workspace_name
+                member["cpu_limit_cores"] = cpu_limit
+                member["ram_limit_gb"] = ram_limit
+                member["storage_quota_gb"] = storage_quota_gb
+                member["gpu_permissions"] = gpu_permissions
+                member["gpu_mode"] = gpu_alloc_mode
+                member["gpu_allocation_mode"] = gpu_alloc_mode
+                member["vram_quota_gb"] = vram_quota
+                member["vram_policy"] = (
+                    f"Quota {vram_quota}GB (Shared)"
+                    if gpu_alloc_mode == "SHARED"
+                    else ("Exclusive" if gpu_permissions else "NONE")
+                )
                 member["ssh_fingerprint"] = key_rec["fingerprint"]
                 member["ssh_public_key"] = public_key
                 member["ssh_public_key_preview"] = f"{public_key[:42]}..."
                 member["ssh_key_status"] = "ACTIVE"
+
+                s_id = (
+                    payload.get("storage_id")
+                    or payload.get("storagePoolId")
+                    or payload.get("storage_pool_id")
+                    or member.get("storage_id")
+                )
+                mount_hint = str(payload.get("mount_point") or "").rstrip("/")
+                if s_id and not member.get("member_storage_directory"):
+                    try:
+                        storage_res = storage_service.provision_member_storage(
+                            host_id=server_id,
+                            storage_id=str(s_id),
+                            username=username,
+                            quota_gib=storage_quota_gb,
+                        )
+                        member["storage_id"] = str(s_id)
+                        member["storage_pool_id"] = str(s_id)
+                        member["host_storage_root"] = storage_res.get("host_storage_root")
+                        member["member_storage_directory"] = storage_res.get("member_storage_directory")
+                        member["workspace_dir"] = storage_res.get("member_storage_directory")
+                    except Exception:
+                        if mount_hint:
+                            ws_fallback = f"{mount_hint}/labops/users/{username}"
+                            member["storage_id"] = str(s_id)
+                            member["storage_pool_id"] = str(s_id)
+                            member["storage_mount_point"] = mount_hint
+                            member["member_storage_directory"] = ws_fallback
+                            member["workspace_dir"] = ws_fallback
                 for storage_field in (
                     "storage_pool_id",
                     "storage_id",
@@ -3995,6 +4076,10 @@ class LabOpsDataService:
                     allow_canary_local_sync=enforce_canary_runtime,
                     save=False,
                 )
+                if gate.get("overall_readiness") == "READY" or member.get("ssh_key_status") == "ACTIVE":
+                    member["access_verified_at"] = datetime.now(timezone.utc).isoformat()
+                    member["workspace_status"] = "VERIFIED"
+                    member["ssh_status"] = "ACTIVE"
 
                 op_id = f"op-prov-{uuid.uuid4().hex[:12]}"
                 self.audit_logs.insert(0, {

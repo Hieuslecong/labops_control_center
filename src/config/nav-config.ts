@@ -61,6 +61,14 @@ export const adminNavGroups: NavGroup[] = [
         items: []
       },
       {
+        title: 'Duyệt Cấp phát SSH',
+        url: '/dashboard/ssh-requests',
+        icon: 'key',
+        shortcut: ['d', 's'],
+        roles: ['ADMIN'],
+        items: []
+      },
+      {
         title: 'Kiểm duyệt Kho mã',
         url: '/dashboard/security',
         icon: 'shield',
@@ -132,10 +140,10 @@ export const adminNavGroups: NavGroup[] = [
 
 export const researcherNavGroups: NavGroup[] = [
   {
-    label: 'Không gian Nghiên cứu viên',
+    label: 'Cổng Thành viên',
     items: [
       {
-        title: 'Tổng quan của tôi',
+        title: 'Trang chủ của tôi',
         url: '/dashboard/researcher',
         icon: 'dashboard',
         shortcut: ['t', 'q'],
@@ -143,26 +151,26 @@ export const researcherNavGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Kết nối & Bảo mật',
-        url: '/dashboard/researcher/connect',
+        title: 'Đăng ký cấp SSH',
+        url: '/dashboard/researcher/ssh-request',
         icon: 'key',
-        shortcut: ['k', 'n'],
+        shortcut: ['x', 's'],
         roles: ['RESEARCHER'],
         items: []
       },
       {
-        title: 'Workspace của tôi',
-        url: '/dashboard/researcher/workspace',
-        icon: 'database',
-        shortcut: ['w', 's'],
+        title: 'Đơn đã nộp & Trạng thái',
+        url: '/dashboard/researcher/requests',
+        icon: 'history',
+        shortcut: ['d', 'n'],
         roles: ['RESEARCHER'],
         items: []
       },
       {
-        title: 'GPU & Tác vụ của tôi',
-        url: '/dashboard/researcher/jobs',
-        icon: 'job',
-        shortcut: ['g', 'p'],
+        title: 'Thông tin Kết nối SSH',
+        url: '/dashboard/researcher/access',
+        icon: 'shield',
+        shortcut: ['b', 'g'],
         roles: ['RESEARCHER'],
         items: []
       }

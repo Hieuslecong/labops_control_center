@@ -20,7 +20,8 @@ from app.api.v1.endpoints import (
     processes,
     v2_platform,
     repositories,
-    ai_assistant
+    ai_assistant,
+    mram
 )
 
 api_router = APIRouter()
@@ -44,6 +45,7 @@ api_router.include_router(monitoring.router, dependencies=[Depends(require_user)
 api_router.include_router(workspaces.router, dependencies=[Depends(require_admin)], prefix="/workspaces", tags=["Workspaces"])
 api_router.include_router(processes.router, dependencies=[Depends(require_user)], prefix="/processes", tags=["Processes"])
 api_router.include_router(repositories.router, dependencies=[Depends(require_user)], prefix="/repositories", tags=["Repositories"])
+api_router.include_router(mram.router, tags=["MRAM"])
 
 
 api_router.include_router(v2_platform.router, prefix="/v2", tags=["V2 Platform"])

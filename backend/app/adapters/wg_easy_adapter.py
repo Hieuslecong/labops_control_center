@@ -507,6 +507,7 @@ class WgEasyAdapter(VPNProvider):
                 "tunnel_traffic_verified": state_flags["VPN_DATA_PATH_VERIFIED"],
                 "total_rx_bytes": total_rx,
                 "total_tx_bytes": total_tx,
+                "devices": clients,
                 "version": "15.x",
                 "web_ui_url": self.base_url,
                 "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -538,6 +539,7 @@ class WgEasyAdapter(VPNProvider):
                 "handshake_ttl_seconds": self.online_ttl_seconds,
                 "total_rx_bytes": 0,
                 "total_tx_bytes": 0,
+                "devices": [],
                 "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
 

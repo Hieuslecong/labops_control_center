@@ -429,3 +429,222 @@ class SchedulerLeaseRecord(Base):
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+# ------------------------------------------------------------------
+# LabOps MRAM v1.0 Models (Member & Research Access Management)
+# ------------------------------------------------------------------
+
+
+class MemberWebCredentialRecord(Base):
+    __tablename__ = "member_web_credentials"
+
+    member_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    hash_algorithm: Mapped[str] = mapped_column(String(32), nullable=False, default="scrypt")
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class MemberProfileRecord(Base):
+    __tablename__ = "member_profiles"
+
+    member_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    full_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    member_code: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    member_category: Mapped[str] = mapped_column(String(32), nullable=False, default="STUDENT", index=True)
+    department_class: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    primary_supervisor_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    direct_manager_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    web_account_status: Mapped[str] = mapped_column(String(32), nullable=False, default="WEB_ACTIVE", index=True)
+    ssh_access_state: Mapped[str] = mapped_column(String(48), nullable=False, default="NONE", index=True)
+    ssh_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    verified_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class SupervisorAssignmentRecord(Base):
+    __tablename__ = "supervisor_assignments"
+    __table_args__ = (
+        Index("ix_sup_assign_student_active", "student_member_id", "is_active"),
+        Index("ix_sup_assign_sup_active", "supervisor_member_id", "is_active"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    student_member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    supervisor_member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    direct_manager_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    assignment_role: Mapped[str] = mapped_column(String(32), nullable=False, default="PRIMARY")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    assigned_by: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    change_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    effective_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServerAccessRequestRecord(Base):
+    __tablename__ = "server_access_requests"
+    __table_args__ = (
+        Index("ix_srv_req_member_status", "member_id", "status"),
+        Index("ix_srv_req_status_exp", "status", "review_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_type: Mapped[str] = mapped_column(String(32), nullable=False, default="INITIAL")
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    member_category: Mapped[str] = mapped_column(String(32), nullable=False, default="STUDENT")
+    primary_supervisor_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    direct_manager_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    project_title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    registration_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    ssh_purpose: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    expected_tasks: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    requested_duration_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gpu_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    gpu_justification: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="mram-v1.0")
+    status: Mapped[str] = mapped_column(String(48), nullable=False, default="PENDING_APPROVAL", index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    review_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    parent_request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class RequestResourceRecommendationRecord(Base):
+    __tablename__ = "request_resource_recommendations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    recommended_host_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    recommended_pool_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    recommended_filesystem_uuid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    recommended_mount_point: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cpu_cores: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    ram_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
+    storage_quota_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    gpu_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
+    gpu_uuid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    duration_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    manual_review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    rationale_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class RequestApprovalRecord(Base):
+    __tablename__ = "request_approvals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    approver_username: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    approved_config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    config_hash: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="mram-v1.0")
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class ApprovalInvitationRecord(Base):
+    __tablename__ = "approval_invitations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    admin_username: Mapped[str] = mapped_column(String(64), nullable=False, default="admin")
+    admin_zalo_id: Mapped[str] = mapped_column(String(128), nullable=False, default="0c00ed813eccd7928edd")
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CapacityReservationRecord(Base):
+    __tablename__ = "capacity_reservations"
+    __table_args__ = (
+        Index("ix_cap_res_host_pool_status", "host_id", "pool_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    approval_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    host_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    pool_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    filesystem_uuid: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    mount_point: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    storage_quota_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    cpu_cores: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    ram_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
+    gpu_uuid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    gpu_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="RESERVED", index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class ProvisioningOperationRecord(Base):
+    __tablename__ = "provisioning_operations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    approval_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    approval_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    config_hash: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(48), nullable=False, default="QUEUED", index=True)
+    steps_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    verification_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class CredentialClaimRecord(Base):
+    __tablename__ = "credential_claims"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    provisioning_op_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    claim_type: Mapped[str] = mapped_column(String(48), nullable=False, default="SSH_TEMP_PASSWORD")
+    claimed_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_up_jti: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="CLAIMED")
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class PolicyAcceptanceRecord(Base):
+    __tablename__ = "policy_acceptances"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="mram-v1.0")
+    policy_hash: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    client_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")

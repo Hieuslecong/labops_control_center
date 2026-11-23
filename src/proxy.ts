@@ -52,6 +52,25 @@ export default function middleware(request: NextRequest, event: NextFetchEvent) 
     secret
   );
 
+  // Luôn xác thực hiệu lực 1 lần của liên kết Zalo trước khi cho vào màn hình duyệt đơn
+  const zaloReviewMatch = pathname.match(/^\/dashboard\/ssh-requests\/([^/]+)\/review$/);
+  const inviteParam = request.nextUrl.searchParams.get('invite');
+  const justVerified = request.nextUrl.searchParams.get('verified') === '1';
+  if (zaloReviewMatch && inviteParam && !justVerified) {
+    const proto =
+      request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() ||
+      request.nextUrl.protocol.replace(/:$/, '') ||
+      'http';
+    const host =
+      request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() ||
+      request.headers.get('host')?.trim() ||
+      request.nextUrl.host;
+    const inviteExchangeUrl = new URL('/api/auth/zalo-invite', `${proto}://${host}`);
+    inviteExchangeUrl.searchParams.set('request_id', zaloReviewMatch[1]);
+    inviteExchangeUrl.searchParams.set('invite', inviteParam);
+    return NextResponse.redirect(inviteExchangeUrl);
+  }
+
   if (verifiedSession) {
     if (
       verifiedSession.role === 'RESEARCHER' &&

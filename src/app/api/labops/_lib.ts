@@ -80,7 +80,6 @@ export function isAdminRequiredLabOpsPath(method: string, segments: string[]): b
   const m = method.toUpperCase();
   const p = segments.join('/').replace(/^\/+|\/+$/g, '');
 
-  if (p === 'auth/step-up') return true;
   if (p === 'users' || p.startsWith('users/')) return true;
   if (p.startsWith('admin/') || p.startsWith('ssh/') || p.startsWith('access/')) return true;
   if (
@@ -223,14 +222,17 @@ export async function proxyLabOps(
   try {
     const body = method === 'GET' || method === 'HEAD' ? undefined : await request.text();
     const idem = request.headers.get('idempotency-key');
-    const stepUpToken = request.headers.get('x-labops-step-up-token');
+    const stepUpToken =
+      request.headers.get('x-step-up-token') || request.headers.get('x-labops-step-up-token');
     const response = await fetch(`${apiBase}/${path}${search}`, {
       method,
       cache: 'no-store',
       headers: {
         Authorization: `Bearer ${bearerToken}`,
         ...(idem ? { 'Idempotency-Key': idem } : {}),
-        ...(stepUpToken ? { 'X-LabOps-Step-Up-Token': stepUpToken } : {}),
+        ...(stepUpToken
+          ? { 'X-Step-Up-Token': stepUpToken, 'X-LabOps-Step-Up-Token': stepUpToken }
+          : {}),
         ...(body ? { 'Content-Type': 'application/json' } : {})
       },
       ...(body ? { body } : {})

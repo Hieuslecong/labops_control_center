@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import {
   IconCpu,
   IconShieldCheck,
@@ -182,6 +183,18 @@ export default function SignInViewPage({ error: initialError }: SignInViewPagePr
                 </>
               )}
             </button>
+
+            <div className='pt-2 border-t border-slate-200 dark:border-zinc-800 space-y-2 text-center'>
+              <p className='text-xs text-slate-500 dark:text-slate-400'>
+                Thành viên mới chưa có tài khoản cổng Web?
+              </p>
+              <Link
+                href='/auth/sign-up'
+                className='w-full py-2.5 px-4 rounded-lg border border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-700 text-slate-800 dark:text-slate-100 font-medium text-sm flex items-center justify-center gap-2 transition'
+              >
+                <span>Đăng ký tài khoản</span>
+              </Link>
+            </div>
           </form>
         </div>
       </div>

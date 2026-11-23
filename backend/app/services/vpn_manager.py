@@ -94,6 +94,7 @@ class VPNManager:
             "handshake_ttl_seconds": wg_easy_status.get("handshake_ttl_seconds", 180),
             "total_rx_bytes": wg_easy_status.get("total_rx_bytes", 0),
             "total_tx_bytes": wg_easy_status.get("total_tx_bytes", 0),
+            "devices": wg_easy_status.get("devices", []),
             "server_public_key": wg_easy_status.get("server_public_key") or "",
             "route_policy": "PER_HOST_DYNAMIC",
         }

@@ -4076,7 +4076,7 @@ class LabOpsDataService:
                     allow_canary_local_sync=enforce_canary_runtime,
                     save=False,
                 )
-                if gate.get("overall_readiness") == "READY" or member.get("ssh_key_status") == "ACTIVE":
+                if gate.get("overall_readiness") == "READY":
                     member["access_verified_at"] = datetime.now(timezone.utc).isoformat()
                     member["workspace_status"] = "VERIFIED"
                     member["ssh_status"] = "ACTIVE"

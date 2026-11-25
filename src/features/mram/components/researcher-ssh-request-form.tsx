@@ -36,13 +36,67 @@ const ACADEMIC_TITLES = new Set([
   'THS'
 ]);
 
+const VN_TONE_MAP: Record<string, string> = {
+  à: 'òa',
+  á: 'óa',
+  ả: 'ỏa',
+  ã: 'õa',
+  ạ: 'ọa',
+  À: 'Òa',
+  Á: 'Óa',
+  Ả: 'Ỏa',
+  Ã: 'Õa',
+  Ạ: 'Ọa',
+  è: 'òe',
+  é: 'óe',
+  ẻ: 'ỏe',
+  ẽ: 'õe',
+  ẹ: 'ọe',
+  È: 'Òe',
+  É: 'Óe',
+  Ẻ: 'Ỏe',
+  Ẽ: 'Õe',
+  Ẹ: 'Ọe',
+  ỳ: 'ùy',
+  ý: 'úy',
+  ỷ: 'ủy',
+  ỹ: 'ũy',
+  ỵ: 'ụy',
+  Ỳ: 'Ùy',
+  Ý: 'Úy',
+  Ỷ: 'Ủy',
+  Ỹ: 'Ũy',
+  Ỵ: 'Ụy'
+};
+
+function normalizeVietnameseToneWord(word: string): string {
+  const nfc = word.normalize('NFC');
+  if (/^[qQ]/.test(nfc)) return nfc;
+  return nfc
+    .replace(/([oO])([àáảãạÀÁẢÃẠ])$/, (_, o: string, v: string) => {
+      const mapped = VN_TONE_MAP[v] || o + v;
+      return o === 'O' ? mapped.charAt(0).toUpperCase() + mapped.slice(1) : mapped.toLowerCase();
+    })
+    .replace(/([oO])([èéẻẽẹÈÉẺẼẸ])$/, (_, o: string, v: string) => {
+      const mapped = VN_TONE_MAP[v] || o + v;
+      return o === 'O' ? mapped.charAt(0).toUpperCase() + mapped.slice(1) : mapped.toLowerCase();
+    })
+    .replace(/([uU])([ỳýỷỹỵỲÝỶỸỴ])$/, (_, u: string, v: string) => {
+      const mapped = VN_TONE_MAP[v] || u + v;
+      return u === 'U' ? mapped.charAt(0).toUpperCase() + mapped.slice(1) : mapped.toLowerCase();
+    });
+}
+
 function formatSupervisorTitleCase(raw: string): string {
-  const cleaned = raw.trim().replace(/\s+/g, ' ');
+  const cleaned = raw.normalize('NFC').trim().replace(/\s+/g, ' ');
   if (!cleaned) return '';
   return cleaned
     .split(' ')
     .filter((w) => !ACADEMIC_TITLES.has(w.toUpperCase()))
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .map((w) => {
+      const norm = normalizeVietnameseToneWord(w);
+      return norm.charAt(0).toUpperCase() + norm.slice(1).toLowerCase();
+    })
     .join(' ');
 }
 

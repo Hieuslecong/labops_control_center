@@ -92,6 +92,7 @@ export type MemberRole =
   | 'ADMIN';
 export type MemberStatus =
   | 'CREATED'
+  | 'WEB_ACTIVE'
   | 'PROVISIONING'
   | 'PENDING_PROVISIONING'
   | 'VERIFYING'
@@ -571,6 +572,10 @@ export interface LabMember {
   tempPasswordExpiresAt?: string;
   activationStatus?: string;
   overallReadiness?: string;
+  sshAccessState?: string;
+  linkedWebMemberId?: string | null;
+  linkedWebUsername?: string | null;
+  isWebRegistered?: boolean;
   sshKeyEnrollmentMode?: string;
   sshKeyPassphraseMode?: string;
   workspaceDelegationStatus?: string;

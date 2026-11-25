@@ -225,6 +225,38 @@ class ZaloIdentityRBACService:
             "verification": self.verify_daily_brief_recipient(target_id),
         }
 
+    def ensure_configured_approver_verified(self, target_zalo_id: Optional[str] = None) -> Dict[str, Any]:
+        """Auto-sync configured MRAM_APPROVER_ZALO_ID / authorized admin into ZaloIdentityLinkRecord when a 1-1 DM chat exists."""
+        target_id = str(target_zalo_id or os.getenv("MRAM_APPROVER_ZALO_ID") or "").strip()
+        cur = self.verify_daily_brief_recipient(target_id)
+        if cur.get("verified") or not target_id or target_id == "*":
+            return cur
+
+        configured_approver = os.getenv("MRAM_APPROVER_ZALO_ID", "").strip()
+        auth_users = {
+            u.strip()
+            for u in os.getenv("ZALO_AUTHORIZED_USERS", "").split(",")
+            if u.strip() and u.strip() != "*"
+        }
+        if target_id != configured_approver and target_id not in auth_users:
+            return cur
+
+        cfg = self.get_daily_brief_config()
+        obs = (cfg.get("observed_private_chats") or {}).get(target_id)
+        if not isinstance(obs, dict) or str(obs.get("chat_id") or "").strip() != target_id:
+            return cur
+
+        disp = str(obs.get("observed_display_name") or cfg.get("target_display_name") or DAILY_BRIEF_TARGET_DISPLAY_NAME).strip()
+        self.admin_bind_identity(
+            zalo_user_id=target_id,
+            username="admin",
+            member_id="mem-admin",
+            role="ADMIN",
+            display_name=disp,
+            admin_actor="system-approver-sync",
+        )
+        return self.verify_daily_brief_recipient(target_id)
+
     def generate_link_code(
         self,
         *,

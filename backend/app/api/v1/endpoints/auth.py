@@ -45,6 +45,13 @@ class ChangeWebPasswordRequest(BaseModel):
     new_password: str
 
 
+class RecoverWebPasswordRequest(BaseModel):
+    username: str
+    member_code: str
+    email: str
+    new_password: str
+
+
 class RegisterWebAccountRequest(BaseModel):
     username: str
     password: str
@@ -308,6 +315,36 @@ async def change_web_password(payload: ChangeWebPasswordRequest, p: Principal = 
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/recover-web-password")
+async def recover_web_password(payload: RecoverWebPasswordRequest, request: Request) -> Dict[str, Any]:
+    """Allow students/researchers to reset a forgotten Web portal password (strictly forbidden for ADMIN)."""
+    uname = payload.username.strip().lower()
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"recover:{uname}"
+    _prune_and_check_rate(client_ip, rate_key)
+
+    try:
+        result = mram_service.recover_member_web_password(
+            username=uname,
+            member_code=payload.member_code,
+            email=payload.email,
+            new_password=payload.new_password,
+        )
+    except MramValidationError as exc:
+        if exc.http_status == 401:
+            _record_failure(client_ip, rate_key)
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+
+    _clear_failures(client_ip, rate_key)
+    if uname:
+        get_revocation_store().revoke_subject(
+            uname,
+            revoked_before=int(time.time()) - 1,
+            reason="web_password_recovered",
+        )
+    return result
 
 
 @router.post("/step-up")

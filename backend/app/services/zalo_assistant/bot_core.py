@@ -65,6 +65,7 @@ class ZaloBotEngine:
         "/ack": "Xác nhận đang xử lý sự cố (/ack <incident_id>)",
         "/report": "Báo cáo tổng hợp (/report today hoặc /report week)",
         "/security": "Tổng hợp an ninh kho mã & cảnh báo (Chỉ Admin)",
+        "/requests": "Danh sách đơn xin cấp SSH đang chờ phê duyệt (Chỉ Admin)",
         "/quota": "Kiểm tra hạn mức tin nhắn nội bộ Zalo & AI requests",
         "/link": "Liên kết tài khoản Zalo với LabOps (/link <MÃ>)",
         "/ask": "Điều tra hạ tầng bằng AI Agent (/ask <câu hỏi>)",
@@ -374,6 +375,8 @@ class ZaloBotEngine:
             "/ack",
             "/report",
             "/security",
+            "/requests",
+            "/ssh-requests",
             "/quota",
         }
         is_ask = cmd == "/ask" or cmd not in known_cmds
@@ -418,6 +421,16 @@ class ZaloBotEngine:
                     "command": "/security",
                 }
             reply = self._cmd_security()
+        elif cmd in ("/requests", "/ssh-requests"):
+            if not principal.is_admin:
+                return {
+                    "success": False,
+                    "error": "FORBIDDEN",
+                    "suppress_outbound": src != "zalo",
+                    "reply": "⛔ Lệnh /requests chỉ dành cho Quản trị viên (Admin).",
+                    "command": "/requests",
+                }
+            reply = self._cmd_requests(principal)
         elif cmd == "/report":
             wants_generate = any(w in arg.lower() for w in ["tạo", "new", "gen", "generate"])
             if wants_generate and not principal.is_admin:
@@ -511,7 +524,7 @@ class ZaloBotEngine:
     def _cmd_help(self, principal: ZaloPrincipal) -> str:
         lines = [f"📖 DANH SÁCH LỆNH LABOPS AI SRE v2 ({principal.role}):"]
         for c, desc in self.COMMANDS.items():
-            if c == "/security" and not principal.is_admin:
+            if c in {"/security", "/requests"} and not principal.is_admin:
                 continue
             lines.append(f"• {c}: {desc}")
         lines.append("\nQuyền dữ liệu được kiểm soát chặt tại backend theo tài khoản LabOps.")
@@ -621,10 +634,37 @@ class ZaloBotEngine:
             )
         return "\n".join(lines)
 
-    def _cmd_allocations(self, principal: ZaloPrincipal) -> str:
-        res = self.tool_registry.execute_tool("get_gpu_metrics", {}, principal, source="zalo")
+    def _cmd_allocations(self, principal: Optional[ZaloPrincipal] = None) -> str:
+        eff_principal = principal or ZaloPrincipal("admin", "admin", "", "ADMIN", "Admin", True, True)
+        try:
+            from app.services import labops_service as core_mod
+
+            groups = core_mod.service.get_gpu_allocations_by_device()
+        except Exception:
+            groups = []
+
+        if groups:
+            lines = ["📋 THỐNG KÊ TÀI KHOẢN THEO TỪNG GPU:", "━━━━━━━━━━━━━━━━━━━━"]
+            for grp in groups:
+                label = grp.get("gpu_label") or grp.get("gpu_id") or "GPU"
+                model = grp.get("model") or "NVIDIA GPU"
+                st = "ONLINE" if grp.get("is_online") else "OFFLINE/UNKNOWN"
+                lines.append(f"\n🖥️ {label} • {model} ({st})")
+                accs = grp.get("accounts") or []
+                if not eff_principal.is_admin:
+                    accs = [a for a in accs if a.get("username") == eff_principal.username]
+                if not accs:
+                    lines.append("  • Không có tài khoản được cấp phát.")
+                    continue
+                for a in accs:
+                    lines.append(
+                        f"  • @{a.get('username')} — {a.get('allocation_mode') or a.get('mode') or 'SHARED'} | Quota {a.get('vram_quota_gb')}GB | {a.get('status')}"
+                    )
+            return "\n".join(lines)
+
+        res = self.tool_registry.execute_tool("get_gpu_metrics", {}, eff_principal, source="zalo")
         gpus = res.get("gpus") or []
-        lines = ["📋 PHÂN BỔ GPU THEO QUYỀN TRUY CẬP:", "━━━━━━━━━━━━━━━━━━━━"]
+        lines = ["📋 THỐNG KÊ TÀI KHOẢN THEO TỪNG GPU:", "━━━━━━━━━━━━━━━━━━━━"]
         if not gpus:
             lines.append("• Chưa có thiết bị GPU nào.")
             return "\n".join(lines)
@@ -701,6 +741,31 @@ class ZaloBotEngine:
         if not open_sec:
             lines.append("• Hiện không có sự cố Repository Guard đang mở.")
         lines.append(f"\nSự kiện Audit gần đây: {len(res.get('audit_events') or [])} mục.")
+        return "\n".join(lines)
+
+    def _cmd_requests(self, principal: ZaloPrincipal) -> str:
+        res = self.tool_registry.execute_tool("get_pending_ssh_requests", {}, principal, source="zalo")
+        if res.get("error"):
+            return f"⛔ Không thể lấy danh sách đơn chờ duyệt: {res.get('error')}"
+        p_reqs = res.get("pending_requests") or []
+        w_sum = res.get("web_accounts_summary") or {}
+        if not p_reqs:
+            return (
+                "📋 ĐƠN XIN CẤP TÀI KHOẢN SSH CHỜ DUYỆT (0 đơn):\n"
+                f"• Hiện không có đơn nào đang chờ phê duyệt (Tổng TK Web: {w_sum.get('total', 0)})."
+            )
+        lines = [
+            f"📋 ĐƠN XIN CẤP TÀI KHOẢN SSH ĐANG CHỜ DUYỆT ({len(p_reqs)} đơn):",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for idx, item in enumerate(p_reqs[:10], 1):
+            lines.append(
+                f"{idx}. {item.get('full_name')} (@{item.get('username')}, mã {item.get('member_code') or 'N/A'})\n"
+                f"   • Mã đơn: {item.get('request_id')} | GVHD: {item.get('supervisor_name')}\n"
+                f"   • Đề tài: {item.get('project_title')}\n"
+                f"   • Đề xuất: {item.get('recommended_spec')} | SLA còn ~{item.get('remaining_sla_hours')}h"
+            )
+        lines.append("\nVào /dashboard/ssh-requests hoặc dùng nút 'Gửi Zalo Admin' để nhận liên kết duyệt 1 lần.")
         return "\n".join(lines)
 
     def _cmd_report(self, arg: str, principal: ZaloPrincipal) -> str:

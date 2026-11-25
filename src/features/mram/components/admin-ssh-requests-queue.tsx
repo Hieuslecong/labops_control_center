@@ -68,6 +68,7 @@ export function AdminSshRequestsQueue() {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [sweeping, setSweeping] = useState(false);
+  const [notifyingId, setNotifyingId] = useState<string | null>(null);
 
   const loadQueue = useCallback(async () => {
     setLoading(true);
@@ -102,6 +103,32 @@ export function AdminSshRequestsQueue() {
       void loadQueue();
     } else {
       toast.error('Lỗi rà soát SLA', { description: res.error });
+    }
+  };
+
+  const handleNotifyZalo = async (requestId: string) => {
+    setNotifyingId(requestId);
+    const res = await labopsCall<{
+      request_id: string;
+      zalo_notification: {
+        delivery_status: string;
+        delivery_detail: string;
+      };
+    }>(`admin/ssh-requests/${encodeURIComponent(requestId)}/notify-zalo`, { method: 'POST' });
+    setNotifyingId(null);
+    if (!res.ok || !res.data) {
+      toast.error('Không thể gửi thông báo Zalo Admin', { description: res.error });
+      return;
+    }
+    const zn = res.data.zalo_notification;
+    if (zn.delivery_status === 'SENT' || zn.delivery_status === 'QUEUED_FOR_VERIFIED_ADMIN') {
+      toast.success(`Đã gửi thông báo Zalo (${zn.delivery_status})`, {
+        description: zn.delivery_detail
+      });
+    } else {
+      toast.warning(`Trạng thái gửi Zalo: ${zn.delivery_status}`, {
+        description: zn.delivery_detail
+      });
     }
   };
 
@@ -180,6 +207,16 @@ export function AdminSshRequestsQueue() {
                       <Badge variant='outline' className='font-mono text-xs text-amber-700'>
                         SLA còn: {formatRemainingSla(r.remaining_review_seconds)}
                       </Badge>
+                    )}
+                    {(r.status === 'PENDING_APPROVAL' || r.status === 'NEED_INFO') && (
+                      <Button
+                        size='sm'
+                        variant='outline'
+                        disabled={notifyingId === r.id}
+                        onClick={() => void handleNotifyZalo(r.id)}
+                      >
+                        {notifyingId === r.id ? 'Đang gửi Zalo...' : 'Gửi Zalo Admin'}
+                      </Button>
                     )}
                     {(() => {
                       const actionMeta = getQueueActionMeta(r.status);

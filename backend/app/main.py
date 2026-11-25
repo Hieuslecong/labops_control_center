@@ -468,6 +468,9 @@ class LabOpsRequestHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"detail": f"Lỗi khi đóng gói file ZIP: {e}"})
         elif path == "/api/v1/v2/vpn/overview":
+            if not principal.is_admin:
+                self._send_json(403, {"detail": "Chỉ quản trị viên mới được xem tổng quan VPN toàn hệ thống"})
+                return
             self._send_json(200, service.get_vpn_system_overview())
         elif path == "/api/v1/v2/vpn/devices":
             if not principal.is_admin:

@@ -17,6 +17,10 @@ export function hasPostCloneFindings(req: RepositoryGuardRequest): boolean {
 }
 
 export function resolveCloneStatus(req: RepositoryGuardRequest): RepositoryCloneStatus {
+  if (req.decision) {
+    const v = String(req.decision.verdict || '').toUpperCase();
+    if (v === 'APPROVED' || v === 'MANUALLY_APPROVED') return 'CLONED';
+  }
   if (req.clone_status) return req.clone_status;
   if (req.source === 'workspace_clone') return 'CLONED';
 
@@ -53,8 +57,6 @@ export function resolveCloneStatus(req: RepositoryGuardRequest): RepositoryClone
 export function resolvePostCloneReviewStatus(
   req: RepositoryGuardRequest
 ): RepositoryPostCloneReviewStatus {
-  if (req.review_status) return req.review_status;
-
   if (req.decision) {
     const v = String(req.decision.verdict || '').toUpperCase();
     if (v === 'REJECTED') return 'REJECTED';
@@ -62,6 +64,8 @@ export function resolvePostCloneReviewStatus(
   }
 
   const state = String(req.state || '').toUpperCase();
+  if (state === 'MANUALLY_APPROVED' || state === 'APPROVED') return 'APPROVED';
+  if (req.review_status) return req.review_status;
   switch (state) {
     case 'REVIEW_REQUIRED':
     case 'MANUAL_REVIEW':

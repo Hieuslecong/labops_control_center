@@ -99,16 +99,24 @@ export function isAdminRequiredLabOpsPath(method: string, segments: string[]): b
     return true;
   }
   if (
+    p === 'ai-assistant/overview' ||
     p === 'ai-assistant/config' ||
     p === 'ai-assistant/tools' ||
     p === 'ai-assistant/history' ||
-    p === 'ai-assistant/reports/generate'
+    p === 'ai-assistant/reports' ||
+    p.startsWith('ai-assistant/reports/') ||
+    p.startsWith('ai-assistant/daily-brief/') ||
+    p === 'ai-assistant/identity-links' ||
+    p.startsWith('ai-assistant/identity-links/') ||
+    p === 'ai-assistant/subscriptions' ||
+    p.startsWith('ai-assistant/subscriptions/') ||
+    (m !== 'GET' && /^ai-assistant\/incidents\/[^/]+\/resolve$/.test(p))
   ) {
     return true;
   }
   if (
     p === 'repositories/audit' ||
-    (m !== 'GET' && /^repositories\/requests\/[^/]+\/decision$/.test(p))
+    (m !== 'GET' && /^repositories\/requests\/[^/]+\/(decision|rescan)$/.test(p))
   ) {
     return true;
   }
@@ -122,7 +130,7 @@ export function isAdminRequiredLabOpsPath(method: string, segments: string[]): b
   ) {
     return true;
   }
-  if (p === 'v2/vpn/devices') return true;
+  if (p === 'v2/vpn/devices' || p === 'v2/vpn/overview') return true;
   if (/^v2\/members\/[^/]+\/(suspend|archive|delete-preview)$/.test(p)) return true;
   if (m === 'DELETE' && /^v2\/members\/[^/]+$/.test(p)) return true;
   if (m !== 'GET' && /^v2\/members\/[^/]+\/devices(\/.*)?$/.test(p)) return true;

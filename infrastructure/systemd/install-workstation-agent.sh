@@ -40,6 +40,10 @@ if ! IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")" ||
 fi
 
 install -d -m 0750 -o aiot-ws1 -g aiot-ws1 /var/lib/labops /var/lib/labops/repositoryguard /var/lib/labops-agent /var/lib/labops-agent/runtime /var/lib/labops-agent/trivy-cache /var/lib/labops-agent/trivy-modules /var/lib/labops-agent/.cache
+if [[ -d /var/lib/labops-agent/repositoryguard ]]; then
+    cp -a -u /var/lib/labops-agent/repositoryguard/. /var/lib/labops/repositoryguard/ || true
+    chown -R aiot-ws1:aiot-ws1 /var/lib/labops/repositoryguard
+fi
 SEEN_DATA_SOURCES=""
 for mnt in /mnt/HDD3 /media/aiot-ws1/*; do
     [[ -d "$mnt" && ! -L "$mnt" ]] || continue
@@ -106,23 +110,27 @@ ENV_LOCAL="$REPO_DIR/.env.local"
 AGENT_ENV=/etc/labops/agent.env
 if [[ -r "$ENV_LOCAL" ]]; then
     DEL_SECRET="$(grep -E '^LABOPS_DELEGATION_SECRET=' "$ENV_LOCAL" | tail -n 1 | cut -d= -f2- | tr -d '[:space:]' || true)"
-    if [[ -n "$DEL_SECRET" ]]; then
-        install -d -m 0750 -o root -g aiot-ws1 /etc/labops
-        if [[ ! -e "$AGENT_ENV" ]]; then
-            (
-                umask 077
-                printf 'LABOPS_DELEGATION_SECRET=%s\n' "$DEL_SECRET" >"$AGENT_ENV"
-            )
-            chown root:aiot-ws1 "$AGENT_ENV"
-            chmod 0640 "$AGENT_ENV"
-        else
-            TMP_ENV="$(mktemp /etc/labops/agent.env.tmp.XXXXXXXX)"
-            grep -v -E '^LABOPS_DELEGATION_SECRET=' "$AGENT_ENV" >"$TMP_ENV" || true
+    install -d -m 0750 -o root -g aiot-ws1 /etc/labops
+    if [[ ! -e "$AGENT_ENV" ]]; then
+        (
+            umask 077
+            printf 'LABOPS_REPO_GUARD_DATA_DIR=/var/lib/labops/repositoryguard\n' >"$AGENT_ENV"
+            if [[ -n "$DEL_SECRET" ]]; then
+                printf 'LABOPS_DELEGATION_SECRET=%s\n' "$DEL_SECRET" >>"$AGENT_ENV"
+            fi
+        )
+        chown root:aiot-ws1 "$AGENT_ENV"
+        chmod 0640 "$AGENT_ENV"
+    else
+        TMP_ENV="$(mktemp /etc/labops/agent.env.tmp.XXXXXXXX)"
+        grep -v -E '^(LABOPS_DELEGATION_SECRET|LABOPS_REPO_GUARD_DATA_DIR)=' "$AGENT_ENV" >"$TMP_ENV" || true
+        printf 'LABOPS_REPO_GUARD_DATA_DIR=/var/lib/labops/repositoryguard\n' >>"$TMP_ENV"
+        if [[ -n "$DEL_SECRET" ]]; then
             printf 'LABOPS_DELEGATION_SECRET=%s\n' "$DEL_SECRET" >>"$TMP_ENV"
-            chown --reference="$AGENT_ENV" "$TMP_ENV"
-            chmod --reference="$AGENT_ENV" "$TMP_ENV"
-            mv -f "$TMP_ENV" "$AGENT_ENV"
         fi
+        chown --reference="$AGENT_ENV" "$TMP_ENV"
+        chmod --reference="$AGENT_ENV" "$TMP_ENV"
+        mv -f "$TMP_ENV" "$AGENT_ENV"
     fi
 fi
 

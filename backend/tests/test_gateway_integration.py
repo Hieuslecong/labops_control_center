@@ -4,6 +4,7 @@ Unit test kiểm thử tích hợp giữa LabOps Python Backend và Go Agent Gat
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -45,7 +46,10 @@ class TestGatewayIntegration(unittest.TestCase):
         }).encode("utf-8")
         mock_gw_response.__enter__.return_value = mock_gw_response
 
-        with patch("urllib.request.urlopen", return_value=mock_gw_response):
+        with patch.dict(os.environ, {
+            "LABOPS_GATEWAY_HTTP_URL": "http://127.0.0.1:9444",
+            "LABOPS_GATEWAY_CONTROL_SECRET": "test-gateway-control-secret",
+        }), patch("urllib.request.urlopen", return_value=mock_gw_response):
             envelope = client.dispatch(remote_host, "INSPECT_HOST")
             self.assertEqual(envelope["host_id"], "workstation")
             self.assertEqual(envelope["action"], "INSPECT_HOST")

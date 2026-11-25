@@ -256,6 +256,79 @@ func PrepareQuarantineWithCanonical(ctx context.Context, baseQuarantineDir, requ
 	}, nil
 }
 
+// copyGitMetadataDir sao chép chỉ đọc thư mục .git bằng quyền của tiến trình hiện tại (CAP_DAC_READ_SEARCH),
+// bỏ qua hooks và symlinks để các tiến trình con git không bị kernel chặn access().
+func copyGitMetadataDir(srcGitDir, dstGitDir string, maxBytes int64) error {
+	if err := os.MkdirAll(dstGitDir, 0700); err != nil {
+		return err
+	}
+	var copiedBytes int64
+	var walkCopy func(src, dst string, isTopLevel bool) error
+	walkCopy = func(src, dst string, isTopLevel bool) error {
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, ent := range entries {
+			name := ent.Name()
+			if isTopLevel && name == "hooks" {
+				continue
+			}
+			srcPath := filepath.Join(src, name)
+			dstPath := filepath.Join(dst, name)
+			info, err := os.Lstat(srcPath)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			if info.IsDir() {
+				if err := os.MkdirAll(dstPath, 0700); err != nil {
+					return err
+				}
+				if err := walkCopy(srcPath, dstPath, false); err != nil {
+					return err
+				}
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if info.Size() > maxBytes-copiedBytes {
+				return fmt.Errorf("kích thước dữ liệu .git vượt giới hạn tối đa (%d MB)", maxBytes/(1024*1024))
+			}
+			in, err := os.Open(srcPath)
+			if err != nil {
+				return err
+			}
+			out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+			if err != nil {
+				_ = in.Close()
+				return err
+			}
+			n, copyErr := io.Copy(out, io.LimitReader(in, (maxBytes-copiedBytes)+1))
+			closeInErr := in.Close()
+			closeOutErr := out.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeInErr != nil {
+				return closeInErr
+			}
+			if closeOutErr != nil {
+				return closeOutErr
+			}
+			copiedBytes += n
+			if copiedBytes > maxBytes {
+				return fmt.Errorf("kích thước dữ liệu .git vượt giới hạn tối đa (%d MB)", maxBytes/(1024*1024))
+			}
+		}
+		return nil
+	}
+	return walkCopy(srcGitDir, dstGitDir, true)
+}
+
 // PrepareQuarantineFromLocalGit trích xuất chỉ đọc snapshot tại commitSHA từ repo đã clone sẵn trong workspace host.
 func PrepareQuarantineFromLocalGit(ctx context.Context, baseQuarantineDir, requestID, workspaceRoot, relRepoPath, canonicalRepo, commitSHA string) (*QuarantineWorkspace, error) {
 	cleanRoot := filepath.Clean(strings.TrimSpace(workspaceRoot))
@@ -311,8 +384,14 @@ func PrepareQuarantineFromLocalGit(ctx context.Context, baseQuarantineDir, reque
 	ctxTimeout, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	// Scoped safe.directory for this exact verified workspace repository (read-only).
-	scopedArgs := []string{"-c", "safe.directory=" + hostRepoDir, "-C", hostRepoDir}
+	// Copy .git metadata using CAP_DAC_READ_SEARCH in-process so git subprocesses never fail UID access() checks on 0700 container dirs.
+	gitMetaTmp := filepath.Join(reqDir, ".git_meta")
+	defer os.RemoveAll(gitMetaTmp)
+	if err := copyGitMetadataDir(gitMetaPath, gitMetaTmp, MaxRepoSizeBytes); err != nil {
+		return nil, fmt.Errorf("không thể đọc dữ liệu .git từ workspace: %w", err)
+	}
+
+	scopedArgs := []string{"-c", "safe.directory=" + gitMetaTmp, "--git-dir=" + gitMetaTmp}
 	verifyArgs := append(append([]string{}, scopedArgs...), "rev-parse", "--verify", commitSHA+"^{commit}")
 	if _, err := runGit(ctxTimeout, "", verifyArgs...); err != nil {
 		return nil, fmt.Errorf("không thể xác minh commit %s trong repo workspace: %w", commitSHA, err)

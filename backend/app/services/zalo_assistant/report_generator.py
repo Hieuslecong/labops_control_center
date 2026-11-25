@@ -851,26 +851,51 @@ class ReportGenerator:
                     r_ok = False
 
         if r_ok:
+            from app.services.zalo_assistant.repo_alert_monitor import RepoSecurityAlertMonitor
+
             win_repos = [r for r in fetched_reqs if _in_win(r.get("submitted_at") or r.get("updated_at"))]
+            approved_repo_keys = {
+                RepoSecurityAlertMonitor._repo_key(r)
+                for r in fetched_reqs
+                if RepoSecurityAlertMonitor.is_request_approved(r) and RepoSecurityAlertMonitor._repo_key(r)
+            }
+
+            def _is_suppressed_or_approved(req_item: Dict[str, Any]) -> bool:
+                if RepoSecurityAlertMonitor.is_request_approved(req_item):
+                    return True
+                rk = RepoSecurityAlertMonitor._repo_key(req_item)
+                return bool(rk and rk in approved_repo_keys)
+
             repo_clones_24h: Optional[int] = len(win_repos)
             repo_review_cnt: Optional[int] = sum(
                 1
                 for r in win_repos
-                if str(r.get("review_status") or "").upper() == "REVIEW_REQUIRED"
-                or str(r.get("state") or "").upper() == "REVIEW_REQUIRED"
+                if not _is_suppressed_or_approved(r)
+                and (
+                    str(r.get("review_status") or "").upper() == "REVIEW_REQUIRED"
+                    or str(r.get("state") or "").upper() == "REVIEW_REQUIRED"
+                )
             )
             repo_scan_failed: Optional[int] = sum(
                 1
                 for r in win_repos
-                if str(r.get("review_status") or "").upper() == "SCAN_FAILED"
-                or str(r.get("state") or "").upper() == "FAILED"
+                if not _is_suppressed_or_approved(r)
+                and (
+                    str(r.get("review_status") or "").upper() == "SCAN_FAILED"
+                    or str(r.get("state") or "").upper() == "FAILED"
+                )
             )
-            repo_with_findings: Optional[int] = sum(1 for r in win_repos if _has_security_concerns(r))
+            repo_with_findings: Optional[int] = sum(
+                1 for r in win_repos if not _is_suppressed_or_approved(r) and _has_security_concerns(r)
+            )
             repo_scanned_ok: Optional[int] = sum(
                 1
                 for r in win_repos
-                if str(r.get("review_status") or "").upper() not in {"SCAN_FAILED", ""}
-                or str(r.get("state") or "").upper() not in {"FAILED", "PENDING"}
+                if _is_suppressed_or_approved(r)
+                or (
+                    str(r.get("review_status") or "").upper() not in {"SCAN_FAILED", ""}
+                    and str(r.get("state") or "").upper() not in {"FAILED", "PENDING"}
+                )
             )
             repo_no_findings: Optional[int] = max(0, int(repo_scanned_ok) - int(repo_with_findings) - int(repo_scan_failed))
         else:

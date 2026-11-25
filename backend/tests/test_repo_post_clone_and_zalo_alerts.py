@@ -254,3 +254,68 @@ def test_admin_rescan_endpoint_forwards_to_agent(monkeypatch):
     assert body["clone_status"] == "CLONED"
     assert body["review_status"] == "SCANNING"
     assert any(c[0] == "POST" and c[1] == "requests/req-123/rescan" for c in calls)
+
+
+def test_repo_approval_suppresses_future_alerts_and_resolves_incidents(tmp_path: Path):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    req_fail = {
+        "id": "req-priv-1",
+        "owner": "TrangLe1912",
+        "repo_name": "risk-constrained-endpointing",
+        "canonical_repo": "https://github.com/TrangLe1912/risk-constrained-endpointing",
+        "commit_sha": "a" * 40,
+        "submitted_by": "tranglt",
+        "target_workspace": "ws-tranglt",
+        "source": "workspace_clone",
+        "clone_status": "CLONED",
+        "review_status": "SCAN_FAILED",
+        "state": "FAILED",
+        "error": "private repo",
+        "submitted_at": now_iso,
+        "updated_at": now_iso,
+    }
+    requests = [req_fail]
+    monitor, _ = _make_monitor(tmp_path, requests)
+    bot = _FakeBot()
+
+    res1 = asyncio.run(monitor.check_and_notify(bot, force=True))
+    assert res1["sent"] == 1
+    open_incs = monitor.incident_engine.list_incidents(status="OPEN", source="repository_guard")
+    assert len(open_incs) == 1
+
+    # Admin approves the repository -> incident resolved and future commits/events suppressed
+    approved_req = {
+        **req_fail,
+        "state": "MANUALLY_APPROVED",
+        "review_status": "APPROVED",
+        "error": "",
+        "decision": {"verdict": "MANUALLY_APPROVED", "reviewer": "admin", "reason": "Trusted repo"},
+    }
+    resolved_cnt = monitor.suppress_repo_alerts(approved_req, actor="admin", reason="Trusted repo")
+    assert resolved_cnt == 1
+    assert monitor.incident_engine.list_incidents(status="OPEN", source="repository_guard") == []
+
+    # Even if another scan/commit arrives with findings or failure for same repo, it must NOT alert again
+    requests.append({
+        "id": "req-priv-2",
+        "owner": "TrangLe1912",
+        "repo_name": "risk-constrained-endpointing",
+        "canonical_repo": "https://github.com/TrangLe1912/risk-constrained-endpointing",
+        "commit_sha": "b" * 40,
+        "submitted_by": "tranglt",
+        "source": "workspace_clone",
+        "clone_status": "CLONED",
+        "review_status": "REVIEW_REQUIRED",
+        "state": "AUTO_APPROVED",
+        "submitted_at": now_iso,
+        "updated_at": now_iso,
+        "report": {
+            "secrets_count": 2,
+            "vulnerabilities": {"critical": 1, "high": 0, "medium": 0, "low": 0},
+            "misconfig_high_count": 0,
+            "coverage": {"overall_coverage": "POLICY_COMPLETE"},
+        },
+    })
+    res2 = asyncio.run(monitor.check_and_notify(bot, force=True))
+    assert res2["sent"] == 0
+    assert len(bot.sent) == 1

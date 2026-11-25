@@ -328,7 +328,7 @@ async def verify_workspace_login(
 # VPN Administration & Multi-Device Management (/api/v1/v2/vpn/*)
 # ------------------------------------------------------------------
 @router.get("/vpn/overview")
-async def get_vpn_overview(p: Principal = Depends(require_user)) -> Dict[str, Any]:
+async def get_vpn_overview(p: Principal = Depends(require_admin)) -> Dict[str, Any]:
     return service.get_vpn_system_overview()
 
 

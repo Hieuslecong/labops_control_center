@@ -980,16 +980,8 @@ func TestGuardService_WorkspaceClonePostReviewAndRescan(t *testing.T) {
 		t.Fatal("workspace_clone private repo MUST NOT be cached in shared ApprovedArtifactStore")
 	}
 
-	// Post-clone AdminDecision APPROVED preserves CloneStatus=CLONED and marks ReviewStatus=APPROVED
-	decided, err := svc.AdminDecision(doneReq.ID, "APPROVED", "admin", "Verified false positive")
-	if err != nil {
-		t.Fatalf("Post-clone AdminDecision failed: %v", err)
-	}
-	if decided.ReviewStatus != ReviewStatusApproved || decided.CloneStatus != CloneStatusCloned || decided.State != StateManuallyApproved {
-		t.Fatalf("Unexpected post-clone decision result: %+v", decided)
-	}
-
-	// RescanRequest recovers a pre-existing FAILED request in-place with local workspace scanning
+	// RescanRequest recovers a pre-existing FAILED request in-place with local workspace scanning & updated commit Ref
+	staleSHA := strings.Repeat("0", 40)
 	svc.mu.Lock()
 	svc.requests["req-failed-old"] = &RepositoryRequest{
 		ID:            "req-failed-old",
@@ -997,8 +989,8 @@ func TestGuardService_WorkspaceClonePostReviewAndRescan(t *testing.T) {
 		CanonicalRepo: "https://github.com/TrangLe1912/risk-constrained-endpointing",
 		Owner:         "TrangLe1912",
 		RepoName:      "risk-constrained-endpointing",
-		RequestedRef:  commitSHA,
-		CommitSHA:     commitSHA,
+		RequestedRef:  staleSHA,
+		CommitSHA:     staleSHA,
 		Submitter:     "tranglt",
 		SubmittedAt:   time.Now(),
 		UpdatedAt:     time.Now(),
@@ -1011,12 +1003,13 @@ func TestGuardService_WorkspaceClonePostReviewAndRescan(t *testing.T) {
 		Source:                SourceWorkspaceClone,
 		LocalRepoRelPath:      "risk-constrained-endpointing",
 		VerifiedWorkspaceRoot: wsRoot,
+		Ref:                   commitSHA,
 	})
 	if err != nil {
 		t.Fatalf("RescanRequest failed: %v", err)
 	}
-	if rescanned.CloneStatus != CloneStatusCloned {
-		t.Fatalf("Expected RescanRequest to set CloneStatus=CLONED, got %+v", rescanned)
+	if rescanned.CloneStatus != CloneStatusCloned || rescanned.RequestedRef != commitSHA || rescanned.CommitSHA != commitSHA {
+		t.Fatalf("Expected RescanRequest to set CloneStatus=CLONED and updated commitSHA, got %+v", rescanned)
 	}
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1027,7 +1020,75 @@ func TestGuardService_WorkspaceClonePostReviewAndRescan(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	finalOld, _ := svc.GetRequest("req-failed-old")
-	if finalOld.State != StateAutoApproved || finalOld.ReviewStatus != ReviewStatusReviewRequired || finalOld.Error != "" {
-		t.Fatalf("Expected req-failed-old to recover cleanly, got %+v", finalOld)
+	if finalOld.State != StateAutoApproved || finalOld.ReviewStatus != ReviewStatusReviewRequired || finalOld.Error != "" || finalOld.CommitSHA != commitSHA {
+		t.Fatalf("Expected req-failed-old to recover cleanly with updated commitSHA, got %+v", finalOld)
+	}
+
+	// Post-clone AdminDecision APPROVED preserves CloneStatus=CLONED and marks ReviewStatus=APPROVED
+	decided, err := svc.AdminDecision(doneReq.ID, "APPROVED", "admin", "Verified false positive")
+	if err != nil {
+		t.Fatalf("Post-clone AdminDecision failed: %v", err)
+	}
+	if decided.ReviewStatus != ReviewStatusApproved || decided.CloneStatus != CloneStatusCloned || decided.State != StateManuallyApproved {
+		t.Fatalf("Unexpected post-clone decision result: %+v", decided)
+	}
+
+	// Admin approving a FAILED request transitions it cleanly to MANUALLY_APPROVED / APPROVED and suppresses future alerts for same repo
+	svc.mu.Lock()
+	svc.requests["req-failed-private"] = &RepositoryRequest{
+		ID:            "req-failed-private",
+		RepoURL:       "https://github.com/TrangLe1912/private-lab-repo",
+		CanonicalRepo: "https://github.com/TrangLe1912/private-lab-repo",
+		Owner:         "TrangLe1912",
+		RepoName:      "private-lab-repo",
+		RequestedRef:  commitSHA,
+		CommitSHA:     commitSHA,
+		Submitter:     "tranglt",
+		SubmittedAt:   time.Now(),
+		UpdatedAt:     time.Now(),
+		State:         StateFailed,
+		ReviewStatus:  ReviewStatusScanFailed,
+		CloneStatus:   CloneStatusFailed,
+		Error:         "fatal: could not read Username for 'https://github.com'",
+	}
+	svc.mu.Unlock()
+
+	approvedFailed, err := svc.AdminDecision("req-failed-private", "APPROVED", "admin", "Trusted lab private repo")
+	if err != nil {
+		t.Fatalf("AdminDecision on FAILED request failed: %v", err)
+	}
+	if approvedFailed.State != StateManuallyApproved || approvedFailed.ReviewStatus != ReviewStatusApproved || approvedFailed.CloneStatus != CloneStatusCloned || approvedFailed.Error != "" {
+		t.Fatalf("Expected FAILED request approved to MANUALLY_APPROVED/APPROVED/CLONED, got %+v", approvedFailed)
+	}
+
+	// New commit / workspace clone on already approved repo inherits Admin approval automatically (no new alert)
+	reSubmitted, err := svc.SubmitRequestWithOptions(
+		context.Background(),
+		"https://github.com/TrangLe1912/risk-constrained-endpointing",
+		commitSHA,
+		"tranglt",
+		"ws-tranglt",
+		SubmitOptions{
+			Source:                SourceWorkspaceClone,
+			LocalRepoRelPath:      "risk-constrained-endpointing",
+			VerifiedWorkspaceRoot: wsRoot,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Re-submit trusted repo failed: %v", err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	var inheritedReq *RepositoryRequest
+	for time.Now().Before(deadline) {
+		curr, ok := svc.GetRequest(reSubmitted.ID)
+		if ok && curr.State == StateManuallyApproved {
+			inheritedReq = curr
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if inheritedReq == nil || inheritedReq.ReviewStatus != ReviewStatusApproved || inheritedReq.Decision == nil {
+		curr, _ := svc.GetRequest(reSubmitted.ID)
+		t.Fatalf("Expected trusted repo to inherit MANUALLY_APPROVED & APPROVED, got %+v", curr)
 	}
 }

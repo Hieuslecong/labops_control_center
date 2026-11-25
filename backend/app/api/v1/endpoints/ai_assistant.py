@@ -85,7 +85,7 @@ class DailyBriefTestRequest(BaseModel):
 
 
 @router.get("/overview", summary="Tổng quan AI SRE Agent v2 & Zalo Quota")
-async def get_overview(principal: Principal = Depends(require_user)):
+async def get_overview(principal: Principal = Depends(require_admin)):
     return await asyncio.to_thread(zalo_assistant_service.get_overview)
 
 
@@ -109,7 +109,7 @@ async def update_config(payload: ConfigUpdateRequest, principal: Principal = Dep
 
 
 @router.get("/reports", summary="Danh sách báo cáo điều hành ngày & báo cáo tuần")
-async def list_reports(principal: Principal = Depends(require_user)):
+async def list_reports(principal: Principal = Depends(require_admin)):
     reports = await asyncio.to_thread(zalo_assistant_service.report_generator.list_reports)
     return {"reports": reports}
 
@@ -190,7 +190,7 @@ async def retry_daily_brief_delivery(period_key: str, principal: Principal = Dep
 
 
 @router.get("/reports/{report_id}", summary="Chi tiết báo cáo")
-async def get_report_detail(report_id: str, principal: Principal = Depends(require_user)):
+async def get_report_detail(report_id: str, principal: Principal = Depends(require_admin)):
     report = await asyncio.to_thread(zalo_assistant_service.report_generator.get_report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo yêu cầu.")
@@ -198,7 +198,7 @@ async def get_report_detail(report_id: str, principal: Principal = Depends(requi
 
 
 @router.get("/reports/{report_id}/download", summary="Tải xuống tệp Markdown báo cáo")
-async def download_report(report_id: str, principal: Principal = Depends(require_user)):
+async def download_report(report_id: str, principal: Principal = Depends(require_admin)):
     report = await asyncio.to_thread(zalo_assistant_service.report_generator.get_report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo yêu cầu.")

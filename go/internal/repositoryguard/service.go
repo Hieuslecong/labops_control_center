@@ -287,6 +287,7 @@ type SubmitOptions struct {
 	Source                string
 	LocalRepoRelPath      string
 	VerifiedWorkspaceRoot string
+	Ref                   string
 }
 
 func reportHasSecurityConcerns(report *ScanReport) bool {
@@ -446,6 +447,13 @@ func (s *GuardService) RescanRequest(ctx context.Context, reqID string, opts Sub
 	opts.Source = source
 	opts.LocalRepoRelPath = relPath
 
+	if newRef := strings.TrimSpace(opts.Ref); newRef != "" {
+		req.RequestedRef = newRef
+		if sha40Regex.MatchString(newRef) {
+			req.CommitSHA = strings.ToLower(newRef)
+		}
+	}
+
 	req.Source = source
 	req.LocalRepoPath = relPath
 	if source == SourceWorkspaceClone {
@@ -570,6 +578,14 @@ func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID stri
 		}
 	}
 
+	s.mu.RLock()
+	var submitter string
+	if reqItem, exists := s.requests[reqID]; exists && reqItem != nil {
+		submitter = reqItem.Submitter
+	}
+	priorDecision := s.findPriorAdminApprovalLocked(canonicalRepo, submitter)
+	s.mu.RUnlock()
+
 	// 3. Tải về vùng Quarantine độc lập (ưu tiên trích xuất cục bộ an toàn cho workspace_clone)
 	s.updateRequest(reqID, func(r *RepositoryRequest) { r.State = StateFetching })
 	var qw *QuarantineWorkspace
@@ -579,6 +595,19 @@ func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID stri
 		qw, err = PrepareQuarantineWithCanonical(ctx, s.quarantineDir, reqID, canonicalRepo, canonicalRepo, commitSHA)
 	}
 	if err != nil {
+		if isWorkspaceClone && priorDecision != nil {
+			decCopy := *priorDecision
+			s.updateRequest(reqID, func(r *RepositoryRequest) {
+				r.State = StateManuallyApproved
+				r.CloneStatus = CloneStatusCloned
+				r.ReviewStatus = ReviewStatusApproved
+				r.Decision = &decCopy
+				r.Error = ""
+			})
+			s.audit.LogEvent("SYSTEM", "TRUSTED_REPO_INHERITED", "REPOSITORY", canonicalRepo, "SUCCESS",
+				fmt.Sprintf("Kế thừa phê duyệt của Admin %s cho repo đã tin cậy (bỏ qua lỗi fetch)", decCopy.Reviewer))
+			return
+		}
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateFailed
 			r.Error = fmt.Sprintf("Lỗi tải về quarantine: %v", err)
@@ -609,6 +638,19 @@ func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID stri
 	report, err := scanner(ctx, qw.SourceDir)
 	if err != nil {
 		_ = qw.PurgeAll()
+		if isWorkspaceClone && priorDecision != nil {
+			decCopy := *priorDecision
+			s.updateRequest(reqID, func(r *RepositoryRequest) {
+				r.State = StateManuallyApproved
+				r.CloneStatus = CloneStatusCloned
+				r.ReviewStatus = ReviewStatusApproved
+				r.Decision = &decCopy
+				r.Error = ""
+			})
+			s.audit.LogEvent("SYSTEM", "TRUSTED_REPO_INHERITED", "REPOSITORY", canonicalRepo, "SUCCESS",
+				fmt.Sprintf("Kế thừa phê duyệt của Admin %s cho repo đã tin cậy (bỏ qua lỗi scan)", decCopy.Reviewer))
+			return
+		}
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = StateFailed
 			r.Error = fmt.Sprintf("Lỗi tiến trình quét bảo mật: %v", err)
@@ -652,11 +694,19 @@ func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID stri
 		// Không đưa mã nguồn từ workspace vào kho cache dùng chung (bảo vệ private repo giữa các thành viên)
 		_ = qw.PurgeAll()
 		provenance = fmt.Sprintf("workspace_local:%s@%s", commitSHA, qw.DigestSHA256)
+		var inheritedDecision *DecisionRecord
+		if priorDecision != nil {
+			verdict = StateManuallyApproved
+			reviewStatus = ReviewStatusApproved
+			decCopy := *priorDecision
+			inheritedDecision = &decCopy
+		}
 		s.updateRequest(reqID, func(r *RepositoryRequest) {
 			r.State = verdict
 			r.CloneStatus = CloneStatusCloned
 			r.ReviewStatus = reviewStatus
 			r.Report = report
+			r.Decision = inheritedDecision
 			r.ArtifactDigest = artifactDigest
 			r.ArtifactSize = artifactSize
 			r.ScannerVersion = report.ScannerVersion
@@ -723,6 +773,33 @@ func (s *GuardService) processRequestWithOptions(ctx context.Context, reqID stri
 		fmt.Sprintf("Kết quả đánh giá chính sách cho %s: %s", canonicalRepo, verdict))
 }
 
+func (s *GuardService) findPriorAdminApprovalLocked(canonicalRepo, submitter string) *DecisionRecord {
+	normRepo := strings.ToLower(strings.TrimSpace(canonicalRepo))
+	normSub := strings.ToLower(strings.TrimSpace(submitter))
+	if normRepo == "" {
+		return nil
+	}
+	var fallback *DecisionRecord
+	for _, r := range s.requests {
+		if r == nil || !strings.EqualFold(strings.TrimSpace(r.CanonicalRepo), normRepo) {
+			continue
+		}
+		if r.State != StateManuallyApproved && r.ReviewStatus != ReviewStatusApproved {
+			continue
+		}
+		if r.Decision == nil || (r.Decision.Verdict != StateManuallyApproved && r.Decision.Verdict != StateApproved) {
+			continue
+		}
+		if normSub != "" && strings.EqualFold(strings.TrimSpace(r.Submitter), normSub) {
+			return r.Decision
+		}
+		if fallback == nil {
+			fallback = r.Decision
+		}
+	}
+	return fallback
+}
+
 // AdminDecision xử lý phê duyệt hoặc từ chối thủ công từ Admin với khóa nguyên tử và xác minh toàn vẹn quarantine.
 func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (*RepositoryRequest, error) {
 	if decision != "APPROVED" && decision != "REJECTED" {
@@ -742,14 +819,21 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 	isPostCloneReview := req.Decision == nil &&
 		(req.State == StateAutoApproved || req.State == StateDelivered) &&
 		(req.ReviewStatus == ReviewStatusReviewRequired || reportHasSecurityConcerns(req.Report))
-	if req.State != StateReviewRequired && !isPostCloneReview {
+	archiveFile := filepath.Join(s.quarantineDir, reqID, "source.tar.gz")
+	_, archiveStatErr := os.Lstat(archiveFile)
+	hasQuarantineArchive := archiveStatErr == nil
+	isDirectStatusDecision := req.Source == SourceWorkspaceClone ||
+		req.State == StateFailed ||
+		req.ReviewStatus == ReviewStatusScanFailed ||
+		(req.State == StateReviewRequired && !hasQuarantineArchive)
+	if req.State != StateReviewRequired && !isPostCloneReview && !isDirectStatusDecision {
 		currentState := req.State
 		s.mu.Unlock()
-		return nil, fmt.Errorf("INVALID_STATE_TRANSITION: yêu cầu đang ở trạng thái %s, chỉ có thể quyết định khi là REVIEW_REQUIRED", currentState)
+		return nil, fmt.Errorf("INVALID_STATE_TRANSITION: yêu cầu đang ở trạng thái %s, chỉ có thể quyết định khi là REVIEW_REQUIRED hoặc FAILED", currentState)
 	}
 
 	now := time.Now()
-	if isPostCloneReview {
+	if isPostCloneReview || isDirectStatusDecision {
 		verdictState := StateManuallyApproved
 		reviewStatus := ReviewStatusApproved
 		if decision == "REJECTED" {
@@ -758,8 +842,13 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 		}
 		req.State = verdictState
 		req.ReviewStatus = reviewStatus
-		if req.CloneStatus == "" {
+		if decision == "APPROVED" {
 			req.CloneStatus = CloneStatusCloned
+			req.Error = ""
+		} else if req.Source == SourceWorkspaceClone {
+			req.CloneStatus = CloneStatusCloned
+		} else if req.CloneStatus == "" {
+			req.CloneStatus = CloneStatusBlocked
 		}
 		req.UpdatedAt = now
 		req.Decision = &DecisionRecord{
@@ -772,8 +861,9 @@ func (s *GuardService) AdminDecision(reqID, decision, reviewer, reason string) (
 		snap := cloneRequest(req)
 		s.mu.Unlock()
 
+		_ = os.RemoveAll(filepath.Join(s.quarantineDir, reqID))
 		s.audit.LogEvent(reviewer, fmt.Sprintf("ADMIN_POST_CLONE_%s", decision), "REQUEST", reqID, "SUCCESS",
-			fmt.Sprintf("Admin %s đã %s kiểm duyệt sau clone (Lý do: %s)", reviewer, decision, reason))
+			fmt.Sprintf("Admin %s đã %s kiểm duyệt repo (Lý do: %s)", reviewer, decision, reason))
 		return snap, nil
 	}
 

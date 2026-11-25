@@ -679,3 +679,69 @@ class UnifiedIncidentEngine:
             )
             session.flush()
             return _serialize_incident(row)
+
+    def resolve_incidents_for_repository(
+        self,
+        *,
+        canonical_repo: str = "",
+        repo_label: str = "",
+        request_id: str = "",
+        actor: str = "admin",
+        reason: str = "",
+    ) -> int:
+        """Auto-resolve open repository_guard incidents when an Admin approves the repository."""
+        now = _utcnow()
+        norm_label = str(repo_label or "").strip().lower()
+        norm_canonical = str(canonical_repo or "").strip().lower()
+        norm_req_id = str(request_id or "").strip()
+        resolved_count = 0
+
+        with self.db.session_scope() as session:
+            open_rows = session.execute(
+                select(IncidentRecord).where(
+                    IncidentRecord.source == "repository_guard",
+                    IncidentRecord.status.in_(["OPEN", "ACKNOWLEDGED", "INVESTIGATING"]),
+                )
+            ).scalars().all()
+
+            for row in open_rows:
+                row_res = str(row.resource_id or "").strip().lower()
+                row_fp = str(row.fingerprint or "").strip().lower()
+                ev = dict(row.evidence_json or {})
+                ev_req_id = str(ev.get("request_id") or "").strip()
+                matched = False
+                if norm_req_id and ev_req_id == norm_req_id:
+                    matched = True
+                elif norm_label and (
+                    row_res == norm_label
+                    or row_fp.startswith(f"repo-findings:{norm_label}:")
+                    or row_fp.startswith(f"repo-scan-failed:{norm_label}:")
+                ):
+                    matched = True
+                elif norm_canonical and row_res == norm_canonical:
+                    matched = True
+                if not matched:
+                    continue
+
+                prev = row.status
+                row.status = "RESOLVED"
+                row.resolved_by = actor
+                row.resolved_at = now
+                row.cooldown_until = now + timedelta(days=365)
+                row.updated_at = now
+                session.add(
+                    IncidentEventRecord(
+                        id=f"iev-{uuid.uuid4().hex[:12]}",
+                        incident_id=row.incident_id,
+                        event_kind="RESOLVED",
+                        actor=actor,
+                        from_status=prev,
+                        to_status="RESOLVED",
+                        details_json={"reason": reason or "Admin approved repository (suppress future alerts)"},
+                        correlation_id=row.correlation_id,
+                        created_at=now,
+                    )
+                )
+                resolved_count += 1
+            session.flush()
+        return resolved_count

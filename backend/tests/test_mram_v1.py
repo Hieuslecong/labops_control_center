@@ -733,3 +733,254 @@ def test_06_zalo_invitation_security_handover_claim_reissue_and_ssh_expiry(mram_
     )
     assert renew_r.status_code == 200
     assert renew_r.json()["request"]["request_type"] == "RENEWAL"
+
+
+def test_07_vietnamese_supervisor_tone_and_unicode_grouping(mram_env):
+    import unicodedata
+
+    mram: MramService = mram_env["mram"]
+    mram.create_web_member_account(
+        {"username": "sv_tone1", "full_name": "SV Tone 1", "member_code": "SV71", "member_category": "STUDENT"}
+    )
+    mram.create_web_member_account(
+        {"username": "sv_tone2", "full_name": "SV Tone 2", "member_code": "SV72", "member_category": "STUDENT"}
+    )
+
+    mram.submit_ssh_request(
+        username="sv_tone1",
+        payload={
+            "supervisor_name": unicodedata.normalize("NFD", "TS. Lê Thị Thuỳ Trang"),
+            "project_title": "Project Tone 1",
+            "registration_reason": "Kiểm tra gộp nhóm giảng viên khi sinh viên gõ dấu kiểu mới.",
+            "ssh_purpose": "Train",
+            "expected_tasks": "train",
+            "policy_accepted": True,
+        },
+    )
+    mram.submit_ssh_request(
+        username="sv_tone2",
+        payload={
+            "supervisor_name": "lê thị thùy trang",
+            "project_title": "Project Tone 2",
+            "registration_reason": "Kiểm tra gộp nhóm giảng viên khi sinh viên gõ dấu kiểu cũ.",
+            "ssh_purpose": "Train",
+            "expected_tasks": "train",
+            "policy_accepted": True,
+        },
+    )
+
+    groups_data = mram.get_supervisor_groups()["groups"]
+    trang_groups = [g for g in groups_data if "trang" in g["supervisor_name"].lower()]
+    assert len(trang_groups) == 1
+    assert trang_groups[0]["supervisor_name"] == "Lê Thị Thùy Trang"
+    assert trang_groups[0]["total_students"] == 2
+    assert {s["username"] for s in trang_groups[0]["students"]} == {"sv_tone1", "sv_tone2"}
+
+
+def test_08_web_accounts_separation_auto_ssh_link_and_password_recovery(mram_env):
+    client: TestClient = mram_env["client"]
+    admin_tok = mram_env["admin_token"]
+
+    # Register student account via public web registration -> WEB_ONLY, not SSH-linked
+    reg = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "sv_sep_link",
+            "password": "WebSepPass123456",
+            "full_name": "Sinh Viên Tách Biệt",
+            "member_code": "1671040099",
+            "email": "sep_link@dnu.edu.vn",
+            "department_class": "KHMT K16",
+            "member_category": "STUDENT",
+        },
+    )
+    assert reg.status_code == 200, reg.text
+    web_member_id = reg.json()["profile"]["member_id"]
+
+    # Web accounts list contains this web account with is_ssh_linked = False
+    web_list1 = client.get("/api/v1/admin/web-accounts", headers=_admin_headers(admin_tok))
+    assert web_list1.status_code == 200
+    acc1 = next(a for a in web_list1.json()["accounts"] if a["username"] == "sv_sep_link")
+    assert acc1["is_ssh_linked"] is False
+    assert acc1["linked_ssh_port"] is None
+
+    # Student self-recovers forgotten Web password: ADMIN must be forbidden (403)
+    rec_admin = client.post(
+        "/api/v1/auth/recover-web-password",
+        json={
+            "username": "admin",
+            "member_code": "ADMIN",
+            "email": "admin@lab.ai",
+            "new_password": "HackedAdminPassword123!",
+        },
+    )
+    assert rec_admin.status_code == 403
+
+    # Wrong student code / email rejected (401)
+    rec_wrong = client.post(
+        "/api/v1/auth/recover-web-password",
+        json={
+            "username": "sv_sep_link",
+            "member_code": "WRONG_CODE",
+            "email": "sep_link@dnu.edu.vn",
+            "new_password": "RecoveredWebPass999!",
+        },
+    )
+    assert rec_wrong.status_code == 401
+
+    # Matching username + member_code + email resets password cleanly
+    rec_ok = client.post(
+        "/api/v1/auth/recover-web-password",
+        json={
+            "username": "sv_sep_link",
+            "member_code": "1671040099",
+            "email": "sep_link@dnu.edu.vn",
+            "new_password": "RecoveredWebPass999!",
+        },
+    )
+    assert rec_ok.status_code == 200, rec_ok.text
+    login_rec = client.post(
+        "/api/v1/auth/login",
+        json={"username": "sv_sep_link", "password": "RecoveredWebPass999!"},
+    )
+    assert login_rec.status_code == 200, login_rec.text
+
+    # Admin reissue Web password: ADMIN rejected (403), student succeeds
+    reissue_admin = client.post(
+        "/api/v1/admin/web-accounts/admin/reissue-password",
+        headers=_admin_headers(admin_tok),
+        json={},
+    )
+    assert reissue_admin.status_code == 403
+
+    reissue_stu = client.post(
+        f"/api/v1/admin/web-accounts/{web_member_id}/reissue-password",
+        headers=_admin_headers(admin_tok),
+        json={},
+    )
+    assert reissue_stu.status_code == 200, reissue_stu.text
+    reissued_pw = reissue_stu.json()["reissued_web_password"]
+    login_reissued = client.post(
+        "/api/v1/auth/login",
+        json={"username": "sv_sep_link", "password": reissued_pw},
+    )
+    assert login_reissued.status_code == 200, login_reissued.text
+    stu_tok = login_reissued.json()["access_token"]
+
+    # Submit SSH request and approve -> Web account is automatically linked with provisioned SSH account
+    sub = client.post(
+        "/api/v1/me/ssh-requests",
+        headers={"Authorization": f"Bearer {stu_tok}"},
+        json={
+            "supervisor_name": "Lê Thị Thùy Trang",
+            "project_title": "Auto Link Verification",
+            "registration_reason": "Xác minh tự động liên kết tài khoản Web và SSH khi duyệt.",
+            "ssh_purpose": "Train AI",
+            "expected_tasks": "train",
+            "policy_accepted": True,
+        },
+    )
+    assert sub.status_code == 200, sub.text
+    req_id = sub.json()["request"]["id"]
+    rec = sub.json()["request"]["recommendation"]
+
+    a_step = client.post(
+        "/api/v1/auth/step-up",
+        headers={"Authorization": f"Bearer {admin_tok}"},
+        json={
+            "password": os.environ["LABOPS_ADMIN_PASSWORD"],
+            "action": "APPROVE_SSH_REQUEST",
+            "target_id": req_id,
+        },
+    )
+    assert a_step.status_code == 200, a_step.text
+    app_r = client.post(
+        f"/api/v1/admin/ssh-requests/{req_id}/approve",
+        headers={"Authorization": f"Bearer {admin_tok}", "X-Step-Up-Token": a_step.json()["step_up_token"]},
+        json={
+            "config": {
+                "host_id": rec["recommended_host_id"],
+                "pool_id": rec["recommended_pool_id"],
+                "cpu_cores": 4,
+                "ram_gb": 16,
+                "storage_quota_gb": 50,
+                "gpu_mode": "NONE",
+                "duration_days": 30,
+            }
+        },
+    )
+    assert app_r.status_code == 200, app_r.text
+
+    web_list2 = client.get("/api/v1/admin/web-accounts", headers=_admin_headers(admin_tok))
+    acc2 = next(a for a in web_list2.json()["accounts"] if a["username"] == "sv_sep_link")
+    assert acc2["is_ssh_linked"] is True
+    assert acc2["linked_ssh_username"] == "sv_sep_link"
+    assert acc2["linked_ssh_port"] is not None
+
+
+def test_09_zalo_approver_sync_notify_resend_and_bot_pending_tool(mram_env, monkeypatch):
+    client: TestClient = mram_env["client"]
+    admin_tok = mram_env["admin_token"]
+
+    from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
+    from app.services.zalo_assistant.service import zalo_assistant_service
+
+    # Simulate real .env.local MRAM_APPROVER_ZALO_ID that already had a 1-1 DM chat in observed_private_chats
+    approver_zalo = "01d4d2b626ffcfa196ee"
+    monkeypatch.setenv("MRAM_APPROVER_ZALO_ID", approver_zalo)
+    zalo_assistant_service.identity_rbac.record_observed_private_chat(
+        approver_zalo, approver_zalo, display_name="Lê Công Hiếu"
+    )
+
+    # Register & submit SSH request -> auto-sync binds approver_zalo as ADMIN & queues outbox message
+    reg = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "sv_zalo_sync",
+            "password": "WebSyncPass12345!",
+            "full_name": "Sinh Viên Zalo Sync",
+            "member_code": "1671040100",
+            "email": "sync_zalo@dnu.edu.vn",
+            "member_category": "STUDENT",
+        },
+    )
+    assert reg.status_code == 200
+    stu_tok = reg.json()["access_token"]
+    sub = client.post(
+        "/api/v1/me/ssh-requests",
+        headers={"Authorization": f"Bearer {stu_tok}"},
+        json={
+            "supervisor_name": "Lê Thị Thùy Trang",
+            "project_title": "Zalo Auto-Sync Test",
+            "registration_reason": "Kiểm tra tự động đồng bộ Zalo Admin và công cụ Bot tra cứu đơn chờ.",
+            "ssh_purpose": "Train AI",
+            "expected_tasks": "train",
+            "policy_accepted": True,
+        },
+    )
+    assert sub.status_code == 200
+    req_id = sub.json()["request"]["id"]
+    assert sub.json()["zalo_notification"]["delivery_status"] == "QUEUED_FOR_VERIFIED_ADMIN"
+    assert sub.json()["zalo_notification"]["target_zalo_id"] == approver_zalo
+
+    # Admin can re-trigger notify-zalo for pending request
+    resend = client.post(
+        f"/api/v1/admin/ssh-requests/{req_id}/notify-zalo",
+        headers=_admin_headers(admin_tok),
+    )
+    assert resend.status_code == 200
+    assert resend.json()["zalo_notification"]["delivery_status"] == "QUEUED_FOR_VERIFIED_ADMIN"
+
+    # Zalo AI Bot tool get_pending_ssh_requests works for ADMIN and denies non-ADMIN
+    admin_principal = ZaloPrincipal(approver_zalo, "admin", "mem-admin", "ADMIN", "Lê Công Hiếu", True, True)
+    tool_res = zalo_assistant_service.bot_engine.tool_registry.execute_tool(
+        "get_pending_ssh_requests", {}, admin_principal, source="zalo"
+    )
+    assert tool_res["pending_count"] >= 1
+    assert any(r["request_id"] == req_id for r in tool_res["pending_requests"])
+
+    stu_principal = ZaloPrincipal("99999", "sv_zalo_sync", "", "RESEARCHER", "SV", True, True)
+    denied = zalo_assistant_service.bot_engine.tool_registry.execute_tool(
+        "get_pending_ssh_requests", {}, stu_principal, source="zalo"
+    )
+    assert denied["error"] == "PERMISSION_DENIED"

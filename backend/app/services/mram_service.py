@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import secrets
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,7 @@ from app.db.models import (
     MemberProfileRecord,
     MemberRecord,
     MemberWebCredentialRecord,
+    NotificationOutboxRecord,
     PolicyAcceptanceRecord,
     ProvisioningOperationRecord,
     RequestApprovalRecord,
@@ -76,9 +78,28 @@ _ACADEMIC_TITLE_TOKENS = {
 }
 
 
+_VN_TONE_PAIRS = (
+    # oa / oe ở cuối âm tiết (hoà -> hòa, khoẻ -> khỏe...)
+    (re.compile(r"(?<![qQ])o([àáảãạÀÁẢÃẠ])(?=\s|$)"), lambda m: {"à": "òa", "á": "óa", "ả": "ỏa", "ã": "õa", "ạ": "ọa", "À": "Òa", "Á": "Óa", "Ả": "Ỏa", "Ã": "Õa", "Ạ": "Ọa"}[m.group(1)]),
+    (re.compile(r"(?<![qQ])O([àáảãạÀÁẢÃẠ])(?=\s|$)"), lambda m: {"à": "Òa", "á": "Óa", "ả": "Ỏa", "ã": "Õa", "ạ": "Ọa", "À": "Òa", "Á": "Óa", "Ả": "Ỏa", "Ã": "Õa", "Ạ": "Ọa"}[m.group(1)]),
+    (re.compile(r"(?<![qQ])o([èéẻẽẹÈÉẺẼẸ])(?=\s|$)"), lambda m: {"è": "òe", "é": "óe", "ẻ": "ỏe", "ẽ": "õe", "ẹ": "ọe", "È": "Òe", "É": "Óe", "Ẻ": "Ỏe", "Ẽ": "Õe", "Ẹ": "Ọe"}[m.group(1)]),
+    (re.compile(r"(?<![qQ])O([èéẻẽẹÈÉẺẼẸ])(?=\s|$)"), lambda m: {"è": "Òe", "é": "Óe", "ẻ": "Ỏe", "ẽ": "Õe", "ẹ": "Ọe", "È": "Òe", "É": "Óe", "Ẻ": "Ỏe", "Ẽ": "Õe", "Ẹ": "Ọe"}[m.group(1)]),
+    # uy không đứng sau q/Q (Thuỳ -> Thùy, Huỳnh vẫn giữ nguyên vì có nh sau y)
+    (re.compile(r"(?<![qQ])u([ỳýỷỹỵỲÝỶỸỴ])(?=\s|$)"), lambda m: {"ỳ": "ùy", "ý": "úy", "ỷ": "ủy", "ỹ": "ũy", "ỵ": "ụy", "Ỳ": "Ùy", "Ý": "Úy", "Ỷ": "Ủy", "Ỹ": "Ũy", "Ỵ": "Ụy"}[m.group(1)]),
+    (re.compile(r"(?<![qQ])U([ỳýỷỹỵỲÝỶỸỴ])(?=\s|$)"), lambda m: {"ỳ": "Ùy", "ý": "Úy", "ỷ": "Ủy", "ỹ": "Ũy", "ỵ": "Ụy", "Ỳ": "Ùy", "Ý": "Úy", "Ỷ": "Ủy", "Ỹ": "Ũy", "Ỵ": "Ụy"}[m.group(1)]),
+)
+
+
+def _normalize_vn_tone_placement(text: str) -> str:
+    normalized = unicodedata.normalize("NFC", text)
+    for pattern, repl in _VN_TONE_PAIRS:
+        normalized = pattern.sub(repl, normalized)
+    return normalized
+
+
 def _normalize_supervisor_name(raw: Optional[str]) -> str:
-    """Loại bỏ học hàm/học vị và chuẩn hóa tên giảng viên theo dạng viết hoa chữ cái đầu mỗi từ."""
-    cleaned = " ".join(str(raw or "").strip().split())
+    """Loại bỏ học hàm/học vị, chuẩn hóa Unicode NFC + vị trí dấu thanh và viết hoa chữ cái đầu mỗi từ."""
+    cleaned = _normalize_vn_tone_placement(" ".join(str(raw or "").strip().split()))
     if not cleaned or cleaned.upper() in {"N/A", "NONE", "NULL"}:
         return ""
     parts: List[str] = []
@@ -390,6 +411,323 @@ class MramService:
         labops_service._save_persistent_data()
         return {"success": True, "username": uname, "must_change_password": False}
 
+    def recover_member_web_password(
+        self,
+        *,
+        username: str,
+        member_code: str,
+        email: str,
+        new_password: str,
+    ) -> Dict[str, Any]:
+        """Allow students/researchers to self-recover their web login password by verifying profile identity (strictly forbidden for ADMIN)."""
+        uname = str(username or "").strip().lower()
+        code = str(member_code or "").strip()
+        mail = str(email or "").strip().lower()
+        admin_user = (os.getenv("LABOPS_ADMIN_USERNAME") or settings.LABOPS_ADMIN_USERNAME or "admin").strip().lower()
+
+        if not uname:
+            raise MramValidationError("MISSING_USERNAME", "Vui lòng nhập Tên đăng nhập", 400)
+        if uname in {"admin", admin_user}:
+            raise MramValidationError(
+                "ADMIN_RECOVERY_FORBIDDEN",
+                "Chức năng lấy lại mật khẩu Web chỉ dành cho Sinh viên / Nghiên cứu viên, không áp dụng cho Quản trị viên.",
+                403,
+            )
+        if not code or not mail:
+            raise MramValidationError(
+                "MISSING_IDENTITY_FIELDS",
+                "Vui lòng nhập đầy đủ Tên đăng nhập, Mã Sinh viên/Giảng viên và Email đã đăng ký",
+                400,
+            )
+        if not new_password or len(new_password) < 12:
+            raise MramValidationError("WEAK_PASSWORD", "Mật khẩu mới phải có ít nhất 12 ký tự", 400)
+
+        member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
+        if member and str(member.get("role") or "").strip().upper() == "ADMIN":
+            raise MramValidationError(
+                "ADMIN_RECOVERY_FORBIDDEN",
+                "Chức năng lấy lại mật khẩu Web không áp dụng cho tài khoản Quản trị viên.",
+                403,
+            )
+
+        now = _utcnow()
+        new_hash, algo = hash_web_password(new_password)
+        with self.db.session_scope() as session:
+            prof = session.execute(
+                select(MemberProfileRecord).where(MemberProfileRecord.username == uname)
+            ).scalar_one_or_none()
+            cred = session.execute(
+                select(MemberWebCredentialRecord).where(MemberWebCredentialRecord.username == uname)
+            ).scalar_one_or_none()
+            if prof is None or cred is None:
+                raise MramValidationError(
+                    "RECOVERY_VERIFICATION_FAILED",
+                    "Thông tin Tên đăng nhập, Mã Sinh viên/Giảng viên hoặc Email không chính xác.",
+                    401,
+                )
+            if not str(prof.member_code or "").strip() or not str(prof.email or "").strip():
+                raise MramValidationError(
+                    "RECOVERY_PROFILE_INCOMPLETE",
+                    "Tài khoản chưa có đầy đủ Mã SV/GV hoặc Email để tự khôi phục; vui lòng liên hệ Admin cấp lại mật khẩu Web.",
+                    400,
+                )
+            if (
+                str(prof.member_code).strip().lower() != code.lower()
+                or str(prof.email).strip().lower() != mail
+            ):
+                raise MramValidationError(
+                    "RECOVERY_VERIFICATION_FAILED",
+                    "Thông tin Tên đăng nhập, Mã Sinh viên/Giảng viên hoặc Email không chính xác.",
+                    401,
+                )
+
+            cred.password_hash = new_hash
+            cred.hash_algorithm = algo
+            cred.must_change_password = False
+            cred.failed_attempts = 0
+            cred.locked_until = None
+            cred.password_changed_at = now
+            cred.updated_at = now
+
+        if member:
+            member["must_change_password"] = False
+        labops_service._audit(
+            uname,
+            "MRAM_WEB_PASSWORD_RECOVERED",
+            "MEMBER",
+            uname,
+            "SUCCESS",
+            "Sinh viên/Nghiên cứu viên tự đặt lại mật khẩu đăng nhập Web sau khi xác minh định danh",
+        )
+        labops_service._save_persistent_data()
+        return {
+            "success": True,
+            "username": uname,
+            "message": "Đã đặt lại mật khẩu tài khoản Web thành công. Bạn có thể đăng nhập bằng mật khẩu mới.",
+        }
+
+    def admin_reissue_member_web_password(
+        self,
+        *,
+        member_id: str,
+        new_password: Optional[str] = None,
+        actor: str = "admin",
+    ) -> Dict[str, Any]:
+        """Admin reissues a temporary web login password for a student/researcher (strictly forbidden for ADMIN)."""
+        target_key = str(member_id or "").strip()
+        admin_user = (os.getenv("LABOPS_ADMIN_USERNAME") or settings.LABOPS_ADMIN_USERNAME or "admin").strip().lower()
+        if not target_key:
+            raise MramValidationError("MISSING_MEMBER_ID", "Thiếu mã thành viên", 400)
+        if target_key.lower() in {"admin", admin_user}:
+            raise MramValidationError(
+                "ADMIN_REISSUE_FORBIDDEN",
+                "Không áp dụng cấp lại mật khẩu Web cho tài khoản Quản trị viên.",
+                403,
+            )
+
+        raw_pw = str(new_password or "").strip()
+        if raw_pw:
+            if len(raw_pw) < 12:
+                raise MramValidationError("WEAK_PASSWORD", "Mật khẩu mới phải có ít nhất 12 ký tự", 400)
+        else:
+            raw_pw = f"LabOpsWeb!{secrets.token_urlsafe(9)}#"
+
+        pw_hash, algo = hash_web_password(raw_pw)
+        now = _utcnow()
+        member: Optional[Dict[str, Any]] = None
+
+        with self.db.session_scope() as session:
+            prof = session.get(MemberProfileRecord, target_key)
+            if prof is None:
+                prof = session.execute(
+                    select(MemberProfileRecord).where(MemberProfileRecord.username == target_key.lower())
+                ).scalar_one_or_none()
+            if prof is None:
+                raise LookupError(f"Không tìm thấy hồ sơ tài khoản Web '{target_key}'")
+
+            uname = prof.username.lower()
+            member = next((m for m in labops_service.members if m.get("id") == prof.member_id or (m.get("username") or "").lower() == uname), None)
+            if uname in {"admin", admin_user} or (member and str(member.get("role") or "").strip().upper() == "ADMIN"):
+                raise MramValidationError(
+                    "ADMIN_REISSUE_FORBIDDEN",
+                    "Không áp dụng cấp lại mật khẩu Web cho tài khoản Quản trị viên.",
+                    403,
+                )
+
+            cred = session.get(MemberWebCredentialRecord, prof.member_id)
+            if cred is None:
+                cred = MemberWebCredentialRecord(
+                    member_id=prof.member_id,
+                    username=uname,
+                    password_hash=pw_hash,
+                    hash_algorithm=algo,
+                    must_change_password=True,
+                    failed_attempts=0,
+                    password_changed_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(cred)
+            else:
+                cred.password_hash = pw_hash
+                cred.hash_algorithm = algo
+                cred.must_change_password = True
+                cred.failed_attempts = 0
+                cred.locked_until = None
+                cred.password_changed_at = now
+                cred.updated_at = now
+
+            prof_full_name = prof.full_name or uname
+            prof_member_id = prof.member_id
+            prof_username = prof.username
+
+        if member:
+            member["must_change_password"] = True
+        labops_service._audit(
+            actor,
+            "MRAM_WEB_PASSWORD_ADMIN_REISSUED",
+            "MEMBER",
+            prof_username,
+            "SUCCESS",
+            f"Admin cấp lại mật khẩu tài khoản Web cho @{prof_username}",
+        )
+        labops_service._save_persistent_data()
+        return {
+            "success": True,
+            "member_id": prof_member_id,
+            "username": prof_username,
+            "full_name": prof_full_name,
+            "reissued_web_password": raw_pw,
+            "must_change_password": True,
+            "one_time_notice": "Mật khẩu đăng nhập Web mới chỉ hiển thị 1 lần. Hãy sao chép và gửi cho sinh viên.",
+        }
+
+    def list_web_accounts(self) -> Dict[str, Any]:
+        """List web-registered member accounts separately from host SSH accounts, showing automatic SSH linkage upon approval."""
+        self.expire_overdue_requests()
+        self.sweep_expired_ssh_access()
+
+        members_by_id: Dict[str, Dict[str, Any]] = {}
+        for m in labops_service.members:
+            if m.get("status") == "DELETED":
+                continue
+            members_by_id[str(m["id"])] = m
+
+        now = _utcnow()
+        with self.db.session_scope() as session:
+            creds = session.execute(select(MemberWebCredentialRecord)).scalars().all()
+            profiles = session.execute(select(MemberProfileRecord)).scalars().all()
+            requests = session.execute(select(ServerAccessRequestRecord)).scalars().all()
+
+        cred_by_member = {c.member_id: c for c in creds}
+        prof_by_member = {p.member_id: p for p in profiles}
+        lecturers = {p.member_id: p for p in profiles if p.member_category == "LECTURER"}
+
+        reqs_by_member: Dict[str, List[ServerAccessRequestRecord]] = {}
+        for req in requests:
+            reqs_by_member.setdefault(req.member_id, []).append(req)
+
+        items: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for p in profiles:
+            m = members_by_id.get(p.member_id)
+            if m is None:
+                continue
+            cred = cred_by_member.get(p.member_id)
+            is_web = (
+                cred is not None
+                or m.get("provisioning_state") == "WEB_ONLY"
+                or bool(m.get("is_web_registered"))
+                or str(p.created_by or "") in {"self-register", "admin"}
+            )
+            if not is_web:
+                continue
+            seen_ids.add(p.member_id)
+
+            m_reqs = sorted(reqs_by_member.get(p.member_id, []), key=lambda x: x.created_at or now, reverse=True)
+            latest_req = m_reqs[0] if m_reqs else None
+
+            supervisor_name = ""
+            if p.primary_supervisor_id and p.primary_supervisor_id in lecturers:
+                lec_prof = lecturers[p.primary_supervisor_id]
+                supervisor_name = _normalize_supervisor_name(lec_prof.full_name) or lec_prof.full_name
+            else:
+                for req_item in m_reqs:
+                    cand = _normalize_supervisor_name((req_item.metadata_json or {}).get("supervisor_name"))
+                    if cand:
+                        supervisor_name = cand
+                        break
+
+            ssh_port = m.get("ssh_port")
+            is_ssh_linked = bool(
+                p.ssh_access_state == "VERIFIED_READY"
+                and ssh_port
+                and m.get("provisioning_state") != "WEB_ONLY"
+            )
+            ssh_server = str(m.get("assigned_server") or "").strip() if is_ssh_linked else None
+            ssh_host = (
+                str(m.get("ssh_ip") or ("192.168.167.251" if ssh_server == "workstation" else "192.168.167.250"))
+                if is_ssh_linked
+                else None
+            )
+
+            items.append({
+                "member_id": p.member_id,
+                "username": p.username,
+                "full_name": p.full_name or m.get("fullName") or p.username,
+                "email": p.email or m.get("email") or "",
+                "member_code": p.member_code or "",
+                "member_category": p.member_category or "STUDENT",
+                "department_class": p.department_class or "",
+                "primary_supervisor_id": p.primary_supervisor_id,
+                "supervisor_name": supervisor_name or None,
+                "web_account_status": p.web_account_status or "WEB_ACTIVE",
+                "ssh_access_state": p.ssh_access_state or "NONE",
+                "ssh_expires_at": _as_utc(p.ssh_expires_at).isoformat() if p.ssh_expires_at else None,
+                "must_change_password": bool(cred.must_change_password) if cred else False,
+                "has_web_credential": cred is not None,
+                "created_by": p.created_by or "self-register",
+                "created_at": _as_utc(p.created_at).isoformat() if p.created_at else m.get("createdAt"),
+                "is_ssh_linked": is_ssh_linked,
+                "linked_ssh_member_id": p.member_id if is_ssh_linked else None,
+                "linked_ssh_username": str(m.get("ssh_login_user") or p.username) if is_ssh_linked else None,
+                "linked_ssh_server": ssh_server,
+                "linked_ssh_host": ssh_host,
+                "linked_ssh_port": int(ssh_port) if (is_ssh_linked and ssh_port is not None) else None,
+                "latest_request": (
+                    {
+                        "id": latest_req.id,
+                        "status": latest_req.status,
+                        "project_title": latest_req.project_title,
+                        "gpu_requested": bool(latest_req.gpu_requested),
+                        "requested_duration_days": latest_req.requested_duration_days,
+                        "submitted_at": _as_utc(latest_req.submitted_at).isoformat() if latest_req.submitted_at else None,
+                        "decided_at": _as_utc(latest_req.decided_at).isoformat() if latest_req.decided_at else None,
+                    }
+                    if latest_req
+                    else None
+                ),
+            })
+
+        items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        linked_cnt = sum(1 for item in items if item["is_ssh_linked"])
+        pending_cnt = sum(
+            1
+            for item in items
+            if not item["is_ssh_linked"]
+            and (item.get("latest_request") or {}).get("status") in {"PENDING_APPROVAL", "NEED_INFO"}
+        )
+        return {
+            "accounts": items,
+            "summary": {
+                "total": len(items),
+                "ssh_linked": linked_cnt,
+                "pending_ssh_approval": pending_cnt,
+                "unlinked": len(items) - linked_cnt,
+            },
+        }
+
     def get_auth_context_for_member(self, username: str) -> Dict[str, Any]:
         uname = str(username or "").strip().lower()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
@@ -488,6 +826,9 @@ class MramService:
             "vram_quota_gb": 0,
             "gpu_permissions": [],
             "must_change_password": True,
+            "is_web_registered": True,
+            "linked_web_member_id": member_id,
+            "linked_web_username": username,
             "wireguard": {"status": "NOT_PROVISIONED", "devices": []},
             "createdAt": now_iso,
             "created_by": actor,
@@ -796,6 +1137,9 @@ class MramService:
         with self.db.session_scope() as session:
             profiles = session.execute(select(MemberProfileRecord)).scalars().all()
             requests = session.execute(select(ServerAccessRequestRecord)).scalars().all()
+            web_cred_ids = set(
+                session.execute(select(MemberWebCredentialRecord.member_id)).scalars().all()
+            )
 
         reqs_by_member: Dict[str, List[ServerAccessRequestRecord]] = {}
         for req in requests:
@@ -838,6 +1182,16 @@ class MramService:
             if p.member_category == "LECTURER":
                 continue
             m = members_by_id[p.member_id]
+            has_requests = p.member_id in reqs_by_member
+            is_web_member = (
+                p.member_id in web_cred_ids
+                or m.get("provisioning_state") == "WEB_ONLY"
+                or bool(m.get("is_web_registered"))
+                or str(p.created_by or "") in {"self-register", "admin"}
+            )
+            # Only group Web-registered members or students with SSH requests / supervisor assignment
+            if not is_web_member and not has_requests and not p.primary_supervisor_id:
+                continue
             m_reqs = sorted(reqs_by_member.get(p.member_id, []), key=lambda x: x.created_at or now, reverse=True)
             latest_req = m_reqs[0] if m_reqs else None
             entered_sup_name = ""
@@ -1165,7 +1519,7 @@ class MramService:
         try:
             from app.services.zalo_assistant.service import zalo_assistant_service
 
-            ver = zalo_assistant_service.identity_rbac.verify_daily_brief_recipient(target_zalo_id)
+            ver = zalo_assistant_service.identity_rbac.ensure_configured_approver_verified(target_zalo_id)
             if ver.get("verified") and ver.get("chat_id"):
                 chat_id = str(ver["chat_id"])
                 msg = (
@@ -1180,7 +1534,7 @@ class MramService:
                     f"• Hạn duyệt (24h): {_fmt_vn(req.review_expires_at)}\n"
                     f"🔗 Xem xét & phê duyệt:\n{review_link}"
                 )
-                zalo_assistant_service.notification_dispatcher.enqueue(
+                enqueued = zalo_assistant_service.notification_dispatcher.enqueue(
                     idempotency_key=f"mram-req:{req.id}:v{req.version}:{inv_id}",
                     recipient_id=chat_id,
                     event_type="MRAM_SSH_REQUEST_SUBMITTED",
@@ -1214,6 +1568,17 @@ class MramService:
 
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                             provider_msg_id = pool.submit(_sync_send).result(timeout=15)
+                        outbox_id = enqueued.get("id")
+                        if outbox_id:
+                            with self.db.session_scope() as session:
+                                out_rec = session.get(NotificationOutboxRecord, outbox_id)
+                                if out_rec is not None:
+                                    out_rec.status = "SENT"
+                                    out_rec.attempt_count = max(1, int(out_rec.attempt_count or 0))
+                                    out_rec.provider_message_id = provider_msg_id
+                                    out_rec.sent_at = _utcnow()
+                                    out_rec.next_retry_at = None
+                                    out_rec.last_error = None
                         delivery_status = "SENT"
                         delivery_detail = f"Đã gửi Zalo DM tới {ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id}), msg_id={provider_msg_id}"
                     except Exception as send_exc:
@@ -1232,6 +1597,48 @@ class MramService:
             "target_zalo_id": target_zalo_id,
             "expires_at": inv_exp.isoformat(),
         }
+
+    def notify_pending_ssh_request_zalo(self, request_id: str, *, actor: str = "admin") -> Dict[str, Any]:
+        """Re-issue a fresh 1-time Zalo invitation for a pending SSH request and dispatch DM to verified Admin."""
+        self.expire_overdue_requests()
+        with self.db.session_scope() as session:
+            req = session.get(ServerAccessRequestRecord, request_id)
+            if req is None:
+                raise LookupError(f"Không tìm thấy yêu cầu SSH '{request_id}'")
+            if req.status not in {"PENDING_APPROVAL", "NEED_INFO"}:
+                raise MramConflictError(
+                    "REQUEST_NOT_PENDING",
+                    f"Đơn {request_id} đang ở trạng thái {req.status}, không cần gửi lại thông báo phê duyệt.",
+                    409,
+                )
+            prof = session.get(MemberProfileRecord, req.member_id)
+            rec = session.execute(
+                select(RequestResourceRecommendationRecord)
+                .where(RequestResourceRecommendationRecord.request_id == req.id)
+                .order_by(RequestResourceRecommendationRecord.request_version.desc())
+            ).scalars().first()
+            sup_name = ""
+            if prof and prof.primary_supervisor_id:
+                sup_prof = session.get(MemberProfileRecord, prof.primary_supervisor_id)
+                if sup_prof and sup_prof.full_name:
+                    sup_name = _normalize_supervisor_name(sup_prof.full_name) or sup_prof.full_name
+            if not sup_name:
+                sup_name = _normalize_supervisor_name((req.metadata_json or {}).get("supervisor_name")) or "Chưa phân công GVHD"
+
+        if prof is None or rec is None:
+            raise LookupError(f"Thiếu hồ sơ hoặc cấu hình đề xuất cho đơn '{request_id}'")
+
+        res = self._issue_and_notify_zalo_invitation(req=req, prof=prof, rec=rec, supervisor_name=sup_name)
+        labops_service._audit(
+            actor,
+            "MRAM_ZALO_INVITATION_RESENT",
+            "SSH_REQUEST",
+            request_id,
+            "SUCCESS" if res.get("delivery_status") in {"SENT", "QUEUED_FOR_VERIFIED_ADMIN"} else "WARNING",
+            f"Gửi lại thông báo phê duyệt Zalo ({res.get('delivery_status')}): {res.get('delivery_detail')}",
+        )
+        labops_service._save_persistent_data()
+        return {"request_id": request_id, "zalo_notification": res}
 
     def submit_ssh_request(
         self,
@@ -2206,6 +2613,13 @@ class MramService:
             member["ssh_access_state"] = "VERIFIED_READY" if verified_ready else "PROVISIONING_FAILED"
             member["ssh_expires_at"] = ssh_exp_dt.isoformat() if ssh_exp_dt else None
             member["member_category"] = req_cat
+            if verified_ready:
+                member["is_web_registered"] = True
+                member["linked_web_member_id"] = member_id
+                member["linked_web_username"] = username
+                member["linked_ssh_member_id"] = member_id
+                member["linked_ssh_username"] = str(member.get("ssh_login_user") or username)
+                member["ssh_linked_at"] = done_at.isoformat()
         labops_service._save_persistent_data()
 
         return {

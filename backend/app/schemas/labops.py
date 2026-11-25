@@ -384,6 +384,10 @@ class MemberResponse(BaseSchema):
     temp_password_expires_at: Optional[str] = Field(None, alias="tempPasswordExpiresAt")
     runtime_verification: Optional[Dict[str, Any]] = Field(None, alias="runtimeVerification")
     one_time_package: Optional[Dict[str, Any]] = Field(None, alias="oneTimePackage")
+    ssh_access_state: Optional[str] = Field(None, alias="sshAccessState")
+    linked_web_member_id: Optional[str] = Field(None, alias="linkedWebMemberId")
+    linked_web_username: Optional[str] = Field(None, alias="linkedWebUsername")
+    is_web_registered: Optional[bool] = Field(None, alias="isWebRegistered")
 
 class JobResponse(BaseSchema):
     id: str

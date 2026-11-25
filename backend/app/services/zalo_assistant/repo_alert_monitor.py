@@ -166,13 +166,14 @@ class RepoSecurityAlertMonitor:
         self._last_poll_monotonic: float = 0.0
 
     def _new_state(self) -> Dict[str, Any]:
-        return {"sent_alerts": {}, "last_checked_at": None, "pending_events": []}
+        return {"sent_alerts": {}, "approved_repos": {}, "last_checked_at": None, "pending_events": []}
 
     def _load_state(self) -> Dict[str, Any]:
         loaded = safe_load_json(self.state_path, self._new_state)
         if not isinstance(loaded, dict):
             return self._new_state()
         loaded.setdefault("sent_alerts", {})
+        loaded.setdefault("approved_repos", {})
         loaded.setdefault("pending_events", [])
         return loaded
 
@@ -184,11 +185,93 @@ class RepoSecurityAlertMonitor:
             state["sent_alerts"] = dict(items[-1000:])
         atomic_write_json(self.state_path, state, mode=0o600, use_lock=False)
 
+    @staticmethod
+    def _repo_key(req: Dict[str, Any]) -> str:
+        canon = str(req.get("canonical_repo") or req.get("repo_url") or "").strip().lower()
+        if canon:
+            return canon
+        owner = str(req.get("owner") or "").strip().lower()
+        repo = str(req.get("repo_name") or "").strip().lower()
+        if owner and repo:
+            return f"https://github.com/{owner}/{repo}"
+        return ""
+
+    @staticmethod
+    def _repo_label(req: Dict[str, Any]) -> str:
+        owner = str(req.get("owner") or "").strip()
+        repo_name = str(req.get("repo_name") or "").strip()
+        if owner and repo_name:
+            return f"{owner}/{repo_name}"
+        return str(req.get("canonical_repo") or req.get("repo_url") or "unknown")
+
+    @staticmethod
+    def is_request_approved(req: Dict[str, Any]) -> bool:
+        if not isinstance(req, dict):
+            return False
+        state = str(req.get("state") or "").upper()
+        review_status = str(req.get("review_status") or "").upper()
+        decision = req.get("decision")
+        dec_verdict = str(decision.get("verdict") or "").upper() if isinstance(decision, dict) else ""
+        return (
+            state == "MANUALLY_APPROVED"
+            or review_status == "APPROVED"
+            or dec_verdict in {"APPROVED", "MANUALLY_APPROVED"}
+        )
+
+    def suppress_repo_alerts(
+        self,
+        req_info: Dict[str, Any],
+        *,
+        actor: str = "admin",
+        reason: str = "",
+    ) -> int:
+        """Record an Admin-approved repository to suppress future Zalo/incident alerts and resolve open incidents."""
+        if not isinstance(req_info, dict):
+            return 0
+        repo_key = self._repo_key(req_info)
+        repo_label = self._repo_label(req_info)
+        req_id = str(req_info.get("id") or "").strip()
+
+        state = self._load_state()
+        approved = state.setdefault("approved_repos", {})
+        if repo_key:
+            approved[repo_key] = {
+                "repo_label": repo_label,
+                "approved_by": actor,
+                "reason": reason,
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+            }
+        # Remove queued events for this repository so pending alerts do not fire after approval
+        queue = list(state.get("pending_events") or [])
+        state["pending_events"] = [
+            ev for ev in queue
+            if isinstance(ev, dict) and self._repo_key(ev) != repo_key and str(ev.get("id") or "") != req_id
+        ]
+        self._save_state(state)
+
+        try:
+            return self.incident_engine.resolve_incidents_for_repository(
+                canonical_repo=repo_key,
+                repo_label=repo_label,
+                request_id=req_id,
+                actor=actor,
+                reason=reason,
+            )
+        except Exception as err:
+            logger.warning("Không thể đóng incident sau khi duyệt repo %s: %s", repo_label, err)
+            return 0
+
     def push_event(self, event_req: Dict[str, Any]) -> None:
         """Event-driven queue push invoked immediately when Repository Guard finishes/updates a scan."""
         if not isinstance(event_req, dict) or not event_req.get("id"):
             return
+        if self.is_request_approved(event_req):
+            self.suppress_repo_alerts(event_req, actor=str((event_req.get("decision") or {}).get("reviewer") or "admin"))
+            return
         state = self._load_state()
+        approved = state.get("approved_repos") or {}
+        if self._repo_key(event_req) in approved:
+            return
         queue = list(state.get("pending_events") or [])
         queue.append(event_req)
         state["pending_events"] = queue[-100:]
@@ -412,10 +495,28 @@ class RepoSecurityAlertMonitor:
         requests = list(merged_by_id.values())
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.bootstrap_lookback_hours)
+        approved_repos = dict(state.get("approved_repos") or {})
+        for req in requests:
+            if self.is_request_approved(req):
+                rk = self._repo_key(req)
+                if rk and rk not in approved_repos:
+                    approved_repos[rk] = {
+                        "repo_label": self._repo_label(req),
+                        "approved_by": str((req.get("decision") or {}).get("reviewer") or "admin"),
+                        "approved_at": datetime.now(timezone.utc).isoformat(),
+                    }
+        if approved_repos:
+            state["approved_repos"] = approved_repos
+
         sent_count = 0
         incidents_created = 0
 
         for req in requests:
+            rk = self._repo_key(req)
+            if rk and rk in approved_repos:
+                continue
+            if self.is_request_approved(req):
+                continue
             alert_kind = self.classify_alert(req)
             if not alert_kind:
                 continue

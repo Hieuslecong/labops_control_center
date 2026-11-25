@@ -723,9 +723,14 @@ class TestMilestone2ZaloAnd9RouterHardening(unittest.TestCase):
         res_tok = issue_token("res_u", "RESEARCHER")
 
         self.assertEqual(self.client.get("/api/v1/ai-assistant/config", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/ai-assistant/overview", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/ai-assistant/reports", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/ai-assistant/reports/rpt-any", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/ai-assistant/reports/rpt-any/download", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
         self.assertEqual(self.client.get("/api/v1/ai-assistant/tools", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
         self.assertEqual(self.client.get("/api/v1/ai-assistant/history", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
         self.assertEqual(self.client.post("/api/v1/ai-assistant/reports/generate", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/v2/vpn/overview", headers={"Authorization": f"Bearer {res_tok}"}).status_code, 403)
 
         r_bad_cfg = self.client.post(
             "/api/v1/ai-assistant/config",

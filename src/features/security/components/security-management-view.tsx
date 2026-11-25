@@ -405,7 +405,9 @@ export function SecurityManagementView() {
                               {rescanningId === r.id ? 'Đang quét...' : 'Quét lại'}
                             </Button>
                           )}
-                          {resolvePostCloneReviewStatus(r) === 'REVIEW_REQUIRED' && (
+                          {(resolvePostCloneReviewStatus(r) === 'REVIEW_REQUIRED' ||
+                            resolvePostCloneReviewStatus(r) === 'SCAN_FAILED' ||
+                            r.state === 'FAILED') && (
                             <Button
                               size='sm'
                               onClick={() => {
@@ -414,6 +416,7 @@ export function SecurityManagementView() {
                                 setDecisionModalOpen(true);
                               }}
                               className='h-7 text-xs px-2 bg-emerald-600 hover:bg-emerald-700 text-white'
+                              title='Phê duyệt repo này và không cảnh báo lại nữa'
                             >
                               Duyệt
                             </Button>
@@ -534,6 +537,22 @@ export function SecurityManagementView() {
                 </div>
               )}
 
+              {selectedReq.decision && (
+                <div className='p-2.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300 text-xs flex flex-col gap-1'>
+                  <span className='font-semibold'>
+                    Quyết định Admin ({selectedReq.decision.verdict}) — miễn trừ cảnh báo lặp lại:
+                  </span>
+                  <span>
+                    Người duyệt:{' '}
+                    <strong className='font-mono'>@{selectedReq.decision.reviewer}</strong> •{' '}
+                    {selectedReq.decision.reviewed_at
+                      ? new Date(selectedReq.decision.reviewed_at).toLocaleString('vi-VN')
+                      : ''}
+                  </span>
+                  {selectedReq.decision.reason && <span>Lý do: {selectedReq.decision.reason}</span>}
+                </div>
+              )}
+
               {selectedReq.error && (
                 <div className='p-2.5 rounded-lg border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400 text-xs'>
                   <span className='font-semibold block'>Lỗi:</span>
@@ -543,7 +562,9 @@ export function SecurityManagementView() {
             </div>
 
             <DialogFooter className='gap-2 sm:gap-0'>
-              {resolvePostCloneReviewStatus(selectedReq) === 'REVIEW_REQUIRED' && (
+              {(resolvePostCloneReviewStatus(selectedReq) === 'REVIEW_REQUIRED' ||
+                resolvePostCloneReviewStatus(selectedReq) === 'SCAN_FAILED' ||
+                selectedReq.state === 'FAILED') && (
                 <div className='flex items-center gap-2 mr-auto'>
                   <Button
                     size='sm'
@@ -553,7 +574,7 @@ export function SecurityManagementView() {
                     }}
                     className='bg-emerald-600 hover:bg-emerald-700 text-white text-xs'
                   >
-                    Duyệt hậu kiểm
+                    Duyệt (Không cảnh báo lại)
                   </Button>
                   <Button
                     size='sm'

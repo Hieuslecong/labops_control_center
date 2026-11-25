@@ -263,6 +263,7 @@ func (h *HTTPHandler) handleRequestByID(w http.ResponseWriter, r *http.Request) 
 			WorkspaceID      string `json:"workspace_id"`
 			MemberID         string `json:"member_id"`
 			NodeID           string `json:"node_id"`
+			Ref              string `json:"ref"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&payload)
@@ -271,6 +272,7 @@ func (h *HTTPHandler) handleRequestByID(w http.ResponseWriter, r *http.Request) 
 		opts := SubmitOptions{
 			Source:           strings.TrimSpace(payload.Source),
 			LocalRepoRelPath: strings.TrimSpace(payload.LocalRepoRelPath),
+			Ref:              strings.TrimSpace(payload.Ref),
 		}
 		if opts.Source == "" {
 			opts.Source = existing.Source

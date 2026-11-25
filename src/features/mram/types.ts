@@ -113,6 +113,40 @@ export interface ServerAccessRequestItem {
   } | null;
 }
 
+export interface WebPortalAccountItem {
+  member_id: string;
+  username: string;
+  full_name: string;
+  email: string;
+  member_code: string;
+  member_category: MemberCategory;
+  department_class: string;
+  primary_supervisor_id: string | null;
+  supervisor_name: string | null;
+  web_account_status: string;
+  ssh_access_state: string;
+  ssh_expires_at: string | null;
+  must_change_password: boolean;
+  has_web_credential: boolean;
+  created_by: string;
+  created_at: string | null;
+  is_ssh_linked: boolean;
+  linked_ssh_member_id: string | null;
+  linked_ssh_username: string | null;
+  linked_ssh_server: string | null;
+  linked_ssh_host: string | null;
+  linked_ssh_port: number | null;
+  latest_request: {
+    id: string;
+    status: string;
+    project_title: string;
+    gpu_requested: boolean;
+    requested_duration_days: number | null;
+    submitted_at: string | null;
+    decided_at: string | null;
+  } | null;
+}
+
 export function formatRemainingSla(seconds: number): string {
   if (seconds <= 0) return 'Hết hạn (00:00)';
   const h = Math.floor(seconds / 3600);

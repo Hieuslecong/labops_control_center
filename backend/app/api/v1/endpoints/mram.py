@@ -98,6 +98,29 @@ async def admin_list_supervisor_groups(p: Principal = Depends(require_admin)) ->
     return mram_service.get_supervisor_groups()
 
 
+@router.get("/admin/web-accounts")
+async def admin_list_web_accounts(p: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    return mram_service.list_web_accounts()
+
+
+@router.post("/admin/web-accounts/{member_id}/reissue-password")
+async def admin_reissue_web_account_password(
+    member_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        new_pw = (payload or {}).get("new_password") if isinstance(payload, dict) else None
+        return mram_service.admin_reissue_member_web_password(
+            member_id=member_id,
+            new_password=str(new_pw) if new_pw else None,
+            actor=p.username,
+        )
+    except Exception as exc:
+        _handle_mram_err(exc)
+        raise
+
+
 @router.get("/me/supervised-students")
 async def list_my_supervised_students(p: Principal = Depends(require_user)) -> Dict[str, Any]:
     try:
@@ -267,6 +290,18 @@ async def admin_get_ssh_request(
             "pools_by_host": pools_by_host,
             "gpus_by_host": gpus_by_host,
         }
+    except Exception as exc:
+        _handle_mram_err(exc)
+        raise
+
+
+@router.post("/admin/ssh-requests/{request_id}/notify-zalo")
+async def admin_notify_ssh_request_zalo(
+    request_id: str,
+    p: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    try:
+        return mram_service.notify_pending_ssh_request_zalo(request_id, actor=p.username)
     except Exception as exc:
         _handle_mram_err(exc)
         raise

@@ -370,8 +370,11 @@ def rescan_repository_request(
     if member:
         data["member_id"] = str(member.get("id") or "")
         data["workspace_id"] = str(member.get("workspace_id") or "")
-        # If this failed before workspace_clone metadata was attached, try discovering rel path in workspace
-        if not data["local_repo_rel_path"] and (member.get("container_id") or member.get("workspace_id")):
+        # If this failed before workspace_clone metadata was attached, or is already a workspace_clone,
+        # inspect the live container to pick up moved paths or updated commit SHAs.
+        if (data["source"] == "workspace_clone" or not data["local_repo_rel_path"]) and (
+            member.get("container_id") or member.get("workspace_id")
+        ):
             container_ref = str(member.get("container_id") or f"ws-{submitter}")
             target_canonical = str(req_info.get("canonical_repo") or req_info.get("repo_url") or "").strip().lower()
             try:
@@ -391,6 +394,9 @@ def rescan_repository_request(
                         if norm_u and norm_u.lower() == target_canonical:
                             data["source"] = "workspace_clone"
                             data["local_repo_rel_path"] = str(rec.get("dir") or "")
+                            discovered_sha = str(rec.get("sha") or "").strip()
+                            if _COMMIT_SHA_RE.match(discovered_sha):
+                                data["ref"] = discovered_sha
                             break
             except Exception:
                 pass
@@ -550,6 +556,15 @@ def _sync_workspace_cloned_repositories(principal: Principal, existing_requests:
             }
 
             if existing_item is not None:
+                dec = existing_item.get("decision")
+                dec_verdict = str(dec.get("verdict") or "").upper() if isinstance(dec, dict) else ""
+                is_admin_approved = (
+                    str(existing_item.get("state") or "").upper() == "MANUALLY_APPROVED"
+                    or str(existing_item.get("review_status") or "").upper() == "APPROVED"
+                    or dec_verdict in {"APPROVED", "MANUALLY_APPROVED"}
+                )
+                if is_admin_approved:
+                    continue
                 if (
                     existing_item.get("state") == "FAILED"
                     and existing_item.get("source") != "workspace_clone"
@@ -658,71 +673,15 @@ def decide_repository_request(
         f"Admin {p.username} đã {payload.decision} yêu cầu {request_id}. Lý do: {payload.reason}",
     )
     getattr(service, "save_audit_logs", service._save_persistent_data)()
-    return res
+    if payload.decision == "APPROVED" and isinstance(res, dict):
+        try:
+            from app.services.zalo_assistant import zalo_assistant_service
 
-
-@router.post("/requests/{request_id}/rescan", status_code=status.HTTP_202_ACCEPTED)
-def rescan_repository_request(
-    request_id: str,
-    p: Principal = Depends(require_admin),
-) -> Dict[str, Any]:
-    _validate_request_id(request_id)
-    req_info = _agent_call(f"requests/{request_id}", method="GET", principal=p)
-    submitter = str(req_info.get("submitted_by") or "").strip()
-    data: Dict[str, Any] = {
-        "source": str(req_info.get("source") or ""),
-        "local_repo_rel_path": str(req_info.get("local_repo_path") or ""),
-        "node_id": settings.LOCAL_HOST_ID,
-    }
-    member = next(
-        (item for item in service.members if str(item.get("username") or "").strip() == submitter),
-        None,
-    )
-    if member:
-        data["member_id"] = str(member.get("id") or "")
-        data["workspace_id"] = str(member.get("workspace_id") or "")
-        # If this failed before workspace_clone metadata was attached, try discovering rel path in workspace
-        if not data["local_repo_rel_path"] and (member.get("container_id") or member.get("workspace_id")):
-            container_ref = str(member.get("container_id") or f"ws-{submitter}")
-            target_canonical = str(req_info.get("canonical_repo") or req_info.get("repo_url") or "").strip().lower()
-            try:
-                proc = subprocess.run(
-                    ["docker", "exec", container_ref, "/usr/bin/python3", "-c", _DOCKER_DISCOVER_SCRIPT],
-                    capture_output=True,
-                    text=True,
-                    timeout=2.5,
-                )
-                if proc.returncode == 0:
-                    for line in proc.stdout.splitlines():
-                        try:
-                            rec = json.loads(line.strip())
-                        except ValueError:
-                            continue
-                        norm_u = _normalize_discovered_git_url(str(rec.get("url") or ""))
-                        if norm_u and norm_u.lower() == target_canonical:
-                            data["source"] = "workspace_clone"
-                            data["local_repo_rel_path"] = str(rec.get("dir") or "")
-                            break
-            except Exception:
-                pass
-
-    res = _agent_call(f"requests/{request_id}/rescan", method="POST", data=data, principal=p)
-    service._audit(
-        p.username,
-        "REPOSITORY_ADMIN_RESCAN",
-        "REPOSITORY_REQUEST",
-        request_id,
-        "SUCCESS",
-        f"Admin {p.username} yêu cầu quét lại hậu kiểm cho {request_id}.",
-    )
-    getattr(service, "save_audit_logs", service._save_persistent_data)()
-    try:
-        from app.services.zalo_assistant import zalo_assistant_service
-
-        if isinstance(res, dict) and res.get("id"):
-            zalo_assistant_service.repo_alert_monitor.push_event(res)
-    except Exception:
-        pass
+            monitor = getattr(zalo_assistant_service, "repo_alert_monitor", None)
+            if monitor is not None:
+                monitor.suppress_repo_alerts(res, actor=p.username, reason=payload.reason)
+        except Exception:
+            pass
     return res
 
 
@@ -769,71 +728,6 @@ def deliver_repository_artifact(
         f"Đã phân phối artifact được phê duyệt vào thư mục {clean_dir}",
     )
     getattr(service, "save_audit_logs", service._save_persistent_data)()
-    return res
-
-
-@router.post("/requests/{request_id}/rescan", status_code=status.HTTP_202_ACCEPTED)
-def rescan_repository_request(
-    request_id: str,
-    p: Principal = Depends(require_admin),
-) -> Dict[str, Any]:
-    _validate_request_id(request_id)
-    req_info = _agent_call(f"requests/{request_id}", method="GET", principal=p)
-    submitter = str(req_info.get("submitted_by") or "").strip()
-    data: Dict[str, Any] = {
-        "source": str(req_info.get("source") or ""),
-        "local_repo_rel_path": str(req_info.get("local_repo_path") or ""),
-        "node_id": settings.LOCAL_HOST_ID,
-    }
-    member = next(
-        (item for item in service.members if str(item.get("username") or "").strip() == submitter),
-        None,
-    )
-    if member:
-        data["member_id"] = str(member.get("id") or "")
-        data["workspace_id"] = str(member.get("workspace_id") or "")
-        # If this failed before workspace_clone metadata was attached, try discovering rel path in workspace
-        if not data["local_repo_rel_path"] and (member.get("container_id") or member.get("workspace_id")):
-            container_ref = str(member.get("container_id") or f"ws-{submitter}")
-            target_canonical = str(req_info.get("canonical_repo") or req_info.get("repo_url") or "").strip().lower()
-            try:
-                proc = subprocess.run(
-                    ["docker", "exec", container_ref, "/usr/bin/python3", "-c", _DOCKER_DISCOVER_SCRIPT],
-                    capture_output=True,
-                    text=True,
-                    timeout=2.5,
-                )
-                if proc.returncode == 0:
-                    for line in proc.stdout.splitlines():
-                        try:
-                            rec = json.loads(line.strip())
-                        except ValueError:
-                            continue
-                        norm_u = _normalize_discovered_git_url(str(rec.get("url") or ""))
-                        if norm_u and norm_u.lower() == target_canonical:
-                            data["source"] = "workspace_clone"
-                            data["local_repo_rel_path"] = str(rec.get("dir") or "")
-                            break
-            except Exception:
-                pass
-
-    res = _agent_call(f"requests/{request_id}/rescan", method="POST", data=data, principal=p)
-    service._audit(
-        p.username,
-        "REPOSITORY_ADMIN_RESCAN",
-        "REPOSITORY_REQUEST",
-        request_id,
-        "SUCCESS",
-        f"Admin {p.username} yêu cầu quét lại hậu kiểm cho {request_id}.",
-    )
-    getattr(service, "save_audit_logs", service._save_persistent_data)()
-    try:
-        from app.services.zalo_assistant import zalo_assistant_service
-
-        if isinstance(res, dict) and res.get("id"):
-            zalo_assistant_service.repo_alert_monitor.push_event(res)
-    except Exception:
-        pass
     return res
 
 

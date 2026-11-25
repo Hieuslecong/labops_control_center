@@ -133,11 +133,29 @@ describe('Milestone 3 BFF CSRF & RBAC Policy', () => {
   });
 
   it('enforces admin RBAC for privileged paths while allowing self-service researcher endpoints', () => {
-    assert.equal(isAdminRequiredLabOpsPath('POST', ['auth', 'step-up']), true);
+    assert.equal(isAdminRequiredLabOpsPath('POST', ['auth', 'step-up']), false);
     assert.equal(isAdminRequiredLabOpsPath('GET', ['audit-logs']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['v2', 'vpn', 'overview']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'overview']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'reports']), true);
+    assert.equal(
+      isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'reports', 'rpt-1', 'download']),
+      true
+    );
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'daily-brief', 'status']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'identity-links']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'subscriptions']), true);
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', ['ai-assistant', 'incidents', 'inc-1', 'resolve']),
+      true
+    );
     assert.equal(isAdminRequiredLabOpsPath('GET', ['repositories', 'audit']), true);
     assert.equal(
       isAdminRequiredLabOpsPath('POST', ['repositories', 'requests', 'req-1', 'decision']),
+      true
+    );
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', ['repositories', 'requests', 'req-1', 'rescan']),
       true
     );
     assert.equal(

@@ -171,6 +171,11 @@ class SREToolRegistry:
                 "additionalProperties": False,
             },
         },
+        "get_pending_ssh_requests": {
+            "description": "Danh sách đơn xin cấp tài khoản SSH/GPU đang chờ Admin phê duyệt (MRAM) và thống kê tài khoản Web mới đăng ký.",
+            "admin_only": True,
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
     }
 
     def __init__(
@@ -493,6 +498,45 @@ class SREToolRegistry:
         reps = self.reports.list_reports()
         return {"report_type": "WEEKLY_OPERATIONAL", "report": reps[0] if reps else None}
 
+    def _tool_get_pending_ssh_requests(self, args: Dict[str, Any], principal: ZaloPrincipal) -> Dict[str, Any]:
+        if not principal.is_admin:
+            return {"error": "PERMISSION_DENIED"}
+        from app.services.mram_service import mram_service
+
+        pending_reqs = mram_service.list_requests_for_admin(status_filter="PENDING_APPROVAL")
+        need_info_reqs = mram_service.list_requests_for_admin(status_filter="NEED_INFO")
+        all_pending = list(pending_reqs) + list(need_info_reqs)
+        web_summary = mram_service.list_web_accounts().get("summary", {})
+
+        formatted: List[Dict[str, Any]] = []
+        for req in all_pending[:15]:
+            rec = req.get("recommendation") or {}
+            rem_sec = int(req.get("remaining_review_seconds") or 0)
+            formatted.append({
+                "request_id": req.get("id"),
+                "username": req.get("username"),
+                "full_name": req.get("full_name"),
+                "member_code": req.get("member_code"),
+                "member_category": req.get("member_category"),
+                "supervisor_name": req.get("supervisor_name") or "Chưa khai báo",
+                "project_title": req.get("project_title"),
+                "registration_reason": str(req.get("registration_reason") or "")[:200],
+                "gpu_requested": bool(req.get("gpu_requested")),
+                "requested_duration_days": req.get("requested_duration_days"),
+                "status": req.get("status"),
+                "submitted_at_vn": _format_vn_time(req.get("submitted_at")),
+                "remaining_sla_hours": round(rem_sec / 3600.0, 1),
+                "recommended_host": rec.get("recommended_host_id") or "workstation",
+                "recommended_spec": f"{rec.get('cpu_cores', 4)}C/{rec.get('ram_gb', 16)}G/{rec.get('storage_quota_gb', 50)}GiB, GPU={rec.get('gpu_mode', 'NONE')}",
+            })
+
+        return {
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "pending_count": len(all_pending),
+            "pending_requests": formatted,
+            "web_accounts_summary": web_summary,
+        }
+
     def list_recent_tool_audit(self, limit: int = 30) -> List[Dict[str, Any]]:
         with self.db.session_scope() as session:
             rows = session.execute(
@@ -522,7 +566,28 @@ class SREAgentRunner:
         q = str(question or "").lower()
         selected: List[tuple[str, Dict[str, Any]]] = []
 
-        if any(k in q for k in ("chậm", "slow", "lag", "cpu", "ram", "disk", "ổ", "workstation", "rack", "máy chủ", "tải")):
+        if principal.is_admin and any(
+            k in q
+            for k in (
+                "phê duyệt",
+                "duyệt",
+                "công việc",
+                "yêu cầu",
+                "đơn",
+                "xin cấp",
+                "thành viên mới",
+                "đăng ký mới",
+                "chờ duyệt",
+                "ssh request",
+                "mram",
+            )
+        ):
+            selected.extend([
+                ("get_pending_ssh_requests", {}),
+                ("get_system_health", {}),
+                ("get_incidents", {}),
+            ])
+        elif any(k in q for k in ("chậm", "slow", "lag", "cpu", "ram", "disk", "ổ", "workstation", "rack", "máy chủ", "tải")):
             selected.extend([
                 ("get_server_metrics", {}),
                 ("get_metrics_history", {"window_hours": 24}),
@@ -752,6 +817,19 @@ class SREAgentRunner:
                 lines.append(
                     f"• Chỉ số 24h: Khả dụng {res.get('availability_percent') or 'N/A'}% | CPU đỉnh {res.get('cpu_peak_percent') or 'N/A'}%"
                 )
+            elif tname == "get_pending_ssh_requests":
+                p_reqs = res.get("pending_requests") or []
+                w_sum = res.get("web_accounts_summary") or {}
+                lines.append(
+                    f"• Đơn xin cấp SSH đang chờ phê duyệt: {res.get('pending_count', len(p_reqs))} đơn "
+                    f"(Tổng TK Web: {w_sum.get('total', 0)}, chưa liên kết SSH: {w_sum.get('unlinked', 0)})"
+                )
+                for req_item in p_reqs[:10]:
+                    lines.append(
+                        f"  - {req_item.get('full_name')} (@{req_item.get('username')}, mã {req_item.get('member_code') or 'N/A'}) | "
+                        f"GVHD: {req_item.get('supervisor_name')} | Dự án: {req_item.get('project_title')} | "
+                        f"Đề xuất: {req_item.get('recommended_spec')} | Mã đơn: {req_item.get('request_id')} (SLA còn ~{req_item.get('remaining_sla_hours')}h)"
+                    )
         if timestamps:
             lines.append(f"• Cập nhật lúc: {_format_vn_time(timestamps[0])} (UTC+7)")
         lines.append("• Nguồn dữ liệu: Đọc trực tiếp từ hệ thống giám sát.")

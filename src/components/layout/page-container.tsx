@@ -1,5 +1,4 @@
 import React from 'react';
-import { Heading } from '../ui/heading';
 import type { InfobarContent } from '@/components/ui/infobar';
 
 function PageSkeleton() {
@@ -26,9 +25,6 @@ export default function PageContainer({
   isLoading = false,
   access = true,
   accessFallback,
-  pageTitle,
-  pageDescription,
-  infoContent,
   pageHeaderAction
 }: {
   children: React.ReactNode;
@@ -54,18 +50,11 @@ export default function PageContainer({
 
   const content = isLoading ? <PageSkeleton /> : children;
 
-  const hasHeader = pageTitle || pageHeaderAction;
-
   return (
-    <div className='flex flex-1 flex-col px-4 pt-2 pb-4 md:px-6 md:pt-4 min-w-0 w-full'>
-      {hasHeader && (
-        <div className='mb-4 flex items-start justify-between gap-4'>
-          <Heading
-            title={pageTitle ?? ''}
-            description={pageDescription ?? ''}
-            infoContent={infoContent}
-          />
-          {pageHeaderAction && <div className='shrink-0'>{pageHeaderAction}</div>}
+    <div className='flex flex-1 flex-col px-4 pt-2 pb-4 md:px-6 md:pt-3 min-w-0 w-full'>
+      {pageHeaderAction && (
+        <div className='mb-3 flex items-center justify-end gap-4'>
+          <div className='shrink-0'>{pageHeaderAction}</div>
         </div>
       )}
       {content}

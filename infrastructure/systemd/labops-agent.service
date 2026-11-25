@@ -26,8 +26,8 @@ Restart=on-failure
 RestartSec=5
 
 NoNewPrivileges=true
-AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_SYS_PTRACE
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_KILL CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 # Dùng ProtectSystem=full (chỉ read-only /usr, /boot, /efi, /etc) thay vì strict để giữ nguyên trạng thái rw thực tế của các ổ đĩa dữ liệu (/mnt/*, /media/*) và /var/lib/*.
 ProtectSystem=full
 ProtectHome=true

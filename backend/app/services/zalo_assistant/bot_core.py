@@ -69,6 +69,17 @@ class ZaloBotEngine:
         "/quota": "Kiểm tra hạn mức tin nhắn nội bộ Zalo & AI requests",
         "/link": "Liên kết tài khoản Zalo với LabOps (/link <MÃ>)",
         "/ask": "Điều tra hạ tầng bằng AI Agent (/ask <câu hỏi>)",
+        "/new": "Bắt đầu phiên hội thoại mới (V4)",
+        "/clear": "Xóa ngữ cảnh hội thoại hiện tại (không xóa audit log)",
+        "/memory": "Xem trạng thái phiên nhớ và tùy chọn cá nhân",
+        "/tasks": "Danh sách tác vụ & watch rules đang hoạt động",
+        "/watch": "Theo dõi ngưỡng (/watch <target> <metric> <lt|lte|gt|gte> <val> [sec])",
+        "/cancel": "Hủy tác vụ hoặc watch (/cancel <task_id>)",
+        "/settings": "Xem hoặc đặt tùy chọn (/settings [key=value])",
+        "/summary": "Tóm tắt tình hình (/summary [today|week])",
+        "/compare": "So sánh tải hiện tại với lịch sử (/compare [host_id])",
+        "/who": "Tra cứu thông tin thành viên (Chỉ Admin)",
+        "/confirm": "Xác nhận đề xuất hành động (/confirm <action_id> <code>)",
     }
 
     ENABLED_READ_TOOLS = list(SREToolRegistry.TOOL_SPECS.keys())
@@ -155,6 +166,7 @@ class ZaloBotEngine:
         self.message_history: List[Dict[str, Any]] = []
         self._ask_lock = threading.Lock()
         self._ask_timestamps: Dict[str, List[float]] = defaultdict(list)
+        self.v4_facade: Optional[Any] = None
         if self._config_path and not self._explicit_allowlist:
             self.reload_persisted_config(force=True)
 
@@ -378,6 +390,17 @@ class ZaloBotEngine:
             "/requests",
             "/ssh-requests",
             "/quota",
+            "/new",
+            "/clear",
+            "/memory",
+            "/tasks",
+            "/watch",
+            "/cancel",
+            "/settings",
+            "/summary",
+            "/compare",
+            "/who",
+            "/confirm",
         }
         is_ask = cmd == "/ask" or cmd not in known_cmds
         if is_ask and not self._check_ask_rate_limit(sender_id):
@@ -444,10 +467,40 @@ class ZaloBotEngine:
             reply = self._cmd_report(arg, principal)
         elif cmd == "/quota":
             reply = self._cmd_quota()
+        elif cmd == "/new":
+            reply = self._cmd_v4_new(principal, source=src, chat_id=chat_id or sender_id)
+        elif cmd == "/clear":
+            reply = self._cmd_v4_clear(principal, source=src, chat_id=chat_id or sender_id)
+        elif cmd == "/memory":
+            reply = self._cmd_v4_memory(principal, source=src, chat_id=chat_id or sender_id)
+        elif cmd == "/tasks":
+            reply = self._cmd_v4_tasks(principal)
+        elif cmd == "/watch":
+            reply = self._cmd_v4_watch(arg, principal)
+        elif cmd == "/cancel":
+            reply = self._cmd_v4_cancel(arg, principal)
+        elif cmd == "/settings":
+            reply = self._cmd_v4_settings(arg, principal)
+        elif cmd == "/summary":
+            reply = self._cmd_report(arg or "today", principal)
+        elif cmd == "/compare":
+            reply = self._cmd_v4_compare(arg, principal, source=src)
+        elif cmd == "/who":
+            if not principal.is_admin:
+                return {
+                    "success": False,
+                    "error": "FORBIDDEN",
+                    "suppress_outbound": src != "zalo",
+                    "reply": "⛔ Lệnh /who chỉ dành cho Quản trị viên (Admin).",
+                    "command": "/who",
+                }
+            reply = self._cmd_v4_who(arg, principal, source=src)
+        elif cmd == "/confirm":
+            reply = self._cmd_v4_confirm(arg, principal, chat_id=chat_id or sender_id)
         elif cmd == "/ask":
-            reply, agent_meta = self._cmd_ask(arg, principal, source=src)
+            reply, agent_meta = self._cmd_ask(arg, principal, source=src, chat_id=chat_id or "")
         else:
-            reply, agent_meta = self._cmd_ask(text, principal, source=src)
+            reply, agent_meta = self._cmd_ask(text, principal, source=src, chat_id=chat_id or "")
 
         if src == "dashboard":
             msg_id = f"dash-{os.urandom(6).hex()}"
@@ -524,7 +577,7 @@ class ZaloBotEngine:
     def _cmd_help(self, principal: ZaloPrincipal) -> str:
         lines = [f"📖 DANH SÁCH LỆNH LABOPS AI SRE v2 ({principal.role}):"]
         for c, desc in self.COMMANDS.items():
-            if c in {"/security", "/requests"} and not principal.is_admin:
+            if c in {"/security", "/requests", "/who"} and not principal.is_admin:
                 continue
             lines.append(f"• {c}: {desc}")
         lines.append("\nQuyền dữ liệu được kiểm soát chặt tại backend theo tài khoản LabOps.")
@@ -816,9 +869,41 @@ class ZaloBotEngine:
             f"{warn}"
         )
 
-    def _cmd_ask(self, question: str, principal: ZaloPrincipal, *, source: str = "zalo") -> tuple[str, Dict[str, Any]]:
+    def _cmd_ask(
+        self,
+        question: str,
+        principal: ZaloPrincipal,
+        *,
+        source: str = "zalo",
+        chat_id: str = "",
+    ) -> tuple[str, Dict[str, Any]]:
         if not question:
             return "Vui lòng nhập câu hỏi sau lệnh /ask. Ví dụ: `/ask Tại sao Workstation hôm nay chậm?`", {}
+
+        if (
+            self.v4_facade is not None
+            and getattr(self.v4_facade.config, "enabled", False)
+            and getattr(self.v4_facade.config, "natural_language", False)
+        ):
+            eff_chat = chat_id or principal.zalo_user_id or principal.username
+            res = self.v4_facade.handle_natural_message(
+                text=question,
+                principal=principal,
+                channel=source,
+                chat_id=eff_chat,
+            )
+            if res.get("ai_used"):
+                self.quota_ledger.record_ai_request()
+            return str(res.get("reply") or ""), {
+                "tool_traces": res.get("tool_traces", []),
+                "evidence_timestamps": res.get("evidence_timestamps", []),
+                "context_scope": res.get("context_scope"),
+                "ai_used": bool(res.get("ai_used", False)),
+                "correlation_id": res.get("correlation_id"),
+                "v4_route": res.get("route"),
+                "v4_intent": res.get("intent"),
+                "v4_session_id": res.get("session_id"),
+            }
 
         self.quota_ledger.record_ai_request()
         inv = self.agent_runner.run_investigation(
@@ -834,6 +919,182 @@ class ZaloBotEngine:
             "ai_used": inv.get("ai_used", False),
             "correlation_id": inv.get("correlation_id"),
         }
+
+    # ---------------- Additive V4 Commands ----------------
+
+    def _v4_unavailable(self) -> str:
+        return "ℹ️ Module Personal AI V4 chưa được khởi tạo trên worker này."
+
+    @staticmethod
+    def _principal_owner_id(principal: ZaloPrincipal) -> str:
+        return principal.username or principal.zalo_user_id
+
+    def _cmd_v4_new(self, principal: ZaloPrincipal, *, source: str, chat_id: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        sess = self.v4_facade.memory.start_new_session(
+            principal_id=self._principal_owner_id(principal),
+            channel=source,
+            chat_id=chat_id,
+        )
+        return f"🆕 Đã tạo phiên hội thoại mới `{sess['session_id']}` (cô lập theo kênh `{source}`)."
+
+    def _cmd_v4_clear(self, principal: ZaloPrincipal, *, source: str, chat_id: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        res = self.v4_facade.memory.clear_active_context(
+            principal_id=self._principal_owner_id(principal),
+            channel=source,
+            chat_id=chat_id,
+        )
+        return f"🧹 Đã xóa {res.get('cleared_messages', 0)} tin nhắn ngữ cảnh chat hiện tại (lịch sử audit vẫn được bảo toàn)."
+
+    def _cmd_v4_memory(self, principal: ZaloPrincipal, *, source: str, chat_id: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        ov = self.v4_facade.memory.get_memory_overview(
+            principal_id=self._principal_owner_id(principal),
+            channel=source,
+            chat_id=chat_id,
+        )
+        sessions = ov.get("active_sessions") or []
+        prefs = (ov.get("preferences") or {}).get("opted_in_preferences") or {}
+        lines = [f"🧠 BỘ NHỚ NGỮ CẢNH ({self._principal_owner_id(principal)}):"]
+        lines.append(f"• Phiên hoạt động ({source}): {len(sessions)}")
+        for s in sessions[:3]:
+            lines.append(f"  - `{s['session_id']}` (tin: {s.get('sequence_no', 0)}, cập nhật: {_fmt_vn_time(s.get('last_active_at'))})")
+        lines.append(f"• Tùy chọn cá nhân đã bật ({len(prefs)}): {', '.join(prefs.keys()) if prefs else 'chưa có'}")
+        lines.append("• Dùng `/clear` để làm sạch ngữ cảnh chat hoặc `/new` để mở phiên mới.")
+        return "\n".join(lines)
+
+    def _cmd_v4_tasks(self, principal: ZaloPrincipal) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        tasks = self.v4_facade.tasks.list_tasks(
+            owner_id=self._principal_owner_id(principal),
+            is_admin=principal.is_admin,
+        )
+        if not tasks:
+            return "📋 Bạn chưa có tác vụ hoặc watch rule nào đang lưu."
+        lines = [f"📋 DANH SÁCH TÁC VỤ & WATCH ({len(tasks)}):"]
+        for t in tasks[:15]:
+            lines.append(f"• `{t['task_id']}` [{t['status']}] {t['title']}")
+        lines.append("• Dùng `/cancel <task_id>` để hủy tác vụ của bạn.")
+        return "\n".join(lines)
+
+    def _cmd_v4_watch(self, arg: str, principal: ZaloPrincipal) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        if not getattr(self.v4_facade.config, "task_manager", False):
+            return "⏸️ Tính năng theo dõi chủ động đang tắt (`assistant_v4.task_manager = false`)."
+        parts = arg.split()
+        if len(parts) < 4:
+            return (
+                "Cú pháp: `/watch <target_id> <metric> <lt|lte|gt|gte> <threshold> [sustained_seconds]`\n"
+                "Ví dụ: `/watch workstation gpu_temperature_c lt 75 300`"
+            )
+        target_id, metric, comp, thresh_raw = parts[:4]
+        hold_s = int(parts[4]) if len(parts) >= 5 and parts[4].isdigit() else 300
+        try:
+            from app.services.assistant_v4.task_scheduler import WatchSpec
+
+            spec = WatchSpec(
+                target_id=target_id,
+                metric=metric,
+                comparator=comp,
+                threshold=float(thresh_raw),
+                sustained_seconds=hold_s,
+            )
+            created = self.v4_facade.tasks.create_watch(
+                owner_id=self._principal_owner_id(principal),
+                owner_role=principal.role,
+                spec=spec,
+            )
+            return (
+                f"✅ Đã tạo Watch `{created['task_id']}`:\n"
+                f"• {spec.target_id}: `{spec.metric} {spec.comparator} {spec.threshold}` (duy trì {spec.sustained_seconds}s)\n"
+                f"• Hủy bằng: `/cancel {created['task_id']}`"
+            )
+        except Exception as exc:
+            return f"⛔ Không thể tạo watch: {exc}"
+
+    def _cmd_v4_cancel(self, arg: str, principal: ZaloPrincipal) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        tid = arg.strip().split()[0] if arg.strip() else ""
+        if not tid:
+            return "Vui lòng nhập mã tác vụ. Ví dụ: `/cancel tsk4-xxxxxx`"
+        try:
+            res = self.v4_facade.tasks.cancel_task(
+                tid,
+                actor_id=self._principal_owner_id(principal),
+                actor_role=principal.role,
+            )
+            return f"✅ Đã hủy tác vụ `{res['task_id']}` (trạng thái: {res['status']})."
+        except Exception as exc:
+            return f"⛔ Không thể hủy `{tid}`: {exc}"
+
+    def _cmd_v4_settings(self, arg: str, principal: ZaloPrincipal) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        pid = self._principal_owner_id(principal)
+        if not arg.strip():
+            prefs = self.v4_facade.memory.get_preferences(pid)
+            return (
+                f"⚙️ TÙY CHỌN CÁ NHÂN ({pid}):\n"
+                f"• Múi giờ: {prefs.get('timezone', 'Asia/Ho_Chi_Minh')}\n"
+                f"• Opt-in preferences: {prefs.get('opted_in_preferences') or {}}\n"
+                "• Cập nhật: `/settings <key>=<value>`"
+            )
+        if "=" not in arg:
+            return "Cú pháp cập nhật: `/settings <key>=<value>` (ví dụ `/settings digest_style=compact`)."
+        k, v = [p.strip() for p in arg.split("=", 1)]
+        updated = self.v4_facade.memory.set_preference(pid, k, v)
+        return f"✅ Đã lưu tùy chọn `{k}` cho @{pid} (phiên bản v{updated.get('version', 1)})."
+
+    def _cmd_v4_compare(self, arg: str, principal: ZaloPrincipal, *, source: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        host_arg = arg.strip().split()[0] if arg.strip() else None
+        out = self.v4_facade.tools.execute_tool(
+            "compare_resource_metrics",
+            {"host_id": host_arg} if host_arg else {},
+            principal,
+            source=source,
+        )
+        data = out.get("data") or {}
+        return f"📊 So sánh chỉ số ({out.get('status')}, nguồn: {out.get('evidence_ref')}):\n{data}"
+
+    def _cmd_v4_who(self, arg: str, principal: ZaloPrincipal, *, source: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        uname = arg.strip().split()[0] if arg.strip() else None
+        out = self.v4_facade.tools.execute_tool(
+            "get_member_info",
+            {"username": uname} if uname else {},
+            principal,
+            source=source,
+        )
+        data = out.get("data") or {}
+        return f"👤 Hồ sơ thành viên (nguồn: {out.get('evidence_ref')}):\n{data}"
+
+    def _cmd_v4_confirm(self, arg: str, principal: ZaloPrincipal, *, chat_id: str) -> str:
+        if self.v4_facade is None:
+            return self._v4_unavailable()
+        parts = arg.strip().split()
+        if len(parts) != 2:
+            return "Cú pháp bắt buộc: `/confirm <action_id> <one_time_code>`"
+        action_id, code = parts
+        try:
+            res = self.v4_facade.approvals.confirm_zalo_action(
+                action_id=action_id,
+                code=code,
+                principal=principal,
+                chat_id=chat_id,
+            )
+            return f"✅ Đã xác nhận `{res['action_id']}` -> trạng thái `{res['state']}`."
+        except Exception as exc:
+            return f"⛔ Xác nhận thất bại: {exc}"
 
     def get_consumer_status(self) -> Dict[str, Any]:
         return {

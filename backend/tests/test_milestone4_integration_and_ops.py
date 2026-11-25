@@ -191,7 +191,7 @@ class TestMilestone4MigrationsAndBackup(unittest.TestCase):
             check=True,
         )
         manifest = json.loads(res_bak.stdout)
-        self.assertEqual(manifest["alembic_version"], "0004_labops_mram_v1")
+        self.assertEqual(manifest["alembic_version"], "0005_labops_personal_ai_v4")
         self.assertEqual(manifest["table_counts"]["members"], 1)
         self.assertIn("tables/members.jsonl", manifest["artifacts"])
         self.assertIn("sqlite_snapshot.db", manifest["artifacts"])
@@ -240,7 +240,7 @@ class TestMilestone4MigrationsAndBackup(unittest.TestCase):
             row = conn.execute(text("SELECT username, workspace_name, ssh_port FROM members WHERE id='mem-m4-01'")).fetchone()
             self.assertEqual(tuple(row), ("minhtq", "ws-minhtq", 22011))
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            self.assertEqual(ver, "0004_labops_mram_v1")
+            self.assertEqual(ver, "0005_labops_personal_ai_v4")
         eng_dst.dispose()
 
 

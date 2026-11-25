@@ -461,6 +461,7 @@ class RepoSecurityAlertMonitor:
         force: bool = False,
         now_monotonic: Optional[float] = None,
         direct_events: Optional[List[Dict[str, Any]]] = None,
+        suppress_direct_send: bool = False,
     ) -> Dict[str, Any]:
         curr_mono = time.monotonic() if now_monotonic is None else now_monotonic
         if not force and not direct_events and self._last_poll_monotonic > 0 and (curr_mono - self._last_poll_monotonic) < self.poll_interval_seconds:
@@ -468,7 +469,7 @@ class RepoSecurityAlertMonitor:
         self._last_poll_monotonic = curr_mono
 
         recipients = self.get_admin_recipients()
-        if not recipients or bot is None:
+        if not suppress_direct_send and (not recipients or bot is None):
             return {"skipped": True, "reason": "NO_VERIFIED_ADMIN_RECIPIENTS_OR_BOT"}
 
         is_first_bootstrap = not os.path.exists(self.state_path)
@@ -548,6 +549,16 @@ class RepoSecurityAlertMonitor:
             inc_id = inc.get("incident_id") if inc else None
             if inc:
                 incidents_created += 1
+
+            if suppress_direct_send:
+                sent_alerts[alert_key] = {
+                    "status": "DELEGATED_TO_V4_POLICY",
+                    "alert_kind": alert_kind,
+                    "incident_id": inc_id,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "recipients": per_recip,
+                }
+                continue
 
             message = self.format_alert_message(req, alert_kind, incident_id=inc_id)
 

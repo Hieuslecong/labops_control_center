@@ -5,13 +5,17 @@ Serves /api/v1/ai-assistant/* for Dashboard and Mobile integrations.
 from __future__ import annotations
 
 import asyncio
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from app.api.dependencies import require_admin, require_user
-from app.core.security import Principal
+from app.core.security import AuthError, Principal, verify_step_up_token
+from app.services.assistant_v4.task_scheduler import WatchSpec
 from app.services.zalo_assistant import zalo_assistant_service
+from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
 
 router = APIRouter()
 
@@ -411,3 +415,438 @@ async def ask_assistant(req: AskRequest, principal: Principal = Depends(require_
     if res.get("error") == "RATE_LIMITED":
         raise HTTPException(status_code=429, detail=res.get("reply") or "Rate limit exceeded")
     return res
+
+
+# ---------------- Personal AI Agent V4 Endpoints ----------------
+
+
+class V4TaskCreateRequest(BaseModel):
+    title: str
+    run_at: str
+    cadence_minutes: Optional[int] = None
+    missed_run_policy: str = "skip"
+    expires_hours: Optional[int] = None
+    recipient_id: Optional[str] = None
+
+
+class V4WatchCreateRequest(BaseModel):
+    target_id: str
+    metric: str
+    comparator: str
+    threshold: float
+    unit: str = ""
+    sustained_seconds: int = 300
+    once: bool = True
+    expires_hours: int = 24
+    title: str = ""
+
+
+class V4CancelRequest(BaseModel):
+    reason: str = "USER_CANCELLED"
+
+
+class V4InvestigationFeedbackRequest(BaseModel):
+    feedback: str
+
+
+class V4ApprovalConfirmRequest(BaseModel):
+    reason: str = ""
+    step_up_token: Optional[str] = None
+
+
+class V4PreferenceUpdateRequest(BaseModel):
+    key: str = ""
+    value: Any = None
+    timezone: Optional[str] = None
+
+
+class V4MemoryClearRequest(BaseModel):
+    channel: str = "zalo"
+    chat_id: Optional[str] = None
+
+
+class V4RetentionRunRequest(BaseModel):
+    dry_run: Optional[bool] = None
+    force: bool = True
+
+
+def _principal_to_zalo(p: Principal) -> ZaloPrincipal:
+    return ZaloPrincipal(
+        zalo_user_id=p.username,
+        username=p.username,
+        member_id=p.member_id or p.username,
+        role=p.role,
+        display_name=p.username,
+        is_authorized=True,
+        is_linked=True,
+    )
+
+
+def _require_v4():
+    v4 = getattr(zalo_assistant_service, "v4", None)
+    if v4 is None:
+        raise HTTPException(status_code=503, detail="Personal AI V4 facade chưa được khởi tạo")
+    return v4
+
+
+@router.get("/v4/health", summary="Trạng thái & feature flags Personal AI V4")
+async def get_v4_health(principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(v4.get_health)
+
+
+@router.get("/v4/metrics", summary="Chỉ số outbox, quota và watchdog V4 (Chỉ Admin)")
+async def get_v4_metrics(principal: Principal = Depends(require_admin)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(v4.get_metrics)
+
+
+@router.post("/v4/retention/run", summary="Chạy bảo trì lưu trữ V4 có kiểm soát (mặc định dry-run, Chỉ Admin)")
+async def run_v4_retention(
+    req: V4RetentionRunRequest,
+    principal: Principal = Depends(require_admin),
+):
+    v4 = _require_v4()
+    return await asyncio.to_thread(
+        v4.retention.run,
+        dry_run=True if req.dry_run is None and not getattr(v4.config.retention, "enabled", False) else req.dry_run,
+        force=req.force,
+        actor=principal.username,
+    )
+
+
+@router.post("/v4/config/reload", summary="Nạp lại cấu hình YAML/env cho V4 facade (Chỉ Admin)")
+async def reload_v4_config(principal: Principal = Depends(require_admin)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(v4.reload_config, actor=principal.username)
+
+
+@router.get("/v4/events/coverage", summary="Ma trận bao phủ nguồn sự kiện V4 (Chỉ Admin)")
+async def get_v4_event_coverage(principal: Principal = Depends(require_admin)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(v4.get_event_coverage)
+
+
+@router.get("/v4/inbox", summary="Lịch sử durable inbox tin nhắn V4")
+async def list_v4_inbox(
+    limit: int = Query(default=30, ge=1, le=200),
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    pid = None if principal.is_admin else principal.username
+    items = await asyncio.to_thread(v4.inbox.list_recent, limit=limit, principal_id=pid)
+    return {"items": items}
+
+
+@router.get("/v4/tasks", summary="Danh sách tác vụ & watch rules V4")
+async def list_v4_tasks(
+    status: Optional[str] = Query(default=None),
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    owner_filter = None if principal.is_admin else principal.username
+    items = await asyncio.to_thread(
+        v4.tasks.list_tasks,
+        owner_id=owner_filter,
+        is_admin=principal.is_admin,
+        status=status,
+    )
+    return {"tasks": items}
+
+
+@router.post("/v4/tasks", summary="Tạo tác vụ nhắc việc / báo cáo định kỳ V4")
+async def create_v4_task(req: V4TaskCreateRequest, principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    if not getattr(v4.config, "task_manager", False):
+        raise HTTPException(status_code=400, detail="TASK_MANAGER_DISABLED: assistant_v4.task_manager đang tắt")
+    if not principal.is_admin and req.recipient_id and req.recipient_id.strip() != principal.username:
+        raise HTTPException(status_code=403, detail="Non-admin cannot schedule reminders for another recipient")
+    try:
+        run_dt = datetime.fromisoformat(req.run_at.strip().replace("Z", "+00:00"))
+        if run_dt.tzinfo is None:
+            run_dt = run_dt.replace(tzinfo=timezone.utc)
+        task = await asyncio.to_thread(
+            v4.tasks.create_reminder,
+            owner_id=principal.username,
+            owner_role=principal.role,
+            title=req.title,
+            run_at=run_dt,
+            cadence_minutes=req.cadence_minutes,
+            missed_run_policy=req.missed_run_policy,
+            recipient_id=req.recipient_id or principal.username,
+        )
+        return {"task": task}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/v4/tasks/{task_id}/cancel", summary="Hủy tác vụ V4")
+async def cancel_v4_task(
+    task_id: str,
+    req: V4CancelRequest,
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    try:
+        task = await asyncio.to_thread(
+            v4.tasks.cancel_task,
+            task_id,
+            actor_id=principal.username,
+            actor_role=principal.role,
+            reason=req.reason,
+        )
+        return {"task": task}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/v4/watches", summary="Danh sách watch rules đang theo dõi")
+async def list_v4_watches(
+    status: Optional[str] = Query(default=None),
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    owner_filter = None if principal.is_admin else principal.username
+    items = await asyncio.to_thread(
+        v4.tasks.list_tasks,
+        owner_id=owner_filter,
+        is_admin=principal.is_admin,
+        status=status,
+    )
+    watches = [t for t in items if "watch_rule" in t]
+    return {"watches": watches}
+
+
+@router.post("/v4/watches", summary="Tạo watch rule theo dõi ngưỡng V4")
+async def create_v4_watch(req: V4WatchCreateRequest, principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    if not getattr(v4.config, "task_manager", False):
+        raise HTTPException(status_code=400, detail="TASK_MANAGER_DISABLED: assistant_v4.task_manager đang tắt")
+    try:
+        spec = WatchSpec(
+            target_id=req.target_id,
+            metric=req.metric,
+            comparator=req.comparator,
+            threshold=req.threshold,
+            unit=req.unit,
+            sustained_seconds=req.sustained_seconds,
+            once=req.once,
+            expires_hours=req.expires_hours,
+        )
+        task = await asyncio.to_thread(
+            v4.tasks.create_watch,
+            owner_id=principal.username,
+            owner_role=principal.role,
+            spec=spec,
+            title=req.title,
+        )
+        return {"watch": task}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/v4/watches/{task_id}/cancel", summary="Hủy watch rule V4")
+async def cancel_v4_watch(
+    task_id: str,
+    req: V4CancelRequest,
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    try:
+        task = await asyncio.to_thread(
+            v4.tasks.cancel_task,
+            task_id,
+            actor_id=principal.username,
+            actor_role=principal.role,
+            reason=req.reason,
+        )
+        return {"watch": task}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/v4/investigations", summary="Danh sách điều tra RCA dựa trên bằng chứng (Chỉ Admin)")
+async def list_v4_investigations(
+    incident_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=100),
+    principal: Principal = Depends(require_admin),
+):
+    v4 = _require_v4()
+    items = await asyncio.to_thread(v4.investigations.list_investigations, incident_id=incident_id, limit=limit)
+    return {"investigations": items}
+
+
+@router.get("/v4/investigations/{run_id}", summary="Chi tiết một lần điều tra RCA V4 (Chỉ Admin)")
+async def get_v4_investigation(run_id: str, principal: Principal = Depends(require_admin)):
+    v4 = _require_v4()
+    item = await asyncio.to_thread(v4.investigations.get_investigation, run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"Investigation '{run_id}' not found")
+    return {"investigation": item}
+
+
+@router.post("/v4/investigations/{run_id}/feedback", summary="Gửi nhận xét đánh giá điều tra RCA V4 (Chỉ Admin)")
+async def submit_v4_investigation_feedback(
+    run_id: str,
+    req: V4InvestigationFeedbackRequest,
+    principal: Principal = Depends(require_admin),
+):
+    v4 = _require_v4()
+    try:
+        updated = await asyncio.to_thread(
+            v4.investigations.submit_feedback,
+            run_id,
+            reviewer=principal.username,
+            feedback=req.feedback,
+        )
+        return {"investigation": updated}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/v4/approvals", summary="Danh sách Action Proposals chờ xác nhận V4")
+async def list_v4_approvals(
+    limit: int = Query(default=50, ge=1, le=200),
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    items = await asyncio.to_thread(
+        v4.approvals.list_proposals,
+        actor_id=principal.username,
+        is_admin=principal.is_admin,
+        limit=limit,
+    )
+    return {"approvals": items}
+
+
+@router.post("/v4/approvals/{action_id}/confirm", summary="Xác nhận thực thi Action Proposal qua Dashboard POST (Chỉ Admin, Step-Up với R3)")
+async def confirm_v4_approval(
+    action_id: str,
+    req: V4ApprovalConfirmRequest,
+    x_labops_step_up_token: Optional[str] = Header(default=None, alias="X-LabOps-Step-Up-Token"),
+    x_step_up_token: Optional[str] = Header(default=None, alias="X-Step-Up-Token"),
+    principal: Principal = Depends(require_admin),
+):
+    v4 = _require_v4()
+    match = await asyncio.to_thread(v4.approvals.get_proposal, action_id)
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"Action proposal '{action_id}' not found")
+
+    step_up_ok = False
+    if str(match.get("risk_tier") or "").upper() == "R3":
+        tok = (x_labops_step_up_token or x_step_up_token or req.step_up_token or "").strip()
+        try:
+            verify_step_up_token(
+                tok,
+                expected_username=principal.username,
+                expected_action="v4_confirm_action",
+                expected_target_id=action_id,
+            )
+            step_up_ok = True
+        except AuthError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+    try:
+        return await asyncio.to_thread(
+            v4.approvals.confirm_dashboard_action,
+            action_id=action_id,
+            actor_username=principal.username,
+            actor_role=principal.role,
+            step_up_ok=step_up_ok,
+            reason=req.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/v4/preferences", summary="Đọc tùy chọn cá nhân V4")
+async def get_v4_preferences(principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(v4.memory.get_preferences, principal.username)
+
+
+@router.post("/v4/preferences", summary="Cập nhật tùy chọn cá nhân opt-in V4")
+async def update_v4_preferences(req: V4PreferenceUpdateRequest, principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(
+        v4.memory.set_preference,
+        principal.username,
+        req.key,
+        req.value,
+        timezone_name=req.timezone,
+    )
+
+
+@router.get("/v4/memory", summary="Tổng quan phiên bộ nhớ hội thoại theo scope người dùng")
+async def get_v4_memory(
+    channel: str = Query(default="zalo"),
+    chat_id: str = Query(default=""),
+    principal: Principal = Depends(require_user),
+):
+    v4 = _require_v4()
+    return await asyncio.to_thread(
+        v4.memory.get_memory_overview,
+        principal_id=principal.username,
+        channel=channel,
+        chat_id=chat_id,
+    )
+
+
+@router.post("/v4/memory/clear", summary="Xóa ngữ cảnh hội thoại hiện tại (không xóa audit log)")
+async def clear_v4_memory(req: V4MemoryClearRequest, principal: Principal = Depends(require_user)):
+    v4 = _require_v4()
+    return await asyncio.to_thread(
+        v4.memory.clear_active_context,
+        principal_id=principal.username,
+        channel=req.channel,
+        chat_id=req.chat_id or principal.username,
+    )
+
+
+@router.get("/v4/connectors", summary="Trạng thái các connector mở rộng V4 (Chỉ Admin)")
+async def get_v4_connectors(principal: Principal = Depends(require_admin)):
+    v4 = _require_v4()
+    try:
+        connectors = await asyncio.to_thread(v4.connectors.get_connector_statuses, _principal_to_zalo(principal))
+        return {"connectors": connectors}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/v4/webhooks/github", summary="Webhook GitHub đã xác thực HMAC-SHA256")
+async def ingest_v4_github_webhook(
+    request: Request,
+    x_hub_signature_256: str = Header(default="", alias="X-Hub-Signature-256"),
+    x_github_delivery: str = Header(default="", alias="X-GitHub-Delivery"),
+    x_github_event: str = Header(default="push", alias="X-GitHub-Event"),
+):
+    v4 = _require_v4()
+    raw_body = await request.body()
+    secret = os.getenv("ASSISTANT_V4_GITHUB_WEBHOOK_SECRET", "")
+    try:
+        return await asyncio.to_thread(
+            v4.connectors.ingest_github_webhook,
+            delivery_id=x_github_delivery,
+            event_name=x_github_event,
+            signature_header=x_hub_signature_256,
+            webhook_secret=secret,
+            raw_body=raw_body,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

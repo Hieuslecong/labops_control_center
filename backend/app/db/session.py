@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional
 
 from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.models import Base
@@ -19,6 +21,19 @@ def normalize_sync_database_url(raw_url: str) -> str:
     if url.startswith("postgresql+asyncpg://"):
         return "postgresql://" + url[len("postgresql+asyncpg://"):]
     return url
+
+
+def resolve_sqlite_abs_path(database_url: str) -> Optional[str]:
+    """Resolve a SQLite SQLAlchemy URL (`sqlite:///...` or `sqlite:////...`) to an absolute file path."""
+    url = normalize_sync_database_url(database_url)
+    if not url.startswith("sqlite:///"):
+        return None
+    raw_path = url[len("sqlite:///"):]
+    if raw_path == ":memory:" or raw_path.startswith("file::memory:"):
+        return None
+    if raw_path.startswith("file:"):
+        raw_path = raw_path[len("file:"):].split("?", 1)[0]
+    return os.path.abspath(raw_path)
 
 
 def _attach_sqlite_pragmas(engine: Engine) -> None:
@@ -149,6 +164,8 @@ class DatabaseManager:
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 10}
 
         self.engine = create_engine(resolved, **kwargs)
+        self._metrics_lock = threading.Lock()
+        self._sqlite_lock_errors = 0
         self.revoked_tokens_has_member_id = False
         self.revoked_tokens_has_permanent = False
         self.has_legacy_username_unique_index = False
@@ -173,12 +190,56 @@ class DatabaseManager:
     def init_schema(self) -> None:
         Base.metadata.create_all(self.engine)
 
+    def get_db_metrics(self) -> Dict[str, Any]:
+        """Return non-sensitive database footprint, dialect, journal mode, and SQLite lock error metrics."""
+        dialect = self.engine.dialect.name
+        abs_path = resolve_sqlite_abs_path(self.database_url) if dialect == "sqlite" else None
+        db_bytes = 0
+        wal_bytes = 0
+        shm_bytes = 0
+        journal_mode = dialect
+        if abs_path:
+            if os.path.exists(abs_path):
+                db_bytes = os.path.getsize(abs_path)
+            wal_path = f"{abs_path}-wal"
+            shm_path = f"{abs_path}-shm"
+            if os.path.exists(wal_path):
+                wal_bytes = os.path.getsize(wal_path)
+            if os.path.exists(shm_path):
+                shm_bytes = os.path.getsize(shm_path)
+            try:
+                with self.engine.connect() as conn:
+                    row = conn.exec_driver_sql("PRAGMA journal_mode").fetchone()
+                    if row and row[0]:
+                        journal_mode = str(row[0])
+            except Exception:
+                pass
+        with self._metrics_lock:
+            lock_errs = int(self._sqlite_lock_errors)
+        return {
+            "dialect": dialect,
+            "sqlite_path_abs": abs_path,
+            "db_size_bytes": db_bytes,
+            "wal_size_bytes": wal_bytes,
+            "shm_size_bytes": shm_bytes,
+            "total_bytes": db_bytes + wal_bytes + shm_bytes,
+            "sqlite_lock_errors": lock_errs,
+            "journal_mode": journal_mode,
+        }
+
     @contextmanager
     def session_scope(self) -> Iterator[Session]:
         session = self.SessionLocal()
         try:
             yield session
             session.commit()
+        except OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" in msg or "busy" in msg:
+                with self._metrics_lock:
+                    self._sqlite_lock_errors += 1
+            session.rollback()
+            raise
         except Exception:
             session.rollback()
             raise

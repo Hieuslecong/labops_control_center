@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.db.models import NotificationSubscriptionRecord, ZaloIdentityLinkRecord
 from app.db.session import DatabaseManager
@@ -449,6 +449,8 @@ class ZaloIdentityRBACService:
             return False
         now = _utcnow()
         changed = False
+        revoked_zalo_ids = {target}
+        revoked_usernames: set[str] = set()
         with self.db.session_scope() as session:
             rows = session.execute(
                 select(ZaloIdentityLinkRecord).where(
@@ -456,18 +458,117 @@ class ZaloIdentityRBACService:
                 )
             ).scalars().all()
             for row in rows:
+                if row.zalo_user_id:
+                    revoked_zalo_ids.add(row.zalo_user_id)
+                if row.username:
+                    revoked_usernames.add(row.username)
                 if row.status in ("ACTIVE", "PENDING_CODE"):
                     row.status = "REVOKED"
                     row.revoked_at = now
                     changed = True
-            sub = session.execute(
-                select(NotificationSubscriptionRecord).where(
-                    NotificationSubscriptionRecord.recipient_zalo_id == target
-                )
-            ).scalar_one_or_none()
-            if sub is not None:
-                sub.enabled = False
-                sub.receive_repo_alerts = False
+            for zid in list(revoked_zalo_ids):
+                sub = session.execute(
+                    select(NotificationSubscriptionRecord).where(
+                        NotificationSubscriptionRecord.recipient_zalo_id == zid
+                    )
+                ).scalar_one_or_none()
+                if sub is not None:
+                    sub.enabled = False
+                    sub.receive_repo_alerts = False
+
+            if changed:
+                # Immediately cascade revocation into V4 sessions, tasks, watches, proposals, and unsent outbox
+                try:
+                    with session.begin_nested():
+                        from app.db.models import (
+                            AuditEventRecord,
+                            V4ActionProposalRecord,
+                            V4AssistantTaskRecord,
+                            V4ChatSessionRecord,
+                            V4NotificationOutboxRecord,
+                            V4WatchRuleRecord,
+                        )
+
+                        active_unames = {
+                            u
+                            for u in session.execute(
+                                select(ZaloIdentityLinkRecord.username).where(
+                                    ZaloIdentityLinkRecord.username.in_(list(revoked_usernames)),
+                                    ZaloIdentityLinkRecord.status == "ACTIVE",
+                                )
+                            )
+                            .scalars()
+                            .all()
+                            if u
+                        } if revoked_usernames else set()
+                        unlinked_unames = sorted(revoked_usernames - active_unames)
+                        principal_ids = sorted(revoked_zalo_ids | set(unlinked_unames))
+
+                        sess_res = session.execute(
+                            update(V4ChatSessionRecord)
+                            .where(
+                                V4ChatSessionRecord.status == "ACTIVE",
+                                (
+                                    V4ChatSessionRecord.principal_id.in_(principal_ids)
+                                    | V4ChatSessionRecord.chat_id.in_(list(revoked_zalo_ids))
+                                ),
+                            )
+                            .values(status="REVOKED", summary_text="", last_active_at=now)
+                        )
+                        watch_res = session.execute(
+                            update(V4WatchRuleRecord)
+                            .where(
+                                V4WatchRuleRecord.owner_id.in_(principal_ids),
+                                V4WatchRuleRecord.status == "ACTIVE",
+                            )
+                            .values(status="CANCELLED", updated_at=now)
+                        )
+                        prop_res = session.execute(
+                            update(V4ActionProposalRecord)
+                            .where(
+                                V4ActionProposalRecord.actor_id.in_(principal_ids),
+                                V4ActionProposalRecord.state.in_(["PROPOSED", "PENDING_CONFIRMATION"]),
+                            )
+                            .values(state="REVOKED", error_detail="LINK_REVOKED", updated_at=now)
+                        )
+                        out_res = session.execute(
+                            update(V4NotificationOutboxRecord)
+                            .where(
+                                V4NotificationOutboxRecord.recipient_id.in_(list(revoked_zalo_ids) + unlinked_unames),
+                                V4NotificationOutboxRecord.status.in_(["PENDING", "FAILED_RETRYABLE"]),
+                            )
+                            .values(
+                                status="SUPPRESSED",
+                                last_error_class="PRINCIPAL_REVOKED",
+                                last_error=f"Identity link revoked by {actor}"[:200],
+                                updated_at=now,
+                            )
+                        )
+                        session.add(
+                            AuditEventRecord(
+                                id=f"aud4-{uuid.uuid4().hex[:12]}",
+                                timestamp=now.isoformat(),
+                                actor=str(actor or "admin")[:128],
+                                action="V4_PRINCIPAL_REVOKED",
+                                target_type="ZALO_IDENTITY_LINK",
+                                target_id=target[:255],
+                                result="REVOKED",
+                                correlation_id=f"rev-{uuid.uuid4().hex[:8]}",
+                                details=json.dumps(
+                                    {
+                                        "revoked_zalo_ids": sorted(revoked_zalo_ids),
+                                        "revoked_usernames": unlinked_unames,
+                                        "sessions": int(getattr(sess_res, "rowcount", 0) or 0),
+                                        "watches": int(getattr(watch_res, "rowcount", 0) or 0),
+                                        "proposals": int(getattr(prop_res, "rowcount", 0) or 0),
+                                        "outbox_suppressed": int(getattr(out_res, "rowcount", 0) or 0),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        )
+                except Exception:
+                    pass
         return changed
 
     def list_links(self) -> List[Dict[str, Any]]:

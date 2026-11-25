@@ -648,3 +648,384 @@ class PolicyAcceptanceRecord(Base):
     policy_hash: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     client_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+
+# ------------------------------------------------------------------
+# LabOps Personal AI Agent V4 Models (Purely Additive v4_* Tables)
+# ------------------------------------------------------------------
+
+
+class V4EventStoreRecord(Base):
+    __tablename__ = "v4_event_store"
+    __table_args__ = (
+        UniqueConstraint("source", "source_event_id", name="uq_v4_event_source_eid"),
+        Index("ix_v4_event_type_observed", "event_type", "observed_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_event_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="aiot-lab")
+    scope_type: Mapped[str] = mapped_column(String(32), nullable=False, default="lab")
+    scope_id: Mapped[str] = mapped_column(String(128), nullable=False, default="global")
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    actor_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    payload_redacted_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class V4EventConsumerReceiptRecord(Base):
+    __tablename__ = "v4_event_consumer_receipts"
+    __table_args__ = (
+        UniqueConstraint("consumer", "event_id", name="uq_v4_consumer_event"),
+        Index("ix_v4_receipt_consumer_res", "consumer", "resource_id", "observed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    consumer: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    result_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PROCESSED")
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class V4MessageInboxRecord(Base):
+    __tablename__ = "v4_message_inbox"
+    __table_args__ = (
+        UniqueConstraint("channel", "bot_id", "external_message_id", name="uq_v4_inbox_channel_bot_msg"),
+        Index("ix_v4_inbox_state_lease", "state", "lease_until"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    bot_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    external_message_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    update_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    sender_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    principal_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    payload_redacted_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="RECEIVED", index=True)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4WorkerCursorRecord(Base):
+    __tablename__ = "v4_worker_cursors"
+
+    cursor_name: Mapped[str] = mapped_column(String(96), primary_key=True)
+    cursor_value: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4NotificationOutboxRecord(Base):
+    __tablename__ = "v4_notification_outbox"
+    __table_args__ = (
+        Index("ix_v4_outbox_claim", "status", "priority", "not_before"),
+        Index("ix_v4_outbox_lease", "status", "lease_until"),
+    )
+
+    notification_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    recipient_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="P1")
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    body_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v4.0")
+    is_critical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    chunk_total: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    body_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    fence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    last_error_class: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4DeliveryAttemptRecord(Base):
+    __tablename__ = "v4_delivery_attempts"
+
+    attempt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    outbox_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    recipient_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    fence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    result_class: Mapped[str] = mapped_column(String(48), nullable=False, default="IN_FLIGHT")
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    redacted_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class V4IncidentMetaRecord(Base):
+    __tablename__ = "v4_incident_meta"
+
+    incident_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_incident_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    correlation_group_key: Mapped[str] = mapped_column(String(200), nullable=False, default="", index=True)
+    episode_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_reminded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminder_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_reminder_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    suppressed_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppression_reason: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    shadow_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4AssistantTaskRecord(Base):
+    __tablename__ = "v4_assistant_tasks"
+    __table_args__ = (
+        Index("ix_v4_tasks_due", "status", "next_run_at"),
+        Index("ix_v4_tasks_owner", "owner_id", "status"),
+    )
+
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    owner_role: Mapped[str] = mapped_column(String(32), nullable=False, default="RESEARCHER")
+    task_type: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    validated_spec_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    missed_run_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="coalesce")
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Ho_Chi_Minh")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE", index=True)
+    deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    fence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    cancellation_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4WatchRuleRecord(Base):
+    __tablename__ = "v4_watch_rules"
+    __table_args__ = (
+        Index("ix_v4_watches_status_target", "status", "target_id"),
+    )
+
+    rule_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    target_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    comparator: Mapped[str] = mapped_column(String(16), nullable=False)
+    threshold: Mapped[float] = mapped_column(nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    sustained_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="once")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE", index=True)
+    condition_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sample_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sample_value: Mapped[Optional[float]] = mapped_column(nullable=True)
+    last_state: Mapped[str] = mapped_column(String(32), nullable=False, default="INIT")
+    triggered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_triggered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4ActionProposalRecord(Base):
+    __tablename__ = "v4_action_proposals"
+    __table_args__ = (
+        Index("ix_v4_proposals_actor_state", "actor_id", "state", "expires_at"),
+    )
+
+    action_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    actor_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    risk_tier: Mapped[str] = mapped_column(String(16), nullable=False, default="R2")
+    target_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_version: Mapped[str] = mapped_column(String(64), nullable=False, default="1")
+    canonical_args_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    canonical_args_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    nonce_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="PROPOSED", index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    core_result_ref: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4ChatSessionRecord(Base):
+    __tablename__ = "v4_chat_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="aiot-lab")
+    principal_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, default="zalo")
+    bot_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    chat_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE", index=True)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class V4ChatMessageRecord(Base):
+    __tablename__ = "v4_chat_messages"
+    __table_args__ = (
+        Index("ix_v4_chat_msg_session_seq", "session_id", "seq"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(24), nullable=False)
+    tool_call_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    tool_name: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
+    content_redacted: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+
+
+class V4UserPreferenceRecord(Base):
+    __tablename__ = "v4_user_preferences"
+
+    principal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Ho_Chi_Minh")
+    notification_prefs_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    opted_in_preferences_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    authorized_subscriptions_json: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4KnowledgeDocumentRecord(Base):
+    __tablename__ = "v4_knowledge_documents"
+    __table_args__ = (
+        Index("ix_v4_kb_scope_status", "scope", "status"),
+    )
+
+    doc_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default="shared")
+    source: Mapped[str] = mapped_column(String(128), nullable=False, default="reviewed_runbook")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reviewed_by: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    content_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    tags_json: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class V4InvestigationRecord(Base):
+    __tablename__ = "v4_investigations"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    episode_key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    runbook_id: Mapped[str] = mapped_column(String(96), nullable=False, default="generic")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="COMPLETED", index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    facts_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    evidence_refs_json: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    hypotheses_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    verified_root_cause: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    missing_information_json: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    recommendations_json: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    model_route: Mapped[str] = mapped_column(String(128), nullable=False, default="deterministic")
+    model_requests_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tool_calls_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    review_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class V4ConnectorStateRecord(Base):
+    __tablename__ = "v4_connector_states"
+
+    connector_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, default="admin")
+    connector_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="NOT_CONFIGURED")
+    capabilities_json: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    cursor: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    config_redacted_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class V4WebhookDeliveryRecord(Base):
+    __tablename__ = "v4_webhook_deliveries"
+    __table_args__ = (
+        UniqueConstraint("connector_id", "delivery_id", name="uq_v4_webhook_connector_delivery"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    connector_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    delivery_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    signature_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACCEPTED")
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)

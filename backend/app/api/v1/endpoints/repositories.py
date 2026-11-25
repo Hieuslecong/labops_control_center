@@ -680,6 +680,9 @@ def decide_repository_request(
             monitor = getattr(zalo_assistant_service, "repo_alert_monitor", None)
             if monitor is not None:
                 monitor.suppress_repo_alerts(res, actor=p.username, reason=payload.reason)
+            ev_store = getattr(zalo_assistant_service, "v4", None)
+            if ev_store is not None:
+                ev_store.record_repo_decision_event(request_id=request_id, req_info=res, decision=payload.decision, actor=p.username)
         except Exception:
             pass
     return res

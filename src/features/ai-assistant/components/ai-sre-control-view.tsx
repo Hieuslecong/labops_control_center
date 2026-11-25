@@ -25,6 +25,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { AssistantV4Panel } from './assistant-v4-panel';
 
 interface ChatEntry {
   sender: string;
@@ -424,6 +425,10 @@ export default function AIAssistantView() {
           <TabsTrigger value='history' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
             <IconHistory className='h-3.5 w-3.5 mr-1' />
             Outbox &amp; Tools
+          </TabsTrigger>
+          <TabsTrigger value='v4' className='!h-auto flex-1 min-w-[130px] text-xs py-2'>
+            <IconSparkles className='h-3.5 w-3.5 mr-1' />
+            Personal AI v4
           </TabsTrigger>
         </TabsList>
 
@@ -1306,6 +1311,10 @@ export default function AIAssistantView() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+
+        <TabsContent value='v4' className='space-y-4'>
+          <AssistantV4Panel />
         </TabsContent>
       </Tabs>
     </div>

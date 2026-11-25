@@ -110,7 +110,17 @@ export function isAdminRequiredLabOpsPath(method: string, segments: string[]): b
     p.startsWith('ai-assistant/identity-links/') ||
     p === 'ai-assistant/subscriptions' ||
     p.startsWith('ai-assistant/subscriptions/') ||
-    (m !== 'GET' && /^ai-assistant\/incidents\/[^/]+\/resolve$/.test(p))
+    (m !== 'GET' && /^ai-assistant\/incidents\/[^/]+\/resolve$/.test(p)) ||
+    p === 'ai-assistant/v4/metrics' ||
+    p === 'ai-assistant/v4/connectors' ||
+    p === 'ai-assistant/v4/events/coverage' ||
+    p === 'ai-assistant/v4/investigations' ||
+    p.startsWith('ai-assistant/v4/investigations/') ||
+    p === 'ai-assistant/v4/retention/run' ||
+    p.startsWith('ai-assistant/v4/retention/') ||
+    p === 'ai-assistant/v4/config/reload' ||
+    p.startsWith('ai-assistant/v4/config/') ||
+    (m !== 'GET' && /^ai-assistant\/v4\/approvals\/[^/]+\/confirm$/.test(p))
   ) {
     return true;
   }

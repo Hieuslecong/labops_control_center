@@ -53,8 +53,10 @@ describe('Milestone 3 Session Token Hardening', () => {
   it('rejects tampered tokens and wrong secrets', () => {
     const token = signSessionCookieToken({ username: 'admin', role: 'ADMIN', secret });
     const [payloadB64, sigB64] = token.split('.');
-    const tamperedSig = `${sigB64.slice(0, -1)}${sigB64.endsWith('A') ? 'B' : 'A'}`;
-    assert.equal(verifySessionCookieToken(`${payloadB64}.${tamperedSig}`, secret), null);
+    const tamperedSigTail = `${sigB64.slice(0, -1)}${sigB64.endsWith('A') ? 'B' : 'A'}`;
+    const tamperedSigHead = `${sigB64.startsWith('A') ? 'B' : 'A'}${sigB64.slice(1)}`;
+    assert.equal(verifySessionCookieToken(`${payloadB64}.${tamperedSigTail}`, secret), null);
+    assert.equal(verifySessionCookieToken(`${payloadB64}.${tamperedSigHead}`, secret), null);
     assert.equal(verifySessionCookieToken(token, 'wrong-secret'), null);
     assert.equal(verifySessionCookieToken('malformed', secret), null);
   });
@@ -149,6 +151,37 @@ describe('Milestone 3 BFF CSRF & RBAC Policy', () => {
       isAdminRequiredLabOpsPath('POST', ['ai-assistant', 'incidents', 'inc-1', 'resolve']),
       true
     );
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'metrics']), true);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'connectors']), true);
+    assert.equal(
+      isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'events', 'coverage']),
+      true
+    );
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'investigations']), true);
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', [
+        'ai-assistant',
+        'v4',
+        'investigations',
+        'inv4-1',
+        'feedback'
+      ]),
+      true
+    );
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', ['ai-assistant', 'v4', 'approvals', 'act4-1', 'confirm']),
+      true
+    );
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', ['ai-assistant', 'v4', 'retention', 'run']),
+      true
+    );
+    assert.equal(
+      isAdminRequiredLabOpsPath('POST', ['ai-assistant', 'v4', 'config', 'reload']),
+      true
+    );
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'tasks']), false);
+    assert.equal(isAdminRequiredLabOpsPath('GET', ['ai-assistant', 'v4', 'health']), false);
     assert.equal(isAdminRequiredLabOpsPath('GET', ['repositories', 'audit']), true);
     assert.equal(
       isAdminRequiredLabOpsPath('POST', ['repositories', 'requests', 'req-1', 'decision']),

@@ -1,0 +1,103 @@
+# LabOps Personal AI Agent V4 — Example Configuration (All Feature Flags OFF by Default)
+# Copy secrets ONLY to environment variables or .env.local (never commit secrets here).
+
+assistant_v4:
+  enabled: false
+  event_engine: false
+  notification_v2: false
+  shadow_mode: false
+  task_manager: false
+  natural_language: false
+  agent_runtime: native          # native | pydantic_ai (requires capability gate + package install)
+  proactive_investigation: false
+  write_actions: false           # NEVER enable until explicit review & R2/R3 approval tests pass
+  ingress_mode: polling          # polling | webhook (strictly one active ingress mode per bot)
+  timezone: Asia/Ho_Chi_Minh
+
+  model:
+    alias: model_free
+    paid_fallback: false
+    request_limit: 4
+    tool_limit: 8
+    wall_timeout_s: 45
+    daily_user_request_limit: 120
+    circuit_breaker_failures: 3
+    circuit_breaker_cooldown_s: 120
+
+  investigation:
+    request_limit: 8
+    tool_limit: 16
+    wall_timeout_s: 120
+    episode_cooldown_minutes: 30
+
+  memory:
+    idle_ttl_minutes: 60
+    max_messages: 20
+    max_context_tokens: 4096
+    raw_chat_retention_days: 7
+
+  notifications:
+    monthly_budget: 3000
+    critical_reserve: 600
+    soft_percent: 80
+    high_percent: 90
+    target_chars: 1800
+    p0_unacked_repeat_minutes: 30
+    p0_acked_repeat_minutes: 360
+    p1_repeat_hours: 24
+    p1_stale_repeat_hours: 48
+    p2_repeat_hours: 48
+    max_attempts: 5
+    fallback_channel: dashboard_inbox
+
+  scheduler:
+    morning: "08:00"
+    evening: "17:00"
+    evening_only_if_changed: true
+    weekly: "MON 08:00"
+    weekly_replaces_daily_on_monday: true
+
+  tasks:
+    max_active_per_user: 20
+    min_interval_seconds: 60
+    max_expiry_days: 30
+    catch_up_max_runs: 3
+
+  watchdog:
+    enabled: false
+    period_seconds: 60
+    grace_seconds: 180
+    ping_url_env: ASSISTANT_V4_WATCHDOG_PING_URL
+
+  external_connectors:
+    github: false
+    web_search: false
+    email: false
+    calendar: false
+    documents: false
+    request_timeout_s: 10.0
+    allowed_github_repos: []
+    allowed_web_domains:
+      - arxiv.org
+      - export.arxiv.org
+      - api.semanticscholar.org
+      - docs.python.org
+      - github.com
+
+  retention:
+    enabled: false                 # Feature-flagged OFF by default
+    dry_run: true                  # Always defaults to dry-run even when enabled
+    run_interval_hours: 24
+    batch_size: 500
+    max_batches_per_run: 10
+    min_dedupe_safety_hours: 168   # Never delete dedupe/replay state younger than 7 days
+    chat_messages_days: 7
+    chat_sessions_days: 30
+    delivery_attempts_days: 30
+    terminal_outbox_days: 30
+    inbox_processed_days: 30
+    event_store_days: 90
+    event_receipts_days: 90
+    terminal_proposals_days: 90
+    webhook_deliveries_days: 30
+    terminal_tasks_days: 90

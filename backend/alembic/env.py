@@ -27,6 +27,14 @@ def get_database_url() -> str:
         return normalize_sync_database_url(configured)
     env_url = normalize_sync_database_url(os.getenv("DATABASE_URL", ""))
     if env_url:
+        if env_url.startswith("sqlite:///") and not env_url.startswith("sqlite:////"):
+            rel_path = env_url[len("sqlite:///"):]
+            if not rel_path.startswith("file:") and rel_path != ":memory:":
+                repo_root = os.path.dirname(_BACKEND_DIR)
+                repo_candidate = os.path.abspath(os.path.join(repo_root, rel_path))
+                cwd_candidate = os.path.abspath(rel_path)
+                if not os.path.exists(cwd_candidate) and os.path.exists(repo_candidate):
+                    return f"sqlite:///{repo_candidate}"
         return env_url
     data_dir = os.path.abspath(os.getenv("LABOPS_DATA_DIR") or os.path.join(_BACKEND_DIR, "data"))
     os.makedirs(data_dir, exist_ok=True)

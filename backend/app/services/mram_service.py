@@ -1522,67 +1522,88 @@ class MramService:
             ver = zalo_assistant_service.identity_rbac.ensure_configured_approver_verified(target_zalo_id)
             if ver.get("verified") and ver.get("chat_id"):
                 chat_id = str(ver["chat_id"])
-                msg = (
-                    f"📩 YÊU CẦU CẤP TÀI KHOẢN SSH MỚI ({req.id})\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• Thành viên: {prof.full_name} (@{prof.username}, mã: {prof.member_code or 'N/A'})\n"
-                    f"• Phân loại: {prof.member_category} | GVHD: {supervisor_name}\n"
-                    f"• Dự án: {req.project_title}\n"
-                    f"• Lý do: {reason_snippet}\n"
-                    f"• Cấu hình đề xuất: {rec_summary}\n"
-                    f"• Thời điểm gửi: {_fmt_vn(req.submitted_at)}\n"
-                    f"• Hạn duyệt (24h): {_fmt_vn(req.review_expires_at)}\n"
-                    f"🔗 Xem xét & phê duyệt:\n{review_link}"
-                )
-                enqueued = zalo_assistant_service.notification_dispatcher.enqueue(
-                    idempotency_key=f"mram-req:{req.id}:v{req.version}:{inv_id}",
-                    recipient_id=chat_id,
-                    event_type="MRAM_SSH_REQUEST_SUBMITTED",
-                    severity="P1",
-                    is_critical=False,
-                    message_text=msg,
-                    correlation_id=req.id,
-                )
-                delivery_status = "QUEUED_FOR_VERIFIED_ADMIN"
-                delivery_detail = f"Đã xếp hàng gửi riêng tới {ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id})"
+                v4_notif_enabled = False
+                try:
+                    from app.services.assistant_v4.notification_policy import resolve_notification_owner
 
-                bot_token = (os.getenv("ZALO_BOT_TOKEN") or getattr(zalo_assistant_service.bot_engine, "bot_token", "") or "").strip()
-                if (
-                    os.getenv("MRAM_IMMEDIATE_ZALO_SEND", "").strip() == "1"
-                    and "PYTEST_CURRENT_TEST" not in os.environ
-                    and bot_token
-                ):
-                    try:
-                        import asyncio
-                        import concurrent.futures
-                        from zalo_bot import Bot
+                    v4_obj = getattr(zalo_assistant_service, "v4", None)
+                    v4_cfg = getattr(v4_obj, "config", None) if v4_obj is not None else None
+                    if v4_cfg is None:
+                        from app.services.assistant_v4.config import load_assistant_v4_config
 
-                        def _sync_send() -> Optional[str]:
-                            async def _do_send() -> Optional[str]:
-                                bot = Bot(token=bot_token)
-                                sent = await bot.send_message(chat_id=chat_id, text=msg)
-                                mid = getattr(sent, "message_id", None)
-                                return str(mid) if mid is not None else "accepted"
+                        v4_cfg = load_assistant_v4_config()
+                    v4_notif_enabled = resolve_notification_owner(v4_cfg) == "V4_ACTIVE"
+                except Exception:
+                    v4_notif_enabled = False
 
-                            return asyncio.run(_do_send())
+                if v4_notif_enabled:
+                    delivery_status = "DELEGATED_TO_V4_POLICY"
+                    delivery_detail = (
+                        f"Đơn {req.id} được xử lý qua V4 EventPolicyEngine cho "
+                        f"{ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id}); bỏ qua V2 để tránh gửi trùng"
+                    )
+                else:
+                    msg = (
+                        f"📩 YÊU CẦU CẤP TÀI KHOẢN SSH MỚI ({req.id})\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• Thành viên: {prof.full_name} (@{prof.username}, mã: {prof.member_code or 'N/A'})\n"
+                        f"• Phân loại: {prof.member_category} | GVHD: {supervisor_name}\n"
+                        f"• Dự án: {req.project_title}\n"
+                        f"• Lý do: {reason_snippet}\n"
+                        f"• Cấu hình đề xuất: {rec_summary}\n"
+                        f"• Thời điểm gửi: {_fmt_vn(req.submitted_at)}\n"
+                        f"• Hạn duyệt (24h): {_fmt_vn(req.review_expires_at)}\n"
+                        f"🔗 Xem xét & phê duyệt:\n{review_link}"
+                    )
+                    enqueued = zalo_assistant_service.notification_dispatcher.enqueue(
+                        idempotency_key=f"mram-req:{req.id}:v{req.version}:{inv_id}",
+                        recipient_id=chat_id,
+                        event_type="MRAM_SSH_REQUEST_SUBMITTED",
+                        severity="P1",
+                        is_critical=False,
+                        message_text=msg,
+                        correlation_id=req.id,
+                    )
+                    delivery_status = "QUEUED_FOR_VERIFIED_ADMIN"
+                    delivery_detail = f"Đã xếp hàng gửi riêng tới {ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id})"
 
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            provider_msg_id = pool.submit(_sync_send).result(timeout=15)
-                        outbox_id = enqueued.get("id")
-                        if outbox_id:
-                            with self.db.session_scope() as session:
-                                out_rec = session.get(NotificationOutboxRecord, outbox_id)
-                                if out_rec is not None:
-                                    out_rec.status = "SENT"
-                                    out_rec.attempt_count = max(1, int(out_rec.attempt_count or 0))
-                                    out_rec.provider_message_id = provider_msg_id
-                                    out_rec.sent_at = _utcnow()
-                                    out_rec.next_retry_at = None
-                                    out_rec.last_error = None
-                        delivery_status = "SENT"
-                        delivery_detail = f"Đã gửi Zalo DM tới {ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id}), msg_id={provider_msg_id}"
-                    except Exception as send_exc:
-                        delivery_detail = f"Đã xếp hàng; gửi trực tiếp gặp lỗi: {send_exc}"
+                    bot_token = (os.getenv("ZALO_BOT_TOKEN") or getattr(zalo_assistant_service.bot_engine, "bot_token", "") or "").strip()
+                    if (
+                        os.getenv("MRAM_IMMEDIATE_ZALO_SEND", "").strip() == "1"
+                        and "PYTEST_CURRENT_TEST" not in os.environ
+                        and bot_token
+                    ):
+                        try:
+                            import asyncio
+                            import concurrent.futures
+                            from zalo_bot import Bot
+
+                            def _sync_send() -> Optional[str]:
+                                async def _do_send() -> Optional[str]:
+                                    bot = Bot(token=bot_token)
+                                    sent = await bot.send_message(chat_id=chat_id, text=msg)
+                                    mid = getattr(sent, "message_id", None)
+                                    return str(mid) if mid is not None else "accepted"
+
+                                return asyncio.run(_do_send())
+
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                                provider_msg_id = pool.submit(_sync_send).result(timeout=15)
+                            outbox_id = enqueued.get("id")
+                            if outbox_id:
+                                with self.db.session_scope() as session:
+                                    out_rec = session.get(NotificationOutboxRecord, outbox_id)
+                                    if out_rec is not None:
+                                        out_rec.status = "SENT"
+                                        out_rec.attempt_count = max(1, int(out_rec.attempt_count or 0))
+                                        out_rec.provider_message_id = provider_msg_id
+                                        out_rec.sent_at = _utcnow()
+                                        out_rec.next_retry_at = None
+                                        out_rec.last_error = None
+                            delivery_status = "SENT"
+                            delivery_detail = f"Đã gửi Zalo DM tới {ver.get('display_name') or TARGET_APPROVER_NAME} ({chat_id}), msg_id={provider_msg_id}"
+                        except Exception as send_exc:
+                            delivery_detail = f"Đã xếp hàng; gửi trực tiếp gặp lỗi: {send_exc}"
             else:
                 delivery_detail = str(ver.get("reason") or "Recipient not verified in ZaloIdentityLinkRecord")
         except Exception as exc:
@@ -1815,6 +1836,45 @@ class MramService:
                 if direct_mgr_id:
                     db_prof.direct_manager_id = direct_mgr_id
                 db_prof.updated_at = now
+            try:
+                from app.services.assistant_v4.event_store import EventEnvelope, insert_event_in_session
+
+                with session.begin_nested():
+                    insert_event_in_session(
+                        session,
+                        EventEnvelope(
+                            source="labops-core",
+                            source_event_id=f"request:{req_id}:v1:created",
+                            event_type="request.created",
+                            scope_type="user",
+                            scope_id=prof.username,
+                            resource_id=req_id,
+                            actor_id=prof.username,
+                            source_version=1,
+                            occurred_at=now,
+                            observed_at=now,
+                            correlation_id=req_id,
+                            payload={
+                                "request_id": req_id,
+                                "request_type": request_type,
+                                "username": prof.username,
+                                "member_id": prof.member_id,
+                                "full_name": prof.full_name or prof.username,
+                                "member_code": prof.member_code,
+                                "member_category": prof.member_category,
+                                "project_title": project_title,
+                                "reason_snippet": registration_reason[:180],
+                                "supervisor_id": sup_id,
+                                "supervisor_name": sup_name,
+                                "submitted_at": now.isoformat(),
+                                "review_expires_at": review_deadline.isoformat(),
+                                "recommended_spec": f"{rec_data['cpu_cores']}C/{rec_data['ram_gb']}G/{rec_data['storage_quota_gb']}GiB GPU={rec_data['gpu_mode']}",
+                                "review_path": f"/dashboard/ssh-requests/{req_id}/review",
+                            },
+                        ),
+                    )
+            except Exception as ev_exc:
+                logger.debug("V4 event insert skipped/deferred for %s: %s", req_id, ev_exc)
             session.flush()
             session.expunge(req_row)
             session.expunge(rec_row)
@@ -1928,6 +1988,36 @@ class MramService:
                     prof = session.get(MemberProfileRecord, r.member_id)
                     if prof and prof.ssh_access_state == "PENDING_APPROVAL":
                         prof.ssh_access_state = "EXPIRED_REVIEW"
+                    try:
+                        from app.services.assistant_v4.event_store import EventEnvelope, insert_event_in_session
+
+                        with session.begin_nested():
+                            insert_event_in_session(
+                                session,
+                                EventEnvelope(
+                                    source="labops-core",
+                                    source_event_id=f"request:{r.id}:v{r.version}:overdue",
+                                    event_type="request.overdue",
+                                    scope_type="user",
+                                    scope_id=r.username,
+                                    resource_id=r.id,
+                                    actor_id="system-sla-worker",
+                                    source_version=int(r.version),
+                                    occurred_at=now,
+                                    observed_at=now,
+                                    correlation_id=r.id,
+                                    payload={
+                                        "request_id": r.id,
+                                        "username": r.username,
+                                        "project_title": r.project_title,
+                                        "supervisor_id": r.primary_supervisor_id,
+                                        "review_expires_at": exp.isoformat() if exp else None,
+                                        "review_path": f"/dashboard/ssh-requests/{r.id}/review",
+                                    },
+                                ),
+                            )
+                    except Exception:
+                        pass
 
         for rid in expired_ids:
             labops_service._audit("system", "MRAM_REQUEST_SLA_EXPIRED", "SSH_REQUEST", rid, "EXPIRED", "Yêu cầu tự động hết hạn sau 24 giờ chưa duyệt")
@@ -2335,6 +2425,43 @@ class MramService:
                     inv.status = "USED" if invitation_token else "REVOKED"
                     inv.revoked_at = now
 
+            try:
+                from app.services.assistant_v4.event_store import EventEnvelope, insert_event_in_session
+
+                ev_name = (
+                    "request.approved"
+                    if dec == "APPROVED"
+                    else ("request.rejected" if dec == "REJECTED" else "request.updated")
+                )
+                with session.begin_nested():
+                    insert_event_in_session(
+                        session,
+                        EventEnvelope(
+                            source="labops-core",
+                            source_event_id=f"request:{req.id}:v{req.version}:{dec.lower()}",
+                            event_type=ev_name,
+                            scope_type="user",
+                            scope_id=req.username,
+                            resource_id=req.id,
+                            actor_id=approver_username,
+                            source_version=int(req.version),
+                            occurred_at=now,
+                            observed_at=now,
+                            correlation_id=req.id,
+                            payload={
+                                "request_id": req.id,
+                                "username": req.username,
+                                "decision": dec,
+                                "approver": approver_username,
+                                "reason": str(reason or "").strip()[:250],
+                                "supervisor_id": req.primary_supervisor_id,
+                                "review_path": f"/dashboard/ssh-requests/{req.id}/review",
+                            },
+                        ),
+                    )
+            except Exception as ev_exc:
+                logger.debug("V4 event insert failed on decide %s: %s", request_id, ev_exc)
+
         labops_service._audit(
             approver_username,
             f"MRAM_REQUEST_{dec}",
@@ -2608,6 +2735,38 @@ class MramService:
                     prof.ssh_access_state = "PROVISIONING_FAILED"
                 if cap_res:
                     cap_res.status = "RELEASED"
+
+            try:
+                from app.services.assistant_v4.event_store import EventEnvelope, insert_event_in_session
+
+                prov_ev = "provisioning.succeeded" if verified_ready else "provisioning.failed"
+                with session.begin_nested():
+                    insert_event_in_session(
+                        session,
+                        EventEnvelope(
+                            source="labops-core",
+                            source_event_id=f"provisioning:{op_id}:v{app_rec.request_version}:{prov_ev.split('.')[-1]}",
+                            event_type=prov_ev,
+                            scope_type="user",
+                            scope_id=username,
+                            resource_id=request_id,
+                            actor_id=approver,
+                            source_version=int(app_rec.request_version),
+                            occurred_at=done_at,
+                            observed_at=done_at,
+                            correlation_id=f"mram-{request_id}",
+                            payload={
+                                "operation_id": op_id,
+                                "request_id": request_id,
+                                "username": username,
+                                "host_id": cfg.get("host_id"),
+                                "status": "VERIFIED_READY" if verified_ready else "PROVISIONING_FAILED",
+                                "error": str(err_msg or "")[:250] if not verified_ready else None,
+                            },
+                        ),
+                    )
+            except Exception:
+                pass
 
         if member:
             member["ssh_access_state"] = "VERIFIED_READY" if verified_ready else "PROVISIONING_FAILED"

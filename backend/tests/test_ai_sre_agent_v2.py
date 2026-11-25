@@ -89,7 +89,7 @@ def test_alembic_upgrade_and_downgrade_sre_v2(tmp_path: Path):
     cfg.set_main_option("sqlalchemy.url", db_url)
 
     res = upgrade_database_schema(db_url)
-    assert res["current_revision"] == "0004_labops_mram_v1"
+    assert res["current_revision"] == "0005_labops_personal_ai_v4"
 
     db = DatabaseManager(str(tmp_path), database_url=db_url)
     tables = set(inspect(db.engine).get_table_names())

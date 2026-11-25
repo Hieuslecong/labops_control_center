@@ -59,10 +59,14 @@ export function verifySessionCookieToken(
     const [payloadB64, sigB64] = parts;
 
     const payloadBuf = Buffer.from(payloadB64, 'base64url');
-    const actualSig = Buffer.from(sigB64, 'base64url');
-    const expectedSig = createHmac('sha256', secret).update(payloadBuf).digest();
+    if (payloadB64 !== payloadBuf.toString('base64url')) {
+      return null;
+    }
+    const expectedSigB64 = createHmac('sha256', secret).update(payloadBuf).digest('base64url');
+    const providedBuf = Buffer.from(sigB64, 'utf8');
+    const expectedBuf = Buffer.from(expectedSigB64, 'utf8');
 
-    if (expectedSig.length !== actualSig.length || !timingSafeEqual(expectedSig, actualSig)) {
+    if (expectedBuf.length !== providedBuf.length || !timingSafeEqual(expectedBuf, providedBuf)) {
       return null;
     }
 

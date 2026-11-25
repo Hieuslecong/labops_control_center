@@ -297,6 +297,15 @@ class ZaloPollingWorker:
 
         offset: Optional[int] = None
         consecutive_errors = 0
+        v4 = getattr(self.service, "v4", None)
+        if v4 is not None and getattr(v4.config, "enabled", False):
+            try:
+                saved_cursor = await asyncio.to_thread(v4.inbox.get_cursor, "zalo_polling_offset")
+                if saved_cursor and str(saved_cursor).isdigit():
+                    offset = int(saved_cursor)
+                    logger.info("📌 Khôi phục cursor polling V4 offset=%s", offset)
+            except Exception as cur_err:
+                logger.warning("Không đọc được V4 polling cursor: %s", cur_err)
 
         while self.is_running:
             try:
@@ -329,6 +338,27 @@ class ZaloPollingWorker:
                     sender_id = str(getattr(from_user, "id", chat_id)) if from_user else chat_id
                     sender_name = str(getattr(from_user, "display_name", "User")) if from_user else "User"
                     msg_id_val = getattr(message, "message_id", None)
+                    v4_inbox_id: Optional[str] = None
+                    if v4 is not None and getattr(v4.config, "enabled", False) and chat_id and sender_id:
+                        try:
+                            ext_id = str(msg_id_val if msg_id_val is not None else (update_id if update_id is not None else uuid.uuid4().hex[:12]))
+                            inb_res = await asyncio.to_thread(
+                                v4.inbox.ingest_message,
+                                channel="zalo",
+                                bot_id=bot_name or "default",
+                                external_message_id=ext_id,
+                                chat_id=chat_id,
+                                sender_id=sender_id,
+                                text=raw_text,
+                                update_id=int(update_id) if update_id is not None else None,
+                                cursor_name="zalo_polling_offset",
+                                cursor_value=str(offset) if offset is not None else None,
+                            )
+                            if inb_res.get("duplicate"):
+                                continue
+                            v4_inbox_id = inb_res.get("inbox_id")
+                        except Exception as inb_err:
+                            logger.warning("V4 inbox ingest error: %s", inb_err)
                     try:
                         await self.process_incoming_message(
                             bot,
@@ -338,15 +368,37 @@ class ZaloPollingWorker:
                             sender_name=sender_name,
                             message_id=str(msg_id_val) if msg_id_val is not None else None,
                         )
+                        if v4 is not None and v4_inbox_id:
+                            await asyncio.to_thread(v4.inbox.mark_processed, v4_inbox_id, state="PROCESSED")
                     except Exception as handle_err:
+                        if v4 is not None and v4_inbox_id:
+                            try:
+                                await asyncio.to_thread(
+                                    v4.inbox.mark_processed,
+                                    v4_inbox_id,
+                                    state="FAILED",
+                                    error=str(handle_err),
+                                )
+                            except Exception:
+                                pass
                         logger.error("Lỗi khi xử lý phản hồi lệnh: %s", handle_err)
 
-                await self._check_repo_security_alerts(bot=bot)
-                await self._check_infra_telemetry_and_incidents(bot=bot)
+                from app.services.assistant_v4.notification_policy import resolve_notification_owner
+
+                v4_owner = resolve_notification_owner(getattr(v4, "config", None) if v4 is not None else None)
+                v4_handles_notif = (v4 is not None and v4_owner == "V4_ACTIVE")
+                await self._check_repo_security_alerts(bot=bot, suppress_direct_send=v4_handles_notif)
+                await self._check_infra_telemetry_and_incidents(
+                    bot=bot,
+                    suppress_v2_enqueue=v4_handles_notif,
+                )
                 await self._check_mram_sla_and_expiry()
                 await self._flush_notification_outbox(bot=bot)
-                await self._check_daily_report_schedule(bot=bot)
-                await self._check_weekly_report_schedule(bot=bot)
+                if not v4_handles_notif:
+                    await self._check_daily_report_schedule(bot=bot)
+                    await self._check_weekly_report_schedule(bot=bot)
+                if v4 is not None and getattr(v4.config, "enabled", False):
+                    await self._run_v4_worker_step(v4, bot=bot)
 
                 await asyncio.sleep(0.5)
 
@@ -377,7 +429,12 @@ class ZaloPollingWorker:
         except Exception as exc:
             logger.warning("Lỗi flush notification outbox: %s", exc)
 
-    async def _check_infra_telemetry_and_incidents(self, bot: Optional[Any] = None) -> None:
+    async def _check_infra_telemetry_and_incidents(
+        self,
+        bot: Optional[Any] = None,
+        *,
+        suppress_v2_enqueue: bool = False,
+    ) -> None:
         now_mono = time.monotonic()
         if self._last_telemetry_eval_mono > 0 and (now_mono - self._last_telemetry_eval_mono) < 60.0:
             return
@@ -387,6 +444,9 @@ class ZaloPollingWorker:
             snap = await asyncio.to_thread(self.telemetry_collector.collect_snapshot)
             await asyncio.to_thread(self.telemetry_collector.record_sample, snap)
             evaluated = await asyncio.to_thread(self.incident_engine.evaluate_snapshot, snap)
+
+            if suppress_v2_enqueue:
+                return
 
             for item in evaluated:
                 inc = item.get("incident") or {}
@@ -659,11 +719,11 @@ class ZaloPollingWorker:
             except Exception as e:
                 logger.error("Lỗi khi tự động tạo báo cáo tuần: %s", e)
 
-    async def _check_repo_security_alerts(self, bot: Optional[Any] = None) -> None:
-        if bot is None:
+    async def _check_repo_security_alerts(self, bot: Optional[Any] = None, *, suppress_direct_send: bool = False) -> None:
+        if bot is None and not suppress_direct_send:
             return
         try:
-            await self.repo_alert_monitor.check_and_notify(bot)
+            await self.repo_alert_monitor.check_and_notify(bot, suppress_direct_send=suppress_direct_send)
         except Exception as exc:
             logger.warning("Lỗi kiểm tra cảnh báo kiểm duyệt repo sau clone: %s", exc)
 
@@ -675,6 +735,42 @@ class ZaloPollingWorker:
             await asyncio.to_thread(mram_service.sweep_expired_ssh_access)
         except Exception as exc:
             logger.debug("Lỗi kiểm tra MRAM 24h SLA / SSH expiry: %s", exc)
+
+    async def _run_v4_worker_step(self, v4: Any, *, bot: Optional[Any] = None) -> None:
+        try:
+            await asyncio.to_thread(v4.run_worker_cycle)
+        except Exception as exc:
+            logger.warning("V4 worker cycle error: %s", exc)
+
+        from app.services.assistant_v4.notification_policy import resolve_notification_owner
+
+        if bot is not None and resolve_notification_owner(getattr(v4, "config", None)) == "V4_ACTIVE":
+            async def _v4_send(recipient_id: str, text: str, channel: str) -> Optional[str]:
+                sent = await bot.send_message(chat_id=recipient_id, text=text)
+                prov_id = getattr(sent, "message_id", None)
+                return str(prov_id) if prov_id is not None else "accepted"
+
+            subs = {s["recipient_zalo_id"]: s for s in self.identity_rbac.list_subscriptions()}
+
+            def _v4_auth_check(recipient_id: str, channel: str) -> bool:
+                if channel == "zalo":
+                    if not self.bot_engine.is_authorized(recipient_id):
+                        return False
+                    sub = subs.get(recipient_id)
+                    if sub is not None and not sub.get("enabled", True):
+                        return False
+                    return True
+                return True
+
+            try:
+                await v4.outbox.deliver_claimed_batch(
+                    self.lease_owner_id,
+                    _v4_send,
+                    is_recipient_authorized_fn=_v4_auth_check,
+                    batch_size=15,
+                )
+            except Exception as exc:
+                logger.warning("V4 outbox deliver error: %s", exc)
 
     def stop(self):
         self.is_running = False

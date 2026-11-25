@@ -69,6 +69,18 @@ class ZaloAssistantService:
             incident_engine=self.incident_engine,
         )
         self.bot_engine.reload_persisted_config(force=True)
+        from app.services.assistant_v4.facade import AssistantV4Facade
+
+        self.v4 = AssistantV4Facade(
+            data_dir=self.data_dir,
+            db_manager=self.db,
+            ai_client=self.ai_client,
+            identity_rbac=self.identity_rbac,
+            telemetry_collector=self.telemetry_collector,
+            incident_engine=self.incident_engine,
+            authorized_users=self.bot_engine.authorized_users,
+        )
+        self.bot_engine.v4_facade = self.v4
 
     def _read_worker_health(self) -> Dict[str, Any]:
         status_file = os.path.join(self.data_dir, "zalo_worker_status.json")

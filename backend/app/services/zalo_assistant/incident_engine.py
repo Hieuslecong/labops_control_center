@@ -193,6 +193,13 @@ class UnifiedIncidentEngine:
                     rank = {"P0": 0, "P1": 1, "P2": 2}
                     if rank.get(sev, 9) < rank.get(str(existing.severity).upper(), 9):
                         existing.severity = sev
+                        self._emit_incident_event_in_session(
+                            session,
+                            row=existing,
+                            event_type="incident.escalated",
+                            source_event_id=f"incident:{existing.incident_id}:ep{int(existing.reopen_count or 0) + 1}:escalated:{sev}",
+                            actor="sre_engine",
+                        )
                     existing.updated_at = now
                     session.flush()
                     return _serialize_incident(existing), "UPDATED"
@@ -229,6 +236,13 @@ class UnifiedIncidentEngine:
                             correlation_id=correlation_id or existing.correlation_id,
                             created_at=now,
                         )
+                    )
+                    self._emit_incident_event_in_session(
+                        session,
+                        row=existing,
+                        event_type="incident.reopened",
+                        source_event_id=f"incident:{existing.incident_id}:ep{int(existing.reopen_count or 0) + 1}:reopened",
+                        actor="sre_engine",
                     )
                     session.flush()
                     return _serialize_incident(existing), "REOPENED"
@@ -269,6 +283,13 @@ class UnifiedIncidentEngine:
                     correlation_id=corr,
                     created_at=now,
                 )
+            )
+            self._emit_incident_event_in_session(
+                session,
+                row=rec,
+                event_type="incident.created",
+                source_event_id=f"incident:{inc_id}:ep1:created",
+                actor="sre_engine",
             )
             session.flush()
             return _serialize_incident(rec), "CREATED"
@@ -646,6 +667,13 @@ class UnifiedIncidentEngine:
                     created_at=now,
                 )
             )
+            self._emit_incident_event_in_session(
+                session,
+                row=row,
+                event_type="incident.acknowledged",
+                source_event_id=f"incident:{incident_id}:ep{int(row.reopen_count or 0) + 1}:ack:{int(now.timestamp())}",
+                actor=actor,
+            )
             session.flush()
             return _serialize_incident(row)
 
@@ -676,6 +704,13 @@ class UnifiedIncidentEngine:
                     correlation_id=row.correlation_id,
                     created_at=now,
                 )
+            )
+            self._emit_incident_event_in_session(
+                session,
+                row=row,
+                event_type="incident.resolved",
+                source_event_id=f"incident:{incident_id}:ep{int(row.reopen_count or 0) + 1}:resolved:{int(now.timestamp() * 1000)}",
+                actor=actor,
             )
             session.flush()
             return _serialize_incident(row)
@@ -742,6 +777,59 @@ class UnifiedIncidentEngine:
                         created_at=now,
                     )
                 )
+                self._emit_incident_event_in_session(
+                    session,
+                    row=row,
+                    event_type="incident.resolved",
+                    source_event_id=f"incident:{row.incident_id}:ep{int(row.reopen_count or 0) + 1}:repo_approved",
+                    actor=actor,
+                )
                 resolved_count += 1
             session.flush()
         return resolved_count
+
+    @staticmethod
+    def _emit_incident_event_in_session(
+        session: Any,
+        *,
+        row: IncidentRecord,
+        event_type: str,
+        source_event_id: str,
+        actor: str,
+    ) -> None:
+        try:
+            from app.services.assistant_v4.event_store import EventEnvelope, insert_event_in_session
+
+            ep = max(1, int(row.reopen_count or 0) + 1)
+            with session.begin_nested():
+                insert_event_in_session(
+                    session,
+                    EventEnvelope(
+                        source="incident-engine",
+                        source_event_id=source_event_id,
+                        event_type=event_type,
+                        scope_type="user" if row.owner_id else "lab",
+                        scope_id=row.owner_id or (row.host_id or "global"),
+                        resource_id=row.incident_id,
+                        actor_id=actor,
+                        source_version=ep,
+                        occurred_at=_as_utc(row.last_observed_at) or _utcnow(),
+                        observed_at=_utcnow(),
+                        correlation_id=row.correlation_id or row.incident_id,
+                        payload={
+                            "incident_id": row.incident_id,
+                            "incident_event_type": row.event_type,
+                            "severity": row.severity,
+                            "confidence": row.confidence,
+                            "status": row.status,
+                            "source": row.source,
+                            "resource_id": row.resource_id,
+                            "host_id": row.host_id,
+                            "owner_id": row.owner_id,
+                            "title": row.title,
+                            "recommended_action": row.recommended_action,
+                        },
+                    ),
+                )
+        except Exception:
+            pass

@@ -1,16 +1,16 @@
 """
 LabOps Personal AI Agent V4 — Controlled Administration & ActionProposal State Machine.
+- Unified 42-action Web Admin Parity Catalog + Mandatory Intent Confirmation across R1..R4.
 - Risk classification:
     R0: Read-only
-    R1: Own reminders / watches / preferences
-    R2: Ack incident, resolve incident (requires recovery proof or override), reject SSH request
-        -> Protected by cryptographically random one-time confirmation code (hashed in DB),
-           bound strictly to (action_id, actor_id, chat_id, session_id, args_hash, target_version),
-           120s expiry, max 3 attempts, NO broad YES/OK/CÓ approval.
-    R3: Approve SSH request, grant/revoke GPU, quota changes, workspace restart
-        -> ALWAYS routed to authenticated Dashboard Step-Up UI (cannot execute via Zalo confirm).
-    FORBIDDEN: Arbitrary shell, SSH, sudo, account/workspace delete, network changes, self-grant.
-- Feature flag `write_actions` defaults to False (no live mutations unless explicitly enabled).
+    R1: Own reminders / watches / preferences & Idempotent admin actions (still require confirmation card)
+    R2: Standard admin mutations -> DM 1-1 OTP + Impact Diff + Similar Alternatives + CAS
+    R3: High-sensitivity security/credential/lifecycle mutations -> Admin RBAC reload + DM 1-1 OTP + CAS + Redaction
+        (blocked on Zalo unless `zalo_r3_actions_enabled=True`)
+    R4: Destructive permanent deletion (`delete_member_permanent`) -> DM 1-1 OTP + Typed Phrase (`CONFIRM DELETE <user>`)
+        (blocked on Zalo unless `zalo_r4_actions_enabled=True`)
+    FORBIDDEN: Arbitrary shell, SSH, sudo, raw delete_member, delete_workspace, network changes, self-grant.
+- Feature flag `write_actions` defaults to False (fail-closed unless explicitly enabled).
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import json
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from sqlalchemy import select, update
 
@@ -30,15 +30,50 @@ from app.db.models import (
     V4ActionProposalRecord,
 )
 from app.db.session import DatabaseManager
+from app.services.assistant_v4.admin_action_catalog import (
+    ADMIN_ACTION_CATALOG,
+    build_confirmation_card,
+    dispatch_confirmed_action,
+    get_action_spec,
+    inspect_target_preview,
+    redact_sensitive_payload,
+    validate_action_args,
+)
 from app.services.assistant_v4.event_store import redact_text
-from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
-from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+
+if TYPE_CHECKING:
+    from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
+    from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
 
 R0_ACTIONS = {"read_metrics", "read_report"}
-R1_ACTIONS = {"create_watch", "create_reminder", "cancel_task", "set_preference"}
-R2_ACTIONS = {"ack_incident", "resolve_incident", "reject_request"}
-R3_ACTIONS = {"approve_request", "grant_gpu", "revoke_gpu", "change_quota", "restart_workspace"}
-FORBIDDEN_ACTIONS = {"arbitrary_shell", "remote_ssh", "sudo_cmd", "delete_member", "delete_workspace", "modify_network", "self_grant_admin"}
+R1_ACTIONS = {"create_watch", "create_reminder", "cancel_task", "set_preference"} | {
+    k for k, spec in ADMIN_ACTION_CATALOG.items() if spec.risk_tier == "R1"
+}
+R2_ACTIONS = {"ack_incident", "resolve_incident", "reject_request"} | {
+    k for k, spec in ADMIN_ACTION_CATALOG.items() if spec.risk_tier == "R2"
+}
+R3_ACTIONS = {"approve_request", "grant_gpu", "revoke_gpu", "change_quota", "restart_workspace"} | {
+    k for k, spec in ADMIN_ACTION_CATALOG.items() if spec.risk_tier == "R3"
+}
+R4_ACTIONS = {k for k, spec in ADMIN_ACTION_CATALOG.items() if spec.risk_tier == "R4"}
+FORBIDDEN_ACTIONS = {
+    "arbitrary_shell",
+    "remote_ssh",
+    "sudo_cmd",
+    "delete_member",
+    "delete_workspace",
+    "modify_network",
+    "self_grant_admin",
+}
+
+LEGACY_ACTION_ALIASES = {
+    "approve_request": "approve_ssh_request",
+    "reject_request": "reject_ssh_request",
+}
+
+ADMIN_REQUIRED_ACTIONS = (
+    set(ADMIN_ACTION_CATALOG.keys()) - {"ack_incident"}
+) | {"approve_request", "reject_request", "grant_gpu", "revoke_gpu", "change_quota", "restart_workspace"}
 
 
 def _utcnow() -> datetime:
@@ -66,6 +101,8 @@ def classify_action_risk(action_type: str) -> str:
     at = str(action_type or "").strip().lower()
     if at in FORBIDDEN_ACTIONS:
         return "FORBIDDEN"
+    if at in R4_ACTIONS:
+        return "R4"
     if at in R3_ACTIONS:
         return "R3"
     if at in R2_ACTIONS:
@@ -83,13 +120,27 @@ class ActionProposalService:
         db_manager: DatabaseManager,
         *,
         write_actions_enabled: bool = False,
+        zalo_r3_actions_enabled: bool = False,
+        zalo_r4_actions_enabled: bool = False,
+        secret_delivery_mode: str = "vault_only",
+        short_otp_confirm: bool = False,
         incident_engine: Optional[UnifiedIncidentEngine] = None,
         identity_reloader: Optional[Callable[[ZaloPrincipal], ZaloPrincipal]] = None,
+        service_context: Optional[Dict[str, Any]] = None,
     ):
         self.db = db_manager
         self.write_actions_enabled = bool(write_actions_enabled)
-        self.incident_engine = incident_engine or UnifiedIncidentEngine(db_manager.data_dir, db_manager=db_manager)
+        self.zalo_r3_actions_enabled = bool(zalo_r3_actions_enabled)
+        self.zalo_r4_actions_enabled = bool(zalo_r4_actions_enabled)
+        self.secret_delivery_mode = str(secret_delivery_mode or "vault_only").strip().lower()
+        self.short_otp_confirm = bool(short_otp_confirm)
+        if incident_engine is None:
+            from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+
+            incident_engine = UnifiedIncidentEngine(db_manager.data_dir, db_manager=db_manager)
+        self.incident_engine = incident_engine
         self.identity_reloader = identity_reloader
+        self.service_context: Dict[str, Any] = dict(service_context or {})
 
     @staticmethod
     def _write_audit(
@@ -103,7 +154,8 @@ class ActionProposalService:
         correlation_id: str = "",
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        detail_str = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
+        safe_details = redact_sensitive_payload(details or {})
+        detail_str = json.dumps(safe_details, ensure_ascii=False, sort_keys=True, default=str)
         session.add(
             AuditEventRecord(
                 id=f"aud4-{uuid.uuid4().hex[:12]}",
@@ -146,16 +198,23 @@ class ActionProposalService:
 
     @staticmethod
     def _serialize_proposal(r: V4ActionProposalRecord) -> Dict[str, Any]:
+        args_json = dict(r.canonical_args_json or {})
+        meta = dict(args_json.get("_meta") or {}) if isinstance(args_json.get("_meta"), dict) else {}
         return {
             "action_id": r.action_id,
             "actor_id": r.actor_id,
             "actor_role": r.actor_role,
+            "chat_id": r.chat_id,
             "action_type": r.action_type,
             "risk_tier": r.risk_tier,
             "target_type": r.target_type,
             "target_id": r.target_id,
             "state": r.state,
             "reason": r.reason,
+            "parsed_intent_summary": meta.get("parsed_intent_summary"),
+            "similar_alternatives": meta.get("similar_alternatives") or [],
+            "reversible": meta.get("reversible"),
+            "typed_phrase_required": meta.get("typed_phrase_required"),
             "expires_at": _as_utc(r.expires_at).isoformat(),
             "created_at": _as_utc(r.created_at).isoformat(),
             "error_detail": r.error_detail,
@@ -166,9 +225,21 @@ class ActionProposalService:
             r = session.get(V4ActionProposalRecord, action_id)
             return self._serialize_proposal(r) if r is not None else None
 
-    def _current_target_version_and_state(self, target_type: str, target_id: str) -> tuple[str, Dict[str, Any]]:
+    def list_pending_for_actor(self, actor_id: str, *, chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        now = _utcnow()
         with self.db.session_scope() as session:
-            tt = target_type.upper()
+            stmt = select(V4ActionProposalRecord).where(
+                V4ActionProposalRecord.actor_id == actor_id,
+                V4ActionProposalRecord.state == "PENDING_CONFIRMATION",
+            )
+            if chat_id:
+                stmt = stmt.where(V4ActionProposalRecord.chat_id == chat_id)
+            rows = session.execute(stmt.order_by(V4ActionProposalRecord.created_at.desc())).scalars().all()
+            return [self._serialize_proposal(r) for r in rows if _as_utc(r.expires_at) > now]
+
+    def _current_target_version_and_state(self, target_type: str, target_id: str) -> tuple[str, Dict[str, Any]]:
+        tt = target_type.upper()
+        with self.db.session_scope() as session:
             if tt == "INCIDENT":
                 inc = session.get(IncidentRecord, target_id)
                 if inc is None:
@@ -180,7 +251,29 @@ class ActionProposalService:
                 if req is None:
                     raise LookupError(f"Request '{target_id}' not found")
                 return str(req.version), {"status": req.status, "username": req.username}
+        if tt == "MEMBER" and self.service_context.get("labops_service") is not None:
+            lsvc = self.service_context["labops_service"]
+            try:
+                if hasattr(lsvc, "ensure_members_fresh"):
+                    lsvc.ensure_members_fresh()
+                mem = None
+                if hasattr(lsvc, "_find_member"):
+                    mem = lsvc._find_member(target_id)
+                if mem:
+                    ver = f"{mem.get('status')}:v{mem.get('version', 1)}:pw{mem.get('password_status', '')}:ssh{mem.get('ssh_status', '')}"
+                    return ver, {"status": mem.get("status"), "username": mem.get("username")}
+            except Exception:
+                pass
         return "1", {}
+
+    def _can_execute_on_zalo(self, risk_tier: str) -> bool:
+        if risk_tier in {"R1", "R2"}:
+            return True
+        if risk_tier == "R3":
+            return self.zalo_r3_actions_enabled
+        if risk_tier == "R4":
+            return self.zalo_r4_actions_enabled
+        return False
 
     def propose_action(
         self,
@@ -195,9 +288,12 @@ class ActionProposalService:
         canonical_args: Optional[Dict[str, Any]] = None,
         reason: str = "",
         idempotency_key: Optional[str] = None,
-        ttl_seconds: int = 120,
+        ttl_seconds: int = 300,
+        confirm_chat_id: Optional[str] = None,
+        origin_chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        risk = classify_action_risk(action_type)
+        norm_action = str(action_type or "").strip().lower()
+        risk = classify_action_risk(norm_action)
         if risk == "FORBIDDEN":
             self._audit_standalone(
                 actor=actor_id,
@@ -205,44 +301,98 @@ class ActionProposalService:
                 target_type=target_type.upper(),
                 target_id=target_id,
                 status="DENIED",
-                details={"action_type": action_type, "reason": "FORBIDDEN_ACTION"},
+                details={"action_type": norm_action, "reason": "FORBIDDEN_ACTION"},
             )
-            raise PermissionError(f"FORBIDDEN_ACTION: Thao tác '{action_type}' bị cấm tuyệt đối.")
-        if action_type in {"resolve_incident", "reject_request", "approve_request", "grant_gpu", "revoke_gpu", "change_quota", "restart_workspace"} and actor_role.upper() != "ADMIN":
+            raise PermissionError(f"FORBIDDEN_ACTION: Thao tác '{norm_action}' bị cấm tuyệt đối.")
+        if norm_action in ADMIN_REQUIRED_ACTIONS and actor_role.upper() != "ADMIN":
             self._audit_standalone(
                 actor=actor_id,
                 action="V4_ACTION_DENIED",
                 target_type=target_type.upper(),
                 target_id=target_id,
                 status="DENIED",
-                details={"action_type": action_type, "reason": "ADMIN_REQUIRED"},
+                details={"action_type": norm_action, "reason": "ADMIN_REQUIRED"},
             )
             raise PermissionError("Chỉ Admin mới có quyền đề xuất thao tác quản trị này.")
 
         target_ver, target_info = self._current_target_version_and_state(target_type, target_id)
-        if action_type == "ack_incident" and actor_role.upper() != "ADMIN" and target_info.get("owner_id") != actor_id:
+        if norm_action == "ack_incident" and actor_role.upper() != "ADMIN" and target_info.get("owner_id") != actor_id:
             self._audit_standalone(
                 actor=actor_id,
                 action="V4_ACTION_DENIED",
                 target_type=target_type.upper(),
                 target_id=target_id,
                 status="DENIED",
-                details={"action_type": action_type, "reason": "NOT_INCIDENT_OWNER"},
+                details={"action_type": norm_action, "reason": "NOT_INCIDENT_OWNER"},
             )
             raise PermissionError("Bạn không có quyền xác nhận sự cố của thành viên khác.")
 
-        args_obj = dict(canonical_args or {"target_id": target_id, "reason": reason})
-        args_hash = _canonical_args_hash(args_obj)
+        spec = get_action_spec(LEGACY_ACTION_ALIASES.get(norm_action, norm_action))
+        raw_input_args = dict(canonical_args or {"target_id": target_id, "reason": reason})
+        if "target_id" not in raw_input_args and spec is not None:
+            raw_input_args["target_id"] = target_id
+        if reason and "reason" not in raw_input_args and spec is not None and "reason" in spec.args_model.model_fields:
+            raw_input_args["reason"] = reason
+        validated_clean_args = (
+            validate_action_args(spec.action_id, raw_input_args)
+            if spec is not None and norm_action in ADMIN_ACTION_CATALOG
+            else raw_input_args
+        )
+
+        eff_confirm_chat = str(confirm_chat_id or chat_id or "").strip()
+        eff_origin_chat = str(origin_chat_id or chat_id or "").strip()
+        routed_to_dm = bool(confirm_chat_id and eff_origin_chat and confirm_chat_id != eff_origin_chat)
+
+        preview = inspect_target_preview(
+            action_type=spec.action_id if spec else norm_action,
+            target_id=target_id,
+            args=validated_clean_args,
+            service_context=self.service_context,
+        )
+
+        # Redact secrets from args stored inside DB canonical_args_json? Wait: if execution needs a user-supplied
+        # new_password / initial_password we hash exact canonical_args_json and never audit it plaintext!
+        # Ensure AuditEventRecord redacts via _write_audit.
         now = _utcnow()
-        exp = now + timedelta(seconds=max(30, min(int(ttl_seconds), 600)))
+        bounded_ttl = max(30, min(int(ttl_seconds), 600))
+        exp = now + timedelta(seconds=bounded_ttl)
         aid = f"act4-{uuid.uuid4().hex[:10]}"
-        idem = idempotency_key or f"prop:{actor_id}:{action_type}:{target_id}:{uuid.uuid4().hex[:8]}"
+        idem = idempotency_key or f"prop:{actor_id}:{norm_action}:{target_id}:{uuid.uuid4().hex[:8]}"
 
         one_time_code: Optional[str] = None
         nonce_hash: Optional[str] = None
-        if risk in {"R1", "R2"}:
+        zalo_allowed = self._can_execute_on_zalo(risk)
+        if zalo_allowed:
             one_time_code = f"{secrets.token_hex(3).upper()}"
             nonce_hash = _hash_secret_code(one_time_code)
+
+        card = build_confirmation_card(
+            action_id=aid,
+            action_type=spec.action_id if spec else norm_action,
+            risk_tier=risk,
+            target_type=target_type.upper(),
+            target_id=target_id,
+            preview=preview,
+            one_time_code=one_time_code,
+            ttl_seconds=bounded_ttl,
+            routed_to_dm=routed_to_dm,
+            short_otp_enabled=self.short_otp_confirm,
+            dashboard_path=(f"/dashboard/ssh-requests/{target_id}/review" if target_type.upper() == "SSH_REQUEST" else "/dashboard/ai-assistant"),
+        )
+
+        meta_block = {
+            "parsed_intent_summary": f"{card['title_vi']} ({norm_action}) trên {target_id}",
+            "similar_alternatives": card["similar_alternatives"],
+            "reversible": card["reversible"],
+            "typed_phrase_required": card.get("typed_phrase_required"),
+            "origin_chat_id": eff_origin_chat,
+            "routed_to_dm": routed_to_dm,
+            "target_label": preview.get("target_label"),
+            "before_state": preview.get("before_state"),
+            "after_state": preview.get("after_state"),
+        }
+        persisted_args = {**validated_clean_args, "_meta": meta_block}
+        args_hash = _canonical_args_hash(persisted_args)
 
         with self.db.session_scope() as session:
             rec = V4ActionProposalRecord(
@@ -250,13 +400,13 @@ class ActionProposalService:
                 actor_id=actor_id,
                 actor_role=actor_role.upper(),
                 session_id=session_id,
-                chat_id=chat_id,
-                action_type=action_type,
+                chat_id=eff_confirm_chat,
+                action_type=norm_action,
                 risk_tier=risk,
                 target_type=target_type.upper(),
                 target_id=target_id,
                 target_version=target_ver,
-                canonical_args_json=args_obj,
+                canonical_args_json=persisted_args,
                 canonical_args_hash=args_hash,
                 nonce_hash=nonce_hash,
                 attempt_count=0,
@@ -278,28 +428,179 @@ class ActionProposalService:
                 target_id=target_id,
                 status="PROPOSED",
                 correlation_id=aid,
-                details={"action_id": aid, "action_type": action_type, "risk_tier": risk, "target_version": target_ver},
+                details={
+                    "action_id": aid,
+                    "action_type": norm_action,
+                    "risk_tier": risk,
+                    "target_version": target_ver,
+                    "routed_to_dm": routed_to_dm,
+                },
             )
             session.flush()
 
         out: Dict[str, Any] = {
             "action_id": aid,
-            "action_type": action_type,
+            "action_type": norm_action,
             "risk_tier": risk,
             "target_type": target_type.upper(),
             "target_id": target_id,
             "target_version": target_ver,
             "state": "PENDING_CONFIRMATION",
             "expires_at": exp.isoformat(),
+            "reversible": card["reversible"],
+            "similar_alternatives": card["similar_alternatives"],
+            "typed_phrase_required": card.get("typed_phrase_required"),
+            "routed_to_dm": routed_to_dm,
+            "confirm_chat_id": eff_confirm_chat,
+            "origin_chat_id": eff_origin_chat,
+            "dm_confirmation_card": card["dm_card_text"],
+            "group_confirmation_notice": card["group_notice_text"],
         }
-        if risk == "R3":
+        if not zalo_allowed:
             out["dashboard_required"] = True
-            out["dashboard_path"] = f"/dashboard/ssh-requests/{target_id}/review" if target_type.upper() == "SSH_REQUEST" else "/dashboard/ai-assistant"
-            out["instruction"] = f"Thao tác {action_type} thuộc nhóm R3 bắt buộc xác thực Step-Up trên Dashboard ({out['dashboard_path']}); không thể xác nhận qua Zalo."
+            out["dashboard_path"] = (
+                f"/dashboard/ssh-requests/{target_id}/review"
+                if target_type.upper() == "SSH_REQUEST"
+                else "/dashboard/ai-assistant"
+            )
+            out["confirmation_card"] = card["dm_card_text"]
+            out["instruction"] = (
+                f"Thao tác {norm_action} thuộc nhóm {risk} bắt buộc xác thực Step-Up trên Dashboard ({out['dashboard_path']}); "
+                "không thể xác nhận qua Zalo."
+            )
         else:
             out["confirmation_code"] = one_time_code
-            out["instruction"] = f"Để xác nhận {action_type} trên {target_id}, hãy gửi đúng lệnh: `/confirm {aid} {one_time_code}` (hết hạn sau {ttl_seconds}s)."
+            out["confirmation_card"] = card["group_notice_text"] if routed_to_dm else card["dm_card_text"]
+            if routed_to_dm:
+                out["instruction"] = (
+                    f"Phiếu xác nhận `{aid}` kèm mã OTP đã được chuyển riêng tới DM 1-1 của Admin. "
+                    "Không xác nhận hoặc hiển thị OTP trong nhóm chat."
+                )
+            else:
+                out["instruction"] = card["dm_card_text"]
         return out
+
+    def cancel_proposal(self, action_id: str, *, actor_id: str, reason: str = "CANCELLED_BY_ADMIN") -> Dict[str, Any]:
+        now = _utcnow()
+        with self.db.session_scope() as session:
+            prop = session.get(V4ActionProposalRecord, action_id)
+            if prop is None:
+                raise LookupError(f"Không tìm thấy đề xuất '{action_id}'.")
+            if prop.actor_id != actor_id:
+                raise PermissionError("ACTOR_MISMATCH: Chỉ người đề xuất mới có thể hủy phiếu.")
+            if prop.state != "PENDING_CONFIRMATION":
+                return {"action_id": action_id, "state": prop.state, "cancelled": False}
+            ver = int(prop.version)
+            cas = session.execute(
+                update(V4ActionProposalRecord)
+                .where(
+                    V4ActionProposalRecord.action_id == action_id,
+                    V4ActionProposalRecord.state == "PENDING_CONFIRMATION",
+                    V4ActionProposalRecord.version == ver,
+                )
+                .values(state="CANCELLED", error_detail=redact_text(reason)[:200], version=ver + 1, updated_at=now)
+            )
+            if getattr(cas, "rowcount", 0) != 1:
+                raise PermissionError("CONCURRENT_CANCEL_CONFLICT")
+            self._write_audit(
+                session,
+                actor=actor_id,
+                action="V4_ACTION_CANCELLED",
+                target_type=prop.target_type,
+                target_id=prop.target_id,
+                status="CANCELLED",
+                correlation_id=action_id,
+                details={"action_id": action_id, "reason": reason},
+            )
+        return {"action_id": action_id, "state": "CANCELLED", "cancelled": True}
+
+    def switch_proposal(
+        self,
+        action_id: str,
+        *,
+        choice_number: int,
+        actor_id: str,
+        actor_role: str,
+        chat_id: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        now = _utcnow()
+        new_action_type = ""
+        target_id = ""
+        reason_txt = ""
+        confirm_chat_id = ""
+        origin_chat_id = ""
+        existing_clean_args: Dict[str, Any] = {}
+
+        with self.db.session_scope() as session:
+            prop = session.get(V4ActionProposalRecord, action_id)
+            if prop is None:
+                raise LookupError(f"Không tìm thấy đề xuất '{action_id}'.")
+            if prop.actor_id != actor_id:
+                raise PermissionError("ACTOR_MISMATCH: Chỉ người đề xuất mới có thể đổi lựa chọn.")
+            if prop.state != "PENDING_CONFIRMATION":
+                raise PermissionError(f"Đề xuất đang ở trạng thái '{prop.state}', không thể chuyển.")
+            args_json = dict(prop.canonical_args_json or {})
+            meta = dict(args_json.get("_meta") or {})
+            alts = list(meta.get("similar_alternatives") or [])
+            chosen = next((a for a in alts if int(a.get("switch_number", 0)) == int(choice_number)), None)
+            if chosen is None:
+                raise LookupError(f"Không có lựa chọn tương tự số `{choice_number}` trên phiếu `{action_id}`.")
+            new_action_type = str(chosen["action_id"])
+            target_id = prop.target_id
+            reason_txt = prop.reason
+            confirm_chat_id = prop.chat_id
+            origin_chat_id = str(meta.get("origin_chat_id") or prop.chat_id)
+            existing_clean_args = {k: v for k, v in args_json.items() if k != "_meta"}
+
+            ver = int(prop.version)
+            cas = session.execute(
+                update(V4ActionProposalRecord)
+                .where(
+                    V4ActionProposalRecord.action_id == action_id,
+                    V4ActionProposalRecord.state == "PENDING_CONFIRMATION",
+                    V4ActionProposalRecord.version == ver,
+                )
+                .values(
+                    state="SWITCHED",
+                    error_detail=f"SWITCHED_TO:{new_action_type}",
+                    version=ver + 1,
+                    updated_at=now,
+                )
+            )
+            if getattr(cas, "rowcount", 0) != 1:
+                raise PermissionError("CONCURRENT_SWITCH_CONFLICT")
+            self._write_audit(
+                session,
+                actor=actor_id,
+                action="V4_ACTION_SWITCHED",
+                target_type=prop.target_type,
+                target_id=prop.target_id,
+                status="SWITCHED",
+                correlation_id=action_id,
+                details={"from_action": prop.action_type, "to_action": new_action_type},
+            )
+
+        new_spec = get_action_spec(new_action_type)
+        if new_spec is None:
+            raise LookupError(f"Unknown switch target action '{new_action_type}'")
+        # Filter existing args down to fields accepted by new spec
+        allowed_fields = set(new_spec.args_model.model_fields.keys())
+        filtered_args = {k: v for k, v in existing_clean_args.items() if k in allowed_fields}
+        filtered_args["target_id"] = target_id
+        return self.propose_action(
+            actor_id=actor_id,
+            actor_role=actor_role,
+            chat_id=chat_id,
+            session_id=session_id,
+            action_type=new_action_type,
+            target_type=new_spec.target_type,
+            target_id=target_id,
+            canonical_args=filtered_args,
+            reason=reason_txt,
+            confirm_chat_id=confirm_chat_id,
+            origin_chat_id=origin_chat_id,
+        )
 
     def confirm_zalo_action(
         self,
@@ -311,6 +612,7 @@ class ActionProposalService:
         session_id: Optional[str] = None,
         override_reason: str = "",
         observed_recovered: bool = False,
+        typed_confirmation: str = "",
         now_override: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         # Group chats where chat_id != sender zalo_user_id are NEVER trusted for write confirmations
@@ -357,15 +659,23 @@ class ActionProposalService:
         deny_exc: Optional[Exception] = None
         action_snapshot: Optional[Dict[str, Any]] = None
         replay_res: Optional[Dict[str, Any]] = None
+        is_dm_1_on_1 = bool(eff_principal.zalo_user_id and chat_id == eff_principal.zalo_user_id)
 
         with self.db.session_scope() as session:
             prop = session.get(V4ActionProposalRecord, action_id)
             if prop is None:
                 raise LookupError(f"Không tìm thấy đề xuất hành động '{action_id}'.")
 
-            if prop.risk_tier == "R3" or prop.risk_tier == "FORBIDDEN":
+            args_json = dict(prop.canonical_args_json or {})
+            meta = dict(args_json.get("_meta") or {}) if isinstance(args_json.get("_meta"), dict) else {}
+            expected_phrase = str(meta.get("typed_phrase_required") or "").strip()
+
+            if prop.risk_tier == "FORBIDDEN" or (prop.risk_tier == "R3" and not self.zalo_r3_actions_enabled):
                 self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="DENIED", correlation_id=action_id, details={"reason": "R3_ZALO_BLOCKED", "action_id": action_id})
                 deny_exc = PermissionError("Thao tác R3 bắt buộc xác thực Step-Up trên Dashboard POST; bị chặn trên Zalo.")
+            elif prop.risk_tier == "R4" and not self.zalo_r4_actions_enabled:
+                self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="DENIED", correlation_id=action_id, details={"reason": "R4_ZALO_BLOCKED", "action_id": action_id})
+                deny_exc = PermissionError("Thao tác R4 bắt buộc thực hiện trên Dashboard; bị chặn trên Zalo.")
             elif prop.actor_id != eff_principal.username:
                 self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="DENIED", correlation_id=action_id, details={"reason": "ACTOR_MISMATCH", "action_id": action_id})
                 deny_exc = PermissionError("ACTOR_MISMATCH: Chỉ đúng người đề xuất mới được xác nhận.")
@@ -410,7 +720,13 @@ class ActionProposalService:
                 prop.updated_at = now
                 self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="INVALID_CODE", correlation_id=action_id, details={"action_id": action_id, "attempts": prop.attempt_count})
                 deny_exc = PermissionError("INVALID_CONFIRMATION_CODE")
-            elif prop.action_type in {"resolve_incident", "reject_request"} and not eff_principal.is_admin:
+            elif prop.risk_tier == "R4" and (
+                not expected_phrase
+                or " ".join(str(typed_confirmation or "").upper().split()) != " ".join(expected_phrase.upper().split())
+            ):
+                self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="R4_PHRASE_MISMATCH", correlation_id=action_id, details={"action_id": action_id})
+                deny_exc = PermissionError(f"R4_TYPED_CONFIRMATION_REQUIRED: Bắt buộc gõ kèm chính xác `{expected_phrase}`.")
+            elif prop.action_type in ADMIN_REQUIRED_ACTIONS and not eff_principal.is_admin:
                 prop.state = "REVOKED"
                 prop.version = int(prop.version) + 1
                 prop.updated_at = now
@@ -454,16 +770,18 @@ class ActionProposalService:
                             deny_exc = PermissionError("CONCURRENT_CONFIRMATION_CONFLICT")
                     else:
                         self._write_audit(session, actor=eff_principal.username, action="V4_ACTION_CONFIRMED", target_type=prop.target_type, target_id=prop.target_id, status="CONFIRMED", correlation_id=action_id, details={"action_id": action_id, "action_type": prop.action_type})
+                        clean_args = {k: v for k, v in args_json.items() if k != "_meta"}
                         action_snapshot = {
                             "action_id": prop.action_id,
                             "action_type": prop.action_type,
                             "target_id": prop.target_id,
                             "target_type": prop.target_type,
-                            "args": dict(prop.canonical_args_json or {}),
+                            "args": clean_args,
                             "actor_id": eff_principal.username,
                             "actor_role": eff_principal.role,
                             "idempotency_key": prop.idempotency_key,
                             "confirmed_version": expected_ver + 1,
+                            "is_dm_1_on_1": is_dm_1_on_1,
                         }
 
         if deny_exc is not None:
@@ -525,9 +843,9 @@ class ActionProposalService:
                 prop.updated_at = now
                 self._write_audit(session, actor=actor_username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="TAMPERED", correlation_id=action_id, details={"action_id": action_id})
                 deny_exc = PermissionError("CANONICAL_ARGS_TAMPERED")
-            elif prop.risk_tier == "R3" and not step_up_ok:
+            elif prop.risk_tier in {"R3", "R4"} and not step_up_ok:
                 self._write_audit(session, actor=actor_username, action="V4_ACTION_DENIED", target_type=prop.target_type, target_id=prop.target_id, status="DENIED", correlation_id=action_id, details={"reason": "STEP_UP_REQUIRED", "action_id": action_id})
-                deny_exc = PermissionError("STEP_UP_REQUIRED: Thao tác R3 cần Step-Up token hợp lệ.")
+                deny_exc = PermissionError(f"STEP_UP_REQUIRED: Thao tác {prop.risk_tier} cần Step-Up token hợp lệ.")
             elif not self.write_actions_enabled:
                 deny_exc = RuntimeError("WRITE_ACTIONS_DISABLED: Feature flag `write_actions` đang tắt.")
             else:
@@ -564,16 +882,19 @@ class ActionProposalService:
                             deny_exc = PermissionError("CONCURRENT_CONFIRMATION_CONFLICT")
                     else:
                         self._write_audit(session, actor=actor_username, action="V4_ACTION_CONFIRMED", target_type=prop.target_type, target_id=prop.target_id, status="CONFIRMED", correlation_id=action_id, details={"action_id": action_id, "action_type": prop.action_type, "channel": "dashboard"})
+                        args_json = dict(prop.canonical_args_json or {})
+                        clean_args = {k: v for k, v in args_json.items() if k != "_meta"}
                         snapshot = {
                             "action_id": prop.action_id,
                             "action_type": prop.action_type,
                             "target_id": prop.target_id,
                             "target_type": prop.target_type,
-                            "args": dict(prop.canonical_args_json or {}),
+                            "args": clean_args,
                             "actor_id": actor_username,
                             "actor_role": actor_role,
                             "idempotency_key": prop.idempotency_key,
                             "confirmed_version": expected_ver + 1,
+                            "is_dm_1_on_1": True,
                         }
 
         if deny_exc is not None:
@@ -615,38 +936,33 @@ class ActionProposalService:
                 raise PermissionError("CONCURRENT_EXECUTION_CONFLICT")
 
         try:
-            atype = snapshot["action_type"]
+            raw_atype = str(snapshot["action_type"] or "").strip().lower()
+            atype = LEGACY_ACTION_ALIASES.get(raw_atype, raw_atype)
             tid = snapshot["target_id"]
             actor = snapshot["actor_id"]
             role = snapshot["actor_role"]
-            note = str(override_note or snapshot["args"].get("reason") or "Confirmed via V4 Approval")
+            args = dict(snapshot.get("args") or {})
+            if override_note:
+                args["reason"] = override_note
 
-            if atype == "ack_incident":
-                res = self.incident_engine.acknowledge_incident(tid, actor=actor, role=role, note=note)
-            elif atype == "resolve_incident":
-                res = self.incident_engine.resolve_incident(tid, actor=actor, role=role, note=note)
-            elif atype == "reject_request":
-                from app.services.mram_service import mram_service
+            dispatched = dispatch_confirmed_action(
+                action_type=atype,
+                target_id=tid,
+                args=args,
+                actor=actor,
+                role=role,
+                service_context=self.service_context,
+                incident_engine=self.incident_engine,
+                secret_delivery_mode=self.secret_delivery_mode,
+                is_dm_1_on_1=bool(snapshot.get("is_dm_1_on_1", False)),
+            )
+            safe_res = redact_sensitive_payload(dispatched["raw_result"])
 
-                res = mram_service.decide_ssh_request(
-                    request_id=tid,
-                    decision="REJECTED",
-                    approver_username=actor,
-                    reason=note if len(note) >= 5 else "Từ chối theo yêu cầu Admin",
-                )
-            elif atype == "approve_request":
-                from app.services.mram_service import mram_service
-
-                res = mram_service.decide_ssh_request(
-                    request_id=tid,
-                    decision="APPROVED",
-                    approver_username=actor,
-                    reason=note,
-                )
-            else:
-                raise ValueError(f"Unsupported execution type: {atype}")
-
-            ref = json.dumps({"status": "OK", "target_id": tid}, ensure_ascii=False)
+            ref = json.dumps(
+                {"status": "OK", "action_type": raw_atype, "target_id": tid, "summary": redact_sensitive_payload(safe_res)},
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
             with self.db.session_scope() as session:
                 prop = session.get(V4ActionProposalRecord, aid)
                 if prop is not None:
@@ -662,9 +978,16 @@ class ActionProposalService:
                     target_id=tid,
                     status="SUCCEEDED",
                     correlation_id=aid,
-                    details={"action_id": aid, "action_type": atype},
+                    details={"action_id": aid, "action_type": raw_atype},
                 )
-            return {"action_id": aid, "state": "SUCCEEDED", "result": res}
+            return {
+                "action_id": aid,
+                "action_type": raw_atype,
+                "state": "SUCCEEDED",
+                "result": safe_res,
+                "summary_reply": dispatched["summary_reply"],
+                "ephemeral_dm_secret_note": dispatched.get("ephemeral_dm_secret_note"),
+            }
         except Exception as exc:
             err = redact_text(str(exc))[:300]
             with self.db.session_scope() as session:
@@ -764,9 +1087,9 @@ class ActionProposalService:
                     req = session.get(ServerAccessRequestRecord, prop.target_id)
                     if req is not None:
                         obs_status = str(req.status or "").upper()
-                        if at == "reject_request" and obs_status == "REJECTED":
+                        if at in {"reject_request", "reject_ssh_request"} and obs_status == "REJECTED":
                             target_ok = True
-                        elif at == "approve_request" and obs_status in {"APPROVED", "PROVISIONING", "COMPLETED"}:
+                        elif at in {"approve_request", "approve_ssh_request"} and obs_status in {"APPROVED", "PROVISIONING", "COMPLETED"}:
                             target_ok = True
 
                 old_ver = int(prop.version)

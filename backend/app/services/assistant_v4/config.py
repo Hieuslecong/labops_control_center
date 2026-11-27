@@ -151,6 +151,10 @@ class AssistantV4Config(BaseModel):
     agent_runtime: Literal["native", "pydantic_ai"] = "native"
     proactive_investigation: bool = False
     write_actions: bool = False
+    zalo_r3_actions_enabled: bool = False
+    zalo_r4_actions_enabled: bool = False
+    zalo_secret_delivery_mode: Literal["vault_only", "dm_once"] = "vault_only"
+    zalo_short_otp_confirm: bool = False
     ingress_mode: Literal["polling", "webhook"] = "polling"
     timezone: str = "Asia/Ho_Chi_Minh"
 
@@ -224,11 +228,20 @@ def load_assistant_v4_config(config_path: Optional[str] = None) -> AssistantV4Co
         "natural_language": "ASSISTANT_V4_NATURAL_LANGUAGE",
         "proactive_investigation": "ASSISTANT_V4_PROACTIVE_INVESTIGATION",
         "write_actions": "ASSISTANT_V4_WRITE_ACTIONS",
+        "zalo_r3_actions_enabled": "ASSISTANT_V4_ZALO_R3_ENABLED",
+        "zalo_r4_actions_enabled": "ASSISTANT_V4_ZALO_R4_ENABLED",
+        "zalo_short_otp_confirm": "ASSISTANT_V4_SHORT_OTP_CONFIRM",
     }
     for attr, env_name in bool_overrides.items():
         bval = _env_bool(env_name)
         if bval is not None:
             setattr(cfg, attr, bval)
+
+    delivery_mode = (os.getenv("ASSISTANT_V4_SECRET_DELIVERY_MODE") or "").strip().lower()
+    if delivery_mode:
+        if delivery_mode not in {"vault_only", "dm_once"}:
+            raise ValueError(f"Unsupported ASSISTANT_V4_SECRET_DELIVERY_MODE: {delivery_mode!r}")
+        cfg.zalo_secret_delivery_mode = delivery_mode  # type: ignore[assignment]
 
     rt = (os.getenv("ASSISTANT_V4_AGENT_RUNTIME") or "").strip().lower()
     if rt:

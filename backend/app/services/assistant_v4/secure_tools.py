@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
@@ -28,10 +29,18 @@ from app.db.models import (
     V4KnowledgeDocumentRecord,
 )
 from app.db.session import DatabaseManager
+from app.services.assistant_v4.admin_action_catalog import (
+    ADMIN_ACTION_CATALOG,
+    check_disambiguation,
+    get_action_spec,
+    redact_sensitive_payload,
+)
 from app.services.assistant_v4.event_store import redact_payload, redact_text
-from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
-from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
-from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
+
+if TYPE_CHECKING:
+    from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
+    from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+    from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
 
 
 def _utcnow_iso() -> str:
@@ -85,6 +94,12 @@ class _MemberArgs(BaseModel):
     username: Optional[str] = Field(default=None, max_length=64)
 
 
+class _InspectMemberArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: Optional[str] = Field(default=None, max_length=64)
+    target_id: Optional[str] = Field(default=None, max_length=128)
+
+
 class _LimitArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     limit: int = Field(default=20, ge=1, le=50)
@@ -128,6 +143,13 @@ class _ActionReasonArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_id: str = Field(min_length=1, max_length=128)
     reason: str = Field(default="", max_length=300)
+
+
+class _ClarifyArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    raw_text: str = Field(min_length=1, max_length=300)
+    target_query: Optional[str] = Field(default=None, max_length=128)
+    action_hint: Optional[str] = Field(default=None, max_length=64)
 
 
 class ToolSpecV4:
@@ -175,15 +197,26 @@ class SecureToolExecutor:
         identity_reloader: Optional[Callable[[ZaloPrincipal], ZaloPrincipal]] = None,
         task_service: Optional[Any] = None,
         proposal_service: Optional[Any] = None,
+        service_context: Optional[Dict[str, Any]] = None,
         log_paths: Optional[Dict[str, str]] = None,
     ):
         self.data_dir = os.path.abspath(data_dir)
         self.db = db_manager
-        self.telemetry = telemetry_collector or UnifiedTelemetryCollector(self.data_dir, db_manager=db_manager)
-        self.incidents = incident_engine or UnifiedIncidentEngine(self.data_dir, db_manager=db_manager)
+        if telemetry_collector is None:
+            from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
+
+            telemetry_collector = UnifiedTelemetryCollector(self.data_dir, db_manager=db_manager)
+        if incident_engine is None:
+            from app.services.zalo_assistant.incident_engine import UnifiedIncidentEngine
+
+            incident_engine = UnifiedIncidentEngine(self.data_dir, db_manager=db_manager)
+        self.telemetry = telemetry_collector
+        self.incidents = incident_engine
         self.identity_reloader = identity_reloader
         self.task_service = task_service
         self.proposal_service = proposal_service
+        self.service_context: Dict[str, Any] = dict(service_context or {})
+        self._call_ctx = threading.local()
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
         self.log_paths = dict(
             log_paths
@@ -233,7 +266,27 @@ class SecureToolExecutor:
         self._register(ToolSpecV4(name="propose_ack", description="Đề xuất xác nhận (ack) một sự cố với mã bảo vệ.", admin_only=False, input_model=_ActionReasonArgs, operation="action.propose", handler=lambda a, p: self._t_propose_r2("ack_incident", "INCIDENT", a, p)))
         self._register(ToolSpecV4(name="propose_resolve", description="Đề xuất đóng sự cố (cần Admin xác nhận bằng mã bảo vệ & bằng chứng).", admin_only=True, input_model=_ActionReasonArgs, operation="action.propose", handler=lambda a, p: self._t_propose_r2("resolve_incident", "INCIDENT", a, p)))
         self._register(ToolSpecV4(name="propose_reject", description="Đề xuất từ chối đơn SSH (cần Admin xác nhận bằng mã bảo vệ).", admin_only=True, input_model=_ActionReasonArgs, operation="action.propose", handler=lambda a, p: self._t_propose_r2("reject_request", "SSH_REQUEST", a, p)))
-        self._register(ToolSpecV4(name="propose_approval", description="Đề xuất phê duyệt cấp phát SSH/GPU (luôn điều hướng Dashboard step-up auth).", admin_only=True, input_model=_ActionReasonArgs, operation="action.propose", handler=lambda a, p: self._t_propose_r3("approve_request", "SSH_REQUEST", a, p)))
+        self._register(ToolSpecV4(name="propose_approval", description="Đề xuất phê duyệt cấp phát SSH/GPU (xác nhận Step-Up hoặc OTP DM 1-1).", admin_only=True, input_model=_ActionReasonArgs, operation="action.propose", handler=lambda a, p: self._t_propose_r3("approve_request", "SSH_REQUEST", a, p)))
+        # Additional Read-only Admin Inspect Tools for Disambiguation & Previews
+        self._register(ToolSpecV4(name="inspect_member_detail", description="Kiểm tra đầy đủ trạng thái Web, SSH, Vault, VPN, GPU của một hoặc nhiều thành viên khớp từ khóa.", admin_only=False, input_model=_InspectMemberArgs, operation="member.read", handler=self._t_inspect_member_detail))
+        self._register(ToolSpecV4(name="list_member_ssh_keys", description="Liệt kê các SSH public keys của thành viên kèm key_id (Chỉ Admin).", admin_only=True, input_model=_InspectMemberArgs, operation="ssh_key.read", handler=self._t_list_member_ssh_keys))
+        self._register(ToolSpecV4(name="list_member_vpn_devices", description="Liệt kê các thiết bị WireGuard VPN của thành viên kèm device_id (Chỉ Admin).", admin_only=True, input_model=_InspectMemberArgs, operation="vpn.read", handler=self._t_list_member_vpn_devices))
+        self._register(ToolSpecV4(name="list_repository_requests", description="Danh sách yêu cầu kiểm duyệt kho mã Repository Guard (Chỉ Admin).", admin_only=True, input_model=_RepoArgs, operation="repo.read", handler=self._t_get_repository_scan))
+        self._register(ToolSpecV4(name="list_security_scans", description="Danh sách bản quét bảo mật Security Scanner (Chỉ Admin).", admin_only=True, input_model=_RepoArgs, operation="security.read", handler=self._t_list_security_scans))
+        self._register(ToolSpecV4(name="list_jobs_and_processes", description="Danh sách job và tiến trình đang chạy kèm PID/ref (Chỉ Admin).", admin_only=True, input_model=_HostArgs, operation="process.read", handler=self._t_list_jobs_and_processes))
+        # Mandatory Disambiguation & 42 Admin Action Proposal Tools (ZERO silent auto-exec for R1..R4)
+        self._register(ToolSpecV4(name="clarify_admin_action", description="Kiểm tra mơ hồ ý định hoặc trùng đối tượng trước khi tạo phiếu xác nhận cho Admin.", admin_only=True, input_model=_ClarifyArgs, operation="action.clarify", handler=self._t_clarify_admin_action))
+        for _aid, _spec in sorted(ADMIN_ACTION_CATALOG.items()):
+            self._register(
+                ToolSpecV4(
+                    name=f"propose_{_aid}",
+                    description=f"[{_spec.risk_tier}] Đề xuất Phiếu Xác Nhận Hiểu Đúng: {_spec.title_vi} ({_spec.summary_vi}). KHÔNG tự thực thi.",
+                    admin_only=(_spec.required_role.upper() == "ADMIN" and _aid != "ack_incident"),
+                    input_model=_spec.args_model,
+                    operation="action.propose",
+                    handler=self._make_catalog_proposal_handler(_aid),
+                )
+            )
 
     def list_allowed_tool_schemas(self, principal: ZaloPrincipal, *, allowed_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         allowed_set = set(allowed_names) if allowed_names is not None else None
@@ -278,6 +331,8 @@ class SecureToolExecutor:
 
     def _write_audit(self, *, corr_id: str, principal: ZaloPrincipal, source: str, question: str, tool_name: str, args: Any, allowed: bool, status: str, dur_ms: int, summary: str) -> None:
         try:
+            safe_args = redact_sensitive_payload(args) if isinstance(args, dict) else {}
+            safe_args = redact_payload(safe_args)
             with self.db.session_scope() as session:
                 session.add(
                     AgentToolAuditRecord(
@@ -289,7 +344,7 @@ class SecureToolExecutor:
                         source=source,
                         question_snippet=redact_text(question)[:250],
                         tool_name=tool_name,
-                        tool_args_json=redact_payload(args) if isinstance(args, dict) else {},
+                        tool_args_json=safe_args,
                         rbac_allowed=allowed,
                         status=status,
                         duration_ms=dur_ms,
@@ -310,6 +365,7 @@ class SecureToolExecutor:
         correlation_id: str = "",
         source: str = "zalo",
         question: str = "",
+        chat_id: str = "",
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
         corr = correlation_id or f"corr-{uuid.uuid4().hex[:8]}"
@@ -346,7 +402,11 @@ class SecureToolExecutor:
 
         pool = ThreadPoolExecutor(max_workers=1)
         try:
-            fut = pool.submit(spec.handler, validated_args, eff_principal)
+            def _run_tool_in_worker() -> Dict[str, Any]:
+                self._call_ctx.chat_id = chat_id or source
+                return spec.handler(validated_args, eff_principal)
+
+            fut = pool.submit(_run_tool_in_worker)
             res = fut.result(timeout=spec.timeout_s)
             status = str(res.get("status") or "OK")
         except PermissionError as exc:
@@ -362,6 +422,7 @@ class SecureToolExecutor:
             pool.shutdown(wait=False, cancel_futures=True)
 
         dur_ms = int((time.monotonic() - t0) * 1000)
+        safe_summary_obj = redact_sensitive_payload(res)
         self._write_audit(
             corr_id=corr,
             principal=eff_principal,
@@ -372,7 +433,7 @@ class SecureToolExecutor:
             allowed=status != "PERMISSION_DENIED",
             status=status,
             dur_ms=dur_ms,
-            summary=json.dumps(res, ensure_ascii=False, default=str)[:400],
+            summary=json.dumps(safe_summary_obj, ensure_ascii=False, default=str)[:400],
         )
         return res
 
@@ -491,18 +552,28 @@ class SecureToolExecutor:
             groups = [{**g, "accounts": [a for a in (g.get("accounts") or []) if a.get("username") == principal.username]} for g in groups]
         return self._wrap_evidence(status="OK", source_id="gpu_scheduler", data={"groups": groups})
 
-    def _t_get_member_info(self, args: _MemberArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
-        target_user = (args.username or principal.username).strip()
+    def _t_get_member_info(self, args: Any, principal: ZaloPrincipal) -> Dict[str, Any]:
+        raw_ident = getattr(args, "username", None) or getattr(args, "target_id", None) or principal.username
+        target_user = str(raw_ident).strip().lstrip("@")
         target_lower = target_user.lower()
         if not principal.is_admin and target_lower != principal.username.lower():
             raise PermissionError("Chỉ Admin được phép tra cứu hồ sơ thành viên khác.")
         m: Optional[Dict[str, Any]] = None
         source_id = "labops_service:members"
         try:
-            from app.services.labops_service import service as core_svc
+            lsvc = self._get_runtime_services().get("labops_service")
+            if lsvc is None:
+                from app.services.labops_service import service as core_svc
+
+                lsvc = core_svc
 
             m = next(
-                (x for x in getattr(core_svc, "members", []) or [] if str(x.get("username") or "").strip().lower() == target_lower),
+                (
+                    x
+                    for x in getattr(lsvc, "members", []) or []
+                    if str(x.get("username") or "").strip().lower() == target_lower
+                    or str(x.get("id") or "").strip().lower() == target_lower
+                ),
                 None,
             )
         except Exception:
@@ -812,10 +883,14 @@ class SecureToolExecutor:
     def _t_propose_r3(self, action_type: str, target_type: str, args: _ActionReasonArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
         if self.proposal_service is None:
             return self._wrap_evidence(status="ERROR", source_id="approval_service", error_code="APPROVAL_SERVICE_UNAVAILABLE")
+        origin_chat = str(getattr(self._call_ctx, "chat_id", "") or principal.zalo_user_id or "dashboard")
+        confirm_chat = principal.zalo_user_id or origin_chat
         prop = self.proposal_service.propose_action(
             actor_id=principal.username,
             actor_role=principal.role,
-            chat_id=principal.zalo_user_id or "dashboard",
+            chat_id=origin_chat,
+            confirm_chat_id=confirm_chat,
+            origin_chat_id=origin_chat,
             session_id="tool-proposal",
             action_type=action_type,
             target_type=target_type,
@@ -823,4 +898,144 @@ class SecureToolExecutor:
             canonical_args={"target_id": args.target_id, "reason": args.reason},
             reason=args.reason,
         )
-        return self._wrap_evidence(status="DASHBOARD_STEP_UP_REQUIRED", source_id="approval_service", data=prop)
+        ev_status = "DASHBOARD_STEP_UP_REQUIRED" if prop.get("dashboard_required") else "PROPOSAL_CREATED"
+        return self._wrap_evidence(status=ev_status, source_id="approval_service", data=prop)
+
+    def _get_runtime_services(self) -> Dict[str, Any]:
+        ctx = dict(self.service_context or {})
+        ctx.setdefault("telemetry_collector", self.telemetry)
+        ctx.setdefault("incident_engine", self.incidents)
+        return ctx
+
+    def _t_inspect_member_detail(self, args: _InspectMemberArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        target_user = str(args.username or args.target_id or principal.username).strip().lstrip("@")
+        if not principal.is_admin and target_user.lower() != principal.username.lower():
+            raise PermissionError("Chỉ Admin được phép kiểm tra chi tiết thành viên khác.")
+        from app.services.assistant_v4.admin_action_catalog import find_matching_members
+
+        ctx = self._get_runtime_services()
+        lsvc = ctx.get("labops_service")
+        if lsvc is None:
+            try:
+                from app.services.labops_service import service as core_svc
+
+                lsvc = core_svc
+            except Exception:
+                lsvc = None
+        matches = find_matching_members(lsvc, target_user) if lsvc is not None else []
+        if len(matches) > 1:
+            return self._wrap_evidence(
+                status="CLARIFYING",
+                source_id="labops_service:members",
+                data={
+                    "multiple_matches": True,
+                    "candidates": [
+                        {"id": m.get("id"), "username": m.get("username"), "full_name": m.get("fullName") or m.get("full_name"), "status": m.get("status")}
+                        for m in matches[:10]
+                    ],
+                },
+            )
+        return self._t_get_member_info(args, principal)
+
+    def _t_list_member_ssh_keys(self, args: _InspectMemberArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        ctx = self._get_runtime_services()
+        lsvc = ctx.get("labops_service")
+        if lsvc is None:
+            from app.services.labops_service import service as core_svc
+
+            lsvc = core_svc
+        uname = str(args.username or args.target_id or "").strip().lstrip("@") or None
+        keys = lsvc.ssh_key_registry.list_keys(username=uname) if hasattr(lsvc, "ssh_key_registry") else []
+        return self._wrap_evidence(status="OK", source_id="ssh_key_registry", data={"keys": keys[:30]})
+
+    def _t_list_member_vpn_devices(self, args: _InspectMemberArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        ctx = self._get_runtime_services()
+        lsvc = ctx.get("labops_service")
+        if lsvc is None:
+            from app.services.labops_service import service as core_svc
+
+            lsvc = core_svc
+        uname = str(args.username or args.target_id or "").strip().lstrip("@").lower()
+        devs: List[Dict[str, Any]] = []
+        for m in getattr(lsvc, "members", None) or []:
+            if uname and str(m.get("username") or "").lower() != uname and str(m.get("id") or "").lower() != uname:
+                continue
+            for d in (m.get("wireguard") or {}).get("devices") or []:
+                devs.append({"member_id": m.get("id"), "username": m.get("username"), **d})
+        return self._wrap_evidence(status="OK", source_id="vpn_devices", data={"devices": devs[:30]})
+
+    def _t_list_security_scans(self, args: _RepoArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        from app.services.labops_service import service as core_svc
+
+        lsvc = self._get_runtime_services().get("labops_service") or core_svc
+        scans = lsvc.security_scanner.list_scans() if hasattr(lsvc, "security_scanner") else []
+        if args.repo_filter:
+            f = args.repo_filter.lower()
+            scans = [s for s in scans if f in str(s.get("repo_url") or s.get("id") or "").lower()]
+        return self._wrap_evidence(status="OK", source_id="security_scanner", data={"scans": scans[:20]})
+
+    def _t_list_jobs_and_processes(self, args: _HostArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        from app.services.labops_service import service as core_svc
+
+        lsvc = self._get_runtime_services().get("labops_service") or core_svc
+        snap = self.telemetry.collect_snapshot()
+        jobs = list(snap.get("jobs") or [])
+        procs = lsvc.list_processes(server_id=args.host_id) if hasattr(lsvc, "list_processes") else []
+        return self._wrap_evidence(status="OK", source_id="jobs_and_processes", observed_at=snap.get("collected_at"), data={"jobs": jobs[:25], "processes": (procs or [])[:25]})
+
+    def _t_clarify_admin_action(self, args: _ClarifyArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
+        res = check_disambiguation(
+            action_type=args.action_hint,
+            raw_text=args.raw_text,
+            target_query=args.target_query,
+            explicit_action=False,
+            service_context=self._get_runtime_services(),
+        )
+        if res is None:
+            return self._wrap_evidence(status="CLEAR", source_id="disambiguation_gate", data={"clarification_needed": False, "action_hint": args.action_hint, "target_query": args.target_query})
+        return self._wrap_evidence(status="CLARIFYING", source_id="disambiguation_gate", data=res)
+
+    def _make_catalog_proposal_handler(self, action_id: str) -> Callable[[BaseModel, ZaloPrincipal], Dict[str, Any]]:
+        def _handler(validated_args: BaseModel, principal: ZaloPrincipal) -> Dict[str, Any]:
+            if self.proposal_service is None:
+                return self._wrap_evidence(status="ERROR", source_id="approval_service", error_code="APPROVAL_SERVICE_UNAVAILABLE")
+            spec = get_action_spec(action_id)
+            if spec is None:
+                return self._wrap_evidence(status="ERROR", source_id="catalog", error_code="UNKNOWN_ACTION")
+            if spec.required_role.upper() == "ADMIN" and action_id != "ack_incident" and not principal.is_admin:
+                raise PermissionError(f"Chỉ Admin mới có quyền đề xuất thao tác '{action_id}'.")
+
+            args_dict = validated_args.model_dump()
+            target_id = str(args_dict.get("target_id") or args_dict.get("username") or "default").strip()
+            reason = str(args_dict.get("reason") or "")
+
+            if spec.target_type == "MEMBER" and action_id != "create_web_account":
+                disamb = check_disambiguation(
+                    action_type=action_id,
+                    raw_text="",
+                    target_query=target_id,
+                    explicit_action=True,
+                    service_context=self._get_runtime_services(),
+                )
+                if disamb is not None:
+                    return self._wrap_evidence(status="CLARIFYING", source_id="disambiguation_gate", data=disamb)
+
+            origin_chat = str(getattr(self._call_ctx, "chat_id", "") or principal.zalo_user_id or "dashboard")
+            confirm_chat = principal.zalo_user_id or origin_chat
+            prop = self.proposal_service.propose_action(
+                actor_id=principal.username,
+                actor_role=principal.role,
+                chat_id=origin_chat,
+                confirm_chat_id=confirm_chat,
+                origin_chat_id=origin_chat,
+                session_id="tool-proposal",
+                action_type=action_id,
+                target_type=spec.target_type,
+                target_id=target_id,
+                canonical_args=args_dict,
+                reason=reason,
+            )
+            ev_status = "DASHBOARD_STEP_UP_REQUIRED" if prop.get("dashboard_required") else "PROPOSAL_CREATED"
+            return self._wrap_evidence(status=ev_status, source_id="approval_service", data=prop)
+
+        return _handler

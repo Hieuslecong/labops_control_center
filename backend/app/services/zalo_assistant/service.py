@@ -79,6 +79,10 @@ class ZaloAssistantService:
             telemetry_collector=self.telemetry_collector,
             incident_engine=self.incident_engine,
             authorized_users=self.bot_engine.authorized_users,
+            service_context={
+                "report_generator": self.report_generator,
+                "repo_alert_monitor": self.repo_alert_monitor,
+            },
         )
         self.bot_engine.v4_facade = self.v4
 

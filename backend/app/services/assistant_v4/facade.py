@@ -19,6 +19,12 @@ from app.db.models import (
     V4WorkerCursorRecord,
 )
 from app.db.session import DatabaseManager
+from app.services.assistant_v4.admin_action_catalog import (
+    ADMIN_ACTION_CATALOG,
+    check_disambiguation,
+    find_matching_members,
+    get_action_spec,
+)
 from app.services.assistant_v4.config import AssistantV4Config, load_assistant_v4_config
 from app.services.assistant_v4.event_store import (
     EVENT_CATALOG,
@@ -67,6 +73,7 @@ class AssistantV4Facade:
         incident_engine: UnifiedIncidentEngine,
         authorized_users: Optional[List[str]] = None,
         config: Optional[AssistantV4Config] = None,
+        service_context: Optional[Dict[str, Any]] = None,
     ):
         from app.services.assistant_v4.agent_runtime import (
             IntentRouter,
@@ -130,11 +137,22 @@ class AssistantV4Facade:
                 p.zalo_user_id, fallback_authorized_users=authorized_users
             )
 
+        self.service_context: Dict[str, Any] = dict(service_context or {})
+        self.service_context.setdefault("identity_rbac", identity_rbac)
+        self.service_context.setdefault("telemetry_collector", telemetry_collector)
+        self.service_context.setdefault("incident_engine", incident_engine)
+        self.service_context["v4_facade"] = self
+
         self.approvals = ActionProposalService(
             db_manager,
             write_actions_enabled=self.config.write_actions,
+            zalo_r3_actions_enabled=self.config.zalo_r3_actions_enabled,
+            zalo_r4_actions_enabled=self.config.zalo_r4_actions_enabled,
+            secret_delivery_mode=self.config.zalo_secret_delivery_mode,
+            short_otp_confirm=self.config.zalo_short_otp_confirm,
             incident_engine=incident_engine,
             identity_reloader=_reload_principal,
+            service_context=self.service_context,
         )
         self.tools = SecureToolExecutor(
             data_dir,
@@ -144,6 +162,7 @@ class AssistantV4Facade:
             identity_reloader=_reload_principal,
             task_service=self.tasks,
             proposal_service=self.approvals,
+            service_context=self.service_context,
         )
         self.runtime = select_agent_runtime(
             requested=self.config.agent_runtime,
@@ -240,6 +259,31 @@ class AssistantV4Facade:
                 proposal.setdefault("session_id", sess["session_id"])
                 proposal.setdefault("context_scope", f"{principal.role}:{principal.username}")
                 return proposal
+
+        if self.config.write_actions:
+            admin_routed = self.try_handle_admin_action_intent(
+                text=clean,
+                principal=principal,
+                chat_id=effective_chat,
+                session_id=sess["session_id"],
+            )
+            if admin_routed is not None:
+                try:
+                    self.memory.append_turn_messages(
+                        session_id=sess["session_id"],
+                        expected_version=None,
+                        entries=[
+                            {"role": "user", "content": clean},
+                            {"role": "assistant", "content": str(admin_routed.get("memory_safe_reply") or admin_routed["reply"])},
+                        ],
+                    )
+                except Exception:
+                    pass
+                admin_routed.setdefault("route", "v4")
+                admin_routed.setdefault("intent", admin_routed.get("intent") or "ADMIN_PARITY_ACTION")
+                admin_routed.setdefault("session_id", sess["session_id"])
+                admin_routed.setdefault("context_scope", f"{principal.role}:{principal.username}")
+                return admin_routed
 
         try:
             prior_history = self.memory.get_bounded_context(
@@ -1005,6 +1049,10 @@ class AssistantV4Facade:
         self.connectors.cfg = self.config.external_connectors
         self.connectors.timeout_s = max(1.0, min(float(getattr(self.config.external_connectors, "request_timeout_s", 10.0)), 60.0))
         self.approvals.write_actions_enabled = bool(self.config.write_actions)
+        self.approvals.zalo_r3_actions_enabled = bool(self.config.zalo_r3_actions_enabled)
+        self.approvals.zalo_r4_actions_enabled = bool(self.config.zalo_r4_actions_enabled)
+        self.approvals.secret_delivery_mode = str(self.config.zalo_secret_delivery_mode or "vault_only")
+        self.approvals.short_otp_confirm = bool(self.config.zalo_short_otp_confirm)
         self.runtime.budget = self.config.model
         self.investigations.cfg = self.config.investigation
 
@@ -1076,6 +1124,11 @@ class AssistantV4Facade:
             "natural_language": self.config.natural_language,
             "proactive_investigation": self.config.proactive_investigation,
             "write_actions": self.config.write_actions,
+            "zalo_r3_actions_enabled": self.config.zalo_r3_actions_enabled,
+            "zalo_r4_actions_enabled": self.config.zalo_r4_actions_enabled,
+            "zalo_secret_delivery_mode": self.config.zalo_secret_delivery_mode,
+            "zalo_short_otp_confirm": self.config.zalo_short_otp_confirm,
+            "parity_actions_count": len(ADMIN_ACTION_CATALOG),
             "watchdog": self.config.watchdog.enabled,
             "retention": self.config.retention.enabled,
             "retention_dry_run": self.config.retention.dry_run,
@@ -1278,6 +1331,7 @@ class AssistantV4Facade:
             "valid_health_states": ["HEALTHY", "DEGRADED", "OFFLINE", "NOT_CONFIGURED", "DISABLED"],
             "components": components,
             "v4_enabled": self.config.enabled,
+            "parity_actions_count": len(ADMIN_ACTION_CATALOG),
             "flags": self._serialize_flags(),
             "notification_ownership": {**ownership_state, "effective_owner": owner},
             "ingress_mode": self.config.ingress_mode,
@@ -1376,3 +1430,299 @@ class AssistantV4Facade:
             st = it["status"]
             counts[st] = counts.get(st, 0) + 1
         return {"summary": counts, "events": items}
+
+    def try_handle_admin_action_intent(
+        self,
+        *,
+        text: str,
+        principal: ZaloPrincipal,
+        chat_id: str,
+        session_id: str = "nl-admin",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Deterministic Vietnamese intent router for Web Admin parity actions:
+        - Strictly blocks non-ADMIN callers on admin mutations.
+        - Enforces Disambiguation Gate (`CLARIFYING`) when ambiguous across similar actions or targets.
+        - Emits 4-part Intent-Confirmation Cards (`PENDING_CONFIRMATION`) for 100% of R1..R4 actions.
+        - Routes OTP cards to DM 1-1 (`dm_notifications`) when invoked from a group chat.
+        """
+        from app.services.mram_service import _strip_vn_accents
+
+        raw = str(text or "").strip()
+        if not raw or raw.startswith("/"):
+            return None
+        norm = _strip_vn_accents(raw)
+
+        # Skip pure informational questions
+        if re.match(r"^(?:xem|cho\s+toi\s+xem|kiem\s+tra\s+trang\s+thai|tai\s+sao|giai\s+thich)\b", norm) and not any(
+            w in norm for w in ("xac minh workspace", "kiem dinh workspace", "verify workspace")
+        ):
+            return None
+
+        # Extract explicit @mention or username token after "cho / tai khoan / thanh vien / user"
+        at_m = re.findall(r"@([a-z0-9_.-]+)", raw.lower())
+        target_q = next((u for u in at_m if u != "admin"), "")
+        if not target_q:
+            m_user = re.search(
+                r"\b(?:cho|tai\s+khoan|thanh\s+vien|user|cua)\s+(?!moi\b|he\s+thong\b|admin\b)([a-z0-9_.-]{2,40})\b",
+                norm,
+            )
+            if m_user:
+                cand_u = m_user.group(1)
+                if cand_u not in {"web", "ssh", "vpn", "gpu", "job", "don", "su", "co", "nay", "do", "toi", "minh"}:
+                    target_q = cand_u
+
+        selected_action: Optional[str] = None
+        extra_args: Dict[str, Any] = {}
+        explicit_action = False
+
+        # 1. Password Reset / Reissue (Web vs SSH Temp vs Disambiguate)
+        if any(w in norm for w in ("mat khau", "password", "pass")) and any(
+            w in norm for w in ("reset", "cap lai", "dat lai", "khoi phuc", "doi")
+        ):
+            has_web = any(w in norm for w in ("web", "portal", "dashboard"))
+            has_ssh = any(w in norm for w in ("ssh", "tam", "lan dau", "container", "temp"))
+            if has_ssh and not has_web:
+                selected_action = "reissue_ssh_temp_password"
+                explicit_action = True
+            elif has_web and not has_ssh:
+                selected_action = "reissue_web_password"
+                explicit_action = True
+            else:
+                explicit_action = False
+                selected_action = "reissue_ssh_temp_password"
+
+        # 2. Member Lifecycle (Suspend / Restore / Archive / Delete R4 / Quota)
+        elif any(w in norm for w in ("tam ngung", "suspend")) and ("ssh" not in norm or "tai khoan" in norm):
+            selected_action = "suspend_member"
+            explicit_action = True
+        elif any(w in norm for w in ("khoi phuc", "mo khoa", "restore")) and any(
+            w in norm for w in ("tai khoan", "thanh vien", "member", "@")
+        ):
+            selected_action = "restore_member"
+            explicit_action = True
+        elif any(w in norm for w in ("luu tru", "archive")) and any(
+            w in norm for w in ("tai khoan", "thanh vien", "member", "workspace", "@")
+        ):
+            selected_action = "archive_member"
+            explicit_action = True
+        elif any(w in norm for w in ("xoa vinh vien", "delete permanent")) and any(
+            w in norm for w in ("tai khoan", "thanh vien", "member", "@")
+        ):
+            selected_action = "delete_member_permanent"
+            explicit_action = True
+        elif any(w in norm for w in ("khoa", "chan", "tat tai khoan", "vo hieu")) and any(
+            w in norm for w in ("tai khoan", "thanh vien", "member", "@")
+        ) and "vpn" not in norm and "key" not in norm:
+            selected_action = "suspend_member"
+            explicit_action = False
+        elif any(w in norm for w in ("cap nhat quota", "doi quota", "nang quota", "giam quota")):
+            qm = re.search(r"(\d{1,5})\s*(?:gb|gib)\b", norm)
+            if qm:
+                selected_action = "update_storage_quota"
+                extra_args["quota_gb"] = int(qm.group(1))
+                explicit_action = True
+
+        # 3. SSH Keys, Sessions & Workspace Verification / Secrets
+        elif any(w in norm for w in ("xoay ssh", "xoay khoa ssh", "rotate ssh", "rotate key")):
+            selected_action = "rotate_ssh_key"
+            explicit_action = True
+        elif any(w in norm for w in ("ngat phien ssh", "dong phien ssh", "terminate ssh")):
+            selected_action = "terminate_ssh_sessions"
+            explicit_action = True
+        elif any(w in norm for w in ("thu hoi quyen ssh", "thu hoi toan bo ssh", "revoke ssh access")):
+            selected_action = "revoke_ssh_access"
+            explicit_action = True
+        elif any(w in norm for w in ("kiem dinh workspace", "xac minh workspace", "verify workspace", "verification gate")):
+            selected_action = "verify_member_workspace"
+            explicit_action = True
+        elif any(w in norm for w in ("lay vault", "claim secret", "nhan bi mat")):
+            selected_action = "claim_member_secrets_once"
+            explicit_action = True
+        elif "ssh" in norm and any(w in norm for w in ("reset", "ngat", "thu hoi", "xoay")):
+            selected_action = "terminate_ssh_sessions"
+            explicit_action = False
+
+        # 4. VPN Device Ops
+        elif "vpn" in norm and any(w in norm for w in ("cap them", "them thiet bi", "tao thiet bi", "add vpn")):
+            selected_action = "add_vpn_device"
+            explicit_action = True
+        elif "vpn" in norm and any(w in norm for w in ("tam tat", "bat lai", "toggle")):
+            selected_action = "toggle_vpn_device"
+            extra_args["enable"] = "bat" in norm or "enable" in norm
+            explicit_action = True
+        elif "vpn" in norm and any(w in norm for w in ("thu hoi vinh vien", "xoa vinh vien", "revoke vpn")):
+            selected_action = "revoke_vpn_device"
+            explicit_action = True
+        elif "vpn" in norm and any(w in norm for w in ("tat", "khoa", "xoa", "thu hoi")):
+            selected_action = "toggle_vpn_device"
+            explicit_action = False
+
+        # 5. Compute / Processes / R1 Queue / Repo / V4
+        elif any(w in norm for w in ("quet sla", "sweep sla")):
+            selected_action = "sweep_mram_sla"
+            target_q = "mram-queue"
+            explicit_action = True
+        elif any(w in norm for w in ("danh gia su co", "evaluate incident")):
+            selected_action = "evaluate_incidents"
+            target_q = "system"
+            explicit_action = True
+        elif any(w in norm for w in ("nap lai cau hinh v4", "reload v4", "reload config")):
+            selected_action = "reload_v4_config"
+            target_q = "v4-runtime"
+            explicit_action = True
+        elif any(w in norm for w in ("chay retention", "don dep v4", "run retention")):
+            selected_action = "run_v4_retention"
+            target_q = "v4-retention"
+            extra_args["dry_run"] = "xoa that" not in norm and "thuc te" not in norm
+            explicit_action = True
+        elif any(w in norm for w in ("quet lai repo", "rescan repo")):
+            rm = re.search(r"\b(req-[a-z0-9_-]+|[a-z0-9_-]{6,32})\b", raw.lower())
+            selected_action = "rescan_repository_request"
+            target_q = rm.group(1) if rm else target_q
+            explicit_action = True
+        elif any(w in norm for w in ("dung job", "kill process", "sigkill", "sigterm", "dung tien trinh")):
+            if "sigkill" in norm or "cuong buc" in norm:
+                selected_action = "kill_process"
+                explicit_action = True
+            elif "sigterm" in norm or "dung mem" in norm:
+                selected_action = "stop_process"
+                explicit_action = True
+            else:
+                selected_action = "stop_process"
+                explicit_action = False
+
+        if selected_action is None:
+            return None
+
+        if not principal.is_admin:
+            return {
+                "forbidden": True,
+                "ai_used": False,
+                "reply": "⛔ Chỉ Quản trị viên (ADMIN) mới có quyền đề xuất và xác nhận thao tác quản trị hệ thống.",
+                "intent": "ADMIN_PARITY_FORBIDDEN",
+            }
+
+        # Run Disambiguation Gate (intent ambiguity AND multi-match target ambiguity)
+        disamb = check_disambiguation(
+            action_type=selected_action,
+            raw_text=raw if not explicit_action else "",
+            target_query=target_q or None,
+            explicit_action=explicit_action,
+            service_context=self.service_context,
+        )
+        if disamb is not None:
+            return {
+                "status": "CLARIFYING",
+                "ai_used": False,
+                "intent": "ADMIN_DISAMBIGUATION",
+                "reply": disamb["message"],
+                "clarification": disamb,
+                "default_action_type": selected_action,
+                "extra_args": extra_args,
+            }
+
+        spec = get_action_spec(selected_action)
+        if spec is None:
+            return None
+
+        # Ensure member-scoped actions have an identifiable target before proposing
+        if spec.target_type == "MEMBER" and selected_action != "create_web_account" and not target_q:
+            lsvc = self.service_context.get("labops_service")
+            candidates = list(getattr(lsvc, "members", None) or []) if lsvc is not None else []
+            active_cands = [m for m in candidates if str(m.get("status") or "").upper() != "DELETED"][:8]
+            if not active_cands:
+                return {"ai_used": False, "reply": "⚠️ Vui lòng nêu rõ `@username` thành viên cần thao tác."}
+            lines = [f"🔎 Bạn muốn áp dụng `{spec.title_vi}` cho thành viên nào? Chọn số thứ tự:"]
+            opts = []
+            for idx, m in enumerate(active_cands, 1):
+                uname = str(m.get("username") or m.get("id"))
+                fname = str(m.get("fullName") or m.get("full_name") or uname)
+                opts.append({"index": idx, "kind": "TARGET", "target_id": uname, "username": uname, "action_type": selected_action, "label": f"{fname} (@{uname})"})
+                lines.append(f"{idx}. {fname} (@{uname}) [{m.get('status')}]")
+            lines.append("\n👉 Nhắn số thứ tự (`1`, `2`, ...) để chọn, hoặc nhắn `HỦY`.")
+            clar = {
+                "status": "CLARIFYING",
+                "clarification_kind": "TARGET_AMBIGUITY",
+                "options": opts,
+                "message": "\n".join(lines),
+            }
+            return {
+                "status": "CLARIFYING",
+                "ai_used": False,
+                "intent": "ADMIN_DISAMBIGUATION",
+                "reply": clar["message"],
+                "clarification": clar,
+                "default_action_type": selected_action,
+                "extra_args": extra_args,
+            }
+
+        resolved_target = target_q
+        if spec.target_type == "MEMBER":
+            lsvc = self.service_context.get("labops_service")
+            cands = find_matching_members(lsvc, target_q) if (lsvc is not None and target_q) else []
+            if len(cands) == 1:
+                resolved_target = str(cands[0].get("username") or cands[0].get("id") or target_q)
+        elif not resolved_target:
+            resolved_target = "default"
+
+        return self.create_admin_confirmation_proposal(
+            action_type=selected_action,
+            target_id=resolved_target,
+            principal=principal,
+            chat_id=chat_id,
+            session_id=session_id,
+            extra_args=extra_args,
+            reason=raw[:200],
+        )
+
+    def create_admin_confirmation_proposal(
+        self,
+        *,
+        action_type: str,
+        target_id: str,
+        principal: ZaloPrincipal,
+        chat_id: str,
+        session_id: str = "nl-admin",
+        extra_args: Optional[Dict[str, Any]] = None,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        """Create a PENDING_CONFIRMATION proposal card with strict DM 1-1 OTP isolation."""
+        spec = get_action_spec(action_type)
+        if spec is None:
+            raise LookupError(f"Unknown admin action '{action_type}'")
+        payload = {"target_id": target_id, **(extra_args or {})}
+        if reason and "reason" in spec.args_model.model_fields and not payload.get("reason"):
+            payload["reason"] = reason
+
+        origin_chat = str(chat_id or principal.zalo_user_id or "dashboard")
+        confirm_chat = str(principal.zalo_user_id or origin_chat)
+        prop = self.approvals.propose_action(
+            actor_id=principal.username,
+            actor_role=principal.role,
+            chat_id=origin_chat,
+            confirm_chat_id=confirm_chat,
+            origin_chat_id=origin_chat,
+            session_id=session_id,
+            action_type=spec.action_id,
+            target_type=spec.target_type,
+            target_id=target_id,
+            canonical_args=payload,
+            reason=reason,
+        )
+        dm_notifications: List[Dict[str, str]] = []
+        if prop.get("routed_to_dm") and confirm_chat and prop.get("dm_confirmation_card"):
+            dm_notifications.append({"chat_id": confirm_chat, "text": str(prop["dm_confirmation_card"])})
+            reply_txt = str(prop.get("group_confirmation_notice") or prop.get("instruction") or "")
+        else:
+            reply_txt = str(prop.get("confirmation_card") or prop.get("instruction") or "")
+        memory_safe_reply = str(prop.get("group_confirmation_notice") or f"📝 Đã tạo Phiếu Xác Nhận Hiểu Đúng `{prop['action_id']}` cho `{action_type}` trên `{target_id}`.")
+        return {
+            "status": "PENDING_CONFIRMATION",
+            "ai_used": False,
+            "intent": "ADMIN_CONFIRMATION_CARD",
+            "reply": reply_txt,
+            "memory_safe_reply": memory_safe_reply,
+            "proposal": prop,
+            "dm_notifications": dm_notifications,
+        }

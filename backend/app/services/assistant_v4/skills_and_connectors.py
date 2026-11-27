@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from app.db.models import V4ConnectorStateRecord, V4KnowledgeDocumentRecord, V4WebhookDeliveryRecord
 from app.db.session import DatabaseManager
+from app.services.assistant_v4.admin_action_catalog import ADMIN_ACTION_CATALOG
 from app.services.assistant_v4.config import ExternalConnectorsConfig
 from app.services.assistant_v4.event_store import EventEnvelope, EventStoreService, redact_text
 from app.services.zalo_assistant.identity_rbac import ZaloPrincipal
@@ -61,10 +62,42 @@ class SkillRegistry:
         self._skills: Dict[str, SkillManifest] = {
             "labops": SkillManifest(
                 name="labops",
-                version=1,
-                purpose="Giám sát hạ tầng, GPU, CPU/RAM/Disk, jobs, workspaces, sự cố và đơn SSH",
+                version=2,
+                purpose="Giám sát hạ tầng, GPU, CPU/RAM/Disk, jobs, workspaces, sự cố, đơn SSH và toàn bộ thao tác quản trị Web Admin đồng bộ sang Zalo qua xác nhận hiểu đúng & OTP DM 1-1",
                 allowed_roles=["ADMIN", "RESEARCHER", "STUDENT"],
-                tool_allowlist=["get_node_status", "get_gpu_metrics", "get_service_health", "get_storage_usage", "get_metric_history", "compare_resource_metrics", "list_incident_history", "list_my_jobs", "get_job", "get_workspace", "get_container_stats", "get_gpu_allocations", "get_member_info", "list_pending_requests", "get_request", "get_group_usage", "get_audit_trail", "get_vpn_status", "search_redacted_logs", "get_repository_scan", "propose_ack", "propose_resolve", "propose_reject", "propose_approval"],
+                tool_allowlist=[
+                    "get_node_status",
+                    "get_gpu_metrics",
+                    "get_service_health",
+                    "get_storage_usage",
+                    "get_metric_history",
+                    "compare_resource_metrics",
+                    "list_incident_history",
+                    "list_my_jobs",
+                    "get_job",
+                    "get_workspace",
+                    "get_container_stats",
+                    "get_gpu_allocations",
+                    "get_member_info",
+                    "list_pending_requests",
+                    "get_request",
+                    "get_group_usage",
+                    "get_audit_trail",
+                    "get_vpn_status",
+                    "search_redacted_logs",
+                    "get_repository_scan",
+                    "inspect_member_detail",
+                    "list_member_ssh_keys",
+                    "list_member_vpn_devices",
+                    "list_repository_requests",
+                    "list_security_scans",
+                    "list_jobs_and_processes",
+                    "clarify_admin_action",
+                    "propose_ack",
+                    "propose_resolve",
+                    "propose_reject",
+                    "propose_approval",
+                ] + [f"propose_{aid}" for aid in sorted(ADMIN_ACTION_CATALOG.keys())],
                 data_classification="internal_infra",
                 enabled=True,
             ),

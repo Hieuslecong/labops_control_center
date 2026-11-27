@@ -25,8 +25,37 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from app.services.assistant_v4.inbox_outbox import chunk_zalo_message
-from app.services.zalo_assistant.service import zalo_assistant_service
+import app.core.config  # noqa: F401,E402
+from app.db.models import V4WorkerCursorRecord  # noqa: E402
+from app.services.assistant_v4.inbox_outbox import chunk_zalo_message  # noqa: E402
+from app.services.zalo_assistant.service import zalo_assistant_service  # noqa: E402
+
+PARITY_RELEASE_ANNOUNCEMENT_KEY = "worker:release_notice:zalo_admin_parity_42_v1"
+
+
+def build_admin_parity_release_announcement() -> str:
+    """Build the one-time Vietnamese Admin Zalo release note for 42-action Web parity."""
+    return (
+        "🚀 CẬP NHẬT HỆ THỐNG: ZALO AI AGENT ĐÃ ĐỒNG BỘ 100% QUYỀN QUẢN TRỊ WEB ADMIN (42 THAO TÁC / 7 PHÂN HỆ)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Chào Admin, từ bản đồng bộ mới nhất, bạn có thể điều khiển toàn bộ thao tác quản trị trên Web Dashboard ngay qua Zalo (mọi lệnh từ nhóm chat đều cách ly gửi OTP riêng về DM 1-1):\n\n"
+        "1️⃣ Thành viên, Mật khẩu & Vòng đời (9): tạo tài khoản Web, cấp lại mật khẩu Web / mật khẩu SSH tạm lần đầu, gán GVHD, đổi quota, tạm ngưng / khôi phục / lưu trữ / xóa vĩnh viễn thành viên (R4).\n"
+        "2️⃣ Khóa SSH, Phiên & Workspace (7): cấp phát SSH/workspace, xoay vòng SSH key, thu hồi 1 key hoặc toàn bộ SSH, ngắt phiên SSH, kiểm định lại 6 cổng Verification Gate, kiểm tra/nhận Vault.\n"
+        "3️⃣ Đơn xin cấp SSH MRAM (5): phê duyệt, từ chối, yêu cầu bổ sung, gửi lại mời Zalo, quét SLA quá hạn.\n"
+        "4️⃣ WireGuard VPN (3): cấp mới, bật/tạm tắt, thu hồi vĩnh viễn thiết bị.\n"
+        "5️⃣ GPU, Jobs & Processes (5): cấp GPU, giải phóng reservation, dừng job, dừng mềm SIGTERM / hủy SIGKILL tiến trình.\n"
+        "6️⃣ Kho Mã & Bảo mật (3): duyệt/từ chối & quét lại Repository Guard, quyết định Security Scan.\n"
+        "7️⃣ Sự cố, Báo cáo, Zalo & V4 (5+5): ACK/Resolve sự cố, đánh giá rule ngay, tạo báo cáo ngày/tuần, tạo mã `/link` / gán / gỡ Zalo ID, cấu hình cảnh báo, nạp lại V4 & chạy retention.\n\n"
+        "🛡️ Cơ chế an toàn & chống làm sai ý mới:\n"
+        "• Hỏi làm rõ (1 / 2 / 3) khi yêu cầu mơ hồ hoặc trùng nhiều người (VD: `cấp lại mật khẩu cho khuongnd`).\n"
+        "• 100% thao tác R1–R4 hiện `Phiếu Xác Nhận Hiểu Đúng` kèm các lựa chọn tương tự (`ĐỔI <số>`) và `HỦY`.\n"
+        "• Hỗ trợ Short Reply OTP: khi chỉ có 1 phiếu chờ trong DM 1-1, chỉ cần gõ thẳng mã OTP 6 ký tự (hoặc dùng `/confirm <action_id> <otp>`).\n"
+        "• Lệnh R4 xóa vĩnh viễn bắt buộc OTP + `CONFIRM DELETE <username>`. Chính sách mặc định `vault_only` không lưu mật khẩu rõ vào log/DB.\n\n"
+        "💡 Ví dụ thử ngay trong DM 1-1:\n"
+        "• `cấp lại mật khẩu cho khuongnd`\n"
+        "• `xác minh workspace cho khuongnd`\n"
+        "• `đổi quota 150GB cho khuongnd` | `quét SLA`"
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -182,6 +211,14 @@ class ZaloPollingWorker:
                     msg_id,
                     provider_message_id=provider_msg_ids[0] if provider_msg_ids else "accepted",
                 )
+            for dm_item in list(result.get("dm_notifications") or []):
+                dm_chat = str(dm_item.get("chat_id") or "").strip()
+                dm_text = str(dm_item.get("text") or "").strip()
+                if dm_chat and dm_text and dm_chat != chat_id:
+                    try:
+                        await self._send_zalo_chunks(bot, chat_id=dm_chat, text=dm_text)
+                    except Exception as dm_err:
+                        logger.warning("Không thể gửi Phiếu Xác Nhận sang DM 1-1 %s: %s", dm_chat, dm_err)
             logger.info(
                 "📤 Đã gửi phản hồi (%s) tới chat %s (Dung lượng: %d chars)",
                 result.get("command"),
@@ -275,6 +312,82 @@ class ZaloPollingWorker:
         except Exception:
             pass
 
+    async def _maybe_send_parity_release_announcement(
+        self,
+        bot: Any,
+        *,
+        force: bool = False,
+        target_chat_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Send a one-time DM 1-1 release announcement introducing 42-action Web Admin parity to verified Admins."""
+        v4 = getattr(self.service, "v4", None)
+        if not force and (v4 is None or not getattr(v4.config, "write_actions", False)):
+            return {"sent": False, "reason": "WRITE_ACTIONS_DISABLED", "delivered_to": []}
+
+        if not force:
+            try:
+                with self.service.db.session_scope() as session:
+                    existing = session.get(V4WorkerCursorRecord, PARITY_RELEASE_ANNOUNCEMENT_KEY)
+                    if existing is not None and existing.cursor_value == "sent":
+                        return {
+                            "sent": False,
+                            "reason": "ALREADY_SENT",
+                            "delivered_to": list((existing.metadata_json or {}).get("sent_to") or []),
+                        }
+            except Exception as check_err:
+                logger.warning("Không kiểm tra được trạng thái thông báo bản parity mới: %s", check_err)
+
+        if target_chat_ids:
+            recipients = [str(c).strip() for c in target_chat_ids if str(c).strip()]
+        else:
+            recipients = self.identity_rbac.get_verified_admin_recipients(
+                fallback_authorized_users=self.bot_engine.authorized_users,
+                alert_category="system_release",
+            )
+        if not recipients:
+            return {"sent": False, "reason": "NO_VERIFIED_ADMINS", "delivered_to": []}
+
+        text = build_admin_parity_release_announcement()
+        delivered_to: List[str] = []
+        errors: Dict[str, str] = {}
+        for admin_chat_id in recipients:
+            try:
+                await self._send_zalo_chunks(bot, chat_id=admin_chat_id, text=text)
+                delivered_to.append(admin_chat_id)
+            except Exception as send_exc:
+                errors[admin_chat_id] = str(send_exc)[:200]
+                logger.warning("Không thể gửi thông báo tính năng mới tới Admin %s: %s", admin_chat_id, send_exc)
+
+        if delivered_to:
+            now_utc = datetime.now(timezone.utc)
+            meta = {
+                "sent_to": delivered_to,
+                "sent_at": now_utc.isoformat(),
+                "errors": errors,
+            }
+            try:
+                with self.service.db.session_scope() as session:
+                    rec = session.get(V4WorkerCursorRecord, PARITY_RELEASE_ANNOUNCEMENT_KEY)
+                    if rec is None:
+                        session.add(
+                            V4WorkerCursorRecord(
+                                cursor_name=PARITY_RELEASE_ANNOUNCEMENT_KEY,
+                                cursor_value="sent",
+                                metadata_json=meta,
+                                updated_at=now_utc,
+                            )
+                        )
+                    else:
+                        rec.cursor_value = "sent"
+                        rec.metadata_json = meta
+                        rec.updated_at = now_utc
+            except Exception as save_err:
+                logger.warning("Đã gửi thông báo Admin nhưng không lưu được cursor idempotent: %s", save_err)
+            logger.info("📣 Đã gửi thông báo giới thiệu 42 chức năng quản trị mới tới Admin Zalo: %s", delivered_to)
+            return {"sent": True, "reason": "DELIVERED", "delivered_to": delivered_to, "errors": errors}
+
+        return {"sent": False, "reason": "DELIVERY_FAILED", "delivered_to": [], "errors": errors}
+
     async def start(self):
         if not self.bot_token:
             logger.error("❌ Không tìm thấy ZALO_BOT_TOKEN trong môi trường hoặc cấu hình.")
@@ -307,6 +420,11 @@ class ZaloPollingWorker:
             self._write_worker_status(False, last_error=str(e))
             self._release_lease()
             return
+
+        try:
+            await self._maybe_send_parity_release_announcement(bot)
+        except Exception as ann_err:
+            logger.warning("Lỗi khi gửi thông báo tính năng mới lúc khởi động: %s", ann_err)
 
         offset: Optional[int] = None
         consecutive_errors = 0

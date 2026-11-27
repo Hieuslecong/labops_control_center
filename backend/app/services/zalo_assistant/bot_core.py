@@ -82,7 +82,7 @@ class ZaloBotEngine:
         "/summary": "Tóm tắt tình hình (/summary [today|week])",
         "/compare": "So sánh tải hiện tại với lịch sử (/compare [host_id])",
         "/who": "Tra cứu thông tin thành viên (Chỉ Admin)",
-        "/confirm": "Xác nhận đề xuất hành động (/confirm <action_id> <code>)",
+        "/confirm": "Xác nhận Phiếu Xác Nhận Hiểu Đúng (/confirm <action_id> <otp> [CONFIRM DELETE <user>])",
     }
 
     ENABLED_READ_TOOLS = list(SREToolRegistry.TOOL_SPECS.keys())
@@ -171,6 +171,7 @@ class ZaloBotEngine:
         self._ask_timestamps: Dict[str, List[float]] = defaultdict(list)
         self._decision_lock = threading.Lock()
         self._admin_decision_drafts: Dict[str, Dict[str, Any]] = {}
+        self._admin_clarification_states: Dict[str, Dict[str, Any]] = {}
         self._decision_draft_ttl_sec = 300.0
         self.v4_facade: Optional[Any] = None
         if self._config_path and not self._explicit_allowlist:
@@ -411,12 +412,19 @@ class ZaloBotEngine:
         has_active_draft = (
             cmd not in known_cmds
             and principal.is_admin
-            and self._get_decision_draft(principal, chat_id or sender_id) is not None
+            and (
+                self._get_decision_draft(principal, chat_id or sender_id) is not None
+                or self._get_clarification_state(principal, chat_id or sender_id) is not None
+                or self._has_active_v4_pending_proposals(principal, chat_id or sender_id)
+            )
         )
         is_admin_ssh_decision_intent = (
             cmd not in known_cmds
             and principal.is_admin
-            and self._parse_natural_ssh_decision_intent(text) is not None
+            and (
+                self._parse_natural_ssh_decision_intent(text) is not None
+                or self._looks_like_v4_admin_parity_intent(text)
+            )
         )
         is_ask = cmd == "/ask" or cmd not in known_cmds
         if (
@@ -490,9 +498,11 @@ class ZaloBotEngine:
             reply = self._cmd_quota()
         elif cmd == "/new":
             self._clear_decision_draft(principal, chat_id or sender_id)
+            self._clear_clarification_state(principal, chat_id or sender_id)
             reply = self._cmd_v4_new(principal, source=src, chat_id=chat_id or sender_id)
         elif cmd == "/clear":
             self._clear_decision_draft(principal, chat_id or sender_id)
+            self._clear_clarification_state(principal, chat_id or sender_id)
             reply = self._cmd_v4_clear(principal, source=src, chat_id=chat_id or sender_id)
         elif cmd == "/memory":
             reply = self._cmd_v4_memory(principal, source=src, chat_id=chat_id or sender_id)
@@ -519,39 +529,60 @@ class ZaloBotEngine:
                 }
             reply = self._cmd_v4_who(arg, principal, source=src)
         elif cmd == "/confirm":
-            reply = self._cmd_v4_confirm(arg, principal, chat_id=chat_id or sender_id)
+            reply, agent_meta = self._cmd_v4_confirm_with_meta(arg, principal, chat_id=chat_id or sender_id)
         elif cmd == "/ask":
             reply, agent_meta = self._cmd_ask(arg, principal, source=src, chat_id=chat_id or "")
         else:
-            conv = self._try_handle_conversational_ssh_decision(
-                text,
-                principal,
-                chat_id=chat_id or sender_id,
-                source=src,
-            )
-            if conv is not None:
-                if conv.get("forbidden"):
+            eff_chat = chat_id or sender_id
+            active_mram_draft = self._get_decision_draft(principal, eff_chat) if principal.is_admin else None
+            handled_custom: Optional[Dict[str, Any]] = None
+
+            if active_mram_draft is not None:
+                handled_custom = self._try_handle_conversational_ssh_decision(
+                    text,
+                    principal,
+                    chat_id=eff_chat,
+                    source=src,
+                )
+            else:
+                handled_custom = self._try_handle_v4_admin_parity(
+                    text,
+                    principal,
+                    chat_id=eff_chat,
+                    source=src,
+                )
+                if handled_custom is None:
+                    handled_custom = self._try_handle_conversational_ssh_decision(
+                        text,
+                        principal,
+                        chat_id=eff_chat,
+                        source=src,
+                    )
+
+            if handled_custom is not None:
+                if handled_custom.get("forbidden"):
                     return {
                         "success": False,
                         "error": "FORBIDDEN",
                         "suppress_outbound": src != "zalo",
-                        "reply": conv["reply"],
+                        "reply": handled_custom["reply"],
                         "command": "/ask",
                     }
-                reply = str(conv["reply"])
-                agent_meta = conv.get("meta") or {}
+                reply = str(handled_custom["reply"])
+                agent_meta = handled_custom.get("meta") or {}
+                mem_reply = str(handled_custom.get("memory_safe_reply") or reply)
                 self._record_v4_turn_memory(
                     principal=principal,
                     source=src,
-                    chat_id=chat_id or sender_id,
+                    chat_id=eff_chat,
                     user_text=text,
-                    reply_text=reply,
+                    reply_text=mem_reply,
                 )
             else:
                 op_act = self._try_handle_natural_operational_action(
                     text,
                     principal,
-                    chat_id=chat_id or sender_id,
+                    chat_id=eff_chat,
                     source=src,
                 )
                 if op_act is not None:
@@ -568,12 +599,26 @@ class ZaloBotEngine:
                     self._record_v4_turn_memory(
                         principal=principal,
                         source=src,
-                        chat_id=chat_id or sender_id,
+                        chat_id=eff_chat,
                         user_text=text,
                         reply_text=reply,
                     )
                 else:
                     reply, agent_meta = self._cmd_ask(text, principal, source=src, chat_id=chat_id or "")
+
+        if "execution" in (agent_meta or {}) and isinstance(agent_meta["execution"], dict):
+            if agent_meta["execution"].get("ephemeral_dm_secret_note"):
+                agent_meta["history_safe_reply"] = f"✅ Đã xác nhận `{agent_meta['execution'].get('action_id')}` (secret đã redact khỏi lịch sử)."
+        safe_store_reply = str(agent_meta.pop("history_safe_reply", None) or "") if isinstance(agent_meta, dict) else ""
+        if not safe_store_reply and isinstance(agent_meta, dict) and agent_meta.get("memory_safe_reply"):
+            safe_store_reply = str(agent_meta.pop("memory_safe_reply"))
+        if not safe_store_reply:
+            try:
+                from app.services.assistant_v4.event_store import redact_text as _v4_redact
+
+                safe_store_reply = _v4_redact(reply)
+            except Exception:
+                safe_store_reply = reply
 
         if src == "dashboard":
             msg_id = f"dash-{os.urandom(6).hex()}"
@@ -582,7 +627,7 @@ class ZaloBotEngine:
                 if defer_outbox_commit:
                     _, msg_id, _ = self.quota_ledger.reserve_outbox(
                         recipient_id=sender_id,
-                        message_text=reply,
+                        message_text=safe_store_reply,
                         is_critical_alert=False,
                         idempotency_key=idempotency_key,
                         metadata={"command": cmd or "/ask", "sender": sender_id, "chat_id": chat_id or ""},
@@ -590,7 +635,7 @@ class ZaloBotEngine:
                 else:
                     _, msg_id, _ = self.quota_ledger.reserve_and_send(
                         recipient_id=sender_id,
-                        message_text=reply,
+                        message_text=safe_store_reply,
                         is_critical_alert=False,
                         idempotency_key=idempotency_key,
                         metadata={"command": cmd or "/ask", "sender": sender_id},
@@ -618,7 +663,7 @@ class ZaloBotEngine:
             "role": principal.role,
             "source": src,
             "incoming_text": command_text,
-            "reply_snippet": reply[:100],
+            "reply_snippet": safe_store_reply[:100],
             "command": cmd or "/ask",
             "timestamp": _now(),
         }
@@ -949,6 +994,328 @@ class ZaloBotEngine:
         key = self._draft_key(principal, chat_id)
         with self._decision_lock:
             self._admin_decision_drafts.pop(key, None)
+
+    def _get_clarification_state(self, principal: ZaloPrincipal, chat_id: str) -> Optional[Dict[str, Any]]:
+        key = self._draft_key(principal, chat_id)
+        now_m = time.monotonic()
+        with self._decision_lock:
+            st = self._admin_clarification_states.get(key)
+            if not st:
+                return None
+            if (now_m - float(st.get("updated_at") or 0.0)) > self._decision_draft_ttl_sec:
+                self._admin_clarification_states.pop(key, None)
+                return None
+            return dict(st)
+
+    def _set_clarification_state(self, principal: ZaloPrincipal, chat_id: str, state: Dict[str, Any]) -> None:
+        key = self._draft_key(principal, chat_id)
+        cp = dict(state)
+        cp["updated_at"] = time.monotonic()
+        with self._decision_lock:
+            self._admin_clarification_states[key] = cp
+
+    def _clear_clarification_state(self, principal: ZaloPrincipal, chat_id: str) -> None:
+        key = self._draft_key(principal, chat_id)
+        with self._decision_lock:
+            self._admin_clarification_states.pop(key, None)
+
+    def _has_active_v4_pending_proposals(self, principal: ZaloPrincipal, chat_id: str) -> bool:
+        if self.v4_facade is None or not getattr(self.v4_facade.config, "enabled", False):
+            return False
+        try:
+            dm_chat = str(principal.zalo_user_id or chat_id)
+            return bool(self.v4_facade.approvals.list_pending_for_actor(principal.username, chat_id=dm_chat))
+        except Exception:
+            return False
+
+    @classmethod
+    def _looks_like_v4_admin_parity_intent(cls, text: str) -> bool:
+        norm = cls._strip_accents_lower(text)
+        return any(
+            k in norm
+            for k in (
+                "mat khau",
+                "password",
+                "tam ngung",
+                "khoi phuc",
+                "luu tru",
+                "xoa vinh vien",
+                "xoay ssh",
+                "ngat phien ssh",
+                "thu hoi quyen ssh",
+                "kiem dinh workspace",
+                "xac minh workspace",
+                "verify workspace",
+                "claim secret",
+                "quet sla",
+                "reload v4",
+                "retention",
+                "kill process",
+            )
+        )
+
+    def _try_handle_v4_admin_parity(
+        self,
+        text: str,
+        principal: ZaloPrincipal,
+        *,
+        chat_id: str,
+        source: str,
+    ) -> Optional[Dict[str, Any]]:
+        if self.v4_facade is None or not getattr(self.v4_facade.config, "enabled", False):
+            return None
+
+        clean = str(text or "").strip()
+        if not clean or clean.startswith("/"):
+            return None
+        norm = self._strip_accents_lower(clean)
+        dm_chat = str(principal.zalo_user_id or chat_id)
+        is_dm_or_dash = source == "dashboard" or not principal.zalo_user_id or chat_id == principal.zalo_user_id
+
+        # 1. Handle ongoing Disambiguation Clarification State
+        clar_st = self._get_clarification_state(principal, chat_id) if principal.is_admin else None
+        if clar_st is not None:
+            if self._is_cancel_phrase(clean) or norm in {"huy", "cancel"}:
+                self._clear_clarification_state(principal, chat_id)
+                return {
+                    "reply": "❎ Đã hủy bước làm rõ lựa chọn. Không có thay đổi nào được thực thi.",
+                    "meta": {"v4_route": "v4", "v4_intent": "ADMIN_CLARIFY_CANCELLED"},
+                }
+
+            opts = list((clar_st.get("clarification") or {}).get("options") or [])
+            chosen: Optional[Dict[str, Any]] = None
+            m_num = re.fullmatch(r"(?:chon\s+|so\s+|thu\s+|#)?\s*(\d{1,2})", norm)
+            if m_num:
+                idx = int(m_num.group(1))
+                if 1 <= idx <= len(opts):
+                    chosen = opts[idx - 1]
+            elif any(w in norm for w in ("ca hai", "both")):
+                chosen = next((o for o in opts if str(o.get("action_key") or "").startswith("BUNDLE:")), None)
+
+            if chosen is not None:
+                self._clear_clarification_state(principal, chat_id)
+                kind = str(chosen.get("kind") or "")
+                extra_args = dict(clar_st.get("extra_args") or {})
+                orig_reason = str(clar_st.get("orig_text") or "")
+
+                if kind == "TARGET":
+                    t_id = str(chosen.get("username") or chosen.get("target_id") or "")
+                    act_id = str(chosen.get("action_type") or clar_st.get("default_action_type") or "")
+                    from app.services.assistant_v4.admin_action_catalog import check_disambiguation as _cd
+
+                    recheck = _cd(
+                        action_type=act_id,
+                        raw_text=orig_reason,
+                        target_query=t_id,
+                        explicit_action=bool(act_id and not clar_st.get("intent_ambiguous")),
+                        service_context=self.v4_facade.service_context,
+                    )
+                    if recheck is not None:
+                        self._set_clarification_state(
+                            principal,
+                            chat_id,
+                            {
+                                "clarification": recheck,
+                                "default_action_type": act_id,
+                                "extra_args": extra_args,
+                                "orig_text": orig_reason,
+                                "intent_ambiguous": False,
+                            },
+                        )
+                        return {"reply": recheck["message"], "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DISAMBIGUATION"}}
+                    prop_res = self.v4_facade.create_admin_confirmation_proposal(
+                        action_type=act_id,
+                        target_id=t_id,
+                        principal=principal,
+                        chat_id=chat_id,
+                        extra_args=extra_args,
+                        reason=orig_reason,
+                    )
+                    return {
+                        "reply": prop_res["reply"],
+                        "memory_safe_reply": prop_res["memory_safe_reply"],
+                        "meta": {
+                            "v4_route": "v4",
+                            "v4_intent": "ADMIN_CONFIRMATION_CARD",
+                            "proposal": prop_res["proposal"],
+                            "dm_notifications": prop_res.get("dm_notifications") or [],
+                        },
+                    }
+
+                if kind == "ACTION":
+                    act_key = str(chosen.get("action_key") or "")
+                    t_id = str(chosen.get("target_id") or (clar_st.get("clarification") or {}).get("target_id") or "")
+                    if not t_id:
+                        t_id = "default"
+                    if act_key.startswith("BUNDLE:"):
+                        bundle_actions = [x.strip() for x in act_key.split(":", 1)[1].split("+") if x.strip()]
+                        replies: List[str] = []
+                        dm_notes: List[Dict[str, str]] = []
+                        proposals: List[Dict[str, Any]] = []
+                        for sub_act in bundle_actions:
+                            p_sub = self.v4_facade.create_admin_confirmation_proposal(
+                                action_type=sub_act,
+                                target_id=t_id,
+                                principal=principal,
+                                chat_id=chat_id,
+                                extra_args=extra_args,
+                                reason=orig_reason,
+                            )
+                            replies.append(p_sub["reply"])
+                            proposals.append(p_sub["proposal"])
+                            dm_notes.extend(p_sub.get("dm_notifications") or [])
+                        return {
+                            "reply": "\n\n".join(replies),
+                            "memory_safe_reply": f"📝 Đã tạo {len(proposals)} Phiếu Xác Nhận Hiểu Đúng ({', '.join(bundle_actions)}) cho `{t_id}`.",
+                            "meta": {
+                                "v4_route": "v4",
+                                "v4_intent": "ADMIN_CONFIRMATION_CARD",
+                                "proposals": proposals,
+                                "proposal": proposals[0] if proposals else None,
+                                "dm_notifications": dm_notes,
+                            },
+                        }
+                    prop_res = self.v4_facade.create_admin_confirmation_proposal(
+                        action_type=act_key,
+                        target_id=t_id,
+                        principal=principal,
+                        chat_id=chat_id,
+                        extra_args=extra_args,
+                        reason=orig_reason,
+                    )
+                    return {
+                        "reply": prop_res["reply"],
+                        "memory_safe_reply": prop_res["memory_safe_reply"],
+                        "meta": {
+                            "v4_route": "v4",
+                            "v4_intent": "ADMIN_CONFIRMATION_CARD",
+                            "proposal": prop_res["proposal"],
+                            "dm_notifications": prop_res.get("dm_notifications") or [],
+                        },
+                    }
+
+            # Unrelated message cancels stale clarification cleanly
+            self._clear_clarification_state(principal, chat_id)
+
+        # 2. Handle active V4 PENDING_CONFIRMATION actions (Switch / Cancel / Short OTP / Block Group Confirmation)
+        if principal.is_admin:
+            pending_dm = self.v4_facade.approvals.list_pending_for_actor(principal.username, chat_id=dm_chat)
+            if not is_dm_or_dash and pending_dm:
+                is_otp_or_generic = bool(re.fullmatch(r"(?:[A-Fa-f0-9]{6}(?:\s+CONFIRM\s+DELETE\s+\S+)?|ok|yes|co|confirm)", norm))
+                if is_otp_or_generic:
+                    return {
+                        "reply": "⛔ Không chấp nhận xác nhận lệnh ghi trong nhóm chat. Admin vui lòng mở DM 1-1 với Bot để nhập OTP.",
+                        "meta": {"v4_route": "v4", "v4_intent": "GROUP_CONFIRM_BLOCKED"},
+                    }
+
+            pending_here = self.v4_facade.approvals.list_pending_for_actor(principal.username, chat_id=chat_id if source == "dashboard" else dm_chat)
+            if is_dm_or_dash and pending_here:
+                top_prop = pending_here[0]
+                if self._is_cancel_phrase(clean) or norm in {"huy", "cancel"}:
+                    c_res = self.v4_facade.approvals.cancel_proposal(top_prop["action_id"], actor_id=principal.username)
+                    return {
+                        "reply": f"❎ Đã hủy phiếu `{c_res['action_id']}` (`{top_prop['action_type']}`). Không có thay đổi nào được thực thi.",
+                        "meta": {"v4_route": "v4", "v4_intent": "V4_PROPOSAL_CANCELLED"},
+                    }
+
+                sw_m = re.fullmatch(r"(?:doi)(?:\s+sang|\s+so)?\s*(\d{1,2})", norm)
+                if sw_m:
+                    choice_no = int(sw_m.group(1))
+                    try:
+                        sw_res = self.v4_facade.approvals.switch_proposal(
+                            top_prop["action_id"],
+                            choice_number=choice_no,
+                            actor_id=principal.username,
+                            actor_role=principal.role,
+                            chat_id=chat_id,
+                            session_id="zalo-switch",
+                        )
+                        return {
+                            "reply": str(sw_res.get("confirmation_card") or sw_res.get("instruction") or ""),
+                            "memory_safe_reply": f"🔄 Đã chuyển từ `{top_prop['action_id']}` sang phiếu mới `{sw_res['action_id']}` (`{sw_res['action_type']}`).",
+                            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_CONFIRMATION_CARD", "proposal": sw_res},
+                        }
+                    except Exception as exc:
+                        return {"reply": f"⛔ Không thể đổi lựa chọn: {exc}", "meta": {"v4_route": "v4", "v4_intent": "V4_SWITCH_ERROR"}}
+
+                if norm in {"ok", "yes", "co", "y", "confirm", "xac nhan", "dong y", "chot"}:
+                    return {
+                        "reply": (
+                            f"⛔ Hệ thống từ chối xác nhận chung chung (`{clean}`). "
+                            f"Vui lòng nhập đúng mã OTP hoặc `/confirm {top_prop['action_id']} <OTP>` (nhắn `HỦY` nếu muốn dừng)."
+                        ),
+                        "meta": {"v4_route": "v4", "v4_intent": "GENERIC_CONFIRM_BLOCKED"},
+                    }
+
+                otp_m = re.fullmatch(r"(?:(?:xac\s+nhan)\s+)?([A-Fa-f0-9]{6})(?:\s+(CONFIRM\s+DELETE\s+\S+))?", norm)
+                if otp_m and getattr(self.v4_facade.config, "zalo_short_otp_confirm", False):
+                    if len(pending_here) > 1:
+                        ids = ", ".join(p["action_id"] for p in pending_here[:5])
+                        return {
+                            "reply": f"⚠️ Bạn đang có {len(pending_here)} phiếu chờ xác nhận ({ids}). Vui lòng dùng `/confirm <action_id> <OTP>` để chọn chính xác phiếu cần chạy.",
+                            "meta": {"v4_route": "v4", "v4_intent": "MULTI_PROPOSAL_OTP_AMBIGUOUS"},
+                        }
+                    code_val = otp_m.group(1).upper()
+                    typed_p = (otp_m.group(2) or "").strip()
+                    try:
+                        conf_res = self.v4_facade.approvals.confirm_zalo_action(
+                            action_id=top_prop["action_id"],
+                            code=code_val,
+                            principal=principal,
+                            chat_id=chat_id,
+                            typed_confirmation=typed_p,
+                        )
+                        out_txt = str(conf_res.get("summary_reply") or f"✅ Đã xác nhận `{conf_res['action_id']}` -> trạng thái `{conf_res['state']}`.")
+                        mem_txt = f"✅ Đã xác nhận và thực thi `{conf_res['action_id']}` (`{top_prop['action_type']}`)."
+                        return {
+                            "reply": out_txt,
+                            "memory_safe_reply": mem_txt,
+                            "meta": {"v4_route": "v4", "v4_intent": "V4_PROPOSAL_CONFIRMED", "execution": conf_res},
+                        }
+                    except Exception as exc:
+                        return {"reply": f"⛔ Xác nhận thất bại: {exc}", "meta": {"v4_route": "v4", "v4_intent": "V4_CONFIRM_FAILED"}}
+
+        # 3. Handle new Natural-Language Web Admin Parity Intent (only when write_actions=True)
+        if not getattr(self.v4_facade.config, "write_actions", False):
+            return None
+
+        routed = self.v4_facade.try_handle_admin_action_intent(
+            text=clean,
+            principal=principal,
+            chat_id=chat_id,
+            session_id="zalo-parity",
+        )
+        if routed is None:
+            return None
+        if routed.get("forbidden"):
+            return routed
+        if routed.get("status") == "CLARIFYING":
+            self._set_clarification_state(
+                principal,
+                chat_id,
+                {
+                    "clarification": routed["clarification"],
+                    "default_action_type": routed.get("default_action_type"),
+                    "extra_args": routed.get("extra_args") or {},
+                    "orig_text": clean,
+                    "intent_ambiguous": True,
+                },
+            )
+            return {
+                "reply": routed["reply"],
+                "memory_safe_reply": routed["reply"],
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DISAMBIGUATION"},
+            }
+        return {
+            "reply": routed["reply"],
+            "memory_safe_reply": routed.get("memory_safe_reply") or routed["reply"],
+            "meta": {
+                "v4_route": "v4",
+                "v4_intent": routed.get("intent") or "ADMIN_CONFIRMATION_CARD",
+                "proposal": routed.get("proposal"),
+                "dm_notifications": routed.get("dm_notifications") or [],
+            },
+        }
 
     @staticmethod
     def _strip_accents_lower(text: str) -> str:
@@ -2636,25 +3003,37 @@ class ZaloBotEngine:
             ]
         )
 
-    def _cmd_v4_confirm(self, arg: str, principal: ZaloPrincipal, *, chat_id: str) -> str:
+    def _cmd_v4_confirm_with_meta(self, arg: str, principal: ZaloPrincipal, *, chat_id: str) -> tuple[str, Dict[str, Any]]:
         if self.v4_facade is None:
-            return self._v4_unavailable()
-        parts = arg.strip().split()
-        if len(parts) != 2:
-            return "Cú pháp bắt buộc: `/confirm <action_id> <one_time_code>`"
-        action_id, code = parts
+            return self._v4_unavailable(), {}
+        parts = arg.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            return "Cú pháp bắt buộc: `/confirm <action_id> <one_time_code> [CONFIRM DELETE <username>]`", {}
+        action_id, code = parts[0], parts[1]
+        typed_confirmation = parts[2].strip() if len(parts) > 2 else ""
         try:
             res = self.v4_facade.approvals.confirm_zalo_action(
                 action_id=action_id,
                 code=code,
                 principal=principal,
                 chat_id=chat_id,
+                typed_confirmation=typed_confirmation,
             )
-            return f"✅ Đã xác nhận `{res['action_id']}` -> trạng thái `{res['state']}`."
+            txt = str(res.get("summary_reply") or f"✅ Đã xác nhận `{res['action_id']}` -> trạng thái `{res['state']}`.")
+            meta: Dict[str, Any] = {"execution": res}
+            if res.get("ephemeral_dm_secret_note"):
+                meta["history_safe_reply"] = f"✅ Đã xác nhận `{res['action_id']}` -> trạng thái `{res['state']}` (secret đã redact)."
+            return txt, meta
         except Exception as exc:
-            return f"⛔ Xác nhận thất bại: {exc}"
+            return f"⛔ Xác nhận thất bại: {exc}", {}
+
+    def _cmd_v4_confirm(self, arg: str, principal: ZaloPrincipal, *, chat_id: str) -> str:
+        txt, _ = self._cmd_v4_confirm_with_meta(arg, principal, chat_id=chat_id)
+        return txt
 
     def get_consumer_status(self) -> Dict[str, Any]:
+        from app.services.assistant_v4.admin_action_catalog import ADMIN_ACTION_CATALOG
+
         return {
             "consumer_id": self.consumer_id,
             "is_polling": self.is_polling,
@@ -2664,4 +3043,6 @@ class ZaloBotEngine:
             "authorized_users_count": len(self.authorized_users or []),
             "enabled_read_tools": self.ENABLED_READ_TOOLS,
             "disabled_write_tools": self.DISABLED_WRITE_TOOLS,
+            "v4_write_actions": bool(self.v4_facade and getattr(self.v4_facade.config, "write_actions", False)),
+            "parity_actions_count": len(ADMIN_ACTION_CATALOG),
         }

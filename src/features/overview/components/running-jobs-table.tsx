@@ -272,6 +272,9 @@ export function RunningJobsTable() {
             <div className='relative flex-1 min-w-[200px] max-w-xs'>
               <Icons.search className='absolute left-2.5 top-2 size-3.5 text-muted-foreground' />
               <Input
+                id='overview-jobs-search'
+                name='jobsSearch'
+                aria-label='Tìm kiếm tiến trình đang chạy'
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder='Tìm theo PID, script, lệnh, user...'
@@ -280,8 +283,15 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-xs font-medium'>Máy chủ:</span>
+              <label
+                htmlFor='overview-server-filter'
+                className='text-muted-foreground text-xs font-medium'
+              >
+                Máy chủ:
+              </label>
               <select
+                id='overview-server-filter'
+                name='serverFilter'
                 value={serverFilter}
                 onChange={(e) => setServerFilter(e.target.value)}
                 className='h-7 rounded-md border border-input bg-background px-2 text-xs focus:ring-1 focus:ring-primary outline-none'
@@ -293,8 +303,15 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-xs font-medium'>Người dùng:</span>
+              <label
+                htmlFor='overview-user-filter'
+                className='text-muted-foreground text-xs font-medium'
+              >
+                Người dùng:
+              </label>
               <select
+                id='overview-user-filter'
+                name='userFilter'
                 value={userFilter}
                 onChange={(e) => setUserFilter(e.target.value)}
                 className='h-7 rounded-md border border-input bg-background px-2 text-xs focus:ring-1 focus:ring-primary outline-none'
@@ -309,8 +326,15 @@ export function RunningJobsTable() {
             </div>
 
             <div className='flex items-center gap-1.5'>
-              <span className='text-muted-foreground text-xs font-medium'>Tài nguyên:</span>
+              <label
+                htmlFor='overview-gpu-filter'
+                className='text-muted-foreground text-xs font-medium'
+              >
+                Tài nguyên:
+              </label>
               <select
+                id='overview-gpu-filter'
+                name='gpuFilter'
                 value={gpuFilter}
                 onChange={(e) => setGpuFilter(e.target.value)}
                 className='h-7 rounded-md border border-input bg-background px-2 text-xs focus:ring-1 focus:ring-primary outline-none'

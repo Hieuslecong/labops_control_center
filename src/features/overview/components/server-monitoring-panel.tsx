@@ -102,13 +102,19 @@ export function ServerMonitoringPanel() {
                       </Badge>
                     </div>
                     <CardDescription className='text-xs mt-0.5 flex items-center gap-2 flex-wrap'>
-                      <span>{server.location}</span>
+                      <span>{server.location || 'Phòng máy AIoT Lab'}</span>
                       <span>•</span>
                       <span className='font-mono text-foreground font-medium'>
-                        IP: {server.ipAddress}
+                        IP: {server.ipAddress || 'Chưa gán IP'}
                       </span>
-                      <span>•</span>
-                      <span className='font-mono text-muted-foreground'>VPN: {server.vpnIp}</span>
+                      {server.vpnIp ? (
+                        <>
+                          <span>•</span>
+                          <span className='font-mono text-muted-foreground'>
+                            VPN: {server.vpnIp}
+                          </span>
+                        </>
+                      ) : null}
                     </CardDescription>
                   </div>
 
@@ -230,8 +236,20 @@ export function ServerMonitoringPanel() {
                     <span className='font-bold text-sm text-foreground mt-0.5 truncate'>
                       {server.uptime}
                     </span>
-                    <span className='text-xs text-emerald-600 dark:text-emerald-400 font-medium truncate'>
-                      Ổn định tuyệt đối
+                    <span
+                      className={`text-xs font-medium truncate ${
+                        server.status === 'online'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : server.status === 'offline'
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {server.status === 'online'
+                        ? 'Đang trực tuyến'
+                        : server.status === 'offline'
+                          ? 'Mất kết nối'
+                          : 'Chưa xác minh'}
                     </span>
                   </div>
                 </div>

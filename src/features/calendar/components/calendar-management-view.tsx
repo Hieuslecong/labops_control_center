@@ -81,7 +81,7 @@ export function CalendarManagementView() {
   // Form state
   const [title, setTitle] = useState('');
   const [type, setType] = useState<EventType>('SEMINAR');
-  const [date, setDate] = useState('2026-11-15');
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [startTime, setStartTime] = useState('14:00');
   const [endTime, setEndTime] = useState('16:00');
   const [location, setLocation] = useState('Phòng Hội thảo A2');
@@ -127,7 +127,7 @@ export function CalendarManagementView() {
             <Icons.calendar className='size-5 text-primary' />
             {events.length} sự kiện
           </div>
-          <span className='text-xs text-muted-foreground'>Lên lịch trong tháng 11</span>
+          <span className='text-xs text-muted-foreground'>Lịch hoạt động &amp; bảo trì Lab</span>
         </Card>
 
         <Card className='p-3.5 bg-card'>
@@ -211,66 +211,94 @@ export function CalendarManagementView() {
 
       {/* Events Grid */}
       <div className='grid grid-cols-1 md:grid-cols-2 gap-4'>
-        {filteredEvents.map((evt) => (
-          <Card key={evt.id} className='border bg-card flex flex-col justify-between'>
-            <CardHeader className='pb-2 pt-4'>
-              <div className='flex items-start justify-between gap-2'>
-                <div className='space-y-1'>
-                  <div className='flex items-center gap-2 flex-wrap'>
-                    {getEventBadge(evt.type)}
-                    {evt.relatedServer && (
-                      <Badge variant='secondary' className='text-xs font-mono uppercase'>
-                        Máy chủ: {evt.relatedServer}
-                      </Badge>
-                    )}
-                    {evt.status === 'CANCELLED' && (
-                      <Badge variant='outline' className='text-rose-600 border-rose-500/30 text-xs'>
-                        ĐÃ HỦY
-                      </Badge>
-                    )}
-                  </div>
-                  <CardTitle className='text-base font-bold text-foreground mt-1'>
-                    {evt.title}
-                  </CardTitle>
-                </div>
-
-                <div className='text-right shrink-0 p-2 rounded-lg bg-muted/40 border border-muted/60'>
-                  <span className='block text-xs font-bold font-mono text-primary'>{evt.date}</span>
-                  <span className='block text-xs text-muted-foreground'>
-                    {evt.startTime} - {evt.endTime}
-                  </span>
-                </div>
+        {filteredEvents.length === 0 ? (
+          <Card className='md:col-span-2 border-dashed bg-muted/10'>
+            <CardContent className='py-12 flex flex-col items-center justify-center text-center gap-2.5'>
+              <Icons.calendar className='size-8 text-muted-foreground/60' />
+              <div className='text-sm font-semibold text-foreground'>
+                Chưa có sự kiện hoặc lịch bảo trì nào trong bộ lọc hiện tại
               </div>
-            </CardHeader>
-
-            <CardContent className='pt-0 pb-4 space-y-3 text-xs flex-1 flex flex-col justify-between'>
-              <CardDescription className='text-xs text-muted-foreground leading-relaxed'>
-                {evt.description}
-              </CardDescription>
-
-              <div className='pt-2 border-t flex items-center justify-between text-xs text-muted-foreground'>
-                <span>
-                  Địa điểm: <strong className='text-foreground'>{evt.location}</strong> • Chủ trì:{' '}
-                  <strong className='text-foreground'>{evt.organizer}</strong>
-                </span>
-
-                {evt.status !== 'CANCELLED' && (
-                  <Button
-                    size='sm'
-                    variant='ghost'
-                    onClick={() => {
-                      updateEventStatus(evt.id, 'CANCELLED');
-                      toast.warning(`Đã hủy sự kiện: ${evt.title}`);
-                    }}
-                    className='h-6 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
-                  >
-                    Hủy lịch
-                  </Button>
-                )}
-              </div>
+              <p className='text-xs text-muted-foreground max-w-md'>
+                Nhấn &ldquo;Thêm Sự kiện Mới&rdquo; để lên lịch seminar, họp nhóm nghiên cứu hoặc
+                khung giờ bảo trì máy chủ cho toàn lab.
+              </p>
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => setDialogOpen(true)}
+                className='mt-1 h-8 text-xs gap-1.5'
+              >
+                <Icons.add className='size-3.5' /> Thêm Sự kiện Mới
+              </Button>
             </CardContent>
           </Card>
-        ))}
+        ) : (
+          filteredEvents.map((evt) => (
+            <Card key={evt.id} className='border bg-card flex flex-col justify-between'>
+              <CardHeader className='pb-2 pt-4'>
+                <div className='flex items-start justify-between gap-2'>
+                  <div className='space-y-1'>
+                    <div className='flex items-center gap-2 flex-wrap'>
+                      {getEventBadge(evt.type)}
+                      {evt.relatedServer && (
+                        <Badge variant='secondary' className='text-xs font-mono uppercase'>
+                          Máy chủ: {evt.relatedServer}
+                        </Badge>
+                      )}
+                      {evt.status === 'CANCELLED' && (
+                        <Badge
+                          variant='outline'
+                          className='text-rose-600 border-rose-500/30 text-xs'
+                        >
+                          ĐÃ HỦY
+                        </Badge>
+                      )}
+                    </div>
+                    <CardTitle className='text-base font-bold text-foreground mt-1'>
+                      {evt.title}
+                    </CardTitle>
+                  </div>
+
+                  <div className='text-right shrink-0 p-2 rounded-lg bg-muted/40 border border-muted/60'>
+                    <span className='block text-xs font-bold font-mono text-primary'>
+                      {evt.date}
+                    </span>
+                    <span className='block text-xs text-muted-foreground'>
+                      {evt.startTime} - {evt.endTime}
+                    </span>
+                  </div>
+                </div>
+              </CardHeader>
+
+              <CardContent className='pt-0 pb-4 space-y-3 text-xs flex-1 flex flex-col justify-between'>
+                <CardDescription className='text-xs text-muted-foreground leading-relaxed'>
+                  {evt.description}
+                </CardDescription>
+
+                <div className='pt-2 border-t flex items-center justify-between text-xs text-muted-foreground'>
+                  <span>
+                    Địa điểm: <strong className='text-foreground'>{evt.location}</strong> • Chủ trì:{' '}
+                    <strong className='text-foreground'>{evt.organizer}</strong>
+                  </span>
+
+                  {evt.status !== 'CANCELLED' && (
+                    <Button
+                      size='sm'
+                      variant='ghost'
+                      onClick={() => {
+                        updateEventStatus(evt.id, 'CANCELLED');
+                        toast.warning(`Đã hủy sự kiện: ${evt.title}`);
+                      }}
+                      className='h-6 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-500/10'
+                    >
+                      Hủy lịch
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          ))
+        )}
       </div>
 
       {/* Add Event Dialog */}
@@ -320,14 +348,18 @@ export function CalendarManagementView() {
                 </div>
 
                 <div className='space-y-1.5'>
-                  <Label className='text-xs font-semibold'>Máy chủ liên quan</Label>
+                  <Label htmlFor='calendar-related-server' className='text-xs font-semibold'>
+                    Máy chủ liên quan
+                  </Label>
                   <select
+                    id='calendar-related-server'
+                    name='relatedServer'
                     value={relatedServer}
                     onChange={(e) => setRelatedServer(e.target.value as ServerId | 'all')}
                     className='w-full rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium'
                   >
-                    <option value='track'>Server Track (Hà Nội)</option>
-                    <option value='workstation'>Server Workstation (TP.HCM)</option>
+                    <option value='track'>Server 01 — Server Rack (aiotlab-rack)</option>
+                    <option value='workstation'>Server 02 — Workstation (aiot-ws1)</option>
                     <option value='all'>Toàn bộ phòng Lab</option>
                   </select>
                 </div>

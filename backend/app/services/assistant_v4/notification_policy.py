@@ -343,9 +343,9 @@ class IncidentLifecycleV4:
                 g = gpus_by_key.get(str(inc.resource_id))
                 if g and g.get("host_online") and g.get("temp_celsius") is not None:
                     h = hosts_by_id.get(str(g.get("host_id") or ""))
-                    if h and str(h.get("freshness_status") or "").upper() == "ONLINE" and float(g["temp_celsius"]) < 80.0:
+                    if h and str(h.get("freshness_status") or "").upper() == "ONLINE" and float(g["temp_celsius"]) < 75.0:
                         is_healthy = True
-                        ev_summary = f"GPU temp {g['temp_celsius']}°C < 80°C on ONLINE host"
+                        ev_summary = f"GPU temp {g['temp_celsius']}°C < 75°C on ONLINE host"
             elif inc.event_type in {"STORAGE_HIGH_USAGE", "STORAGE_CRITICAL"}:
                 h = hosts_by_id.get(str(inc.host_id or ""))
                 if h and str(h.get("freshness_status") or "").upper() == "ONLINE" and h.get("disk_usage_percent") is not None:
@@ -357,6 +357,9 @@ class IncidentLifecycleV4:
                 inc.status = "RESOLVED"
                 inc.resolved_by = "telemetry-recovery-verifier"
                 inc.resolved_at = now
+                inc.cooldown_until = now + (
+                    timedelta(hours=24) if inc.event_type == "GPU_THERMAL_HIGH" else timedelta(minutes=30)
+                )
                 inc.updated_at = now
                 ep = max(1, int(inc.reopen_count or 0) + 1)
                 insert_event_in_session(
@@ -1007,12 +1010,21 @@ class EventPolicyEngine:
                     recipients.append(sup_rec)
 
                 review_path = payload.get("review_path") or f"/dashboard/ssh-requests/{req_id}/review"
+                rec_host = payload.get("recommended_host_id") or "workstation"
+                rec_pool = payload.get("recommended_pool_id") or ""
+                rec_mount = payload.get("recommended_mount_point") or ""
+                pool_txt = f" | Ổ: {rec_pool} ({rec_mount})" if rec_pool else ""
+                spec_txt = payload.get("recommended_spec") or "4C/16G/50GiB"
                 msg = (
                     f"📩 YÊU CẦU CẤP SSH MỚI ({req_id})\n"
                     f"• Thành viên: {payload.get('full_name') or payload.get('username')} (@{payload.get('username')})\n"
                     f"• Lý do: {payload.get('reason_snippet') or payload.get('project_title') or 'N/A'}\n"
+                    f"• Đề xuất: {rec_host}{pool_txt} • {spec_txt}\n"
                     f"• Gửi lúc: {_fmt_vn(payload.get('submitted_at') or ev['occurred_at'])}\n"
                     f"• Hạn SLA (24h): {_fmt_vn(payload.get('review_expires_at'))}\n"
+                    f"💬 Nhắn tự nhiên cho AI Agent ngay trên Zalo (Agent sẽ hỏi xác nhận lại 1 lần):\n"
+                    f"  • \"@{payload.get('username')} đồng ý duyệt cấp tài nguyên mặc định\"\n"
+                    f"  • \"@{payload.get('username')} tài khoản này tôi từ chối cấp vì lý do ...\"\n"
                     f"🔗 Dashboard: {base_url}{review_path}"
                 )
                 self._enqueue_for_audience(
@@ -1054,12 +1066,28 @@ class EventPolicyEngine:
                 if sup_rec:
                     recipients.append(sup_rec)
                 label = {"request.approved": "✅ ĐÃ PHÊ DUYỆT", "request.rejected": "⛔ TỪ CHỐI", "request.overdue": "⏰ QUÁ HẠN SLA 24H"}[etype]
+                alloc_line = ""
+                link_line = f"{base_url}/dashboard/ssh-requests/{req_id}/review"
+                if etype == "request.approved":
+                    h_id = payload.get("host_id") or "workstation"
+                    p_id = payload.get("pool_id") or ""
+                    mnt = payload.get("mount_point") or ""
+                    p_txt = f"{p_id} ({mnt})" if mnt else str(p_id or "N/A")
+                    alloc_line = (
+                        f"• Tài nguyên: {h_id} | Pool {p_txt} | "
+                        f"{payload.get('cpu_cores', 4)} vCPU / {payload.get('ram_gb', 16)} GiB RAM / "
+                        f"{payload.get('storage_quota_gb', 50)} GiB Ổ cứng / GPU={payload.get('gpu_mode', 'NONE')}\n"
+                    )
+                    link_line = f"{base_url}/dashboard/researcher/access"
+                elif etype == "request.rejected":
+                    link_line = f"{base_url}/dashboard/researcher/ssh-request"
                 msg = (
                     f"{label} ĐƠN SSH ({req_id})\n"
                     f"• Thành viên: @{uname}\n"
-                    f"• Lý do/Ghi chú: {payload.get('reason') or 'Cập nhật từ hệ thống'}\n"
+                    f"• Lý do / Phản hồi từ Admin: {payload.get('reason') or 'Cập nhật từ hệ thống'}\n"
+                    f"{alloc_line}"
                     f"• Thời gian: {_fmt_vn(ev['occurred_at'])}\n"
-                    f"🔗 Dashboard: {base_url}/dashboard/ssh-requests/{req_id}/review"
+                    f"🔗 Cổng thông tin: {link_line}"
                 )
                 self._enqueue_for_audience(
                     session,

@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 
-from app.db.models import IncidentEventRecord, IncidentRecord
+from app.db.models import IncidentEventRecord, IncidentRecord, TelemetryHistorySampleRecord
 from app.db.session import DatabaseManager
 
 logger = logging.getLogger("labops.sre.incident")
@@ -36,8 +36,10 @@ def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 @dataclass
 class IncidentRuleThresholds:
-    gpu_temp_warn_c: float = 85.0
-    gpu_temp_crit_c: float = 92.0
+    gpu_temp_warn_c: float = 88.0
+    gpu_temp_crit_c: float = 94.0
+    gpu_temp_sustained_hours: float = 36.0
+    gpu_temp_cooldown_hours: float = 24.0
     disk_warn_percent: float = 85.0
     disk_crit_percent: float = 95.0
     cpu_sustained_percent: float = 95.0
@@ -61,8 +63,10 @@ class IncidentRuleThresholds:
                 return d
 
         return cls(
-            gpu_temp_warn_c=_flt("SRE_GPU_TEMP_WARN_C", 85.0),
-            gpu_temp_crit_c=_flt("SRE_GPU_TEMP_CRIT_C", 92.0),
+            gpu_temp_warn_c=_flt("SRE_GPU_TEMP_WARN_C", 88.0),
+            gpu_temp_crit_c=_flt("SRE_GPU_TEMP_CRIT_C", 94.0),
+            gpu_temp_sustained_hours=max(0.0, _flt("SRE_GPU_TEMP_SUSTAINED_HOURS", 36.0)),
+            gpu_temp_cooldown_hours=max(0.5, _flt("SRE_GPU_TEMP_COOLDOWN_HOURS", 24.0)),
             disk_warn_percent=_flt("SRE_DISK_WARN_PCT", 85.0),
             disk_crit_percent=_flt("SRE_DISK_CRIT_PCT", 95.0),
             cpu_sustained_percent=_flt("SRE_CPU_SUSTAINED_PCT", 95.0),
@@ -301,6 +305,64 @@ class UnifiedIncidentEngine:
         self._streak_counts[fp] = self._streak_counts.get(fp, 0) + 1
         return self._streak_counts[fp]
 
+    def _is_gpu_thermal_sustained(
+        self,
+        *,
+        host_id: str,
+        gkey: str,
+        current_temp: float,
+        streak: int,
+    ) -> Tuple[bool, float, float]:
+        """Verify whether GPU overheating has persisted across the configured 1-2 day window."""
+        t = self.thresholds
+        if t.gpu_temp_sustained_hours <= 0:
+            return (streak >= t.hysteresis_samples, 0.0, 1.0)
+        if float(current_temp) < t.gpu_temp_warn_c or streak < t.hysteresis_samples:
+            return (False, 0.0, 0.0)
+
+        now = _utcnow()
+        cutoff = now - timedelta(hours=t.gpu_temp_sustained_hours)
+        valid_samples: List[Tuple[datetime, float]] = []
+        with self.db.session_scope() as session:
+            rows = session.execute(
+                select(TelemetryHistorySampleRecord)
+                .where(
+                    TelemetryHistorySampleRecord.host_id == host_id,
+                    TelemetryHistorySampleRecord.collected_at >= cutoff,
+                )
+                .order_by(TelemetryHistorySampleRecord.collected_at.asc())
+            ).scalars().all()
+            for r in rows:
+                gpus = list(r.gpus_json or [])
+                matched_gpu: Optional[Dict[str, Any]] = None
+                for item in gpus:
+                    item_key = str(item.get("gpu_key") or item.get("gpu_id") or "")
+                    item_uuid = str(item.get("gpu_uuid") or "")
+                    if item_key == gkey or (item_uuid and (item_uuid == gkey or gkey.endswith(f":{item_uuid}"))):
+                        matched_gpu = item
+                        break
+                if matched_gpu is None and len(gpus) == 1:
+                    matched_gpu = gpus[0]
+                if not matched_gpu:
+                    continue
+                tv = matched_gpu.get("temp_celsius")
+                ts = _as_utc(r.collected_at)
+                if tv is not None and ts is not None:
+                    try:
+                        valid_samples.append((ts, float(tv)))
+                    except (TypeError, ValueError):
+                        continue
+
+        min_samples = max(2, t.hysteresis_samples)
+        if len(valid_samples) < min_samples:
+            return (False, 0.0, 0.0)
+
+        span_hours = (valid_samples[-1][0] - valid_samples[0][0]).total_seconds() / 3600.0
+        hot_count = sum(1 for _, tv in valid_samples if tv >= t.gpu_temp_warn_c)
+        hot_ratio = hot_count / len(valid_samples)
+        sustained = span_hours >= (t.gpu_temp_sustained_hours * 0.9) and hot_ratio >= 0.85
+        return (sustained, round(span_hours, 2), round(hot_ratio, 3))
+
     def evaluate_snapshot(
         self,
         snapshot: Dict[str, Any],
@@ -428,13 +490,14 @@ class UnifiedIncidentEngine:
             if temp is not None and float(temp) >= t.gpu_temp_warn_c:
                 streak = self._bump_streak(fp_temp, True)
                 tval = float(temp)
-                if tval >= t.gpu_temp_crit_c and streak >= t.hysteresis_samples:
-                    sev = "P0"
-                elif streak >= t.hysteresis_samples:
-                    sev = "P1"
-                else:
-                    sev = ""
-                if sev:
+                is_sustained, span_h, hot_ratio = self._is_gpu_thermal_sustained(
+                    host_id=hid,
+                    gkey=gkey,
+                    current_temp=tval,
+                    streak=streak,
+                )
+                if is_sustained:
+                    sev = "P0" if tval >= t.gpu_temp_crit_c else "P1"
                     inc, action = self.upsert_incident(
                         event_type="GPU_THERMAL_HIGH",
                         severity=sev,
@@ -443,8 +506,14 @@ class UnifiedIncidentEngine:
                         resource_id=gkey,
                         host_id=hid,
                         fingerprint=fp_temp,
-                        title=f"Nhiệt độ GPU {gkey} cao kéo dài ({tval}°C)",
-                        evidence={"temp_celsius": tval, "utilization_gpu": g.get("utilization_gpu"), "streak": streak},
+                        title=f"Nhiệt độ GPU {gkey} cao kéo dài ({tval}°C trong {span_h:.1f}h)",
+                        evidence={
+                            "temp_celsius": tval,
+                            "utilization_gpu": g.get("utilization_gpu"),
+                            "streak": streak,
+                            "sustained_hours": span_h,
+                            "hot_ratio": hot_ratio,
+                        },
                         recommended_action="Kiểm tra hệ thống tản nhiệt/quạt GPU và tải huấn luyện đang chạy.",
                     )
                     results.append({"incident": inc, "action": action})
@@ -690,7 +759,11 @@ class UnifiedIncidentEngine:
             row.status = "RESOLVED"
             row.resolved_by = actor
             row.resolved_at = now
-            row.cooldown_until = now + timedelta(minutes=self.thresholds.cooldown_minutes)
+            row.cooldown_until = now + (
+                timedelta(hours=self.thresholds.gpu_temp_cooldown_hours)
+                if row.event_type == "GPU_THERMAL_HIGH"
+                else timedelta(minutes=self.thresholds.cooldown_minutes)
+            )
             row.updated_at = now
             session.add(
                 IncidentEventRecord(

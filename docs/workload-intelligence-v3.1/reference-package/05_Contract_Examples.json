@@ -1,0 +1,17 @@
+{
+  "note": "Synthetic, complete test fixtures. No production data. See schemas and invariant tests.",
+  "snapshots": [
+    "fixtures/partial-coverage.json",
+    "fixtures/healthy.json",
+    "fixtures/offline-node.json",
+    "fixtures/empty-workloads.json",
+    "fixtures/stale-snapshot.json",
+    "fixtures/multi-gpu.json"
+  ],
+  "other": [
+    "fixtures/analytics.json",
+    "fixtures/history.json",
+    "fixtures/events.json",
+    "fixtures/action-partial.json"
+  ]
+}

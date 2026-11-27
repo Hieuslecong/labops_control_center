@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null
+  },
+  "from": "2026-11-25T00:00:00Z",
+  "to": "2026-11-25T00:03:00Z",
+  "items": [
+    {
+      "id": "fixture-observed-1",
+      "node_id": "workstation",
+      "member_id": "fixture-member-1",
+      "group_id": null,
+      "first_seen_at": "2026-11-25T00:00:00Z",
+      "last_seen_at": "2026-11-25T00:01:00Z",
+      "observed_seconds": 60,
+      "state": "MISSING_UNCONFIRMED",
+      "exit_code": null,
+      "exit_reason": null,
+      "evidence": "Synthetic missing in later valid observation; not verified exit",
+      "actionable": false
+    }
+  ],
+  "next_cursor": null,
+  "capability": "PARTIAL"
+}

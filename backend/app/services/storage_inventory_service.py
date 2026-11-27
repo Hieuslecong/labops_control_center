@@ -22,20 +22,100 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_pool_priority_tier(p: Dict[str, Any]) -> tuple[int, str]:
+    """Phân tầng ưu tiên ổ đĩa: Tier 0 (PREFERRED: sdd, sdb và các pool mặc định), Tier 1 (FALLBACK_RESTRICTED: /mnt/HDD3 / sdc)."""
+    dev_base = os.path.basename(str(p.get("device") or "")).strip().lower()
+    sid = str(p.get("storage_id") or p.get("id") or "").strip().lower()
+    mount = str(p.get("mount_point") or "").rstrip("/").lower()
+    if (
+        mount == "/mnt/hdd3"
+        or "hdd3" in mount
+        or dev_base.startswith("sdc")
+        or sid in {"d5111439-d134-4ba6-93ef-6268d738f035", "pool-hdd3", "hdd3"}
+    ):
+        return (1, "FALLBACK_RESTRICTED")
+    return (0, "PREFERRED")
+
+
+def _enrich_pool_metadata(p: Dict[str, Any], host_id: str) -> Dict[str, Any]:
+    """Chuẩn hóa nhãn hiển thị tiếng Việt và metadata cho cả dữ liệu từ Go Node Agent lẫn quét cục bộ."""
+    entry = dict(p)
+    entry["host_id"] = host_id
+    if "mounted" not in entry:
+        entry["mounted"] = True
+    dev = str(entry.get("device") or "").strip()
+    dev_base = os.path.basename(dev).lower() if dev else ""
+    mount = str(entry.get("mount_point") or "").strip()
+    fs = str(entry.get("filesystem") or "ext4").strip()
+    cap_gib = round(float(entry.get("capacity_gib") or 0.0), 1)
+    p_rank, p_tier = get_pool_priority_tier(entry)
+    entry["priority_rank"] = p_rank
+    entry["priority_tier"] = p_tier
+    if p_rank == 1 or mount == "/" or dev_base == "sda2":
+        entry["is_default"] = False
+    elif "is_default" not in entry:
+        entry["is_default"] = True
+    if not str(entry.get("label") or "").strip():
+        if mount == "/mnt/HDD3" or dev_base == "sdc":
+            entry["label"] = f"Ổ đĩa Nghiên cứu AI HDD3 (/mnt/HDD3 — {cap_gib} GiB)"
+        elif mount == "/" or dev_base == "sda2":
+            entry["label"] = f"Ổ đĩa Hệ thống Root ({fs.upper()} {dev or '/dev/sda2'} — {cap_gib} GiB)"
+        elif dev_base.startswith("sd") or dev_base.startswith("nvme"):
+            entry["label"] = f"Ổ đĩa Lưu trữ Thứ cấp {dev_base.upper()} ({dev} — {cap_gib} GiB)"
+        else:
+            entry["label"] = f"{fs.upper()} ({mount or entry.get('storage_id') or ''} — {cap_gib} GiB)"
+    return entry
+
+
+def _pool_matches_identifier(p: Dict[str, Any], query_id: str) -> bool:
+    """So khớp storage pool theo UUID, storage_id, bí danh pool-hdd3/pool-sd*, thiết bị hoặc mount point."""
+    q = str(query_id or "").strip().lower()
+    if not q:
+        return False
+    q_trimmed = q.rstrip("/") or ("/" if q == "/" else q)
+    sid = str(p.get("storage_id") or "").strip().lower()
+    pid = str(p.get("id") or "").strip().lower()
+    fs_uuid = str(p.get("filesystem_uuid") or "").strip().lower()
+    dev = str(p.get("device") or "").strip().lower()
+    dev_base = os.path.basename(dev) if dev else ""
+    raw_mount = str(p.get("mount_point") or "").strip()
+    mount_l = "/" if raw_mount == "/" else raw_mount.rstrip("/").lower()
+
+    candidates = {
+        x
+        for x in (
+            sid,
+            pid,
+            fs_uuid,
+            dev,
+            dev_base,
+            f"pool-{dev_base}" if dev_base else "",
+            mount_l,
+        )
+        if x
+    }
+    if mount_l == "/mnt/hdd3" or "hdd3" in mount_l or dev_base == "sdc":
+        candidates.update({"pool-hdd3", "hdd3", "/mnt/hdd3"})
+    if mount_l == "/" or dev_base == "sda2":
+        candidates.update({"pool-root", "root"})
+    return q in candidates or q_trimmed in candidates
+
+
 def _pool_sort_key(p: Dict[str, Any]) -> tuple:
-    """Ưu tiên phân vùng đủ điều kiện, xếp /dev/sdd rồi /dev/sdb lên đầu trước các ổ khác."""
+    """Ưu tiên phân vùng đủ điều kiện, xếp /dev/sdd rồi /dev/sdb lên đầu trước các ổ hạn chế như /mnt/HDD3."""
     eligible = bool(p.get("eligible", False))
+    p_rank, _ = get_pool_priority_tier(p)
     dev_base = os.path.basename(str(p.get("device") or "")).lower()
     sid = str(p.get("storage_id") or p.get("id") or "").lower()
     if dev_base.startswith("sdd") or sid == "5ce32377-6072-4c07-a066-807e89a5d48b":
         rank = 0
     elif dev_base.startswith("sdb") or sid == "159bacc4-38ae-4adb-bf25-7a5091c308ca":
         rank = 1
-    elif p.get("is_default"):
+    elif p_rank == 0 and p.get("is_default"):
         rank = 2
     else:
-        rank = 3
-    return (not eligible, rank, -float(p.get("allocatable_gib") or 0.0))
+        rank = 3 + p_rank
+    return (not eligible, p_rank, rank, -float(p.get("allocatable_gib") or 0.0))
 
 class StorageInventoryService:
     """Quản lý kiểm kê ổ đĩa, xác thực tính đủ điều kiện và cấp phát thư mục storage riêng cho từng thành viên."""
@@ -61,7 +141,7 @@ class StorageInventoryService:
 
         # 1. Trả về custom pools nếu đã được mock trong test
         if target_host in self._custom_pools:
-            return [dict(p) for p in self._custom_pools[target_host]]
+            return [_enrich_pool_metadata(p, target_host) for p in self._custom_pools[target_host]]
 
         # 2. Chỉ truy vấn Node Agent cục bộ cho đúng host cục bộ (không áp nhầm sang remote node như 'track')
         if target_host in (local_host, "local", "localhost"):
@@ -79,12 +159,10 @@ class StorageInventoryService:
                             resolved_host = local_host
                             result_pools: List[Dict[str, Any]] = []
                             for p in pools:
-                                entry = dict(p)
-                                agent_host = str(entry.get("server_id") or entry.get("host_id") or resolved_host).lower()
+                                agent_host = str(p.get("server_id") or p.get("host_id") or resolved_host).lower()
                                 if target_host not in ("local", "localhost") and agent_host != target_host:
                                     continue
-                                entry["host_id"] = resolved_host
-                                result_pools.append(entry)
+                                result_pools.append(_enrich_pool_metadata(p, resolved_host))
                             if result_pools:
                                 result_pools.sort(key=_pool_sort_key)
                                 return result_pools
@@ -254,6 +332,7 @@ class StorageInventoryService:
 
         pools.extend(pools_by_device.values())
         pools.extend(extra_pools)
+        pools = [_enrich_pool_metadata(p, host_id) for p in pools]
 
         pools.sort(key=_pool_sort_key)
         return pools
@@ -262,6 +341,9 @@ class StorageInventoryService:
         pools = self.get_storage_pools(host_id)
         for p in pools:
             if p.get("storage_id") == storage_id or p.get("id") == storage_id:
+                return p
+        for p in pools:
+            if _pool_matches_identifier(p, storage_id):
                 return p
         # Check legacy service storage pools if available
         try:

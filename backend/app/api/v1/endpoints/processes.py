@@ -3,11 +3,32 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.api.dependencies import require_user
+from app.api.dependencies import require_admin, require_user
 from app.core.security import Principal
+from app.schemas.workload_v31 import ProcessActionResultEnvelope, V31ProcessActionRequest
 from app.services.labops_service import service
+from app.services.workload_intelligence_service import get_workload_intelligence_service
 
 router = APIRouter()
+
+
+def _filter_tree_for_owner(node: Dict[str, Any], owner_username: str) -> Optional[Dict[str, Any]]:
+    """Strip foreign-owned and system/protected descendants from process trees for non-admin callers."""
+    if not isinstance(node, dict):
+        return None
+    node_owner = node.get("user") or node.get("username")
+    is_protected = bool(node.get("is_protected") or node.get("classification") == "SYSTEM_PROCESS")
+    if node_owner != owner_username or is_protected:
+        return None
+    clean = dict(node)
+    raw_children = node.get("children") or []
+    filtered_children = []
+    for ch in raw_children:
+        c_clean = _filter_tree_for_owner(ch, owner_username)
+        if c_clean is not None:
+            filtered_children.append(c_clean)
+    clean["children"] = filtered_children
+    return clean
 
 
 class TerminateProcessRequest(BaseModel):
@@ -78,10 +99,56 @@ async def get_process_tree(ref: str, p: Principal = Depends(require_user)) -> Di
         raise HTTPException(status_code=400, detail=err_msg)
 
     if not p.is_admin:
-        root_owner = (tree.get("root") or {}).get("username") or tree.get("username")
+        root_owner = (tree.get("root") or {}).get("username") or tree.get("username") or tree.get("user")
         if root_owner != p.username:
             raise HTTPException(status_code=403, detail="Bạn chỉ được phép xem cây tiến trình do chính mình sở hữu")
+        if "children" in tree and isinstance(tree["children"], list):
+            filtered_list = []
+            for ch in tree["children"]:
+                c_user = ch.get("username") or ch.get("user")
+                if c_user == p.username and not ch.get("is_protected") and ch.get("classification") != "SYSTEM_PROCESS":
+                    if "children" in ch:
+                        c_clean = _filter_tree_for_owner(ch, p.username)
+                        if c_clean is not None:
+                            filtered_list.append(c_clean)
+                    else:
+                        filtered_list.append(ch)
+            tree = dict(tree)
+            tree["children"] = filtered_list
     return tree
+
+
+@router.post("/{ref:path}/v31-action", response_model=ProcessActionResultEnvelope)
+async def execute_v31_action(
+    ref: str,
+    body: V31ProcessActionRequest = Body(...),
+    p: Principal = Depends(require_admin),
+) -> ProcessActionResultEnvelope:
+    """Hardened V3.1 process action with boot_id + pidfd + durable idempotency (Admin only)."""
+    wk_svc = get_workload_intelligence_service(service)
+    try:
+        return wk_svc.execute_v31_process_action(
+            ref=ref,
+            req=body,
+            actor=p.username,
+            is_admin=p.is_admin,
+        )
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe)) from pe
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le)) from le
+    except ValueError as ve:
+        msg = str(ve)
+        if "PID_RECYCLED" in msg or "BOOT_IDENTITY_MISMATCH" in msg:
+            raise HTTPException(status_code=409, detail=msg) from ve
+        raise HTTPException(status_code=422, detail=msg) from ve
+    except RuntimeError as re_err:
+        msg = str(re_err)
+        if "IDEMPOTENCY_CONFLICT" in msg or "ACTION_IN_FLIGHT" in msg:
+            raise HTTPException(status_code=409, detail=msg) from re_err
+        if "FAIL_CLOSED" in msg:
+            raise HTTPException(status_code=503, detail=msg) from re_err
+        raise HTTPException(status_code=400, detail=msg) from re_err
 
 
 @router.post("/{ref:path}/stop")

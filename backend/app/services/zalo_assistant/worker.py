@@ -25,6 +25,7 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+from app.services.assistant_v4.inbox_outbox import chunk_zalo_message
 from app.services.zalo_assistant.service import zalo_assistant_service
 
 logging.basicConfig(
@@ -73,6 +74,19 @@ class ZaloPollingWorker:
             if c.strip() and c.strip() != "*"
         ]
         self._last_telemetry_eval_mono: float = 0.0
+
+    async def _send_zalo_chunks(self, bot: Any, *, chat_id: str, text: str) -> List[str]:
+        """Split long outbound Zalo messages cleanly (<=1800 chars) so Zalo never drops >2000-char payloads."""
+        chunks = chunk_zalo_message(text, max_chars=1800) or ([str(text)] if str(text or "").strip() else [])
+        msg_ids: List[str] = []
+        for idx, chunk in enumerate(chunks):
+            if idx > 0:
+                await asyncio.sleep(0.15)
+            sent = await bot.send_message(chat_id=chat_id, text=chunk)
+            prov_id = getattr(sent, "message_id", None)
+            if prov_id is not None:
+                msg_ids.append(str(prov_id))
+        return msg_ids
 
     async def process_incoming_message(
         self,
@@ -135,7 +149,7 @@ class ZaloPollingWorker:
         if not result.get("success"):
             if result.get("command") == "/link" and result.get("reply"):
                 try:
-                    await bot.send_message(chat_id=chat_id, text=result["reply"])
+                    await self._send_zalo_chunks(bot, chat_id=chat_id, text=result["reply"])
                 except Exception:
                     pass
             return result
@@ -151,7 +165,7 @@ class ZaloPollingWorker:
         # /link verification reply does not reserve outbox quota ledger
         if result.get("command") == "/link":
             try:
-                await bot.send_message(chat_id=chat_id, text=reply_text)
+                await self._send_zalo_chunks(bot, chat_id=chat_id, text=reply_text)
             except Exception as link_send_err:
                 logger.warning("Lỗi gửi xác nhận /link tới %s: %s", chat_id, link_send_err)
             return result
@@ -162,12 +176,11 @@ class ZaloPollingWorker:
             return {**result, "deduplicated": True}
 
         try:
-            sent = await bot.send_message(chat_id=chat_id, text=reply_text)
-            provider_msg_id = getattr(sent, "message_id", None)
+            provider_msg_ids = await self._send_zalo_chunks(bot, chat_id=chat_id, text=reply_text)
             if msg_id:
                 self.quota_ledger.confirm_sent(
                     msg_id,
-                    provider_message_id=str(provider_msg_id) if provider_msg_id is not None else "accepted",
+                    provider_message_id=provider_msg_ids[0] if provider_msg_ids else "accepted",
                 )
             logger.info(
                 "📤 Đã gửi phản hồi (%s) tới chat %s (Dung lượng: %d chars)",
@@ -420,9 +433,8 @@ class ZaloPollingWorker:
         subs = {s["recipient_zalo_id"]: s for s in self.identity_rbac.list_subscriptions()}
 
         async def _send_fn(recipient_id: str, text: str) -> Optional[str]:
-            sent = await bot.send_message(chat_id=recipient_id, text=text)
-            prov_id = getattr(sent, "message_id", None)
-            return str(prov_id) if prov_id is not None else "accepted"
+            msg_ids = await self._send_zalo_chunks(bot, chat_id=recipient_id, text=text)
+            return msg_ids[0] if msg_ids else "accepted"
 
         try:
             await self.dispatcher.dispatch_pending(_send_fn, limit=15, subscriptions=subs)
@@ -746,9 +758,8 @@ class ZaloPollingWorker:
 
         if bot is not None and resolve_notification_owner(getattr(v4, "config", None)) == "V4_ACTIVE":
             async def _v4_send(recipient_id: str, text: str, channel: str) -> Optional[str]:
-                sent = await bot.send_message(chat_id=recipient_id, text=text)
-                prov_id = getattr(sent, "message_id", None)
-                return str(prov_id) if prov_id is not None else "accepted"
+                msg_ids = await self._send_zalo_chunks(bot, chat_id=recipient_id, text=text)
+                return msg_ids[0] if msg_ids else "accepted"
 
             subs = {s["recipient_zalo_id"]: s for s in self.identity_rbac.list_subscriptions()}
 

@@ -511,6 +511,7 @@ class SREToolRegistry:
         formatted: List[Dict[str, Any]] = []
         for req in all_pending[:15]:
             rec = req.get("recommendation") or {}
+            rat = rec.get("rationale") or {}
             rem_sec = int(req.get("remaining_review_seconds") or 0)
             formatted.append({
                 "request_id": req.get("id"),
@@ -527,6 +528,10 @@ class SREToolRegistry:
                 "submitted_at_vn": _format_vn_time(req.get("submitted_at")),
                 "remaining_sla_hours": round(rem_sec / 3600.0, 1),
                 "recommended_host": rec.get("recommended_host_id") or "workstation",
+                "recommended_pool_id": rec.get("recommended_pool_id"),
+                "recommended_mount_point": rec.get("recommended_mount_point"),
+                "pool_assigned_members": rat.get("chosen_pool_assigned_members"),
+                "pool_net_allocatable_gib": rat.get("chosen_pool_net_allocatable_gib"),
                 "recommended_spec": f"{rec.get('cpu_cores', 4)}C/{rec.get('ram_gb', 16)}G/{rec.get('storage_quota_gb', 50)}GiB, GPU={rec.get('gpu_mode', 'NONE')}",
             })
 
@@ -566,26 +571,36 @@ class SREAgentRunner:
         q = str(question or "").lower()
         selected: List[tuple[str, Dict[str, Any]]] = []
 
-        if principal.is_admin and any(
-            k in q
-            for k in (
-                "phê duyệt",
-                "duyệt",
-                "công việc",
-                "yêu cầu",
-                "đơn",
-                "xin cấp",
-                "thành viên mới",
-                "đăng ký mới",
-                "chờ duyệt",
-                "ssh request",
-                "mram",
+        if principal.is_admin and (
+            any(
+                k in q
+                for k in (
+                    "phê duyệt",
+                    "duyệt",
+                    "kiểm duyệt",
+                    "xét duyệt",
+                    "công việc",
+                    "yêu cầu",
+                    "đơn",
+                    "xin cấp",
+                    "thành viên mới",
+                    "đăng ký mới",
+                    "chờ duyệt",
+                    "ssh request",
+                    "mram",
+                    "giảng viên",
+                    "ginagr",
+                    "gvhd",
+                    "hướng dẫn",
+                    "lý do",
+                    "đề tài",
+                )
             )
+            or "@" in q
         ):
             selected.extend([
                 ("get_pending_ssh_requests", {}),
                 ("get_system_health", {}),
-                ("get_incidents", {}),
             ])
         elif any(k in q for k in ("chậm", "slow", "lag", "cpu", "ram", "disk", "ổ", "workstation", "rack", "máy chủ", "tải")):
             selected.extend([
@@ -828,6 +843,7 @@ class SREAgentRunner:
                     lines.append(
                         f"  - {req_item.get('full_name')} (@{req_item.get('username')}, mã {req_item.get('member_code') or 'N/A'}) | "
                         f"GVHD: {req_item.get('supervisor_name')} | Dự án: {req_item.get('project_title')} | "
+                        f"Lý do xin cấp: {req_item.get('registration_reason') or 'Chưa ghi rõ'} | "
                         f"Đề xuất: {req_item.get('recommended_spec')} | Mã đơn: {req_item.get('request_id')} (SLA còn ~{req_item.get('remaining_sla_hours')}h)"
                     )
         if timestamps:

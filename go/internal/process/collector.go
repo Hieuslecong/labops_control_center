@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +44,8 @@ func formatElapsedTime(seconds float64) string {
 type Collector struct {
 	serverID     string
 	gpuCol       *gpu.Collector
+	bootID       string
+	clkTck       float64
 	mu           sync.RWMutex
 	prevCPUTimes map[int]uint64
 	lastTotalCPU uint64
@@ -50,11 +54,30 @@ type Collector struct {
 	lastScan     time.Time
 }
 
+func readKernelBootID() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func readKernelCLKTCK() float64 {
+	if out, err := exec.Command("getconf", "CLK_TCK").Output(); err == nil {
+		if v, pErr := strconv.ParseFloat(strings.TrimSpace(string(out)), 64); pErr == nil && v > 0 {
+			return v
+		}
+	}
+	return 100.0
+}
+
 // NewCollector khởi tạo Process Collector
 func NewCollector(serverID string, gpuCol *gpu.Collector) *Collector {
 	c := &Collector{
 		serverID:     serverID,
 		gpuCol:       gpuCol,
+		bootID:       readKernelBootID(),
+		clkTck:       readKernelCLKTCK(),
 		prevCPUTimes: make(map[int]uint64),
 		uidToUser:    make(map[int]string),
 	}
@@ -294,6 +317,86 @@ func IsWorkloadCandidate(name, cmdline string, isGPU bool, vramMB uint64) (bool,
 	return false, AttributionUnknown
 }
 
+var monitoringBasenames = map[string]bool{
+	"gpustat":    true,
+	"nvidia-smi": true,
+	"nvtop":      true,
+}
+
+func extractExecutableBasename(cmdline string) string {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return ""
+	}
+	// If invoked via python/python3 -m <module> or python /path/to/script, inspect target token.
+	firstBase := strings.ToLower(filepath.Base(fields[0]))
+	if strings.HasPrefix(firstBase, "python") && len(fields) >= 3 && fields[1] == "-m" {
+		return strings.ToLower(fields[2])
+	}
+	if strings.HasPrefix(firstBase, "python") && len(fields) >= 2 && !strings.HasPrefix(fields[1], "-") {
+		return strings.ToLower(filepath.Base(fields[1]))
+	}
+	return firstBase
+}
+
+func isMonitoringCommand(name, cmdline string) (bool, string) {
+	baseName := strings.ToLower(filepath.Base(strings.TrimSpace(name)))
+	if monitoringBasenames[baseName] {
+		return true, baseName
+	}
+	cmdBase := extractExecutableBasename(cmdline)
+	if monitoringBasenames[cmdBase] {
+		return true, cmdBase
+	}
+	return false, ""
+}
+
+// ClassifyWorkloadKind phân loại bảo thủ loại tác vụ độc lập với việc có đang dùng GPU hay không.
+func ClassifyWorkloadKind(name, cmdline string, isGPU bool, vramMB uint64, isProtected bool) (string, string, []string) {
+	if isProtected {
+		return "SYSTEM", "VERIFIED", []string{"protected_system_policy"}
+	}
+	if isMon, monTool := isMonitoringCommand(name, cmdline); isMon {
+		return "MONITORING", "VERIFIED", []string{"monitoring_executable:" + monTool}
+	}
+
+	nameLower := strings.ToLower(strings.TrimSpace(name))
+	cmdLower := strings.ToLower(cmdline)
+	cmdBase := extractExecutableBasename(cmdline)
+
+	if strings.HasPrefix(nameLower, "jupyter") || strings.Contains(nameLower, "ipykernel") ||
+		strings.HasPrefix(cmdBase, "jupyter") || strings.Contains(cmdLower, "ipykernel_launcher") {
+		return "NOTEBOOK", "VERIFIED", []string{"notebook_runtime"}
+	}
+
+	for _, tok := range []string{"vllm", "tritonserver", "ollama", "text-generation-inference"} {
+		if nameLower == tok || cmdBase == tok || strings.Contains(" "+cmdLower+" ", " "+tok+" ") {
+			return "INFERENCE", "HEURISTIC", []string{"inference_engine:" + tok}
+		}
+	}
+
+	if nameLower == "torchrun" || nameLower == "deepspeed" || nameLower == "accelerate" ||
+		cmdBase == "torchrun" || cmdBase == "deepspeed" || cmdBase == "accelerate" {
+		return "TRAINING", "HEURISTIC", []string{"distributed_training_launcher:" + cmdBase}
+	}
+	if strings.Contains(cmdLower, "train.py") || strings.Contains(cmdLower, "finetune") || strings.Contains(cmdLower, "--do_train") {
+		return "TRAINING", "HEURISTIC", []string{"training_script_or_flag"}
+	}
+
+	for _, tok := range []string{"python", "python3", "pytest", "julia", "matlab", "rscript"} {
+		if strings.HasPrefix(nameLower, tok) || strings.HasPrefix(cmdBase, tok) || strings.HasSuffix(cmdBase, ".py") {
+			return "GENERAL_COMPUTE", "HEURISTIC", []string{"general_compute_runtime:" + nameLower}
+		}
+	}
+	if strings.HasPrefix(cmdLower, "./") || strings.Contains(cmdLower, ".sh") {
+		return "GENERAL_COMPUTE", "HEURISTIC", []string{"user_script_or_binary"}
+	}
+	if isGPU || vramMB > 0 {
+		return "GENERAL_COMPUTE", "HEURISTIC", []string{"gpu_compute_binary"}
+	}
+	return "OTHER", "UNKNOWN", []string{"unclassified_process"}
+}
+
 // Collect quét danh sách tiến trình từ /proc
 func (c *Collector) Collect(filterType string) *ProcessReport {
 	c.mu.Lock()
@@ -327,18 +430,39 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		}
 	}
 
-	// Đọc bảng GPU compute apps từ GPU collector (cộng dồn nếu 1 PID dùng nhiều GPU)
+	// Đọc bảng GPU compute apps từ GPU collector (cộng dồn cho legacy field, đồng thời giữ map từng GPU UUID)
 	gpuProcessMap := make(map[int]struct {
 		gpuIndex int
 		gpuUUID  string
 		vramMB   uint64
 	})
+	gpuAllocMap := make(map[int][]ProcessGPUAllocation)
 
 	if c.gpuCol != nil {
 		gpuReport := c.gpuCol.GetLatest()
 		if gpuReport != nil {
 			for _, g := range gpuReport.GPUs {
 				for _, p := range g.ActiveProcesses {
+					allocs := gpuAllocMap[p.PID]
+					merged := false
+					for idx := range allocs {
+						if allocs[idx].GPUUUID == g.UUID {
+							allocs[idx].VRAMMB += p.UsedMemoryMB
+							allocs[idx].ValueBytes = allocs[idx].VRAMMB * 1024 * 1024
+							merged = true
+							break
+						}
+					}
+					if !merged {
+						allocs = append(allocs, ProcessGPUAllocation{
+							GPUUUID:    g.UUID,
+							GPUIndex:   g.Index,
+							ValueBytes: p.UsedMemoryMB * 1024 * 1024,
+							VRAMMB:     p.UsedMemoryMB,
+						})
+					}
+					gpuAllocMap[p.PID] = allocs
+
 					if existing, ok := gpuProcessMap[p.PID]; ok {
 						existing.vramMB += p.UsedMemoryMB
 						if g.Index < existing.gpuIndex {
@@ -368,6 +492,7 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			Source:      "labops-go-agent",
 			CollectedAt: time.Now().UTC().Format(time.RFC3339),
 			ServerID:    c.serverID,
+			BootID:      c.bootID,
 			TotalCount:  0,
 			Processes:   []ProcessInfo{},
 		}
@@ -429,13 +554,18 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		rssMB := math.Round((float64(rssBytes)/(1024*1024))*10) / 10
 		vmsMB := math.Round((float64(vsize)/(1024*1024))*10) / 10
 
-		// Tính toán start_time và elapsed_time chuẩn
-		// CLK_TCK = 100 on Linux x86_64
-		startSecAfterBoot := float64(startTimeTicks) / 100.0
+		// Tính toán start_time và elapsed_time theo CLK_TCK thực tế
+		clk := c.clkTck
+		if clk <= 0 {
+			clk = 100.0
+		}
+		startSecAfterBoot := float64(startTimeTicks) / clk
 		procStartTime := bootTime.Add(time.Duration(startSecAfterBoot * float64(time.Second)))
 		elapsedSec := math.Max(0, uptimeSec-startSecAfterBoot)
+		elapsedSecondsInt := int64(elapsedSec)
 		elapsedStr := formatElapsedTime(elapsedSec)
 		startTimeStr := procStartTime.Format("2006-01-02 15:04:05")
+		startedAtUTC := procStartTime.UTC().Format(time.RFC3339)
 
 		// Đọc UID từ /proc/[pid]/status
 		uid := 0
@@ -509,11 +639,16 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			isUserWorkload = false
 		} else {
 			// Thuộc tài khoản user (UID >= 1000) hoặc trong Container
+			isMonTool, _ := isMonitoringCommand(procName, cmdline)
 			// Nếu tiến trình đang dùng GPU / VRAM thì ưu tiên là user workload (tránh bị ẩn bởi VS Code / background matcher)
 			if isGPU || vramMB > 0 {
 				isUserWorkload = true
 				attribution = AttributionVerifiedWorkload
 				classification = ClassGPUProcess
+			} else if isMonTool {
+				isUserWorkload = true
+				attribution = AttributionVerifiedWorkload
+				classification = ClassMemberProcess
 			} else if IsDesktopOrBackgroundService(procName, cmdline) {
 				classification = ClassMemberProcess
 				attribution = AttributionBackgroundProcess
@@ -552,6 +687,8 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			}
 		}
 
+		wkKind, wkConf, wkEvidence := ClassifyWorkloadKind(procName, cmdline, isGPU, vramMB, isProtected)
+
 		pInfo := ProcessInfo{
 			Ref:               ref,
 			PID:               pid,
@@ -563,6 +700,9 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			CommandLine:       cmdline,
 			Classification:    classification,
 			Attribution:       attribution,
+			WorkloadKind:      wkKind,
+			KindConfidence:    wkConf,
+			KindEvidence:      wkEvidence,
 			IsUserWorkload:    isUserWorkload,
 			IsRootWorkload:    isUserWorkload, // Tạm thời là root, sẽ gộp theo cây ở bước sau
 			ChildrenCount:     0,
@@ -572,16 +712,20 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 			TreeIsGPU:         isGPU || vramMB > 0,
 			TreeGPUIndex:      gpuIdx,
 			TreeGPUUUID:       gpuUUID,
+			GPUAllocations:    gpuAllocMap[pid],
 			ContainerID:       containerID,
 			Workspace:         workspace,
+			BootID:            c.bootID,
 			CPUPercent:        cpuPct,
 			MemoryRSSMB:       rssMB,
 			MemoryVMSMB:       vmsMB,
 			MemoryPercent:     memPct,
 			State:             state,
 			StartTime:         startTimeStr,
+			StartedAtUTC:      startedAtUTC,
 			StartTimeTicks:    startTimeTicks,
 			ElapsedTime:       elapsedStr,
+			ElapsedSeconds:    elapsedSecondsInt,
 			IsGPU:             isGPU,
 			GPUIndex:          gpuIdx,
 			GPUUUID:           gpuUUID,
@@ -640,6 +784,7 @@ func (c *Collector) Collect(filterType string) *ProcessReport {
 		Source:      "labops-go-agent",
 		CollectedAt: time.Now().UTC().Format(time.RFC3339),
 		ServerID:    c.serverID,
+		BootID:      c.bootID,
 		TotalCount:  len(filtered),
 		Processes:   filtered,
 	}
@@ -754,6 +899,41 @@ func aggregateWorkloadTrees(procs []ProcessInfo) {
 			treeGPUIdx = &idxCopy
 		}
 		treeGPUUUID := root.GPUUUID
+		allocByUUID := make(map[string]ProcessGPUAllocation)
+		mergeAlloc := func(a ProcessGPUAllocation) {
+			if a.GPUUUID == "" {
+				return
+			}
+			if cur, exists := allocByUUID[a.GPUUUID]; exists {
+				cur.VRAMMB += a.VRAMMB
+				cur.ValueBytes += a.ValueBytes
+				if cur.ValueBytes == 0 && cur.VRAMMB > 0 {
+					cur.ValueBytes = cur.VRAMMB * 1024 * 1024
+				}
+				allocByUUID[a.GPUUUID] = cur
+			} else {
+				cp := a
+				if cp.ValueBytes == 0 && cp.VRAMMB > 0 {
+					cp.ValueBytes = cp.VRAMMB * 1024 * 1024
+				}
+				allocByUUID[a.GPUUUID] = cp
+			}
+		}
+		for _, a := range root.GPUAllocations {
+			mergeAlloc(a)
+		}
+		if len(root.GPUAllocations) == 0 && (root.IsGPU || root.VRAMMB > 0) && root.GPUUUID != "" {
+			idxVal := 0
+			if root.GPUIndex != nil {
+				idxVal = *root.GPUIndex
+			}
+			mergeAlloc(ProcessGPUAllocation{
+				GPUUUID:    root.GPUUUID,
+				GPUIndex:   idxVal,
+				ValueBytes: root.VRAMMB * 1024 * 1024,
+				VRAMMB:     root.VRAMMB,
+			})
+		}
 		childrenCount := 0
 		visited := map[int]bool{root.PID: true}
 
@@ -767,6 +947,22 @@ func aggregateWorkloadTrees(procs []ProcessInfo) {
 					totalCPU += child.CPUPercent
 					totalRSS += child.MemoryRSSMB
 					totalVRAM += child.VRAMMB
+
+					for _, ca := range child.GPUAllocations {
+						mergeAlloc(ca)
+					}
+					if len(child.GPUAllocations) == 0 && (child.IsGPU || child.VRAMMB > 0) && child.GPUUUID != "" {
+						idxVal := 0
+						if child.GPUIndex != nil {
+							idxVal = *child.GPUIndex
+						}
+						mergeAlloc(ProcessGPUAllocation{
+							GPUUUID:    child.GPUUUID,
+							GPUIndex:   idxVal,
+							ValueBytes: child.VRAMMB * 1024 * 1024,
+							VRAMMB:     child.VRAMMB,
+						})
+					}
 
 					if child.IsGPU || child.VRAMMB > 0 {
 						treeIsGPU = true
@@ -796,5 +992,18 @@ func aggregateWorkloadTrees(procs []ProcessInfo) {
 		root.TreeIsGPU = treeIsGPU || totalVRAM > 0
 		root.TreeGPUIndex = treeGPUIdx
 		root.TreeGPUUUID = treeGPUUUID
+		if len(allocByUUID) > 0 {
+			combined := make([]ProcessGPUAllocation, 0, len(allocByUUID))
+			for _, v := range allocByUUID {
+				combined = append(combined, v)
+			}
+			sort.Slice(combined, func(aIdx, bIdx int) bool {
+				if combined[aIdx].GPUIndex != combined[bIdx].GPUIndex {
+					return combined[aIdx].GPUIndex < combined[bIdx].GPUIndex
+				}
+				return combined[aIdx].GPUUUID < combined[bIdx].GPUUUID
+			})
+			root.GPUAllocations = combined
+		}
 	}
 }

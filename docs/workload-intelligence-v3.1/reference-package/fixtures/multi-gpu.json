@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "fixture-multi",
+  "observed_at": "2026-11-25T14:14:00Z",
+  "received_at": "2026-11-25T14:14:01Z",
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null,
+    "mode": "workloads"
+  },
+  "quality": {
+    "status": "FRESH",
+    "expected_nodes": 1,
+    "fresh_nodes": 1,
+    "fresh_workload_nodes": 1,
+    "expected_gpus": 2,
+    "fresh_gpus": 2,
+    "last_success_at": "2026-11-25T14:14:00Z"
+  },
+  "nodes": [
+    {
+      "id": "workstation",
+      "quality": "FRESH",
+      "workload_quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "last_success_at": "2026-11-25T14:14:00Z"
+    }
+  ],
+  "gpus": [
+    {
+      "gpu_uuid": "fixture-gpu-ws",
+      "node_id": "workstation",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 1073741824,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-ws2",
+      "node_id": "workstation",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 3221225472,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    }
+  ],
+  "kpis": {
+    "observed_workloads": 1,
+    "last_known_workloads": null,
+    "gpu_associated_workloads": 1,
+    "gpu_association_unknown": 0,
+    "observed_members": 1,
+    "unmapped_member_workloads": 0,
+    "device_vram_used_bytes": 4294967296,
+    "device_vram_capacity_bytes": 51539607552,
+    "gpu_coverage": {
+      "fresh": 2,
+      "expected": 2
+    },
+    "attention_count": null
+  },
+  "composition": {
+    "gpu_non_monitoring": 1,
+    "non_gpu_compute": 0,
+    "monitoring": 0,
+    "other_unknown": 0
+  },
+  "workloads": [
+    {
+      "id": "fixture-root-1",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304501,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-1",
+      "username": "member_1",
+      "group_id": null,
+      "workspace": "ws-member_1",
+      "display_name": "python",
+      "workload_kind": "GENERAL_COMPUTE",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": true,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 4194304000,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 4294967296,
+        "attribution": "PER_DEVICE_VERIFIED"
+      },
+      "gpu_allocations": [
+        {
+          "gpu_uuid": "fixture-gpu-ws",
+          "value_bytes": 1073741824,
+          "quality": "FRESH"
+        },
+        {
+          "gpu_uuid": "fixture-gpu-ws2",
+          "value_bytes": 3221225472,
+          "quality": "FRESH"
+        }
+      ],
+      "elapsed_seconds": 3600,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    }
+  ],
+  "device_vram": {
+    "scope": "DEVICE_WIDE",
+    "member_filter_applied": false,
+    "reconciliation": "NOT_COMPARABLE"
+  },
+  "warnings": []
+}

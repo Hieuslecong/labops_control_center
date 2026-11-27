@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workload-analytics",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_uuid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "member_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "node_id",
+        "gpu_uuid",
+        "member_id",
+        "group_id"
+      ],
+      "additionalProperties": false
+    },
+    "from": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "to": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "bucket_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coverage_ratio": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "entity_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "aggregation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "coverage_ratio": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ts": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "Z$"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "quality": {
+                  "enum": [
+                    "FRESH",
+                    "STALE",
+                    "OFFLINE",
+                    "NOT_CONFIGURED",
+                    "UNSUPPORTED",
+                    "NO_DATA",
+                    "ERROR",
+                    "UNKNOWN",
+                    "PARTIAL"
+                  ]
+                }
+              },
+              "required": [
+                "ts",
+                "value",
+                "quality"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 600
+          }
+        },
+        "required": [
+          "metric",
+          "entity_id",
+          "unit",
+          "aggregation",
+          "coverage_ratio",
+          "points"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 20
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "enum": [
+              "SUPPORTED",
+              "PARTIAL",
+              "UNSUPPORTED",
+              "NO_DATA",
+              "DEFERRED"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "status",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "scope",
+    "from",
+    "to",
+    "bucket_seconds",
+    "coverage_ratio",
+    "series",
+    "capabilities"
+  ],
+  "additionalProperties": false
+}

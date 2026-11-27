@@ -116,13 +116,13 @@ async def login(payload: LoginRequest, request: Request) -> Dict[str, Any]:
         if not hmac.compare_digest(password.encode("utf-8"), admin_pass.encode("utf-8")):
             _record_failure(client_ip, username)
             service._audit(username, "AUTH_LOGIN_FAILED", "SESSION", username, "DENIED", "Sai mật khẩu quản trị")
-            service._save_persistent_data()
+            service.save_audit_logs()
             raise HTTPException(status_code=401, detail="Tài khoản hoặc mật khẩu không chính xác")
         _clear_failures(client_ip, username)
         ttl = 8 * 3600
         tok = issue_token(admin_user, "ADMIN", ttl=ttl)
         service._audit(admin_user, "AUTH_LOGIN", "SESSION", admin_user, "SUCCESS", "Đăng nhập quản trị viên thành công")
-        service._save_persistent_data()
+        service.save_audit_logs()
         return {
             "access_token": tok,
             "token_type": "bearer",
@@ -172,7 +172,7 @@ async def login(payload: LoginRequest, request: Request) -> Dict[str, Any]:
     auth_ctx = mram_service.get_auth_context_for_member(username)
     tok = issue_token(username, "RESEARCHER", member_id=member_id, ttl=ttl)
     service._audit(username, "AUTH_LOGIN", "SESSION", username, "SUCCESS", f"Đăng nhập thành viên (must_change={must_change})")
-    service._save_persistent_data()
+    service.save_audit_logs()
     return {
         "access_token": tok,
         "token_type": "bearer",
@@ -220,7 +220,7 @@ async def exchange_zalo_invite_session(payload: ZaloInviteSessionRequest) -> Dic
         "SUCCESS",
         f"Mở phiên duyệt nhanh từ liên kết Zalo ({ver.get('invitation_id')})",
     )
-    service._save_persistent_data()
+    service.save_audit_logs()
     return {
         "access_token": tok,
         "token_type": "bearer",
@@ -275,7 +275,7 @@ async def logout(p: Principal = Depends(require_user)) -> Dict[str, Any]:
     else:
         get_revocation_store().revoke_subject(p.username, reason="logout")
     service._audit(p.username, "AUTH_LOGOUT", "SESSION", p.username, "SUCCESS", "Đăng xuất và thu hồi phiên JWT")
-    service._save_persistent_data()
+    service.save_audit_logs()
     return {"success": True, "revoked": True}
 
 
@@ -355,7 +355,7 @@ async def issue_step_up(payload: StepUpRequest, p: Principal = Depends(require_u
             raise HTTPException(status_code=503, detail="LABOPS_ADMIN_PASSWORD chưa được cấu hình")
         if not hmac.compare_digest(payload.password.encode("utf-8"), admin_pass.encode("utf-8")):
             service._audit(p.username, "AUTH_STEP_UP_FAILED", payload.action, payload.target_id, "DENIED", "Sai mật khẩu xác thực nâng cao")
-            service._save_persistent_data()
+            service.save_audit_logs()
             raise HTTPException(status_code=401, detail="Mật khẩu xác nhận không chính xác")
     else:
         allowed_member_actions = {"CLAIM_SSH_SECRET", "REISSUE_SSH_SECRET", "CLAIM_SSH_BUNDLE"}

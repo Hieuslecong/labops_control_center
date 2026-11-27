@@ -1,0 +1,991 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workload-snapshot",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "observed_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_uuid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "member_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "enum": [
+            "workloads"
+          ]
+        }
+      },
+      "required": [
+        "node_id",
+        "gpu_uuid",
+        "member_id",
+        "group_id",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "FRESH",
+            "STALE",
+            "OFFLINE",
+            "NOT_CONFIGURED",
+            "UNSUPPORTED",
+            "NO_DATA",
+            "ERROR",
+            "UNKNOWN",
+            "PARTIAL"
+          ]
+        },
+        "expected_nodes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fresh_nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fresh_workload_nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_gpus": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fresh_gpus": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_success_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "expected_nodes",
+        "fresh_nodes",
+        "fresh_workload_nodes",
+        "expected_gpus",
+        "fresh_gpus",
+        "last_success_at"
+      ],
+      "additionalProperties": false
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "quality": {
+            "enum": [
+              "FRESH",
+              "STALE",
+              "OFFLINE",
+              "NOT_CONFIGURED",
+              "UNSUPPORTED",
+              "NO_DATA",
+              "ERROR",
+              "UNKNOWN",
+              "PARTIAL"
+            ]
+          },
+          "workload_quality": {
+            "enum": [
+              "FRESH",
+              "STALE",
+              "OFFLINE",
+              "NOT_CONFIGURED",
+              "UNSUPPORTED",
+              "NO_DATA",
+              "ERROR",
+              "UNKNOWN",
+              "PARTIAL"
+            ]
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "quality",
+          "workload_quality",
+          "observed_at",
+          "last_success_at"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 100
+    },
+    "gpus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "gpu_uuid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "quality": {
+            "enum": [
+              "FRESH",
+              "STALE",
+              "OFFLINE",
+              "NOT_CONFIGURED",
+              "UNSUPPORTED",
+              "NO_DATA",
+              "ERROR",
+              "UNKNOWN",
+              "PARTIAL"
+            ]
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vram_used_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vram_capacity_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "utilization_percent": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "gpu_uuid",
+          "node_id",
+          "quality",
+          "observed_at",
+          "vram_used_bytes",
+          "vram_capacity_bytes",
+          "utilization_percent"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 256
+    },
+    "kpis": {
+      "type": "object",
+      "properties": {
+        "observed_workloads": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_known_workloads": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_associated_workloads": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_association_unknown": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_members": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unmapped_member_workloads": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device_vram_used_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device_vram_capacity_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attention_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gpu_coverage": {
+          "type": "object",
+          "properties": {
+            "fresh": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "expected": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fresh",
+            "expected"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "observed_workloads",
+        "last_known_workloads",
+        "gpu_associated_workloads",
+        "gpu_association_unknown",
+        "observed_members",
+        "unmapped_member_workloads",
+        "device_vram_used_bytes",
+        "device_vram_capacity_bytes",
+        "attention_count",
+        "gpu_coverage"
+      ],
+      "additionalProperties": false
+    },
+    "composition": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "gpu_non_monitoring": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "non_gpu_compute": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "monitoring": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "other_unknown": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "gpu_non_monitoring",
+            "non_gpu_compute",
+            "monitoring",
+            "other_unknown"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workloads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "node_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "boot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_pid": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "start_ticks": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "container_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "uid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "member_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "workload_kind": {
+            "enum": [
+              "TRAINING",
+              "INFERENCE",
+              "NOTEBOOK",
+              "GENERAL_COMPUTE",
+              "MONITORING",
+              "SYSTEM",
+              "OTHER",
+              "UNKNOWN"
+            ]
+          },
+          "kind_confidence": {
+            "enum": [
+              "VERIFIED",
+              "HEURISTIC",
+              "UNKNOWN"
+            ]
+          },
+          "kind_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "maxItems": 12
+          },
+          "gpu_associated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cpu": {
+            "type": "object",
+            "properties": {
+              "value_percent": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "basis": {
+                "enum": [
+                  "PER_CORE_PERCENT",
+                  "HOST_CAPACITY_PERCENT",
+                  "UNKNOWN"
+                ]
+              }
+            },
+            "required": [
+              "value_percent",
+              "basis"
+            ],
+            "additionalProperties": false
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "value_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "method": {
+                "enum": [
+                  "PROCESS_RSS",
+                  "TREE_RSS_SUM",
+                  "TREE_PSS_SUM",
+                  "WORKSPACE_CGROUP_CURRENT",
+                  "UNKNOWN"
+                ]
+              },
+              "unique_memory": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "value_bytes",
+              "method",
+              "unique_memory"
+            ],
+            "additionalProperties": false
+          },
+          "vram": {
+            "type": "object",
+            "properties": {
+              "value_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attribution": {
+                "enum": [
+                  "PER_DEVICE_VERIFIED",
+                  "LEGACY_AGGREGATE",
+                  "UNKNOWN"
+                ]
+              }
+            },
+            "required": [
+              "value_bytes",
+              "attribution"
+            ],
+            "additionalProperties": false
+          },
+          "gpu_allocations": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "gpu_uuid": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "quality": {
+                      "enum": [
+                        "FRESH",
+                        "STALE",
+                        "OFFLINE",
+                        "NOT_CONFIGURED",
+                        "UNSUPPORTED",
+                        "NO_DATA",
+                        "ERROR",
+                        "UNKNOWN",
+                        "PARTIAL"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "gpu_uuid",
+                    "value_bytes",
+                    "quality"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "elapsed_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "OBSERVED",
+              "STALE",
+              "MISSING_UNCONFIRMED",
+              "EXIT_CONFIRMED",
+              "UNKNOWN"
+            ]
+          },
+          "quality": {
+            "enum": [
+              "FRESH",
+              "STALE",
+              "OFFLINE",
+              "NOT_CONFIGURED",
+              "UNSUPPORTED",
+              "NO_DATA",
+              "ERROR",
+              "UNKNOWN",
+              "PARTIAL"
+            ]
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_protected": {
+            "type": "boolean"
+          },
+          "actions_allowed": {
+            "type": "boolean"
+          },
+          "action_block_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "ref",
+          "node_id",
+          "boot_id",
+          "host_pid",
+          "start_ticks",
+          "container_id",
+          "uid",
+          "member_id",
+          "username",
+          "group_id",
+          "workspace",
+          "display_name",
+          "workload_kind",
+          "kind_confidence",
+          "kind_evidence",
+          "gpu_associated",
+          "cpu",
+          "memory",
+          "vram",
+          "gpu_allocations",
+          "elapsed_seconds",
+          "started_at",
+          "state",
+          "quality",
+          "observed_at",
+          "is_protected",
+          "actions_allowed",
+          "action_block_reason"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 2000
+    },
+    "device_vram": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "const": "DEVICE_WIDE"
+        },
+        "member_filter_applied": {
+          "const": false
+        },
+        "reconciliation": {
+          "enum": [
+            "CONSISTENT",
+            "MISMATCH",
+            "NOT_COMPARABLE",
+            "UNKNOWN"
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "member_filter_applied",
+        "reconciliation"
+      ],
+      "additionalProperties": false
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "observed_at",
+    "received_at",
+    "scope",
+    "quality",
+    "nodes",
+    "gpus",
+    "kpis",
+    "composition",
+    "workloads",
+    "device_vram",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

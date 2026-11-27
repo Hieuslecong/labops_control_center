@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -30,6 +30,7 @@ from app.services.assistant_v4.inbox_outbox import DurableMessageInbox, OutboxV4
 from app.services.assistant_v4.memory_service import ScopedSessionMemory
 from app.services.assistant_v4.notification_policy import (
     SHADOW_METRICS_KEY,
+    VN_TZ,
     resolve_notification_owner,
 )
 from app.services.assistant_v4.retention_service import RetentionMaintenanceService
@@ -40,6 +41,18 @@ if TYPE_CHECKING:
     from app.services.zalo_assistant.telemetry_collector import UnifiedTelemetryCollector
 
 logger = logging.getLogger("labops.v4.facade")
+
+
+def _fmt_vn_time(iso_str: Any) -> str:
+    if not isinstance(iso_str, str) or not iso_str.strip():
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(iso_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(VN_TZ).strftime("%H:%M %d/%m/%Y")
+    except Exception:
+        return str(iso_str)[:16]
 
 
 class AssistantV4Facade:
@@ -188,7 +201,7 @@ class AssistantV4Facade:
         intent = self._intent_router.classify(clean)
 
         if intent == "GENERAL_CHAT":
-            return self.runtime.run_turn(
+            out = self.runtime.run_turn(
                 question=clean,
                 principal=principal,
                 session_id=sess["session_id"],
@@ -196,13 +209,49 @@ class AssistantV4Facade:
                 chat_id=effective_chat,
                 allowed_tools=[],
             )
+            if out.get("degraded") and str(out.get("reply") or "").startswith("⚠️ AI Gateway"):
+                out["reply"] = (
+                    "ℹ️ Cổng AI tổng quát (9Router) hiện đang ngoại tuyến nên chưa trả lời câu hỏi kiến thức tự do.\n"
+                    "• Tuy nhiên, mọi thao tác quản trị & vận hành LabOps (đơn SSH, GPU/máy chủ, cảnh báo, nhắc việc, sự cố, báo cáo) "
+                    "vẫn hoạt động trực tiếp bằng tiếng Việt tự nhiên."
+                )
+            out.setdefault("route", "v4")
+            out.setdefault("intent", intent)
+            out.setdefault("session_id", sess["session_id"])
+            out.setdefault("context_scope", f"{principal.role}:{principal.username}")
+            return out
 
         if intent == "WATCH_OR_REMINDER_NL":
             proposal = self._parse_nl_watch_or_reminder(clean, principal)
             if proposal is not None:
+                try:
+                    self.memory.append_turn_messages(
+                        session_id=sess["session_id"],
+                        expected_version=None,
+                        entries=[
+                            {"role": "user", "content": clean},
+                            {"role": "assistant", "content": str(proposal["reply"])},
+                        ],
+                    )
+                except Exception:
+                    pass
+                proposal.setdefault("route", "v4")
+                proposal.setdefault("intent", intent)
+                proposal.setdefault("session_id", sess["session_id"])
+                proposal.setdefault("context_scope", f"{principal.role}:{principal.username}")
                 return proposal
 
-        return self.runtime.run_turn(
+        try:
+            prior_history = self.memory.get_bounded_context(
+                session_id=sess["session_id"],
+                principal_id=principal.username or principal.zalo_user_id,
+                channel=channel,
+                chat_id=effective_chat,
+            )
+        except Exception:
+            prior_history = []
+
+        out = self.runtime.run_turn(
             question=clean,
             principal=principal,
             session_id=sess["session_id"],
@@ -210,19 +259,537 @@ class AssistantV4Facade:
             chat_id=effective_chat,
             allowed_tools=None,
         )
+        if out.get("degraded") and getattr(self.ai_client, "base_url", None):
+            fallback = self._deterministic_v4_tool_fallback(
+                question=clean,
+                principal=principal,
+                corr_id=str(out.get("correlation_id") or ""),
+                prior_history=prior_history,
+            )
+            if fallback is not None:
+                out["reply"] = fallback["reply"]
+                out["tool_traces"] = list(out.get("tool_traces") or []) + list(fallback.get("tool_traces") or [])
+                out["evidence_timestamps"] = list(fallback.get("evidence_timestamps") or [])
+                out["fallback_used"] = True
+                try:
+                    with self.db.session_scope() as s:
+                        from app.db.models import V4ChatMessageRecord
+
+                        last_msg = (
+                            s.execute(
+                                select(V4ChatMessageRecord)
+                                .where(V4ChatMessageRecord.session_id == sess["session_id"])
+                                .order_by(V4ChatMessageRecord.seq.desc())
+                                .limit(1)
+                            )
+                            .scalars()
+                            .first()
+                        )
+                        if (
+                            last_msg is not None
+                            and last_msg.role == "assistant"
+                            and str(last_msg.content_redacted or "").startswith(
+                                ("⚠️ AI Gateway", "🤖 LabOps Personal AI V4 (Chế độ công cụ trực tiếp")
+                            )
+                        ):
+                            last_msg.content_redacted = str(fallback["reply"])[:4000]
+                        else:
+                            self.memory.append_turn_messages(
+                                session_id=sess["session_id"],
+                                expected_version=None,
+                                entries=[
+                                    {"role": "user", "content": clean},
+                                    {"role": "assistant", "content": str(fallback["reply"])},
+                                ],
+                            )
+                except Exception:
+                    pass
+        out.setdefault("route", "v4")
+        out.setdefault("intent", intent)
+        out.setdefault("session_id", sess["session_id"])
+        out.setdefault("context_scope", f"{principal.role}:{principal.username}")
+        return out
+
+    @staticmethod
+    def _format_ssh_request_dossier(
+        r: Dict[str, Any],
+        *,
+        member_info: Optional[Dict[str, Any]] = None,
+        show_action_hints: bool = True,
+    ) -> List[str]:
+        req_id = str(r.get("id") or "")
+        uname = str(r.get("username") or (member_info or {}).get("username") or "")
+        full_name = str(r.get("full_name") or (member_info or {}).get("full_name") or uname)
+        mcode = str(r.get("member_code") or (member_info or {}).get("member_code") or "N/A")
+        mcat = str(r.get("member_category") or (member_info or {}).get("member_category") or "STUDENT")
+        dept = str(r.get("department_class") or (member_info or {}).get("department_class") or "").strip()
+        dept_str = f" • {dept}" if dept else ""
+        sup_name = str(r.get("supervisor_name") or (member_info or {}).get("supervisor_name") or "Chưa khai báo")
+        proj = str(r.get("project_title") or "Chưa nêu tên đề tài")
+        reason = str(r.get("registration_reason") or "").strip() or "Chưa ghi rõ"
+        purpose = str(r.get("ssh_purpose") or "").strip() or "Chưa ghi rõ"
+        tasks = str(r.get("expected_tasks") or "").strip() or "Chưa ghi rõ"
+        gpu_req = bool(r.get("gpu_requested"))
+        gpu_just = str(r.get("gpu_justification") or "").strip()
+        gpu_str = f"Có ({gpu_just})" if (gpu_req and gpu_just) else ("Có (SHARED)" if gpu_req else "Không")
+        dur_days = r.get("requested_duration_days")
+        dur_str = f"{dur_days} ngày" if dur_days else ("Không giới hạn" if mcat == "LECTURER" else "30 ngày (mặc định)")
+        status_str = str(r.get("status") or "PENDING_APPROVAL")
+        sub_at = _fmt_vn_time(r.get("submitted_at"))
+        rem_h = round(int(r.get("remaining_review_seconds") or 0) / 3600.0, 1)
+
+        rec = dict(r.get("recommendation") or {})
+        if not rec.get("recommended_pool_id"):
+            try:
+                from app.services.mram_service import mram_service
+
+                rec = mram_service.compute_resource_recommendation(
+                    member_category=mcat,
+                    requested_duration_days=dur_days,
+                    gpu_requested=gpu_req,
+                )
+            except Exception:
+                pass
+        rat = rec.get("rationale") or {}
+        host_lbl = rec.get("recommended_host_id") or r.get("recommended_host") or "workstation"
+        pool_id = rec.get("recommended_pool_id") or r.get("recommended_pool_id") or "N/A"
+        mount_pt = rec.get("recommended_mount_point") or r.get("recommended_mount_point") or ""
+        free_gib = rat.get("chosen_pool_net_allocatable_gib")
+        mem_cnt = rat.get("chosen_pool_assigned_members")
+        pool_load = (
+            f" (đang có {mem_cnt} TV, trống {free_gib} GiB)"
+            if (mem_cnt is not None and free_gib is not None)
+            else ""
+        )
+        mount_txt = f" ({mount_pt})" if mount_pt else ""
+        spec_line = (
+            f"{rec.get('cpu_cores', 4)} vCPU | {rec.get('ram_gb', 16)} GiB RAM | "
+            f"{rec.get('storage_quota_gb', 50)} GiB Ổ cứng | GPU: {rec.get('gpu_mode', 'NONE')}"
+        )
+
+        purpose_task_line = (
+            f"• Mục đích & Tác vụ dự kiến: {purpose}"
+            if (purpose.strip().lower() == tasks.strip().lower() or tasks == "Chưa ghi rõ")
+            else f"• Mục đích SSH & Tác vụ dự kiến: {purpose} | Tác vụ: {tasks}"
+        )
+
+        lines = [
+            f"📋 CHI TIẾT ĐƠN XIN CẤP TÀI NGUYÊN SSH ({req_id})",
+            f"• Người xin cấp: {full_name} (@{uname} • Mã: {mcode} • {mcat}{dept_str})",
+            f"• Giảng viên hướng dẫn (GVHD): {sup_name}",
+            f"• Đề tài / Dự án: {proj}",
+            f"• Lý do xin cấp: {reason}",
+            purpose_task_line,
+            f"• Yêu cầu GPU & Thời hạn: {gpu_str} | Thời hạn: {dur_str}",
+            f"• Trạng thái đơn: {status_str} (Nộp lúc: {sub_at} • SLA còn ~{rem_h}h)",
+            f"• Đề xuất cấp phát trên {host_lbl}: Ổ {pool_id}{mount_txt}{pool_load} • Cấu hình: {spec_line}",
+        ]
+        if show_action_hints and status_str in {"PENDING_APPROVAL", "NEED_INFO"}:
+            lines.append(
+                f"• Gợi ý xử lý nhanh: Nhắn \"@{uname} đồng ý duyệt cấp tài nguyên\" hoặc \"@{uname} tôi từ chối cấp vì lý do ...\""
+            )
+        return lines
+
+    def _deterministic_v4_tool_fallback(
+        self,
+        *,
+        question: str,
+        principal: ZaloPrincipal,
+        corr_id: str = "",
+        prior_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Read-only V4 tool fallback when 9Router gateway is offline/unconfigured."""
+        from app.services.mram_service import _strip_vn_accents, mram_service
+
+        raw_q = str(question or "").strip()
+        q = raw_q.lower()
+        q_norm = _strip_vn_accents(raw_q)
+
+        recent_ssh_context = any(
+            (
+                "sshreq-" in str(m.get("content") or "").lower()
+                or "đơn xin cấp ssh" in str(m.get("content") or "").lower()
+                or "chi tiết đơn xin cấp" in str(m.get("content") or "").lower()
+            )
+            for m in (prior_history or [])[-4:]
+        )
+
+        ssh_keywords = (
+            "don",
+            "duyet",
+            "kiem duyet",
+            "xet duyet",
+            "phe duyet",
+            "cho duyet",
+            "yeu cau",
+            "ssh request",
+            "mram",
+            "xin cap",
+            "cap ssh",
+            "ly do",
+            "giang vien",
+            "ginagr",
+            "gvhd",
+            "huong dan",
+            "de tai",
+            "muc dich",
+        )
+        followup_detail_phrases = (
+            "thong tin hon",
+            "chi tiet",
+            "cu the",
+            "la gi",
+            "do ai",
+            "ai huong dan",
+            "xem them",
+        )
+        is_ssh_review_query = any(k in q_norm for k in ssh_keywords) or (
+            recent_ssh_context and any(p in q_norm for p in followup_detail_phrases)
+        )
+
+        at_mentions = [
+            m.lower() for m in re.findall(r"@([a-z0-9_.-]+)", q) if m.lower() != "admin"
+        ]
+        matched_reqs: List[Dict[str, Any]] = []
+        if principal.is_admin:
+            try:
+                m_info = mram_service.match_pending_requests_by_query(raw_q)
+                matched_reqs = list(m_info.get("matches") or [])
+            except Exception:
+                matched_reqs = []
+            singular_ref_phrases = (
+                "ban nay",
+                "ban ay",
+                "ban do",
+                "sinh vien nay",
+                "tai khoan nay",
+                "don nay",
+                "don tren",
+                "nguoi nay",
+                "em nay",
+                "anh nay",
+                "chi nay",
+            )
+            plural_list_markers = ("cac don", "danh sach", "tat ca", "bao nhieu don", "co don ssh nao", "nhung don")
+            if (
+                not matched_reqs
+                and not at_mentions
+                and not any(p in q_norm for p in plural_list_markers)
+                and (any(p in q_norm for p in singular_ref_phrases) or any(p in q_norm for p in followup_detail_phrases))
+            ):
+                for prev in reversed(prior_history or []):
+                    if str(prev.get("role") or "").lower() != "assistant":
+                        continue
+                    prev_content = str(prev.get("content") or "")
+                    prev_req_ids = list(dict.fromkeys(re.findall(r"\bsshreq-[a-z0-9]+\b", prev_content.lower())))
+                    if len(prev_req_ids) == 1:
+                        try:
+                            ctx_match = mram_service.match_pending_requests_by_query(prev_req_ids[0])
+                            matched_reqs = list(ctx_match.get("matches") or [])
+                        except Exception:
+                            matched_reqs = []
+                    break
+
+        selected_calls: List[tuple[str, Dict[str, Any]]] = []
+        mode = "general"
+
+        if principal.is_admin and matched_reqs:
+            mode = "specific_request"
+            for r in matched_reqs[:2]:
+                selected_calls.append(("get_request", {"target_id": str(r["id"])}))
+                if r.get("username"):
+                    selected_calls.append(("get_member_info", {"username": str(r["username"])}))
+        elif at_mentions:
+            mode = "member_lookup"
+            selected_calls.append(("get_member_info", {"username": at_mentions[0]}))
+        elif principal.is_admin and is_ssh_review_query:
+            mode = "ssh_list"
+            selected_calls.append(("list_pending_requests", {}))
+            if any(k in q_norm for k in ("may chu", "server", "cpu", "ram", "suc khoe", "he thong")):
+                selected_calls.append(("get_node_status", {}))
+        elif not principal.is_admin and (
+            is_ssh_review_query
+            or any(
+                k in q_norm
+                for k in (
+                    "don cua toi",
+                    "tai khoan cua toi",
+                    "ho so cua toi",
+                    "ssh cua toi",
+                    "duoc duyet chua",
+                    "da duyet chua",
+                    "trang thai don",
+                    "xin cap cua toi",
+                )
+            )
+        ):
+            mode = "member_lookup"
+            selected_calls.append(("get_member_info", {"username": principal.username}))
+        elif any(k in q_norm for k in ("gpu", "vram", "nhiet", "cuda", "a30")):
+            selected_calls = [("get_gpu_metrics", {}), ("get_node_status", {}), ("list_my_jobs", {})]
+        elif any(k in q_norm for k in ("su co", "incident", "canh bao", "loi")):
+            selected_calls = [("list_incident_history", {}), ("get_node_status", {})]
+        elif any(k in q_norm for k in ("job", "tac vu", "train", "tien trinh")):
+            selected_calls = [("list_my_jobs", {}), ("get_gpu_metrics", {})]
+        elif any(k in q_norm for k in ("o cung", "disk", "dung luong", "storage")) or re.search(r"\bo\b", q_norm):
+            selected_calls = [("get_storage_usage", {}), ("get_node_status", {})]
+        elif any(k in q_norm for k in ("vpn", "wireguard")):
+            selected_calls = [("get_vpn_status", {}), ("get_node_status", {})]
+        else:
+            selected_calls = [
+                ("get_node_status", {}),
+                ("get_gpu_metrics", {}),
+                ("list_my_jobs", {}),
+                ("list_incident_history", {}),
+            ]
+
+        traces: List[Dict[str, Any]] = []
+        timestamps: List[str] = []
+        lines: List[str] = [
+            "🤖 LabOps Personal AI V4 (Chế độ công cụ trực tiếp):",
+            f"• Quyền truy cập: {principal.role} (@{principal.username})",
+        ]
+
+        executed_results: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        for tname, targs in selected_calls[:4]:
+            res = self.tools.execute_tool(
+                tname,
+                targs,
+                principal,
+                correlation_id=corr_id or None,
+                source="v4_fallback",
+                question=question,
+            )
+            traces.append(
+                {
+                    "tool": tname,
+                    "status": res.get("status"),
+                    "observed_at": res.get("observed_at"),
+                    "freshness": res.get("freshness"),
+                    "error_code": res.get("error_code"),
+                }
+            )
+            obs = res.get("observed_at")
+            if obs:
+                timestamps.append(str(obs))
+            executed_results.append((tname, targs, res))
+
+        if mode == "specific_request":
+            members_by_user: Dict[str, Dict[str, Any]] = {}
+            req_objs: List[Dict[str, Any]] = []
+            for tname, _, res in executed_results:
+                if res.get("status") != "OK":
+                    continue
+                data = res.get("data") or {}
+                if tname == "get_member_info" and data.get("member"):
+                    mem = data["member"]
+                    members_by_user[str(mem.get("username") or "").lower()] = mem
+                elif tname == "get_request" and data.get("request"):
+                    req_objs.append(data["request"])
+            for r in req_objs:
+                mem_inf = members_by_user.get(str(r.get("username") or "").lower())
+                lines.extend(self._format_ssh_request_dossier(r, member_info=mem_inf, show_action_hints=True))
+        elif mode == "member_lookup":
+            for tname, targs, res in executed_results:
+                if res.get("status") != "OK":
+                    uname_miss = targs.get("username") or (at_mentions[0] if at_mentions else "")
+                    if res.get("status") == "DENIED" or res.get("error_code") in {"PERMISSION_DENIED", "RBAC_DENIED"}:
+                        lines.append(
+                            f"• ⛔ Từ chối truy cập (RBAC): Bạn không có quyền xem hồ sơ hoặc đơn xin cấp SSH của @{uname_miss}."
+                        )
+                    else:
+                        lines.append(f"• Không tìm thấy hồ sơ thành viên hoặc đơn xin cấp SSH cho @{uname_miss}.")
+                        if principal.is_admin:
+                            lines.append("• Admin có thể gõ `/requests` để xem danh sách các đơn đang chờ duyệt.")
+                    continue
+                mem = (res.get("data") or {}).get("member") or {}
+                lines.append(
+                    f"👤 HỒ SƠ THÀNH VIÊN: {mem.get('full_name') or mem.get('username')} (@{mem.get('username')})"
+                )
+                lines.append(
+                    f"• Mã: {mem.get('member_code') or 'N/A'} | Phân loại: {mem.get('member_category') or mem.get('role') or 'N/A'} | Trạng thái: {mem.get('status') or 'N/A'}"
+                )
+                if mem.get("supervisor_name"):
+                    lines.append(f"• Giảng viên hướng dẫn (GVHD): {mem.get('supervisor_name')}")
+                lines.append(
+                    f"• Hạ tầng & Định mức: Máy chủ {mem.get('assigned_server') or 'N/A'} | Workspace: {mem.get('workspace_name') or 'N/A'} | SSH Port: {mem.get('ssh_port') or 'N/A'}"
+                )
+                lines.append(
+                    f"• Tài nguyên: {mem.get('cpu_limit_cores') or 'N/A'} vCPU | {mem.get('ram_limit_gb') or 'N/A'} GiB RAM | {mem.get('storage_quota_gb') or 'N/A'} GiB Storage | GPU: {mem.get('gpu_permissions') or 'NONE'}"
+                )
+                rec_reqs = mem.get("recent_ssh_requests") or []
+                if rec_reqs:
+                    lines.append(f"• Đơn xin cấp SSH gần đây ({len(rec_reqs)}):")
+                    for r in rec_reqs[:3]:
+                        lines.extend(
+                            self._format_ssh_request_dossier(r, member_info=mem, show_action_hints=principal.is_admin)
+                        )
+                else:
+                    lines.append("• Đơn xin cấp SSH: Không có đơn nào được ghi nhận.")
+        else:
+            for tname, _, res in executed_results:
+                data = res.get("data") or {}
+                if res.get("status") != "OK":
+                    lines.append(f"• {tname}: {res.get('status')} ({res.get('error_code') or 'ERR'})")
+                    continue
+
+                if tname == "get_node_status":
+                    for h in data.get("hosts") or []:
+                        st = h.get("status")
+                        if st in {"ONLINE", "DEGRADED"}:
+                            cpu = f"{h.get('cpu_usage_percent')}%" if h.get("cpu_usage_percent") is not None else "N/A"
+                            ram = f"{h.get('ram_used_gb')}/{h.get('ram_total_gb')} GiB" if h.get("ram_total_gb") else "N/A"
+                            lines.append(f"• Máy chủ {h.get('hostname')}: {st} | CPU {cpu} | RAM {ram}")
+                        else:
+                            lines.append(f"• Máy chủ {h.get('hostname')}: {st} ({h.get('freshness_status')})")
+                elif tname == "get_gpu_metrics":
+                    for g in data.get("gpus") or []:
+                        if g.get("host_online"):
+                            util = f"{g.get('utilization_gpu')}%" if g.get("utilization_gpu") is not None else "N/A"
+                            temp = f"{g.get('temp_celsius')}°C" if g.get("temp_celsius") is not None else "N/A"
+                            vram = f"{g.get('vram_used_mb')}/{g.get('vram_total_mb')} MiB" if g.get("vram_total_mb") else "N/A"
+                            lines.append(f"• GPU {g.get('model')} ({g.get('host_id')}): Tải {util}, Nhiệt độ {temp}, VRAM {vram}")
+                        else:
+                            lines.append(f"• GPU {g.get('model')} ({g.get('host_id')}): Máy chủ ngoại tuyến")
+                elif tname == "get_storage_usage":
+                    for s in data.get("storage") or []:
+                        lines.append(f"• Lưu trữ {s.get('hostname')}: {s.get('disk_used_tb')}/{s.get('disk_total_tb')} TB ({s.get('disk_usage_percent')}%)")
+                    if principal.is_admin:
+                        try:
+                            dist = mram_service.get_host_pool_distribution("workstation", required_storage_gb=50.0)
+                            if dist:
+                                elig = [d for d in dist if d.get("eligible_for_request")]
+                                elig.sort(
+                                    key=lambda d: (
+                                        int(d.get("priority_rank", 0)),
+                                        -float(d.get("effective_free_per_member_gib") or 0.0),
+                                        int(d.get("assigned_member_count") or 0),
+                                        -float(d.get("net_allocatable_gib") or 0.0),
+                                        str(d.get("pool_id") or ""),
+                                    )
+                                )
+                                rec_pid = str(elig[0]["pool_id"]) if elig else ""
+                                lines.append("• Phân bổ & Độ trống các ổ cứng trên workstation (ưu tiên sdd/sdb, hạn chế HDD3):")
+                                for d in dist:
+                                    pool_meta = d.get("pool") or {}
+                                    lbl = pool_meta.get("label") or d.get("pool_id")
+                                    dev = d.get("device") or ""
+                                    mnt = d.get("mount_point") or ""
+                                    free_g = d.get("net_allocatable_gib")
+                                    mcnt = d.get("assigned_member_count")
+                                    eff = d.get("effective_free_per_member_gib")
+                                    tier_lbl = " [ƯU TIÊN]" if int(d.get("priority_rank", 0)) == 0 else " [HẠN CHẾ - DỰ PHÒNG]"
+                                    badge = (
+                                        " [Đề xuất cấp tiếp theo]"
+                                        if str(d.get("pool_id")) == rec_pid
+                                        else ("" if d.get("eligible") else " [Không khả dụng]")
+                                    )
+                                    lines.append(
+                                        f"  - {lbl} ({dev}, {mnt}){tier_lbl}: Trống khả dụng {free_g} GiB | {mcnt} thành viên | Hiệu dụng {eff} GiB/TV{badge}"
+                                    )
+                        except Exception:
+                            pass
+                elif tname == "list_my_jobs":
+                    jobs = data.get("jobs") or []
+                    lines.append(f"• Tác vụ tính toán nhìn thấy: {len(jobs)}")
+                    for j in jobs[:5]:
+                        lines.append(f"  - @{j.get('owner')}: {j.get('name')} [{j.get('status')}] (VRAM: {j.get('vram_mb', 0)} MiB)")
+                elif tname == "list_incident_history":
+                    incs = [i for i in (data.get("incidents") or []) if i.get("status") != "RESOLVED"]
+                    lines.append(f"• Sự cố đang mở: {len(incs)}")
+                    for inc in incs[:3]:
+                        lines.append(f"  - {inc.get('incident_id')} [{inc.get('severity')}] {inc.get('title')}")
+                elif tname == "list_pending_requests":
+                    reqs = data.get("requests") or []
+                    compact_multi = len(reqs) > 1
+
+                    def _clip_field(val: str, limit: int = 160) -> str:
+                        s_val = " ".join(str(val or "").split())
+                        if not compact_multi or len(s_val) <= limit:
+                            return s_val
+                        return s_val[: limit - 3].rstrip() + "..."
+
+                    lines.append(f"• Đơn xin cấp SSH đang chờ duyệt: {data.get('pending_count', len(reqs))}")
+                    for idx, r in enumerate(reqs[:10], 1):
+                        host_lbl = r.get("recommended_host") or "workstation"
+                        pool_id = r.get("recommended_pool_id")
+                        mount_pt = r.get("recommended_mount_point") or ""
+                        pool_part = f"{host_lbl}/{pool_id}" if pool_id else host_lbl
+                        if mount_pt and pool_id:
+                            pool_part = f"{host_lbl}/{pool_id} ({mount_pt})"
+                        mem_cnt = r.get("recommended_member_count")
+                        free_gib = r.get("recommended_free_gib")
+                        pool_load = (
+                            f" [đang có {mem_cnt} TV, trống {free_gib} GiB]"
+                            if (mem_cnt is not None and free_gib is not None)
+                            else ""
+                        )
+                        spec_part = r.get("recommended_spec") or "4C/16G/50GiB"
+                        gpu_lbl = (
+                            f"Có ({_clip_field(r.get('gpu_justification'), 80)})"
+                            if (r.get("gpu_requested") and r.get("gpu_justification"))
+                            else ("Có (SHARED)" if r.get("gpu_requested") else "Không")
+                        )
+                        dur_days = r.get("requested_duration_days")
+                        mcat = r.get("member_category") or "STUDENT"
+                        dur_lbl = f"{dur_days} ngày" if dur_days else ("Không giới hạn" if mcat == "LECTURER" else "30 ngày")
+                        purp = str(r.get("ssh_purpose") or "N/A").strip()
+                        tsk = str(r.get("expected_tasks") or "N/A").strip()
+                        purp_line = _clip_field(
+                            purp
+                            if (purp.lower() == tsk.lower() or tsk == "N/A")
+                            else f"{purp} | Tác vụ: {tsk}"
+                        )
+                        proj_line = _clip_field(r.get("project_title") or "Chưa nêu tên đề tài")
+                        reason_line = _clip_field(r.get("registration_reason") or "Chưa ghi rõ")
+                        lines.append(
+                            f"  {idx}. {r.get('full_name') or r.get('username')} (@{r.get('username')} • Mã: {r.get('member_code') or 'N/A'} • {mcat}) — Mã đơn: {r.get('id')}\n"
+                            f"     • GVHD: {r.get('supervisor_name') or 'Chưa khai báo'}\n"
+                            f"     • Đề tài: {proj_line}\n"
+                            f"     • Lý do xin cấp: {reason_line}\n"
+                            f"     • Mục đích & Tác vụ: {purp_line} | GPU: {gpu_lbl} | Thời hạn: {dur_lbl}\n"
+                            f"     • Đề xuất: {pool_part}{pool_load} • {spec_part} | SLA còn ~{r.get('remaining_sla_hours', 0)}h"
+                        )
+                    if reqs:
+                        first_u = reqs[0].get("username")
+                        lines.append(
+                            f"• Hỏi chi tiết từng người: \"cho tôi xem @{first_u}\" | "
+                            f"Xử lý nhanh: \"@{first_u} đồng ý duyệt cấp tài nguyên\" hoặc \"@{first_u} tôi từ chối cấp vì lý do ...\""
+                        )
+                elif tname == "get_vpn_status":
+                    lines.append(f"• VPN Gateway: {data.get('gateway_status') or data.get('status') or 'N/A'} | Peers online: {data.get('online_peers', 0)}")
+
+        if timestamps:
+            lines.append(f"• Thời gian quan sát: {_fmt_vn_time(timestamps[0])} (ICT / UTC+7)")
+        return {
+            "reply": "\n".join(lines),
+            "tool_traces": traces,
+            "evidence_timestamps": list(dict.fromkeys(timestamps)),
+        }
 
     def _parse_nl_watch_or_reminder(self, text: str, principal: ZaloPrincipal) -> Optional[Dict[str, Any]]:
-        low = text.lower()
-        target = "workstation" if ("workstation" in low or "ws" in low) else ("track" if "rack" in low else "workstation")
-        # Extract GPU temp watch like "dưới 80°C trong 5 phút"
-        m_temp = re.search(r"(dưới|duoi|nhỏ hơn|<|trên|tren|lớn hơn|>=|>)\s*(\d+(?:\.\d+)?)\s*(?:°c|độ|c)", low)
-        if m_temp:
+        from app.services.mram_service import _strip_vn_accents
+
+        raw = str(text or "").strip()
+        low = raw.lower()
+        norm = _strip_vn_accents(raw)
+        target = "track" if ("rack" in norm or "track" in norm) else "workstation"
+
+        # 1. Condition-based hardware watch (supports GPU temp, GPU util, CPU, RAM, Storage, Node Online/Offline)
+        m_cmp_num = re.search(
+            r"(dưới|duoi|nhỏ hơn|nho hon|thấp hơn|thap hon|<=|<|trên|tren|vượt|vuot|lớn hơn|lon hon|cao hơn|cao hon|>=|>)\s*(\d+(?:\.\d+)?)\s*(°c|do\s*c|do|c|%|phan\s*tram)?",
+            low,
+        )
+        m_temp = re.search(r"(dưới|duoi|nhỏ hơn|<|trên|tren|lớn hơn|vượt|vuot|>=|>)\s*(\d+(?:\.\d+)?)\s*(?:°c|độ|c)", low)
+        watch_spec: Optional[Any] = None
+        unit_lbl = ""
+
+        if m_temp and ("%" not in low) and not any(w in norm for w in ("cpu", "ram", "o dia", "o cung", "disk", "storage")):
             op_word, val_s = m_temp.groups()
             comp = "lt" if op_word in {"dưới", "duoi", "nhỏ hơn", "<"} else "gte"
-            m_min = re.search(r"(\d+)\s*(?:phút|phut|min|m)", low)
-            hold_s = (int(m_min.group(1)) * 60) if m_min else 300
-            hold_s = max(60, min(hold_s, 86400))
-            spec = self._watch_spec_cls(
+            m_min = re.search(r"(\d+)\s*(?:phút|phut|min|m)\b", low)
+            hold_s = max(60, min((int(m_min.group(1)) * 60) if m_min else 300, 86400))
+            watch_spec = self._watch_spec_cls(
                 target_id=target,
                 metric="gpu_temperature_c",
                 comparator=comp,
@@ -230,18 +797,71 @@ class AssistantV4Facade:
                 sustained_seconds=hold_s,
                 once=True,
             )
+            unit_lbl = "°C"
+        elif m_cmp_num:
+            op_word, val_s, val_unit = m_cmp_num.groups()
+            norm_op = _strip_vn_accents(op_word)
+            comp = "lt" if norm_op in {"duoi", "nho hon", "thap hon", "<"} else ("lte" if norm_op == "<=" else "gt" if norm_op in {"vuot", ">"} else "gte")
+            metric = ""
+            if any(w in norm for w in ("nhiet", "°c", "temp")) or val_unit in {"°c", "do", "do c", "c"}:
+                metric = "gpu_temperature_c"
+                unit_lbl = "°C"
+            elif "cpu" in norm:
+                metric = "cpu_percent"
+                unit_lbl = "%"
+            elif "ram" in norm:
+                metric = "ram_percent"
+                unit_lbl = "%"
+            elif any(w in norm for w in ("o dia", "o cung", "dung luong", "disk", "storage")):
+                metric = "storage_percent"
+                unit_lbl = "%"
+            elif any(w in norm for w in ("gpu", "vram")):
+                metric = "gpu_util_percent" if ("%" in low or "tai" in norm or "util" in norm or val_unit == "%") else "gpu_temperature_c"
+                unit_lbl = "%" if metric == "gpu_util_percent" else "°C"
+            if metric:
+                m_hold = re.search(r"(?:trong|duy\s*tri|giu)\s*(\d+)\s*(phut|min|m|giay|s)\b", norm)
+                if m_hold:
+                    hv, hu = int(m_hold.group(1)), m_hold.group(2)
+                    hold_s = hv * (1 if hu in {"giay", "s"} else 60)
+                else:
+                    m_min = re.search(r"(\d+)\s*(?:phut|min|m)\b", norm)
+                    hold_s = (int(m_min.group(1)) * 60) if m_min else 300
+                hold_s = max(60, min(hold_s, 86400))
+                watch_spec = self._watch_spec_cls(
+                    target_id=target,
+                    metric=metric,
+                    comparator=comp,
+                    threshold=float(val_s),
+                    sustained_seconds=hold_s,
+                    once=True,
+                )
+        elif any(w in norm for w in ("theo doi", "canh bao", "bao toi", "bao cho toi")) and any(
+            w in norm for w in ("online", "offline", "mat ket noi")
+        ):
+            is_online_target = "online" in norm and "offline" not in norm
+            watch_spec = self._watch_spec_cls(
+                target_id=target,
+                metric="node_status",
+                comparator="eq",
+                threshold=1.0 if is_online_target else 0.0,
+                sustained_seconds=60,
+                once=True,
+            )
+            unit_lbl = ""
+
+        if watch_spec is not None:
             if self.config.task_manager:
                 created = self.tasks.create_watch(
                     owner_id=principal.username or principal.zalo_user_id,
                     owner_role=principal.role,
-                    spec=spec,
+                    spec=watch_spec,
                 )
                 return {
                     "reply": (
                         f"✅ Đã tạo Watch `{created['task_id']}`:\n"
-                        f"• Mục tiêu: {spec.target_id} | {spec.metric} {comp} {spec.threshold}°C\n"
-                        f"• Duy trì: {spec.sustained_seconds}s | Chế độ: báo 1 lần\n"
-                        f"• Hủy bất cứ lúc nào: `/cancel {created['task_id']}`"
+                        f"• Mục tiêu: {watch_spec.target_id} | {watch_spec.metric} {watch_spec.comparator} {watch_spec.threshold}{unit_lbl}\n"
+                        f"• Duy trì: {watch_spec.sustained_seconds}s | Chế độ: báo 1 lần\n"
+                        f"• Hủy bất cứ lúc nào: \"hủy cảnh báo vừa tạo\" hoặc `/cancel {created['task_id']}`"
                     ),
                     "ai_used": False,
                     "task": created,
@@ -249,12 +869,57 @@ class AssistantV4Facade:
             return {
                 "reply": (
                     f"📋 Đề xuất Watch:\n"
-                    f"• Mục tiêu: {spec.target_id} | {spec.metric} {comp} {spec.threshold}°C (duy trì {spec.sustained_seconds}s, 1 lần)\n"
-                    f"👉 Gõ `/watch {spec.target_id} {spec.metric} {comp} {spec.threshold} {spec.sustained_seconds}` để xác nhận tạo."
+                    f"• Mục tiêu: {watch_spec.target_id} | {watch_spec.metric} {watch_spec.comparator} {watch_spec.threshold}{unit_lbl} "
+                    f"(duy trì {watch_spec.sustained_seconds}s, 1 lần)\n"
+                    f"👉 Gõ `/watch {watch_spec.target_id} {watch_spec.metric} {watch_spec.comparator} {watch_spec.threshold} {watch_spec.sustained_seconds}` để xác nhận tạo."
                 ),
                 "ai_used": False,
-                "proposal": spec.model_dump(),
+                "proposal": watch_spec.model_dump(),
             }
+
+        # 2. Time-based Reminder ("nhắc tôi sau 30 phút kiểm tra lại job")
+        m_rem = re.search(
+            r"(?:sau\s+(\d+)\s*(phút|phut|min|m|giờ|gio|tiếng|tieng|h)|(\d+)\s*(phút|phut|min|m|giờ|gio|tiếng|tieng|h)\s*nữa)",
+            low,
+        )
+        if m_rem and any(k in norm for k in ("nhac", "hen", "lich")):
+            num_s = m_rem.group(1) or m_rem.group(3)
+            unit_s = (m_rem.group(2) or m_rem.group(4) or "phut").lower()
+            qty = max(1, int(num_s))
+            is_hours = unit_s.startswith(("g", "t", "h"))
+            mins = min(43200, qty * (60 if is_hours else 1))
+            # Extract clean reminder title
+            title_cand = re.sub(
+                r"^(?:hãy\s+|hay\s+|giúp\s+|giup\s+)?(?:nhắc\s+tôi|nhac\s+toi|nhắc\s+mình|nhac\s+minh|hẹn\s+tôi|hen\s+toi|đặt\s+lịch\s+nhắc|dat\s+lich\s+nhac)\s*(?:tôi\s+|mình\s+)?",
+                "",
+                raw,
+                flags=re.IGNORECASE,
+            ).strip()
+            title_cand = re.sub(
+                r"(?:vào\s+)?(?:sau\s+\d+\s*(?:phút|phut|min|m|giờ|gio|tiếng|tieng|h)|\d+\s*(?:phút|phut|min|m|giờ|gio|tiếng|tieng|h)\s*nữa)(?:\s*(?:để|là|:))?\s*",
+                "",
+                title_cand,
+                flags=re.IGNORECASE,
+            ).strip(" ,.;:-")
+            title = title_cand or f"Nhắc việc LabOps (sau {qty} {'giờ' if is_hours else 'phút'})"
+            run_at = datetime.now(timezone.utc) + timedelta(minutes=mins)
+            if self.config.task_manager:
+                created = self.tasks.create_reminder(
+                    owner_id=principal.username or principal.zalo_user_id,
+                    owner_role=principal.role,
+                    title=title,
+                    run_at=run_at,
+                )
+                return {
+                    "reply": (
+                        f"⏰ Đã đặt lịch nhắc `{created['task_id']}`:\n"
+                        f"• Nội dung: {title}\n"
+                        f"• Thời gian nhắc: {_fmt_vn_time(run_at.isoformat())} (ICT / UTC+7, sau {mins} phút)\n"
+                        f"• Hủy bất cứ lúc nào: \"hủy lịch nhắc vừa tạo\" hoặc `/cancel {created['task_id']}`"
+                    ),
+                    "ai_used": False,
+                    "task": created,
+                }
         return None
 
     def _run_digests_step(self, *, now_override: Optional[datetime], has_changes: bool) -> int:

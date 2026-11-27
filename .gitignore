@@ -89,4 +89,5 @@ bin/
 # Blue-Green zero-downtime deployment artifacts
 /.next-blue/
 /.next-green/
+/.next-v31-demo/
 /.runtime/

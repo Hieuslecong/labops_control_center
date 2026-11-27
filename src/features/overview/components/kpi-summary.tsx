@@ -4,7 +4,9 @@ import React from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Icons } from '@/components/icons';
+import { useRepositoryRequestsQuery } from '@/features/labops/queries';
 import { useLabOpsStore } from '@/features/labops/store';
+import { resolvePostCloneReviewStatus } from '@/features/security/utils/repo-status';
 import Link from 'next/link';
 
 export function KpiSummary() {
@@ -13,6 +15,8 @@ export function KpiSummary() {
   const members = useLabOpsStore((state) => state.members);
   const jobs = useLabOpsStore((state) => state.jobs);
   const securityReviews = useLabOpsStore((state) => state.securityReviews);
+  const repoRequestsQuery = useRepositoryRequestsQuery();
+  const repoRequests = React.useMemo(() => repoRequestsQuery.data ?? [], [repoRequestsQuery.data]);
   const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
 
   const summary = React.useMemo(() => {
@@ -67,10 +71,22 @@ export function KpiSummary() {
       alerts: {
         warnings: isDemoMode
           ? securityReviews.filter((review) => review.status === 'MANUAL_REVIEW').length
-          : null
+          : repoRequestsQuery.isFetched
+            ? repoRequests.filter((r) => resolvePostCloneReviewStatus(r) === 'REVIEW_REQUIRED')
+                .length
+            : null
       }
     };
-  }, [servers, gpus, members, jobs, securityReviews, isDemoMode]);
+  }, [
+    servers,
+    gpus,
+    members,
+    jobs,
+    securityReviews,
+    repoRequests,
+    repoRequestsQuery.isFetched,
+    isDemoMode
+  ]);
 
   return (
     <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 min-w-0 w-full'>
@@ -284,7 +300,9 @@ export function KpiSummary() {
               </span>
             </div>
             <p className='text-muted-foreground text-xs mt-1 truncate'>
-              Không có collector sự cố đã xác minh
+              {summary.alerts.warnings === null
+                ? 'Đang đồng bộ Auto Security Bot'
+                : `${repoRequests.length} lượt quét Trivy đã ghi nhận`}
             </p>
           </CardContent>
         </Card>

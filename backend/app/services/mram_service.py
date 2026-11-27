@@ -47,10 +47,11 @@ from app.db.models import (
     RequestResourceRecommendationRecord,
     ServerAccessRequestRecord,
     SupervisorAssignmentRecord,
+    ZaloIdentityLinkRecord,
 )
 from app.db.session import DatabaseManager
 from app.services.labops_service import MemberConflictError, service as labops_service
-from app.services.storage_inventory_service import storage_service
+from app.services.storage_inventory_service import get_pool_priority_tier, storage_service
 
 logger = logging.getLogger("labops.mram")
 
@@ -60,6 +61,9 @@ POLICY_TEXT_DIGEST = hashlib.sha256(b"LabOps-Acceptable-Use-Security-Policy-mram
 TARGET_APPROVER_ZALO_ID = "0c00ed813eccd7928edd"
 TARGET_APPROVER_NAME = "Hiếu Lê"
 DEFAULT_PUBLIC_URL = "https://aiotserver.fitdnu.id.vn"
+DEFAULT_TARGET_HOST_ID = "workstation"
+STUDENT_DEFAULT_STORAGE_GB = int(os.getenv("MRAM_DEFAULT_STUDENT_STORAGE_GB", "50"))
+STUDENT_MAX_RAM_GB = int(os.getenv("MRAM_MAX_STUDENT_RAM_GB", "16"))
 
 
 _ACADEMIC_TITLE_TOKENS = {
@@ -95,6 +99,14 @@ def _normalize_vn_tone_placement(text: str) -> str:
     for pattern, repl in _VN_TONE_PAIRS:
         normalized = pattern.sub(repl, normalized)
     return normalized
+
+
+def _strip_vn_accents(text: str) -> str:
+    """Lowercase and strip Vietnamese diacritics (handling đ/Đ) for fuzzy name matching."""
+    cleaned = str(text or "").replace("đ", "d").replace("Đ", "D")
+    nfkd = unicodedata.normalize("NFKD", cleaned)
+    no_marks = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    return " ".join(no_marks.lower().split())
 
 
 def _normalize_supervisor_name(raw: Optional[str]) -> str:
@@ -368,6 +380,7 @@ class MramService:
         if current_password == new_password:
             raise MramValidationError("PASSWORD_REUSE", "Mật khẩu mới phải khác mật khẩu hiện tại")
 
+        labops_service.ensure_members_fresh()
         # Verify current password (either web credential or legacy workspace password)
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if not member:
@@ -407,6 +420,7 @@ class MramService:
                 cred.password_changed_at = now
 
         member["must_change_password"] = False
+        member["version"] = int(member.get("version") or 1) + 1
         labops_service._audit(uname, "WEB_PASSWORD_CHANGED", "MEMBER", uname, "SUCCESS", "Thành viên đổi mật khẩu cổng web")
         labops_service._save_persistent_data()
         return {"success": True, "username": uname, "must_change_password": False}
@@ -442,6 +456,7 @@ class MramService:
         if not new_password or len(new_password) < 12:
             raise MramValidationError("WEAK_PASSWORD", "Mật khẩu mới phải có ít nhất 12 ký tự", 400)
 
+        labops_service.ensure_members_fresh()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if member and str(member.get("role") or "").strip().upper() == "ADMIN":
             raise MramValidationError(
@@ -491,6 +506,7 @@ class MramService:
 
         if member:
             member["must_change_password"] = False
+            member["version"] = int(member.get("version") or 1) + 1
         labops_service._audit(
             uname,
             "MRAM_WEB_PASSWORD_RECOVERED",
@@ -545,6 +561,7 @@ class MramService:
             if prof is None:
                 raise LookupError(f"Không tìm thấy hồ sơ tài khoản Web '{target_key}'")
 
+            labops_service.ensure_members_fresh()
             uname = prof.username.lower()
             member = next((m for m in labops_service.members if m.get("id") == prof.member_id or (m.get("username") or "").lower() == uname), None)
             if uname in {"admin", admin_user} or (member and str(member.get("role") or "").strip().upper() == "ADMIN"):
@@ -583,6 +600,7 @@ class MramService:
 
         if member:
             member["must_change_password"] = True
+            member["version"] = int(member.get("version") or 1) + 1
         labops_service._audit(
             actor,
             "MRAM_WEB_PASSWORD_ADMIN_REISSUED",
@@ -730,6 +748,7 @@ class MramService:
 
     def get_auth_context_for_member(self, username: str) -> Dict[str, Any]:
         uname = str(username or "").strip().lower()
+        labops_service.ensure_members_fresh()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if not member:
             return {"member_category": "STUDENT", "ssh_access_state": "NONE", "must_change_password": False}
@@ -752,6 +771,7 @@ class MramService:
 
     def create_web_member_account(self, payload: Dict[str, Any], actor: str = "admin") -> Dict[str, Any]:
         """Admin creates an initial Web-Only member account WITHOUT Linux/SSH/VPN/Docker/Storage/GPU."""
+        labops_service.ensure_members_fresh()
         username = str(payload.get("username") or "").strip().lower()
         if not SAFE_USERNAME_RE.match(username):
             raise MramValidationError(
@@ -830,6 +850,7 @@ class MramService:
             "linked_web_member_id": member_id,
             "linked_web_username": username,
             "wireguard": {"status": "NOT_PROVISIONED", "devices": []},
+            "version": 1,
             "createdAt": now_iso,
             "created_by": actor,
         }
@@ -1002,6 +1023,8 @@ class MramService:
             if cred is not None:
                 cred.must_change_password = False
         res["member"]["must_change_password"] = False
+        res["member"]["version"] = int(res["member"].get("version") or 1) + 1
+        labops_service._save_persistent_data()
         res["must_change_password"] = False
         res.pop("initial_web_password", None)
         return res
@@ -1063,6 +1086,7 @@ class MramService:
         actor: str = "admin",
         change_reason: str = "Cập nhật giảng viên hướng dẫn",
     ) -> Dict[str, Any]:
+        labops_service.ensure_members_fresh()
         student_m = self._validate_member_exists(student_member_id)
         sid = str(student_m["id"])
         sup_prof = self._validate_lecturer_id(primary_supervisor_id)
@@ -1104,6 +1128,7 @@ class MramService:
 
         student_m["primary_supervisor_id"] = sup_id
         student_m["direct_manager_id"] = direct_manager_id
+        student_m["version"] = int(student_m.get("version") or 1) + 1
         labops_service._audit(
             actor,
             "SUPERVISOR_ASSIGNED",
@@ -1298,6 +1323,7 @@ class MramService:
         if is_admin:
             return {"scoped_role": "ADMIN", "groups": groups_data["groups"], "students": [s for g in groups_data["groups"] for s in g["students"]]}
 
+        labops_service.ensure_members_fresh()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if not member:
             raise PermissionError("Tài khoản không tồn tại")
@@ -1349,6 +1375,132 @@ class MramService:
                 out.setdefault(str(r.gpu_uuid), []).append({"member_id": r.member_id, "gpu_mode": r.gpu_mode})
             return out
 
+    def get_host_pool_distribution(
+        self,
+        host_id: str = DEFAULT_TARGET_HOST_ID,
+        *,
+        required_storage_gb: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Compute live allocatable free space, assigned member count, and balanced score
+        for every storage pool on `host_id` so new allocations are distributed fairly
+        across eligible disks by both free space and allocated member count.
+        """
+        labops_service.ensure_members_fresh()
+        hid = str(host_id or DEFAULT_TARGET_HOST_ID).strip().lower()
+        pools = storage_service.get_storage_pools(hid)
+
+        def _canonical_pool_id(raw_pid: str) -> str:
+            q = str(raw_pid or "").strip()
+            if not q:
+                return ""
+            for p in pools:
+                p_sid = str(p.get("storage_id") or p.get("id") or "").strip()
+                if p_sid == q:
+                    return p_sid
+            from app.services.storage_inventory_service import _pool_matches_identifier
+
+            for p in pools:
+                if _pool_matches_identifier(p, q):
+                    return str(p.get("storage_id") or p.get("id") or q).strip()
+            return q
+
+        res_gib_by_pool: Dict[str, int] = {}
+        res_members_by_pool: Dict[str, set[str]] = {}
+        with self.db.session_scope() as session:
+            rows = session.execute(
+                select(CapacityReservationRecord).where(
+                    CapacityReservationRecord.host_id == hid,
+                    CapacityReservationRecord.status.in_(["RESERVED", "COMMITTED"]),
+                )
+            ).scalars().all()
+            for r in rows:
+                pid = _canonical_pool_id(str(r.pool_id or ""))
+                if not pid:
+                    continue
+                res_gib_by_pool[pid] = res_gib_by_pool.get(pid, 0) + int(r.storage_quota_gb or 0)
+                if r.member_id:
+                    res_members_by_pool.setdefault(pid, set()).add(str(r.member_id))
+
+        dist: List[Dict[str, Any]] = []
+        raw_mem_res = getattr(storage_service, "_reservations", {}) or {}
+        mem_res_map: Dict[str, int] = {}
+        for k, v in raw_mem_res.items():
+            ck = _canonical_pool_id(str(k))
+            if ck:
+                mem_res_map[ck] = mem_res_map.get(ck, 0) + int(v or 0)
+        inactive_statuses = set(ACTIVE_MEMBER_BAD_STATUSES) | {"EXPIRED"}
+
+        for p in pools:
+            pid = str(p.get("storage_id") or p.get("id") or "").strip()
+            mount = str(p.get("mount_point") or "").rstrip("/")
+            runtime_members: set[str] = set()
+            for m in getattr(labops_service, "members", []) or []:
+                m_host = str(m.get("assigned_server") or "").strip().lower()
+                m_status = str(m.get("status") or "ACTIVE").strip().upper()
+                if m_host != hid or m_status in inactive_statuses:
+                    continue
+                m_pool = _canonical_pool_id(str(m.get("storage_id") or m.get("storage_pool_id") or "").strip())
+                m_mount = str(m.get("storage_mount_point") or m.get("host_storage_root") or "").rstrip("/")
+                m_ws_dir = str(
+                    m.get("member_storage_directory")
+                    or m.get("workspace_dir")
+                    or m.get("host_storage_directory")
+                    or ""
+                )
+                matched = False
+                if pid and m_pool == pid:
+                    matched = True
+                elif mount and mount != "/" and (
+                    m_mount == mount
+                    or m_ws_dir.startswith(f"{mount}/")
+                    or m_ws_dir == mount
+                ):
+                    matched = True
+                if matched:
+                    m_key = str(m.get("id") or m.get("username") or "").strip()
+                    if m_key:
+                        runtime_members.add(m_key)
+
+            assigned_members = set(res_members_by_pool.get(pid, set())) | runtime_members
+            assigned_count = len(assigned_members)
+            db_res_gb = int(res_gib_by_pool.get(pid, 0))
+            mem_res_gb = int(mem_res_map.get(pid, 0))
+            committed_gib = float(max(db_res_gb, mem_res_gb))
+            raw_alloc_gib = float(p.get("allocatable_gib") or 0.0)
+            net_alloc_gib = round(max(0.0, raw_alloc_gib - committed_gib), 2)
+            # Fair balancing score: available GiB per allocated member (+1 for upcoming allocation)
+            effective_free_per_member = round(net_alloc_gib / float(assigned_count + 1), 2)
+            p_rank, p_tier = get_pool_priority_tier(p)
+            is_eligible_pool = bool(
+                p.get("eligible")
+                and not p.get("read_only")
+                and p.get("mounted", True)
+                and p.get("filesystem_uuid")
+                and net_alloc_gib >= float(required_storage_gb)
+            )
+            dist.append(
+                {
+                    "host_id": hid,
+                    "pool_id": pid,
+                    "mount_point": p.get("mount_point") or "",
+                    "device": p.get("device") or "",
+                    "filesystem_uuid": p.get("filesystem_uuid") or "",
+                    "allocatable_gib": round(raw_alloc_gib, 2),
+                    "db_reserved_gib": db_res_gb,
+                    "committed_gib": round(committed_gib, 2),
+                    "net_allocatable_gib": net_alloc_gib,
+                    "assigned_member_count": assigned_count,
+                    "effective_free_per_member_gib": effective_free_per_member,
+                    "priority_rank": p_rank,
+                    "priority_tier": p_tier,
+                    "eligible": bool(p.get("eligible")),
+                    "eligible_for_request": is_eligible_pool,
+                    "pool": p,
+                }
+            )
+        return dist
+
     def compute_resource_recommendation(
         self,
         *,
@@ -1357,10 +1509,13 @@ class MramService:
         gpu_requested: bool,
     ) -> Dict[str, Any]:
         default_cpu = int(os.getenv("MRAM_DEFAULT_CPU_CORES", "4"))
-        default_ram = int(os.getenv("MRAM_DEFAULT_RAM_GB", "16"))
+        default_ram_raw = int(os.getenv("MRAM_DEFAULT_RAM_GB", "16"))
+        student_max_ram = int(os.getenv("MRAM_MAX_STUDENT_RAM_GB", str(STUDENT_MAX_RAM_GB)))
         if member_category == "STUDENT":
-            default_storage = int(os.getenv("MRAM_DEFAULT_STUDENT_STORAGE_GB", "50"))
+            default_ram = min(default_ram_raw, student_max_ram)
+            default_storage = int(os.getenv("MRAM_DEFAULT_STUDENT_STORAGE_GB", str(STUDENT_DEFAULT_STORAGE_GB)))
         else:
+            default_ram = default_ram_raw
             default_storage = int(os.getenv("MRAM_DEFAULT_LECTURER_STORAGE_GB", "100"))
         default_gpu_vram = int(os.getenv("MRAM_DEFAULT_SHARED_GPU_VRAM_GB", "12"))
         duration = requested_duration_days if member_category == "STUDENT" else None
@@ -1368,52 +1523,66 @@ class MramService:
             duration = int(os.getenv("MRAM_DEFAULT_STUDENT_DURATION_DAYS", "30"))
 
         hosts = labops_service.get_v2_hosts()
-        # Prefer online hosts dynamically; never assume offline host is online
+        # Prefer online hosts dynamically; always prefer workstation first when available
         eligible_hosts = [
             h for h in hosts
             if str(h.get("observed_state") or h.get("freshness") or h.get("freshness_status") or h.get("status") or "").upper()
             in {"ONLINE", "ACTIVE", "DEGRADED"}
         ]
-        # Stable preference order if online: workstation -> others
-        eligible_hosts.sort(key=lambda h: (0 if h.get("id") == "workstation" else 1, str(h.get("id"))))
+        eligible_hosts.sort(key=lambda h: (0 if str(h.get("id") or "").lower() == DEFAULT_TARGET_HOST_ID else 1, str(h.get("id"))))
 
         chosen_host: Optional[Dict[str, Any]] = None
-        chosen_pool: Optional[Dict[str, Any]] = None
+        chosen_entry: Optional[Dict[str, Any]] = None
+        chosen_dist: List[Dict[str, Any]] = []
         manual_reason: Optional[str] = None
 
         for h in eligible_hosts:
             hid = str(h["id"])
-            pools = storage_service.get_storage_pools(hid)
-            # Filter verified, writable, non-root physical pools with enough net allocatable capacity
-            candidates: List[Tuple[float, Dict[str, Any]]] = []
-            for p in pools:
-                if not p.get("eligible") or p.get("read_only") or not p.get("mounted", True):
-                    continue
-                if not p.get("filesystem_uuid"):
-                    continue
-                db_res = self._get_active_db_reservations(hid, str(p.get("storage_id") or p.get("id")))
-                raw_alloc = float(p.get("allocatable_gib") or 0.0)
-                net_alloc = raw_alloc - float(db_res)
-                if net_alloc >= float(default_storage):
-                    candidates.append((net_alloc, p))
+            dist = self.get_host_pool_distribution(hid, required_storage_gb=float(default_storage))
+            candidates = [d for d in dist if d["eligible_for_request"]]
             if candidates:
-                def _candidate_rank(item: Tuple[float, Dict[str, Any]]) -> Tuple[int, float, int]:
-                    net_alloc_val, p_entry = item
-                    dev_base = os.path.basename(str(p_entry.get("device") or "")).lower()
-                    sid = str(p_entry.get("storage_id") or p_entry.get("id") or "").lower()
-                    if dev_base.startswith("sdd") or sid == "5ce32377-6072-4c07-a066-807e89a5d48b":
-                        return (0, -net_alloc_val, 0)
-                    if dev_base.startswith("sdb") or sid == "159bacc4-38ae-4adb-bf25-7a5091c308ca":
-                        return (0, -net_alloc_val, 1)
-                    if p_entry.get("is_default"):
-                        return (1, -net_alloc_val, 2)
-                    return (2, -net_alloc_val, 3)
-
-                candidates.sort(key=_candidate_rank)
+                # 2-tier priority + fair load balancing across physical disks on the host:
+                # 0. Priority tier (Tier 0 PREFERRED: sdd/sdb before Tier 1 FALLBACK_RESTRICTED: /mnt/HDD3)
+                # 1. Highest effective free GiB per member (net_allocatable_gib / (assigned_member_count + 1))
+                # 2. Fewest assigned members
+                # 3. Highest raw net free GiB
+                # 4. Deterministic pool_id tie-breaker
+                candidates.sort(
+                    key=lambda d: (
+                        int(d.get("priority_rank", 0)),
+                        -float(d["effective_free_per_member_gib"]),
+                        int(d["assigned_member_count"]),
+                        -float(d["net_allocatable_gib"]),
+                        str(d["pool_id"]),
+                    )
+                )
                 chosen_host = h
-                chosen_pool = candidates[0][1]
+                chosen_entry = candidates[0]
+                chosen_dist = [
+                    {
+                        "pool_id": d["pool_id"],
+                        "mount_point": d["mount_point"],
+                        "assigned_member_count": d["assigned_member_count"],
+                        "net_allocatable_gib": d["net_allocatable_gib"],
+                        "effective_free_per_member_gib": d["effective_free_per_member_gib"],
+                        "priority_rank": int(d.get("priority_rank", 0)),
+                        "priority_tier": d.get("priority_tier", "PREFERRED"),
+                        "eligible": d["eligible_for_request"],
+                    }
+                    for d in sorted(
+                        dist,
+                        key=lambda x: (
+                            0 if x["eligible_for_request"] else 1,
+                            int(x.get("priority_rank", 0)),
+                            -float(x["effective_free_per_member_gib"]),
+                            int(x["assigned_member_count"]),
+                            str(x["pool_id"]),
+                        ),
+                    )
+                ]
                 break
 
+        chosen_pool = chosen_entry["pool"] if chosen_entry else None
         manual_review = chosen_host is None or chosen_pool is None
         if manual_review:
             if not eligible_hosts:
@@ -1449,6 +1618,12 @@ class MramService:
             "manual_review_required": manual_review,
             "rationale": {
                 "profile": f"Default {default_cpu} vCPU shared / {default_ram} GiB RAM / {default_storage} GiB storage / GPU={rec_gpu_mode}",
+                "balancing_strategy": "FAIR_FREE_SPACE_AND_MEMBER_COUNT",
+                "student_max_ram_gb": student_max_ram if member_category == "STUDENT" else None,
+                "chosen_pool_assigned_members": chosen_entry["assigned_member_count"] if chosen_entry else None,
+                "chosen_pool_net_allocatable_gib": chosen_entry["net_allocatable_gib"] if chosen_entry else None,
+                "chosen_pool_effective_free_per_member_gib": chosen_entry["effective_free_per_member_gib"] if chosen_entry else None,
+                "pool_distribution": chosen_dist,
                 "gpu_requested_by_member": gpu_requested,
                 "gpu_vram_gb": default_gpu_vram if rec_gpu_mode == "SHARED" else None,
                 "manual_reason": manual_reason,
@@ -1507,8 +1682,17 @@ class MramService:
 
         review_link = self._build_review_url(req.id, raw_token)
         reason_snippet = (req.registration_reason or req.ssh_purpose or "").strip().replace("\n", " ")[:180]
+        rat = dict(rec.rationale_json or {})
+        pool_lbl = (
+            f"{rec.recommended_pool_id} ({rec.recommended_mount_point})"
+            if rec.recommended_pool_id
+            else "Chờ chọn"
+        )
+        pool_extra = ""
+        if rat.get("chosen_pool_assigned_members") is not None and rat.get("chosen_pool_net_allocatable_gib") is not None:
+            pool_extra = f" | Đang có {rat['chosen_pool_assigned_members']} TV, trống {rat['chosen_pool_net_allocatable_gib']} GiB"
         rec_summary = (
-            f"Host: {rec.recommended_host_id or 'Chờ chọn'} | "
+            f"Host: {rec.recommended_host_id or 'workstation'} | Pool: {pool_lbl}{pool_extra} | "
             f"{rec.cpu_cores} vCPU | {rec.ram_gb} GiB RAM | {rec.storage_quota_gb} GiB Storage | GPU: {rec.gpu_mode}"
         )
 
@@ -1553,7 +1737,10 @@ class MramService:
                         f"• Cấu hình đề xuất: {rec_summary}\n"
                         f"• Thời điểm gửi: {_fmt_vn(req.submitted_at)}\n"
                         f"• Hạn duyệt (24h): {_fmt_vn(req.review_expires_at)}\n"
-                        f"🔗 Xem xét & phê duyệt:\n{review_link}"
+                        f"💬 Phản hồi tự nhiên cho AI Agent ngay trên Zalo (Agent sẽ hỏi xác nhận lại 1 lần):\n"
+                        f"  • \"@{prof.username} đồng ý duyệt cấp tài nguyên mặc định\"\n"
+                        f"  • \"@{prof.username} tài khoản này tôi từ chối cấp vì lý do ...\"\n"
+                        f"🔗 Hoặc duyệt trực tiếp trên Dashboard:\n{review_link}"
                     )
                     enqueued = zalo_assistant_service.notification_dispatcher.enqueue(
                         idempotency_key=f"mram-req:{req.id}:v{req.version}:{inv_id}",
@@ -1658,7 +1845,7 @@ class MramService:
             "SUCCESS" if res.get("delivery_status") in {"SENT", "QUEUED_FOR_VERIFIED_ADMIN"} else "WARNING",
             f"Gửi lại thông báo phê duyệt Zalo ({res.get('delivery_status')}): {res.get('delivery_detail')}",
         )
-        labops_service._save_persistent_data()
+        labops_service.save_audit_logs()
         return {"request_id": request_id, "zalo_notification": res}
 
     def submit_ssh_request(
@@ -1679,6 +1866,7 @@ class MramService:
                 )
 
         uname = str(username or "").strip().lower()
+        labops_service.ensure_members_fresh()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if not member:
             raise LookupError(f"Không tìm thấy hồ sơ thành viên '{uname}'")
@@ -1868,6 +2056,9 @@ class MramService:
                                 "supervisor_name": sup_name,
                                 "submitted_at": now.isoformat(),
                                 "review_expires_at": review_deadline.isoformat(),
+                                "recommended_host_id": rec_data.get("recommended_host_id"),
+                                "recommended_pool_id": rec_data.get("recommended_pool_id"),
+                                "recommended_mount_point": rec_data.get("recommended_mount_point"),
                                 "recommended_spec": f"{rec_data['cpu_cores']}C/{rec_data['ram_gb']}G/{rec_data['storage_quota_gb']}GiB GPU={rec_data['gpu_mode']}",
                                 "review_path": f"/dashboard/ssh-requests/{req_id}/review",
                             },
@@ -1889,6 +2080,7 @@ class MramService:
             )
 
         member["ssh_access_state"] = "PENDING_APPROVAL"
+        member["version"] = int(member.get("version") or 1) + 1
         labops_service._audit(
             prof.username,
             "MRAM_SSH_REQUEST_SUBMITTED",
@@ -1957,8 +2149,10 @@ class MramService:
 
     def expire_overdue_requests(self, now_override: Optional[datetime] = None) -> List[str]:
         """Sweep PENDING_APPROVAL / NEED_INFO requests past review_expires_at (24h SLA)."""
+        labops_service.ensure_members_fresh()
         now = _as_utc(now_override) or _utcnow()
         expired_ids: List[str] = []
+        expired_usernames: List[str] = []
         with self.db.session_scope() as session:
             candidates = session.execute(
                 select(ServerAccessRequestRecord).where(
@@ -1974,6 +2168,7 @@ class MramService:
                     r.decided_by = "system-sla-worker"
                     r.updated_at = now
                     expired_ids.append(r.id)
+                    expired_usernames.append(str(r.username or "").strip().lower())
 
                     invs = session.execute(
                         select(ApprovalInvitationRecord).where(
@@ -2019,6 +2214,11 @@ class MramService:
                     except Exception:
                         pass
 
+        for uname in expired_usernames:
+            m = next((x for x in labops_service.members if (x.get("username") or "").strip().lower() == uname), None)
+            if m and m.get("ssh_access_state") == "PENDING_APPROVAL":
+                m["ssh_access_state"] = "EXPIRED_REVIEW"
+                m["version"] = int(m.get("version") or 1) + 1
         for rid in expired_ids:
             labops_service._audit("system", "MRAM_REQUEST_SLA_EXPIRED", "SSH_REQUEST", rid, "EXPIRED", "Yêu cầu tự động hết hạn sau 24 giờ chưa duyệt")
         if expired_ids:
@@ -2232,10 +2432,15 @@ class MramService:
             if host_st not in {"ONLINE", "ACTIVE", "DEGRADED"}:
                 errors.append(f"Máy chủ '{host_id}' đang ở trạng thái {host_st} — không thể cấp phát")
 
+        student_max_ram = int(os.getenv("MRAM_MAX_STUDENT_RAM_GB", str(STUDENT_MAX_RAM_GB)))
         if cpu_cores < 1 or cpu_cores > 64:
             errors.append("Số CPU cores phải từ 1 đến 64")
         if ram_gb < 1 or ram_gb > 512:
             errors.append("RAM phải từ 1 GiB đến 512 GiB")
+        elif req_cat == "STUDENT" and ram_gb > student_max_ram:
+            errors.append(
+                f"Sinh viên chỉ được cấp tối đa {student_max_ram} GiB RAM (yêu cầu hiện tại: {ram_gb} GiB)"
+            )
         if storage_quota_gb < 10 or storage_quota_gb > 5000:
             errors.append("Dung lượng storage phải từ 10 GiB đến 5000 GiB")
         if req_cat == "STUDENT" and (duration_days is None or duration_days < 1 or duration_days > 365):
@@ -2451,10 +2656,18 @@ class MramService:
                             payload={
                                 "request_id": req.id,
                                 "username": req.username,
+                                "project_title": req.project_title,
                                 "decision": dec,
                                 "approver": approver_username,
                                 "reason": str(reason or "").strip()[:250],
                                 "supervisor_id": req.primary_supervisor_id,
+                                "host_id": approved_config.get("host_id"),
+                                "pool_id": approved_config.get("pool_id"),
+                                "mount_point": approved_config.get("mount_point"),
+                                "cpu_cores": approved_config.get("cpu_cores"),
+                                "ram_gb": approved_config.get("ram_gb"),
+                                "storage_quota_gb": approved_config.get("storage_quota_gb"),
+                                "gpu_mode": approved_config.get("gpu_mode"),
                                 "review_path": f"/dashboard/ssh-requests/{req.id}/review",
                             },
                         ),
@@ -2462,6 +2675,17 @@ class MramService:
             except Exception as ev_exc:
                 logger.debug("V4 event insert failed on decide %s: %s", request_id, ev_exc)
 
+        m_target = next(
+            (
+                x
+                for x in labops_service.members
+                if x.get("id") == req.member_id or (x.get("username") or "").strip().lower() == str(req.username or "").strip().lower()
+            ),
+            None,
+        )
+        if m_target is not None:
+            m_target["ssh_access_state"] = "APPROVED_PROVISIONING" if dec == "APPROVED" else dec
+            m_target["version"] = int(m_target.get("version") or 1) + 1
         labops_service._audit(
             approver_username,
             f"MRAM_REQUEST_{dec}",
@@ -2476,12 +2700,534 @@ class MramService:
         if dec == "APPROVED":
             prov_res = self.provision_approved_request(request_id=request_id, approval_id=approval_id)
 
+        applicant_notif = self._notify_applicant_decision(
+            request_id=request_id,
+            decision=dec,
+            reason=str(reason or "").strip(),
+            approver_username=approver_username,
+            approved_config=approved_config,
+            provisioning=prov_res,
+        )
+
         return {
             "decision": dec,
             "approval_id": approval_id,
             "request": self.get_request_detail(request_id, viewer_username=approver_username, is_admin=True),
             "provisioning": prov_res,
+            "applicant_notification": applicant_notif,
         }
+
+    def _notify_applicant_decision(
+        self,
+        *,
+        request_id: str,
+        decision: str,
+        reason: str,
+        approver_username: str,
+        approved_config: Dict[str, Any],
+        provisioning: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Notify the applicant on Zalo (if linked) with the Admin's decision, reason, and workstation allocation."""
+        with self.db.session_scope() as session:
+            req = session.get(ServerAccessRequestRecord, request_id)
+            if not req:
+                return {"delivery_status": "REQUEST_NOT_FOUND"}
+            uname = str(req.username or "").strip()
+            project_title = str(req.project_title or "").strip()
+            req_ver = int(req.version or 1)
+            links = session.execute(
+                select(ZaloIdentityLinkRecord)
+                .where(
+                    ZaloIdentityLinkRecord.username == uname,
+                    ZaloIdentityLinkRecord.status == "ACTIVE",
+                )
+                .order_by(ZaloIdentityLinkRecord.verified_at.desc())
+            ).scalars().all()
+            chat_ids = list(
+                dict.fromkeys(
+                    str(lk.zalo_user_id).strip()
+                    for lk in links
+                    if lk.zalo_user_id and str(lk.zalo_user_id).strip() != "*"
+                )
+            )
+
+        base_url = self._public_base_url()
+        reason_txt = reason or (
+            "Đã phê duyệt cấp tài nguyên mặc định" if decision == "APPROVED" else "Cập nhật từ Quản trị viên"
+        )
+        ver_info = (provisioning or {}).get("verification") or {}
+        ssh_ip = ver_info.get("ssh_ip")
+        ssh_port = ver_info.get("ssh_port")
+        ws_dir = ver_info.get("workspace_dir")
+
+        if decision == "APPROVED":
+            host_lbl = approved_config.get("host_id") or DEFAULT_TARGET_HOST_ID
+            pool_lbl = approved_config.get("pool_id") or "N/A"
+            mount_lbl = approved_config.get("mount_point") or ""
+            pool_full = f"{pool_lbl} ({mount_lbl})" if mount_lbl else str(pool_lbl)
+            gpu_mode = approved_config.get("gpu_mode") or "NONE"
+            gpu_lbl = (
+                f"SHARED ({approved_config.get('gpu_vram_gb') or 12} GiB VRAM)"
+                if gpu_mode == "SHARED"
+                else gpu_mode
+            )
+            endpoint_line = (
+                f"• SSH Endpoint: {ssh_ip}:{ssh_port}"
+                + (f" | Workspace: {ws_dir}" if ws_dir else "")
+                if (ssh_ip and ssh_port)
+                else ""
+            )
+            msg_lines = [
+                f"✅ ĐƠN XIN CẤP TÀI NGUYÊN SSH ĐÃ ĐƯỢC PHÊ DUYỆT ({request_id})",
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"• Tài khoản: @{uname} | Đề tài: {project_title}",
+                f"• Người duyệt: @{approver_username}",
+                f"• Lý do / Phản hồi từ Admin: {reason_txt}",
+                f"• Máy chủ & Ổ lưu trữ: {host_lbl} | Pool {pool_full}",
+                (
+                    f"• Tài nguyên được cấp: {approved_config.get('cpu_cores', 4)} vCPU | "
+                    f"{approved_config.get('ram_gb', 16)} GiB RAM | "
+                    f"{approved_config.get('storage_quota_gb', 50)} GiB Ổ cứng | GPU: {gpu_lbl}"
+                ),
+            ]
+            if endpoint_line:
+                msg_lines.append(endpoint_line)
+            msg_lines.append(
+                f"🔗 Nhận mật khẩu SSH 1 lần & gói WireGuard VPN:\n{base_url}/dashboard/researcher/access"
+            )
+            msg = "\n".join(msg_lines)
+        elif decision == "REJECTED":
+            msg = "\n".join(
+                [
+                    f"⛔ ĐƠN XIN CẤP TÀI NGUYÊN SSH ĐÃ BỊ TỪ CHỐI ({request_id})",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"• Tài khoản: @{uname} | Đề tài: {project_title}",
+                    f"• Người xử lý: @{approver_username}",
+                    f"• Lý do từ chối từ Admin: {reason_txt}",
+                    f"🔗 Chỉnh sửa và gửi lại đơn mới tại:\n{base_url}/dashboard/researcher/ssh-request",
+                ]
+            )
+        else:
+            msg = "\n".join(
+                [
+                    f"⚠️ YÊU CẦU BỔ SUNG THÔNG TIN ĐƠN SSH ({request_id})",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"• Tài khoản: @{uname} | Đề tài: {project_title}",
+                    f"• Người xử lý: @{approver_username}",
+                    f"• Nội dung cần bổ sung: {reason_txt}",
+                    f"🔗 Kiểm tra trạng thái đơn tại:\n{base_url}/dashboard/researcher/requests",
+                ]
+            )
+
+        if not chat_ids:
+            return {
+                "delivery_status": "WEB_PORTAL_ONLY_NO_ZALO_LINK",
+                "delivery_detail": "Tài khoản xin cấp chưa liên kết Zalo; phản hồi lý do đã được cập nhật trên Web Portal.",
+                "recipients": [],
+                "message_preview": msg,
+            }
+
+        try:
+            from app.services.zalo_assistant.service import zalo_assistant_service
+
+            v4_notif_enabled = False
+            try:
+                from app.services.assistant_v4.notification_policy import resolve_notification_owner
+
+                v4_obj = getattr(zalo_assistant_service, "v4", None)
+                v4_cfg = getattr(v4_obj, "config", None) if v4_obj is not None else None
+                if v4_cfg is None:
+                    from app.services.assistant_v4.config import load_assistant_v4_config
+
+                    v4_cfg = load_assistant_v4_config()
+                v4_notif_enabled = resolve_notification_owner(v4_cfg) == "V4_ACTIVE"
+            except Exception:
+                v4_notif_enabled = False
+
+            if v4_notif_enabled and decision in {"APPROVED", "REJECTED"}:
+                return {
+                    "delivery_status": "DELEGATED_TO_V4_POLICY",
+                    "delivery_detail": f"Phản hồi tới @{uname} được gửi qua V4 EventPolicyEngine.",
+                    "recipients": chat_ids,
+                    "message_preview": msg,
+                }
+
+            queued_ids: List[str] = []
+            sent_ids: List[str] = []
+            errors: List[str] = []
+            bot_token = (os.getenv("ZALO_BOT_TOKEN") or getattr(zalo_assistant_service.bot_engine, "bot_token", "") or "").strip()
+            immediate = (
+                os.getenv("MRAM_IMMEDIATE_ZALO_SEND", "").strip() == "1"
+                and "PYTEST_CURRENT_TEST" not in os.environ
+                and bool(bot_token)
+            )
+            for cid in chat_ids:
+                enqueued = zalo_assistant_service.notification_dispatcher.enqueue(
+                    idempotency_key=f"mram-decision:{request_id}:v{req_ver}:{decision.lower()}:{cid}",
+                    recipient_id=cid,
+                    event_type=f"MRAM_SSH_REQUEST_{decision}",
+                    severity="P1",
+                    is_critical=False,
+                    message_text=msg,
+                    correlation_id=request_id,
+                )
+                queued_ids.append(cid)
+                if immediate:
+                    try:
+                        import asyncio
+                        import concurrent.futures
+                        from zalo_bot import Bot
+
+                        def _sync_send_applicant(target_cid: str = cid) -> Optional[str]:
+                            async def _do_send() -> Optional[str]:
+                                bot = Bot(token=bot_token)
+                                sent = await bot.send_message(chat_id=target_cid, text=msg)
+                                mid = getattr(sent, "message_id", None)
+                                return str(mid) if mid is not None else "accepted"
+
+                            return asyncio.run(_do_send())
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            prov_msg_id = pool.submit(_sync_send_applicant).result(timeout=15)
+                        outbox_id = enqueued.get("id")
+                        if outbox_id:
+                            with self.db.session_scope() as session:
+                                out_rec = session.get(NotificationOutboxRecord, outbox_id)
+                                if out_rec is not None:
+                                    out_rec.status = "SENT"
+                                    out_rec.attempt_count = max(1, int(out_rec.attempt_count or 0))
+                                    out_rec.provider_message_id = prov_msg_id
+                                    out_rec.sent_at = _utcnow()
+                                    out_rec.next_retry_at = None
+                                    out_rec.last_error = None
+                        sent_ids.append(cid)
+                    except Exception as send_exc:
+                        errors.append(str(send_exc))
+
+            status = "SENT" if (sent_ids and len(sent_ids) == len(queued_ids)) else "QUEUED_FOR_APPLICANT"
+            detail = (
+                f"Đã gửi trực tiếp Zalo DM cho @{uname} ({', '.join(sent_ids)})"
+                if status == "SENT"
+                else f"Đã xếp hàng gửi Zalo DM phản hồi lý do tới @{uname} ({', '.join(queued_ids)})"
+            )
+            if errors:
+                detail = f"{detail}; ghi chú gửi trực tiếp: {'; '.join(errors)}"
+            return {
+                "delivery_status": status,
+                "delivery_detail": detail,
+                "recipients": queued_ids,
+                "message_preview": msg,
+            }
+        except Exception as exc:
+            return {
+                "delivery_status": "ZALO_NOTIFY_FAILED",
+                "delivery_detail": str(exc),
+                "recipients": chat_ids,
+                "message_preview": msg,
+            }
+
+    def resolve_pending_request_identifier(self, identifier: str = "") -> ServerAccessRequestRecord:
+        """Resolve a request ID, request ID prefix, @username, or implicit sole pending request."""
+        self.expire_overdue_requests()
+        ident = str(identifier or "").strip()
+        with self.db.session_scope() as session:
+            pending = session.execute(
+                select(ServerAccessRequestRecord)
+                .where(ServerAccessRequestRecord.status.in_(["PENDING_APPROVAL", "NEED_INFO"]))
+                .order_by(ServerAccessRequestRecord.submitted_at.desc())
+            ).scalars().all()
+
+            if not ident:
+                if len(pending) == 1:
+                    chosen = pending[0]
+                    session.expunge(chosen)
+                    return chosen
+                if not pending:
+                    raise LookupError("Hiện không có đơn xin cấp SSH nào đang chờ phê duyệt.")
+                sample = ", ".join(f"{r.id} (@{r.username})" for r in pending[:5])
+                raise MramValidationError(
+                    "MULTIPLE_PENDING_REQUESTS",
+                    f"Hiện có {len(pending)} đơn đang chờ duyệt ({sample}). Vui lòng ghi rõ mã đơn hoặc @username.",
+                    400,
+                )
+
+            exact = session.get(ServerAccessRequestRecord, ident)
+            if exact is not None:
+                session.expunge(exact)
+                return exact
+
+            ident_norm = ident.lstrip("@").lower()
+            prefix_matches = [r for r in pending if r.id.lower().startswith(ident.lower())]
+            if len(prefix_matches) == 1:
+                chosen = prefix_matches[0]
+                session.expunge(chosen)
+                return chosen
+
+            user_matches = [r for r in pending if str(r.username or "").lower() == ident_norm]
+            if len(user_matches) == 1:
+                chosen = user_matches[0]
+                session.expunge(chosen)
+                return chosen
+            if len(user_matches) > 1:
+                sample = ", ".join(r.id for r in user_matches[:4])
+                raise MramValidationError(
+                    "MULTIPLE_USER_REQUESTS",
+                    f"Thành viên @{ident_norm} có nhiều đơn chờ ({sample}); vui lòng dùng mã đơn cụ thể.",
+                    400,
+                )
+
+        raise LookupError(f"Không tìm thấy đơn xin cấp SSH đang chờ duyệt cho '{identifier}'.")
+
+    def match_pending_requests_by_query(self, query_text: str) -> Dict[str, Any]:
+        """Match natural Vietnamese Admin prose against pending SSH requests by req ID, @username, code, index, or name."""
+        self.expire_overdue_requests()
+        all_pending = (
+            self.list_requests_for_admin(status_filter="PENDING_APPROVAL")
+            + self.list_requests_for_admin(status_filter="NEED_INFO")
+        )
+        raw = str(query_text or "").strip()
+        raw_lower = raw.lower()
+        norm_text = _strip_vn_accents(raw)
+
+        # 1. Explicit request ID (sshreq-... or req-...)
+        req_id_tokens = re.findall(r"\b((?:ssh)?req-[a-z0-9_-]+)\b", raw_lower)
+        if req_id_tokens:
+            id_matches: List[Dict[str, Any]] = []
+            for req in all_pending:
+                rid = str(req.get("id") or "").lower()
+                if any(rid == tok or rid.startswith(tok) for tok in req_id_tokens):
+                    id_matches.append(req)
+            return {
+                "matches": id_matches,
+                "all_pending": all_pending,
+                "explicit_unmatched_mention": req_id_tokens[0] if not id_matches else None,
+            }
+
+        # 2. Explicit @username mentions (ignoring @admin)
+        at_mentions = [
+            m.lower() for m in re.findall(r"@([a-z0-9_.-]+)", raw_lower) if m.lower() != "admin"
+        ]
+        if at_mentions:
+            at_matches = [
+                req for req in all_pending
+                if str(req.get("username") or "").lower() in at_mentions
+                or str(req.get("id") or "").lower() in at_mentions
+            ]
+            return {
+                "matches": at_matches,
+                "all_pending": all_pending,
+                "explicit_unmatched_mention": f"@{at_mentions[0]}" if not at_matches else None,
+            }
+
+        # 3. Ordinal / index reference ("đơn số 1", "đơn thứ 2", "bạn số 1", "đơn đầu tiên")
+        if re.search(r"\b(?:don|ban|yeu cau)\s+(?:dau\s+tien|thu\s+nhat)\b", norm_text):
+            idx_matches = [all_pending[0]] if all_pending else []
+            return {"matches": idx_matches, "all_pending": all_pending, "explicit_unmatched_mention": None}
+        idx_m = re.search(r"\b(?:don|ban|yeu cau|st+)\s*(?:so|thu|#)?\s*(\d{1,2})\b", norm_text)
+        if idx_m:
+            idx_num = int(idx_m.group(1))
+            if 1 <= idx_num <= len(all_pending):
+                return {"matches": [all_pending[idx_num - 1]], "all_pending": all_pending, "explicit_unmatched_mention": None}
+
+        # 4. Exact bare username or member_code
+        strong_matches: List[Dict[str, Any]] = []
+        for req in all_pending:
+            uname = str(req.get("username") or "").strip().lower()
+            mcode = str(req.get("member_code") or "").strip().lower()
+            if uname and re.search(rf"(?<![a-z0-9_.-]){re.escape(uname)}(?![a-z0-9_.-])", raw_lower):
+                strong_matches.append(req)
+                continue
+            if len(mcode) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(mcode)}(?![a-z0-9])", norm_text):
+                strong_matches.append(req)
+        if strong_matches:
+            return {"matches": strong_matches, "all_pending": all_pending, "explicit_unmatched_mention": None}
+
+        # 5. Full Vietnamese name (accented or accent-stripped), 2-word given name, or person-prefixed short name
+        full_matches: List[Dict[str, Any]] = []
+        two_word_matches: List[Dict[str, Any]] = []
+        given_word_matches: List[Dict[str, Any]] = []
+
+        for req in all_pending:
+            full_norm = _strip_vn_accents(req.get("full_name") or "")
+            if not full_norm:
+                continue
+            words = full_norm.split()
+            if len(words) >= 2 and re.search(rf"(?<![a-z0-9]){re.escape(full_norm)}(?![a-z0-9])", norm_text):
+                full_matches.append(req)
+                continue
+            if len(words) >= 2:
+                last_two = " ".join(words[-2:])
+                if re.search(rf"(?<![a-z0-9]){re.escape(last_two)}(?![a-z0-9])", norm_text):
+                    two_word_matches.append(req)
+                    continue
+            last_word = words[-1]
+            if last_word and re.search(
+                rf"\b(?:ban|em|sinh vien|sv|tai khoan|tk|cua|cho|gui)\s+(?:nay\s+|ay\s+)?{re.escape(last_word)}(?![a-z0-9])",
+                norm_text,
+            ):
+                given_word_matches.append(req)
+
+        chosen = full_matches or two_word_matches or given_word_matches
+        return {"matches": chosen, "all_pending": all_pending, "explicit_unmatched_mention": None}
+
+    def resolve_default_approval_config(
+        self,
+        request_id: str,
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build default workstation + balanced storage pool approval config (with student 50GiB / max 16GiB RAM rules)."""
+        ov = dict(overrides or {})
+        with self.db.session_scope() as session:
+            req = session.get(ServerAccessRequestRecord, request_id)
+            if not req:
+                raise LookupError(f"Không tìm thấy yêu cầu '{request_id}'")
+            rec = session.execute(
+                select(RequestResourceRecommendationRecord)
+                .where(RequestResourceRecommendationRecord.request_id == req.id)
+                .order_by(RequestResourceRecommendationRecord.request_version.desc())
+            ).scalars().first()
+            req_cat = str(req.member_category or "STUDENT").upper()
+            req_dur = req.requested_duration_days
+            req_gpu = bool(req.gpu_requested)
+
+        # Recompute fresh recommendation at approval time so sequential approvals
+        # automatically balance members across workstation storage pools.
+        live_rec = self.compute_resource_recommendation(
+            member_category=req_cat,
+            requested_duration_days=req_dur,
+            gpu_requested=req_gpu,
+        )
+
+        host_raw = ov.get("host_id") or ov.get("host") or live_rec.get("recommended_host_id") or (rec.recommended_host_id if rec else None) or DEFAULT_TARGET_HOST_ID
+        host_id = str(host_raw).strip().lower()
+
+        pool_raw = ov.get("pool_id") or ov.get("pool")
+        if pool_raw:
+            raw_pool_str = str(pool_raw).strip()
+            resolved_pool = storage_service.get_storage_pool_by_id(host_id, raw_pool_str)
+            if resolved_pool:
+                pool_id = str(resolved_pool.get("storage_id") or resolved_pool.get("id") or raw_pool_str).strip()
+            else:
+                pool_id = raw_pool_str
+        elif host_id == str(live_rec.get("recommended_host_id") or "").lower() and live_rec.get("recommended_pool_id"):
+            pool_id = str(live_rec["recommended_pool_id"])
+        else:
+            dist = self.get_host_pool_distribution(
+                host_id,
+                required_storage_gb=float(live_rec.get("storage_quota_gb") or (STUDENT_DEFAULT_STORAGE_GB if req_cat == "STUDENT" else 100)),
+            )
+            eligible = [d for d in dist if d["eligible_for_request"]]
+            eligible.sort(
+                key=lambda d: (
+                    int(d.get("priority_rank", 0)),
+                    -float(d["effective_free_per_member_gib"]),
+                    int(d["assigned_member_count"]),
+                    -float(d["net_allocatable_gib"]),
+                    str(d["pool_id"]),
+                )
+            )
+            pool_id = str(eligible[0]["pool_id"]) if eligible else str((rec.recommended_pool_id if rec else "") or "")
+
+        cpu_val = ov.get("cpu_cores") or ov.get("cpu") or live_rec.get("cpu_cores") or (rec.cpu_cores if rec else 4) or 4
+        student_max_ram = int(os.getenv("MRAM_MAX_STUDENT_RAM_GB", str(STUDENT_MAX_RAM_GB)))
+        if ov.get("ram_gb") is not None or ov.get("ram") is not None:
+            ram_val = int(ov.get("ram_gb") if ov.get("ram_gb") is not None else ov.get("ram"))
+        else:
+            base_ram = int(live_rec.get("ram_gb") or (rec.ram_gb if rec else 16) or 16)
+            ram_val = min(base_ram, student_max_ram) if req_cat == "STUDENT" else base_ram
+
+        if ov.get("storage_quota_gb") is not None or ov.get("disk") is not None or ov.get("storage") is not None:
+            raw_disk = ov.get("storage_quota_gb")
+            if raw_disk is None:
+                raw_disk = ov.get("disk") if ov.get("disk") is not None else ov.get("storage")
+            storage_val = int(raw_disk)
+        else:
+            storage_val = int(live_rec.get("storage_quota_gb") or (STUDENT_DEFAULT_STORAGE_GB if req_cat == "STUDENT" else 100))
+
+        gpu_raw = ov.get("gpu_mode") or ov.get("gpu")
+        if gpu_raw is not None:
+            g_up = str(gpu_raw).strip().upper()
+            if g_up in {"YES", "TRUE", "1", "SHARED"}:
+                gpu_mode = "SHARED"
+            elif g_up in {"NO", "FALSE", "0", "NONE"}:
+                gpu_mode = "NONE"
+            else:
+                gpu_mode = g_up
+        else:
+            gpu_mode = str(live_rec.get("gpu_mode") or (rec.gpu_mode if rec else ("SHARED" if req_gpu else "NONE")) or "NONE").upper()
+
+        gpu_uuid = ov.get("gpu_uuid")
+        if gpu_mode == "NONE":
+            gpu_uuid = None
+        elif not gpu_uuid:
+            gpu_uuid = live_rec.get("gpu_uuid") or (rec.gpu_uuid if rec else None)
+            if not gpu_uuid:
+                host_gpus = [
+                    g for g in getattr(labops_service, "gpus", []) or []
+                    if str(g.get("server_id") or g.get("host_id") or "").lower() == host_id
+                ]
+                if host_gpus:
+                    gpu_uuid = str(host_gpus[0].get("uuid") or host_gpus[0].get("id") or "") or None
+                elif host_id == "workstation":
+                    gpu_uuid = "GPU-workstation-a30-01"
+
+        gpu_vram_raw = ov.get("gpu_vram_gb") if ov.get("gpu_vram_gb") is not None else ov.get("vram")
+        gpu_vram_gb = int(gpu_vram_raw) if gpu_vram_raw is not None else (12 if gpu_mode == "SHARED" else None)
+
+        dur_raw = ov.get("duration_days") if ov.get("duration_days") is not None else ov.get("days")
+        if dur_raw is not None:
+            duration_days: Optional[int] = int(dur_raw)
+        elif req_cat == "STUDENT":
+            duration_days = int(req_dur or (rec.duration_days if rec else None) or 30)
+        else:
+            duration_days = None
+
+        return {
+            "host_id": host_id,
+            "pool_id": pool_id,
+            "cpu_cores": int(cpu_val),
+            "ram_gb": int(ram_val),
+            "storage_quota_gb": int(storage_val),
+            "gpu_mode": gpu_mode,
+            "gpu_uuid": gpu_uuid,
+            "gpu_vram_gb": gpu_vram_gb,
+            "duration_days": duration_days,
+        }
+
+    def zalo_admin_decide_request(
+        self,
+        *,
+        identifier: str,
+        decision: str,
+        admin_username: str = "admin",
+        reason: str = "",
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Approve, reject, or request more info for an SSH request directly from Zalo Admin DM."""
+        dec = str(decision or "").strip().upper()
+        req = self.resolve_pending_request_identifier(identifier)
+        clean_reason = str(reason or "").strip()
+        if dec == "APPROVED":
+            cfg = self.resolve_default_approval_config(req.id, overrides=overrides)
+            if not clean_reason:
+                clean_reason = (
+                    f"Đã phê duyệt cấp tài nguyên mặc định trên máy chủ {cfg['host_id']} "
+                    f"(pool {cfg['pool_id']}, {cfg['cpu_cores']} vCPU, {cfg['ram_gb']} GiB RAM, "
+                    f"{cfg['storage_quota_gb']} GiB ổ cứng) qua Zalo Admin."
+                )
+            return self.decide_ssh_request(
+                request_id=req.id,
+                decision="APPROVED",
+                approver_username=admin_username,
+                reason=clean_reason,
+                config=cfg,
+            )
+        return self.decide_ssh_request(
+            request_id=req.id,
+            decision=dec,
+            approver_username=admin_username,
+            reason=clean_reason,
+        )
 
     # ------------------------------------------------------------------
     # P6: Durable Provisioning Integration & Verification Gate
@@ -2492,6 +3238,7 @@ class MramService:
         request_id: str,
         approval_id: str,
         dry_run: Optional[bool] = None,
+        force_retry: bool = False,
     ) -> Dict[str, Any]:
         is_dry = self._test_dry_run_provisioning if dry_run is None else bool(dry_run)
         now = _utcnow()
@@ -2505,7 +3252,7 @@ class MramService:
             existing_op = session.execute(
                 select(ProvisioningOperationRecord).where(ProvisioningOperationRecord.idempotency_key == idemp_key)
             ).scalar_one_or_none()
-            if existing_op is not None and existing_op.status == "VERIFIED_READY":
+            if existing_op is not None and existing_op.status == "VERIFIED_READY" and not force_retry:
                 return {
                     "operation_id": existing_op.id,
                     "idempotent_replay": True,
@@ -2547,6 +3294,7 @@ class MramService:
         verified_ready = False
 
         try:
+            labops_service.reconcile_persistence_state()
             member = next((m for m in labops_service.members if m.get("id") == member_id or m.get("username") == username), None)
             if not member:
                 raise RuntimeError(f"Member '{username}' missing from runtime store")
@@ -2672,13 +3420,25 @@ class MramService:
 
             # Explicit Read-Back Verification Gate
             refreshed = next((m for m in labops_service.members if m.get("id") == member_id), None)
-            ws_dir = str((refreshed or {}).get("workspace_dir") or (refreshed or {}).get("host_storage_directory") or "")
+            storage_dir = str(
+                (refreshed or {}).get("member_storage_directory")
+                or (refreshed or {}).get("host_storage_directory")
+                or (refreshed or {}).get("workspace_dir")
+                or ""
+            )
+            ws_dir = str((refreshed or {}).get("workspace_dir") or storage_dir)
             expected_suffix = f"/labops/users/{username}"
+            expected_ws_suffix = f"/workspaces/{cfg['host_id']}/{username}"
             checks = {
                 "member_exists": refreshed is not None,
                 "non_privileged_policy": True,
                 "cpu_ram_applied": bool(refreshed and int(refreshed.get("cpu_limit_cores") or 0) == int(cfg["cpu_cores"]) and int(refreshed.get("ram_limit_gb") or 0) == int(cfg["ram_gb"])),
-                "storage_path_isolated": ws_dir.endswith(expected_suffix) or is_dry,
+                "storage_path_isolated": (
+                    storage_dir.endswith(expected_suffix)
+                    or ws_dir.endswith(expected_suffix)
+                    or ws_dir.endswith(expected_ws_suffix)
+                    or is_dry
+                ),
                 "ssh_endpoint_assigned": bool(refreshed and refreshed.get("ssh_port")),
                 "gpu_policy_matched": list((refreshed or {}).get("gpu_permissions") or []) == gpu_list,
             }
@@ -2686,7 +3446,11 @@ class MramService:
                 "checked_at": _utcnow().isoformat(),
                 "checks": checks,
                 "all_passed": all(checks.values()),
-                "workspace_dir": ws_dir or f"{cfg.get('mount_point', '')}{expected_suffix}",
+                "workspace_dir": (
+                    storage_dir
+                    if storage_dir.endswith(expected_suffix)
+                    else (ws_dir or f"{cfg.get('mount_point', '')}{expected_suffix}")
+                ),
                 "ssh_port": (refreshed or {}).get("ssh_port"),
                 "ssh_ip": (refreshed or {}).get("ssh_ip"),
             }
@@ -2712,6 +3476,7 @@ class MramService:
             if verified_ready:
                 if op_rec:
                     op_rec.status = "VERIFIED_READY"
+                    op_rec.last_error = None
                     op_rec.steps_json = steps + [{"step": "VERIFICATION_GATE", "status": "VERIFIED"}]
                     op_rec.verification_json = verification
                     op_rec.completed_at = done_at
@@ -2772,7 +3537,18 @@ class MramService:
             member["ssh_access_state"] = "VERIFIED_READY" if verified_ready else "PROVISIONING_FAILED"
             member["ssh_expires_at"] = ssh_exp_dt.isoformat() if ssh_exp_dt else None
             member["member_category"] = req_cat
+            member["version"] = int(member.get("version") or 1) + 1
+            member["updated_at"] = done_at.isoformat()
             if verified_ready:
+                if member.get("status") not in {"SUSPENDED", "REVOKED", "ARCHIVED", "DELETE_ELIGIBLE", "DELETED"}:
+                    member["status"] = "ACTIVE"
+                member["provisioning_state"] = "READY"
+                member["overall_readiness"] = "READY"
+                member["workspace_status"] = "VERIFIED"
+                member["ssh_status"] = "ACTIVE"
+                member["ssh_key_status"] = "ACTIVE"
+                member["access_verified_at"] = done_at.isoformat()
+                member.pop("legacy_access_status", None)
                 member["is_web_registered"] = True
                 member["linked_web_member_id"] = member_id
                 member["linked_web_username"] = username
@@ -2793,9 +3569,51 @@ class MramService:
     # ------------------------------------------------------------------
     def get_member_ssh_access_handover(self, username: str) -> Dict[str, Any]:
         self.sweep_expired_ssh_access()
+        labops_service.ensure_members_fresh()
         uname = str(username or "").strip().lower()
         member = next((m for m in labops_service.members if (m.get("username") or "").lower() == uname), None)
         if not member:
+            with self.db.session_scope() as session:
+                prof_only = (
+                    session.execute(select(MemberProfileRecord).where(MemberProfileRecord.username == uname))
+                    .scalars()
+                    .first()
+                )
+                cred_only = (
+                    session.execute(select(MemberWebCredentialRecord).where(MemberWebCredentialRecord.username == uname))
+                    .scalars()
+                    .first()
+                )
+                if prof_only is not None:
+                    return {
+                        "ready": False,
+                        "ssh_access_state": prof_only.ssh_access_state or "NONE",
+                        "web_account_status": prof_only.web_account_status or "ACTIVE",
+                        "member_category": prof_only.member_category or "STUDENT",
+                        "username": uname,
+                        "ssh_expires_at": _as_utc(prof_only.ssh_expires_at).isoformat() if prof_only.ssh_expires_at else None,
+                        "message": "Quyền truy cập SSH chưa sẵn sàng (cần Admin phê duyệt và hoàn tất kiểm chứng runtime).",
+                    }
+                if uname == "admin" or (cred_only is not None and str(cred_only.role).upper() == "ADMIN"):
+                    return {
+                        "ready": False,
+                        "ssh_access_state": "NONE",
+                        "web_account_status": "ACTIVE",
+                        "member_category": "ADMIN",
+                        "username": uname,
+                        "ssh_expires_at": None,
+                        "message": "Tài khoản quản trị (@admin) không dùng luồng bàn giao SSH cá nhân của sinh viên; hãy dùng trang Thành viên & Truy cập hoặc Duyệt Cấp phát SSH.",
+                    }
+                if cred_only is not None:
+                    return {
+                        "ready": False,
+                        "ssh_access_state": "NONE",
+                        "web_account_status": cred_only.status or "ACTIVE",
+                        "member_category": "STUDENT",
+                        "username": uname,
+                        "ssh_expires_at": None,
+                        "message": "Tài khoản chưa có hồ sơ SSH. Hãy gửi đơn xin cấp quyền SSH để Admin xem xét.",
+                    }
             raise LookupError(f"Không tìm thấy thành viên '{uname}'")
         prof = self._ensure_legacy_profile(member)
         state = prof.ssh_access_state
@@ -2831,7 +3649,7 @@ class MramService:
         vault_avail = labops_service.ssh_access_manager.vault.get_availability(prof.member_id)
         ssh_host = str(member.get("ssh_ip") or ("192.168.167.251" if member.get("assigned_server") == "workstation" else "192.168.167.250"))
         ssh_port = int(member.get("ssh_port") or 22001)
-        if claim is None and not bool(vault_avail.get("channel_secrets_available")):
+        if claim is None and not bool(vault_avail.get("channel_secrets_available")) and not str(member.get("ssh_public_key") or "").strip():
             temp_pw, pw_meta = labops_service.ssh_access_manager.issue_temporary_password(
                 member_id=prof.member_id,
                 username=uname,
@@ -2840,18 +3658,63 @@ class MramService:
             )
             ws_name = str(member.get("workspace_name") or f"ws-{uname}")
             ws_path = str(
-                member.get("workspace_dir")
+                member.get("member_storage_directory")
+                or member.get("workspace_dir")
                 or member.get("host_storage_directory")
                 or f"/media/aiot-ws1/5ce32377-6072-4c07-a066-807e89a5d48b/labops/users/{uname}"
             )
             generated = labops_service.ssh_access_manager.generate_encrypted_ed25519_keypair(
                 uname, ws_name, require_passphrase=True
             )
-            if not member.get("ssh_public_key"):
-                member["ssh_public_key"] = generated["public_key"]
-                member["ssh_fingerprint"] = generated["fingerprint"]
-                member["ssh_public_key_preview"] = f"{generated['public_key'][:42]}..."
-                member["ssh_key_status"] = "ACTIVE"
+            member["ssh_public_key"] = generated["public_key"]
+            member["ssh_fingerprint"] = generated["fingerprint"]
+            member["ssh_public_key_preview"] = f"{generated['public_key'][:42]}..."
+            member["ssh_key_status"] = "ACTIVE"
+            member["version"] = int(member.get("version") or 1) + 1
+            member["updated_at"] = _utcnow().isoformat()
+            try:
+                labops_service.ssh_key_registry.register_key(
+                    username=uname,
+                    label="Admin-Managed Ed25519 Key",
+                    public_key=generated["public_key"],
+                    actor="system-handover",
+                    member_id=prof.member_id,
+                )
+            except Exception:
+                pass
+            if member.get("workspace_id") and member.get("container_id"):
+                srv_id = str(member.get("assigned_server") or "workstation")
+                srv_obj = next((s for s in labops_service.servers if s.get("id") == srv_id), None)
+                if srv_obj is not None and labops_service._is_host_online(srv_id):
+                    try:
+                        labops_service.node_agent.dispatch(
+                            srv_obj,
+                            "SYNC_SSH_AUTHORIZED_KEYS",
+                            params={
+                                "workspace_id": str(member["workspace_id"]),
+                                "member_username": uname,
+                                "keys_json": json.dumps([generated["public_key"]]),
+                            },
+                            idempotency_key=f"sync-keys-handover-{member['workspace_id']}-{uuid.uuid4().hex[:8]}",
+                            actor_id="system-handover",
+                            actor_role="ADMIN",
+                        )
+                        labops_service.ssh_access_manager.sync_container_first_login_gate(
+                            workspace_id=str(member["workspace_id"]),
+                            username=uname,
+                            member_id=prof.member_id,
+                            keys=[generated["public_key"]],
+                            member_storage_dir=member.get("member_storage_directory"),
+                        )
+                    except Exception:
+                        pass
+            elif not getattr(labops_service, "_is_live_production_data_dir", False) and member.get("workspace_dir"):
+                try:
+                    labops_service.ssh_access_manager.write_authorized_keys_state(
+                        str(member["workspace_dir"]), [generated["public_key"]]
+                    )
+                except Exception:
+                    pass
             labops_service.ssh_access_manager.vault.store_provisioned_package(
                 member_id=prof.member_id,
                 username=uname,
@@ -2867,6 +3730,7 @@ class MramService:
                 vpn_guide="WireGuard VPN + SSH handover",
                 ssh_login_user=uname,
             )
+            labops_service._save_persistent_data()
             vault_avail = labops_service.ssh_access_manager.vault.get_availability(prof.member_id)
         vscode_snippet = (
             f"Host labops-{uname}\n"
@@ -2886,7 +3750,7 @@ class MramService:
             "assigned_server": member.get("assigned_server"),
             "ssh_host": ssh_host,
             "ssh_port": ssh_port,
-            "workspace_dir": member.get("workspace_dir") or member.get("host_storage_directory"),
+            "workspace_dir": member.get("member_storage_directory") or member.get("workspace_dir") or member.get("host_storage_directory"),
             "cpu_limit_cores": member.get("cpu_limit_cores"),
             "ram_limit_gb": member.get("ram_limit_gb"),
             "storage_quota_gb": member.get("storage_quota_gb"),
@@ -2941,19 +3805,59 @@ class MramService:
         }
 
     def reissue_member_ssh_secret(self, *, username: str, step_up_jti: str) -> Dict[str, Any]:
+        labops_service.ensure_members_fresh()
         handover = self.get_member_ssh_access_handover(username)
         if not handover.get("ready"):
             raise MramConflictError("SSH_NOT_VERIFIED_READY", "Tài khoản SSH chưa ở trạng thái VERIFIED_READY", 409)
 
+        uname = str(username or "").strip().lower()
         member_id = str(handover["member_id"])
         op_id = handover.get("provisioning_op_id")
         new_pw, pw_meta = labops_service.ssh_access_manager.issue_temporary_password(
             member_id=member_id,
-            username=username,
-            actor=username,
+            username=uname,
+            actor=uname,
             ttl_seconds=86400,
+            invalidate_previous=True,
         )
         exp_iso = str(pw_meta.get("temp_password_expires_at") or (_utcnow() + timedelta(hours=24)).isoformat())
+        labops_service.ssh_access_manager.vault.store_reissued_temp_password(
+            member_id=member_id,
+            username=uname,
+            temporary_password=new_pw,
+            temp_password_expires_at=exp_iso,
+            ttl_seconds=86400,
+        )
+        member = next(
+            (
+                m
+                for m in labops_service.members
+                if m.get("id") == member_id or (m.get("username") or "").strip().lower() == uname
+            ),
+            None,
+        )
+        if member is not None:
+            member["activation_status"] = "PENDING_ACTIVATION"
+            member["password_status"] = "CHANGE_REQUIRED"
+            member["temp_password_expires_at"] = exp_iso
+            member["one_time_package"] = labops_service.ssh_access_manager.vault.get_availability(member_id)
+            member["version"] = int(member.get("version") or 1) + 1
+            if member.get("workspace_id"):
+                reg_keys = [
+                    k.get("public_key")
+                    for k in labops_service.ssh_key_registry.list_keys(username=uname, member_id=member_id)
+                    if k.get("desired_state") != "REVOKED" and k.get("public_key")
+                ]
+                cur_pub = str(member.get("ssh_public_key") or "").strip()
+                if cur_pub and cur_pub not in reg_keys:
+                    reg_keys.insert(0, cur_pub)
+                labops_service.ssh_access_manager.sync_container_first_login_gate(
+                    workspace_id=str(member["workspace_id"]),
+                    username=uname,
+                    member_id=member_id,
+                    keys=reg_keys,
+                    member_storage_dir=member.get("member_storage_directory"),
+                )
         now = _utcnow()
         with self.db.session_scope() as session:
             session.add(
@@ -2962,14 +3866,17 @@ class MramService:
                     member_id=member_id,
                     provisioning_op_id=op_id,
                     claim_type="SSH_TEMP_PASSWORD",
-                    claimed_by=username,
+                    claimed_by=uname,
                     step_up_jti=step_up_jti,
                     status="REISSUED",
                     claimed_at=now,
                 )
             )
-        labops_service._audit(username, "SSH_TEMP_SECRET_REISSUED", "MEMBER", username, "SUCCESS", "Thành viên yêu cầu cấp lại mật khẩu tạm SSH một lần")
-        labops_service._save_persistent_data()
+        labops_service._audit(uname, "SSH_TEMP_SECRET_REISSUED", "MEMBER", uname, "SUCCESS", "Thành viên yêu cầu cấp lại mật khẩu tạm SSH một lần")
+        if member is not None:
+            labops_service._save_persistent_data()
+        else:
+            labops_service.save_audit_logs()
         return {
             "reissued": True,
             "temporary_password": new_pw,
@@ -2979,6 +3886,7 @@ class MramService:
 
     def sweep_expired_ssh_access(self, now_override: Optional[datetime] = None) -> List[str]:
         """Expire student SSH access at ssh_expires_at while retaining web_account_status=WEB_ACTIVE and disk data."""
+        labops_service.ensure_members_fresh()
         now = _as_utc(now_override) or _utcnow()
         expired_usernames: List[str] = []
         with self.db.session_scope() as session:
@@ -3014,6 +3922,7 @@ class MramService:
                 # Keep m['status'] != SUSPENDED/REVOKED on web login check or keep SSH revoked separately
                 m["gpu_permissions"] = []
                 m["provisioning_state"] = "SSH_EXPIRED"
+                m["version"] = int(m.get("version") or 1) + 1
             labops_service._audit(
                 "system",
                 "MRAM_STUDENT_SSH_EXPIRED",

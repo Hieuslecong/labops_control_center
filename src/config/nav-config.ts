@@ -77,7 +77,7 @@ export const adminNavGroups: NavGroup[] = [
         items: []
       },
       {
-        title: 'Giám sát An ninh',
+        title: 'Giám sát & Cảnh báo',
         url: '/dashboard/monitoring',
         icon: 'gauge',
         shortcut: ['g', 's'],

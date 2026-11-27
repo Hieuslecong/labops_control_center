@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-action-result",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "action": {
+      "enum": [
+        "SIGTERM",
+        "SIGKILL"
+      ]
+    },
+    "status": {
+      "enum": [
+        "TERMINATED",
+        "KILLED",
+        "TIMEOUT_STILL_RUNNING",
+        "FAILED_STILL_RUNNING",
+        "PARTIAL_FAILURE",
+        "UNKNOWN",
+        "FAILED",
+        "DENIED"
+      ]
+    },
+    "verification": {
+      "enum": [
+        "VERIFIED",
+        "PARTIAL_FAILURE",
+        "STILL_RUNNING",
+        "FAILED",
+        "UNKNOWN"
+      ]
+    },
+    "pids_remaining": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true
+    },
+    "skipped_descendants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2048
+      }
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "executed_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "action_id",
+    "action",
+    "status",
+    "verification",
+    "pids_remaining",
+    "skipped_descendants",
+    "message",
+    "correlation_id",
+    "executed_at"
+  ],
+  "additionalProperties": false
+}

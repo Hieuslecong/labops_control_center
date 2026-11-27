@@ -12,12 +12,15 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import select
 
 from app.services.zalo_assistant.ai_gateway_client import AIGatewayClient
 from app.services.zalo_assistant.identity_rbac import ZaloIdentityRBACService, ZaloPrincipal
@@ -166,6 +169,9 @@ class ZaloBotEngine:
         self.message_history: List[Dict[str, Any]] = []
         self._ask_lock = threading.Lock()
         self._ask_timestamps: Dict[str, List[float]] = defaultdict(list)
+        self._decision_lock = threading.Lock()
+        self._admin_decision_drafts: Dict[str, Dict[str, Any]] = {}
+        self._decision_draft_ttl_sec = 300.0
         self.v4_facade: Optional[Any] = None
         if self._config_path and not self._explicit_allowlist:
             self.reload_persisted_config(force=True)
@@ -402,8 +408,23 @@ class ZaloBotEngine:
             "/who",
             "/confirm",
         }
+        has_active_draft = (
+            cmd not in known_cmds
+            and principal.is_admin
+            and self._get_decision_draft(principal, chat_id or sender_id) is not None
+        )
+        is_admin_ssh_decision_intent = (
+            cmd not in known_cmds
+            and principal.is_admin
+            and self._parse_natural_ssh_decision_intent(text) is not None
+        )
         is_ask = cmd == "/ask" or cmd not in known_cmds
-        if is_ask and not self._check_ask_rate_limit(sender_id):
+        if (
+            is_ask
+            and not has_active_draft
+            and not is_admin_ssh_decision_intent
+            and not self._check_ask_rate_limit(sender_id, limit=50 if principal.is_admin else 10)
+        ):
             return {
                 "success": False,
                 "error": "RATE_LIMITED",
@@ -468,8 +489,10 @@ class ZaloBotEngine:
         elif cmd == "/quota":
             reply = self._cmd_quota()
         elif cmd == "/new":
+            self._clear_decision_draft(principal, chat_id or sender_id)
             reply = self._cmd_v4_new(principal, source=src, chat_id=chat_id or sender_id)
         elif cmd == "/clear":
+            self._clear_decision_draft(principal, chat_id or sender_id)
             reply = self._cmd_v4_clear(principal, source=src, chat_id=chat_id or sender_id)
         elif cmd == "/memory":
             reply = self._cmd_v4_memory(principal, source=src, chat_id=chat_id or sender_id)
@@ -500,7 +523,57 @@ class ZaloBotEngine:
         elif cmd == "/ask":
             reply, agent_meta = self._cmd_ask(arg, principal, source=src, chat_id=chat_id or "")
         else:
-            reply, agent_meta = self._cmd_ask(text, principal, source=src, chat_id=chat_id or "")
+            conv = self._try_handle_conversational_ssh_decision(
+                text,
+                principal,
+                chat_id=chat_id or sender_id,
+                source=src,
+            )
+            if conv is not None:
+                if conv.get("forbidden"):
+                    return {
+                        "success": False,
+                        "error": "FORBIDDEN",
+                        "suppress_outbound": src != "zalo",
+                        "reply": conv["reply"],
+                        "command": "/ask",
+                    }
+                reply = str(conv["reply"])
+                agent_meta = conv.get("meta") or {}
+                self._record_v4_turn_memory(
+                    principal=principal,
+                    source=src,
+                    chat_id=chat_id or sender_id,
+                    user_text=text,
+                    reply_text=reply,
+                )
+            else:
+                op_act = self._try_handle_natural_operational_action(
+                    text,
+                    principal,
+                    chat_id=chat_id or sender_id,
+                    source=src,
+                )
+                if op_act is not None:
+                    if op_act.get("forbidden"):
+                        return {
+                            "success": False,
+                            "error": "FORBIDDEN",
+                            "suppress_outbound": src != "zalo",
+                            "reply": op_act["reply"],
+                            "command": "/ask",
+                        }
+                    reply = str(op_act["reply"])
+                    agent_meta = op_act.get("meta") or {}
+                    self._record_v4_turn_memory(
+                        principal=principal,
+                        source=src,
+                        chat_id=chat_id or sender_id,
+                        user_text=text,
+                        reply_text=reply,
+                    )
+                else:
+                    reply, agent_meta = self._cmd_ask(text, principal, source=src, chat_id=chat_id or "")
 
         if src == "dashboard":
             msg_id = f"dash-{os.urandom(6).hex()}"
@@ -568,14 +641,27 @@ class ZaloBotEngine:
     # ---------------- Command Handlers ----------------
 
     def _cmd_start(self, principal: ZaloPrincipal) -> str:
+        is_v4 = self.v4_facade is not None and getattr(self.v4_facade.config, "enabled", False)
+        ver_label = "LabOps Personal AI Agent V4 (SRE v2 + V4)" if is_v4 else "LabOps AI SRE Agent v2"
+        extra = (
+            " Hỗ trợ thêm hội thoại ngữ cảnh `/new`, `/memory`, theo dõi ngưỡng `/watch`, tác vụ `/tasks` và so sánh `/compare`."
+            if is_v4
+            else ""
+        )
         return (
-            f"🚀 Chào mừng @{principal.username} ({principal.role}) đến với LabOps AI SRE Agent v2!\n\n"
-            "Tôi hỗ trợ giám sát máy chủ, GPU, sự cố, báo cáo ngày/tuần và phân tích điều tra bằng AI Agent.\n"
+            f"🚀 Chào mừng @{principal.username} ({principal.role}) đến với {ver_label}!\n\n"
+            f"Tôi hỗ trợ giám sát máy chủ, GPU, sự cố, báo cáo ngày/tuần và phân tích điều tra bằng AI Agent.{extra}\n"
             "Gõ `/help` để xem danh sách lệnh theo phân quyền của bạn."
         )
 
     def _cmd_help(self, principal: ZaloPrincipal) -> str:
-        lines = [f"📖 DANH SÁCH LỆNH LABOPS AI SRE v2 ({principal.role}):"]
+        is_v4 = self.v4_facade is not None and getattr(self.v4_facade.config, "enabled", False)
+        title = (
+            f"📖 DANH SÁCH LỆNH LABOPS PERSONAL AI V4 ({principal.role}):"
+            if is_v4
+            else f"📖 DANH SÁCH LỆNH LABOPS AI SRE v2 ({principal.role}):"
+        )
+        lines = [title]
         for c, desc in self.COMMANDS.items():
             if c in {"/security", "/requests", "/who"} and not principal.is_admin:
                 continue
@@ -812,14 +898,1420 @@ class ZaloBotEngine:
             "━━━━━━━━━━━━━━━━━━━━",
         ]
         for idx, item in enumerate(p_reqs[:10], 1):
+            req_id = str(item.get("request_id") or "")
+            pool_info = (
+                f" | Ổ: {item.get('recommended_pool_id')} ({item.get('recommended_mount_point')})"
+                if item.get("recommended_pool_id")
+                else ""
+            )
+            pool_load = ""
+            if item.get("pool_assigned_members") is not None and item.get("pool_net_allocatable_gib") is not None:
+                pool_load = f" [Đang có {item['pool_assigned_members']} TV, trống {item['pool_net_allocatable_gib']} GiB]"
             lines.append(
                 f"{idx}. {item.get('full_name')} (@{item.get('username')}, mã {item.get('member_code') or 'N/A'})\n"
-                f"   • Mã đơn: {item.get('request_id')} | GVHD: {item.get('supervisor_name')}\n"
+                f"   • Mã đơn: {req_id} | GVHD: {item.get('supervisor_name')}\n"
                 f"   • Đề tài: {item.get('project_title')}\n"
-                f"   • Đề xuất: {item.get('recommended_spec')} | SLA còn ~{item.get('remaining_sla_hours')}h"
+                f"   • Đề xuất: {item.get('recommended_host')}{pool_info}{pool_load} • {item.get('recommended_spec')} | SLA còn ~{item.get('remaining_sla_hours')}h"
             )
-        lines.append("\nVào /dashboard/ssh-requests hoặc dùng nút 'Gửi Zalo Admin' để nhận liên kết duyệt 1 lần.")
+        first_uname = str((p_reqs[0] or {}).get("username") or "tai_khoan")
+        lines.append(
+            "\n💬 Admin không cần dùng lệnh cứng — chỉ cần nhắn tự nhiên cho tôi (Agent sẽ kiểm tra điều kiện và hỏi xác nhận lại 1 lần), ví dụ:\n"
+            f"• \"@{first_uname} đồng ý duyệt cấp tài nguyên cho bạn ấy\"\n"
+            f"• \"@{first_uname} tài khoản này tôi từ chối cấp vì lý do ...\""
+        )
         return "\n".join(lines)
+
+    # ---------------- Conversational Admin SSH Decision Agent ----------------
+
+    def _draft_key(self, principal: ZaloPrincipal, chat_id: str) -> str:
+        return f"{principal.username or principal.zalo_user_id}:{chat_id or principal.zalo_user_id}"
+
+    def _get_decision_draft(self, principal: ZaloPrincipal, chat_id: str) -> Optional[Dict[str, Any]]:
+        key = self._draft_key(principal, chat_id)
+        now_m = time.monotonic()
+        with self._decision_lock:
+            draft = self._admin_decision_drafts.get(key)
+            if not draft:
+                return None
+            if (now_m - float(draft.get("updated_at") or 0.0)) > self._decision_draft_ttl_sec:
+                self._admin_decision_drafts.pop(key, None)
+                return None
+            return dict(draft)
+
+    def _set_decision_draft(self, principal: ZaloPrincipal, chat_id: str, draft: Dict[str, Any]) -> None:
+        key = self._draft_key(principal, chat_id)
+        copy = dict(draft)
+        copy["updated_at"] = time.monotonic()
+        with self._decision_lock:
+            self._admin_decision_drafts[key] = copy
+
+    def _clear_decision_draft(self, principal: ZaloPrincipal, chat_id: str) -> None:
+        key = self._draft_key(principal, chat_id)
+        with self._decision_lock:
+            self._admin_decision_drafts.pop(key, None)
+
+    @staticmethod
+    def _strip_accents_lower(text: str) -> str:
+        from app.services.mram_service import _strip_vn_accents
+
+        return _strip_vn_accents(text)
+
+    @classmethod
+    def _is_cancel_phrase(cls, text: str) -> bool:
+        raw_lower = " ".join(re.sub(r"[,.!?;:]+", " ", str(text or "").lower()).split())
+        if re.search(
+            r"^(?:đừng|thôi\s+đừng|(?:thôi\s+)?(?:đừng|dừng|hủy|huỷ|ngưng)\s+(?:có\s+)?(?:duyệt|phê\s+duyệt|cấp|làm|từ\s+chối|yêu\s+cầu(?:\s+bổ\s+sung)?|bổ\s+sung|xác\s+nhận|chốt|thực\s+hiện|gửi)(?:\s+.*)?)$",
+            raw_lower,
+        ):
+            return True
+        if re.search(
+            r"^(?:thôi\s+)?không\s+(?:có\s+)?(?:duyệt|phê\s+duyệt|cấp|làm|từ\s+chối|yêu\s+cầu(?:\s+bổ\s+sung)?|bổ\s+sung|xác\s+nhận|chốt|thực\s+hiện|gửi)\s+nữa(?:\s+(?:nhé|nha|em|đi|thôi|ạ)){0,3}$",
+            raw_lower,
+        ):
+            return True
+        norm = cls._strip_accents_lower(re.sub(r"[,.!?;:]+", " ", str(text or "")))
+        if re.search(
+            r"^(?:thoi\s+)?(?:khong|huy|ngung)\s+(?:co\s+)?(?:duyet|phe\s+duyet|cap|lam|tu\s+choi|yeu\s+cau(?:\s+bo\s+sung)?|bo\s+sung|xac\s+nhan|chot|thuc\s+hien|gui)\s+(?:nua|di|thoi)(?:\s+(?:nhe|nha|em|di|thoi|a)){0,3}$",
+            norm,
+        ):
+            return True
+        return norm in {
+            "huy",
+            "huy bo",
+            "thoi",
+            "bo qua",
+            "khong lam nua",
+            "dung lai",
+            "khong duyet nua",
+            "cancel",
+            "abort",
+        }
+
+    @classmethod
+    def _is_affirmative_confirmation(cls, text: str) -> bool:
+        raw_lower = " ".join(re.sub(r"[,.!?;:]+", " ", str(text or "").lower()).split())
+        if not raw_lower:
+            return False
+        if re.search(r"\b(?:đừng|không|chưa|sai|hủy|huỷ|thôi|dừng|ngưng)\b", raw_lower):
+            return False
+        norm = cls._strip_accents_lower(re.sub(r"[,.!?;:]+", " ", str(text or "")))
+        if not norm or len(norm) > 60:
+            return False
+        if any(neg in norm.split() for neg in ("khong", "chua", "sai", "dung")):
+            # Allow "dung roi" ("đúng rồi" -> dung roi), block "sai" / "khong" / "chua" / "dung duyet|lam"
+            if re.search(r"\b(?:khong|chua|sai|dung\s+(?:co\s+)?(?:lam|duyet|cap|thuc\s+hien|chot|xac\s+nhan))\b", norm):
+                return False
+        confirm_exact = {
+            "ok",
+            "oke",
+            "okay",
+            "ok em",
+            "ok nhe",
+            "ok nha",
+            "ok duyet",
+            "ok duyet di",
+            "ok dong y",
+            "ok xac nhan",
+            "ok chot",
+            "ok thuc hien",
+            "xac nhan",
+            "xac nhan nhe",
+            "xac nhan di",
+            "dung",
+            "dung roi",
+            "dung roi em",
+            "dung roi nhe",
+            "chinh xac",
+            "chuan",
+            "chuan roi",
+            "dong y",
+            "dong y nhe",
+            "duyet di",
+            "duyet luon",
+            "tu choi di",
+            "thuc hien",
+            "thuc hien di",
+            "gui di",
+            "chot",
+            "chot nhe",
+            "chot di",
+            "chot duyet",
+            "chot duyet di",
+            "u",
+            "uh",
+            "vang",
+            "yes",
+            "confirm",
+            "tien hanh",
+            "tien hanh di",
+        }
+        if norm in confirm_exact:
+            return True
+        return bool(
+            re.match(
+                r"^(?:ok|oke|okay|dung\s+roi|xac\s+nhan|chinh\s+xac|chot|dong\s+y|thuc\s+hien|duyet\s+di|tien\s+hanh)\b(?:\s+(?:nhe|nha|em|di|luon|nha\s+em|xac\s+nhan|dong\s+y|duyet|tu\s+choi)){0,3}$",
+                norm,
+            )
+        )
+
+    @classmethod
+    def _is_negative_rejection(cls, text: str) -> bool:
+        norm = cls._strip_accents_lower(re.sub(r"[,.!?;:]+", " ", str(text or "")))
+        return norm in {
+            "khong",
+            "khong dung",
+            "chua dung",
+            "sai",
+            "sai roi",
+            "khong phai",
+            "chua chuan",
+            "sua lai",
+            "chinh lai",
+        }
+
+    @classmethod
+    def _parse_natural_ssh_decision_intent(cls, text: str) -> Optional[str]:
+        raw = str(text or "").strip()
+        if not raw or raw.startswith("/") or cls._is_cancel_phrase(raw):
+            return None
+        norm = cls._strip_accents_lower(raw)
+
+        # Explicit imperative decision overrides status/question checks unless ending as a status question
+        imperative_action_patterns = (
+            r"\bphe\s+duyet\b",
+            r"\bdong\s+y\s+(?:duyet|cap)\b",
+            r"\bduyet\s+cap\b",
+            r"\bduyet\s+cho\b",
+            r"\bduyet\s+don\b",
+            r"\byeu\s+cau\s+bo\s+sung\b",
+            r"\bde\s+nghi\s+bo\s+sung\b",
+        )
+        has_imperative_override = any(re.search(p, norm) for p in imperative_action_patterns)
+
+        # Status/lookup questions must return None even when @username is mentioned
+        status_question_phrases = (
+            "duoc duyet chua",
+            "da duyet chua",
+            "duyet hay chua",
+            "bi tu choi",
+            "dang cho duyet",
+            "cho duyet the nao",
+            "xem don",
+            "cho toi xem",
+            "cho minh xem",
+            "cho em xem",
+            "ly do xin cap",
+            "ai huong dan",
+            "ginagr vien",
+            "giang vien",
+            "kiem tra",
+            "trang thai don",
+            "tinh trang don",
+            "thong tin don",
+            "co don nao",
+            "danh sach",
+            "nhung don nao",
+            "bao nhieu don",
+            "liet ke",
+            "lam sao",
+            "huong dan",
+            "ai dang cho",
+            "ai chua duoc",
+            "tai sao",
+            "vi sao",
+            "ra sao",
+            "the nao",
+        )
+        if (
+            any(k in norm for k in status_question_phrases)
+            or re.search(r"\bduyet\s+chua\s*(?:\?|$)", norm)
+        ) and not has_imperative_override:
+            return None
+
+        # Avoid triggering on remaining pure lookup/status questions
+        lookup_markers = (
+            "trang thai",
+            "tai sao don",
+            "vi sao don",
+        )
+        has_at_mention = bool(re.search(r"@[a-z0-9_.-]+", raw.lower()))
+        if any(k in norm for k in lookup_markers) and not has_at_mention:
+            return None
+        if re.match(r"^(?:tai sao|vi sao|ai da|kiem tra|cho xem)\b", norm):
+            return None
+
+        # Check REJECTED BEFORE APPROVED because "không đồng ý cấp" contains "đồng ý cấp"
+        reject_patterns = (
+            r"\btu choi\b",
+            r"\bkhong duyet\b",
+            r"\bkhong phe duyet\b",
+            r"\bkhong dong y\s+(?:cap|duyet|phe duyet)\b",
+            r"\bkhong cap\b",
+            r"\bkhong chap nhan\b",
+            r"\bkhong cho\b.*(?:dung|ssh|truy cap|tai nguyen|may)",
+            r"\bhuy don\b",
+            r"\btu choi ban\b",
+            r"\btu choi don\b",
+            r"\bbac bo\b",
+            r"\b(?:co|tinh)\s+tu\s+choi\b",
+        )
+        for pat in reject_patterns:
+            if re.search(pat, norm):
+                return "REJECTED"
+
+        needinfo_patterns = (
+            r"\byeu cau bo sung\b",
+            r"\bde nghi bo sung\b",
+            r"\bnhac bo sung\b",
+            r"\bbao bo sung\b",
+            r"\b(?:yeu cau|de nghi|nhac|bao)\s+.{1,45}\bbo sung\b",
+            r"\b(?:yeu cau|de nghi|nhac|bao)\s+.{1,45}\blam ro\b",
+            r"\bgui lai don\b",
+            r"\bbo sung them\b",
+            r"\bbo sung thong tin\b",
+            r"\bbo sung ho so\b",
+            r"\bban ay bo sung\b",
+            r"\bnhac ban ay bo sung\b",
+            r"\bbao ban ay bo sung\b",
+            r"\bcan bo sung\b",
+            r"\byeu cau lam ro\b",
+            r"\bcan lam ro\b",
+            r"\bbo sung\b.*(?:thong tin|gvhd|de tai|muc tieu|ho so)",
+        )
+        for pat in needinfo_patterns:
+            if re.search(pat, norm):
+                return "NEED_INFO"
+
+        approve_patterns = (
+            r"\bphe duyet\b",
+            r"\bdong y duyet\b",
+            r"\bdong y cap\b",
+            r"\bchap thuan\b",
+            r"\bcho phep\b",
+            r"\bmo quyen\b",
+            r"\bmo tai khoan\b",
+            r"\bcap may\b",
+            r"\bcap cho\b",
+            r"\bduyet cap\b",
+            r"\bduyet don\b",
+            r"\bduyet cho\b",
+            r"\bduyet ban\b",
+            r"\bduyet em\b",
+            r"\bduyet tai khoan\b",
+            r"\bduyet yeu cau\b",
+            r"\bcap tai nguyen\b",
+            r"\bcap ssh\b",
+            r"\bcap quyen ssh\b",
+            r"\bdong y cho\b.*(?:ssh|tai nguyen|dung may|workstation)",
+        )
+        norm_no_apply = re.sub(r"\b(?:xin|dang\s+ky)\s+cap\b", " xin ", norm)
+        for pat in approve_patterns:
+            if re.search(pat, norm_no_apply):
+                return "APPROVED"
+
+        norm_for_bare_approve = re.sub(r"\b(?:dang\s+cho|cho|chua|duoc)\s+duyet\b", " ", norm)
+        if (has_at_mention or re.search(r"\b(?:sshreq-|req-|don\s+so\s+\d+|tai\s+khoan\s+|sinh\s+vien\s+|ban\s+)", norm)) and re.search(
+            r"\b(?:duyet|approve)\b", norm_for_bare_approve
+        ):
+            if not re.search(r"\b(?:chua|sao|gi|nao|khong)\s*\?+$", cls._strip_accents_lower(raw)):
+                return "APPROVED"
+
+        return None
+
+    @staticmethod
+    def _clean_reason_text(raw_reason: str) -> str:
+        s = " ".join(str(raw_reason or "").strip().split())
+        s = re.sub(r'^["\']+|["\']+$', "", s).strip()
+        s = re.sub(r"[,.!?;:\s]+$", "", s).strip()
+        # Strip trailing polite Vietnamese sentence particles only when preceded by whitespace
+        s = re.sub(r"\s+(?:nhé|nha|ạ|nhỉ|nhé em|đi em|đi|luôn nhé|giúp tôi|giúp mình)\s*$", "", s, flags=re.IGNORECASE).strip()
+        s = re.sub(r"[,.!?;:\s]+$", "", s).strip()
+        return s
+
+    @classmethod
+    def _extract_reason_from_decision_prose(cls, text: str, decision: str) -> str:
+        raw = " ".join(str(text or "").strip().split())
+        if not raw:
+            return ""
+        # Match explicit reason markers (vì lý do, bởi vì, lý do:, lý do ..., vì ...)
+        m = re.search(
+            r"(?:^|[\s,;:.])(?:vì\s+lý\s+do(?:\s+là|\s*[:\-])?|vi\s+ly\s+do(?:\s+la|\s*[:\-])?|lý\s+do(?:\s+là|\s*[:\-]|\s+)|ly\s+do(?:\s+la|\s*[:\-]|\s+)|bởi\s+vì\s+|boi\s+vi\s+|tại\s+vì\s+|tai\s+vi\s+|ghi\s+chú(?:\s+là|\s*[:\-]|\s+)|lời\s+nhắn(?:\s+là|\s*[:\-]|\s+)|vì\s+|vi\s+|do\s+là\s+)(.+)$",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            cleaned = cls._clean_reason_text(m.group(1))
+            if cleaned:
+                return cleaned
+
+        if decision == "NEED_INFO":
+            ni_m = re.search(
+                r"(?:bổ\s+sung(?:\s+thêm|\s+thông\s+tin|\s+hồ\s+sơ)?|bo\s+sung(?:\s+them|\s+thong\s+tin|\s+ho\s+so)?|làm\s+rõ|lam\s+ro)\s*(?:là|:|\s)\s*(.+)$",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            if ni_m:
+                cleaned = cls._clean_reason_text(ni_m.group(1))
+                if len(cleaned) >= 5:
+                    return cleaned
+
+        if decision == "REJECTED":
+            # Support colon separator after account/verb ("Từ chối @sv_x: trùng đề tài")
+            colon_m = re.search(r"[:]\s*([^:]{5,})$", raw)
+            if colon_m:
+                cleaned = cls._clean_reason_text(colon_m.group(1))
+                if len(cleaned) >= 5:
+                    return cleaned
+        return ""
+
+    @classmethod
+    def _extract_resource_overrides_from_prose(cls, text: str) -> Dict[str, Any]:
+        raw = str(text or "")
+        norm = cls._strip_accents_lower(raw)
+        ov: Dict[str, Any] = {}
+        cpu_m = re.search(r"\b(\d{1,2})\s*(?:v?cpu|core|cores|nhan|luong)\b", norm)
+        if cpu_m:
+            ov["cpu_cores"] = int(cpu_m.group(1))
+        ram_m = re.search(r"\b(\d{1,3})\s*(?:gb|gib)\s*ram\b|\bram\s*(\d{1,3})\s*(?:gb|gib)?\b", norm)
+        if ram_m:
+            ov["ram_gb"] = int(ram_m.group(1) or ram_m.group(2))
+        disk_m = re.search(r"\b(\d{2,4})\s*(?:gb|gib)\s*(?:o|o\s*cung|disk|storage|dung\s*luong|luu\s*tru)\b", norm)
+        if disk_m:
+            ov["storage_quota_gb"] = int(disk_m.group(1))
+        days_m = re.search(r"\b(\d{1,3})\s*ngay\b", norm)
+        if days_m:
+            ov["duration_days"] = int(days_m.group(1))
+
+        if re.search(r"\b(?:khong|ko|no)\s+(?:dung\s+|cap\s+)?gpu\b", norm):
+            ov["gpu_mode"] = "NONE"
+        elif re.search(r"\b(?:exclusive|doc\s*quyen)\s+gpu\b", norm):
+            ov["gpu_mode"] = "EXCLUSIVE"
+        elif re.search(r"\b(?:co|dung|cap|shared)\s+gpu\b", norm):
+            ov["gpu_mode"] = "SHARED"
+
+        pool_m = re.search(r"\b(pool-[a-z0-9_-]+)\b", raw.lower())
+        if pool_m:
+            ov["pool_id"] = pool_m.group(1)
+        else:
+            uuid_m = re.search(
+                r"(?:pool|o(?:\s+cung|\s+dia)?|disk)\s*[=:]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+                raw.lower(),
+            )
+            if uuid_m:
+                ov["pool_id"] = uuid_m.group(1)
+            else:
+                path_m = re.search(r"(/mnt/hdd\d+|/dev/(?:sd[a-z]\d*|nvme\d+n\d+(?:p\d+)?))", raw, flags=re.IGNORECASE)
+                if path_m:
+                    ov["pool_id"] = path_m.group(1)
+                else:
+                    disk_nl_m = re.search(
+                        r"\b(?:o(?:\s+cung|\s+dia)?|dia|disk|pool)\s*(?:luu\s+tru\s+|thu\s+cap\s+|ai\s+)?[:=]?\s*(hdd\d+|sd[a-z]\d*|nvme\d+n\d+(?:p\d+)?|root)\b",
+                        norm,
+                    )
+                    if disk_nl_m:
+                        tok = disk_nl_m.group(1).lower()
+                        ov["pool_id"] = f"pool-{tok}"
+        return ov
+
+    def _finalize_or_ask_confirmation(
+        self,
+        *,
+        principal: ZaloPrincipal,
+        chat_id: str,
+        decision: str,
+        req: Dict[str, Any],
+        reason: str,
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from app.services.mram_service import STUDENT_DEFAULT_STORAGE_GB, STUDENT_MAX_RAM_GB, mram_service
+
+        req_id = str(req["id"])
+        uname = str(req.get("username") or "")
+        full_name = str(req.get("full_name") or uname)
+        cat = str(req.get("member_category") or "STUDENT").upper()
+        prereq_notices: List[str] = []
+        clean_ov = dict(overrides or {})
+
+        if decision in {"REJECTED", "NEED_INFO"} and len(str(reason or "").strip()) < 5:
+            draft = {
+                "stage": "AWAITING_PREREQUISITE",
+                "missing": "REASON",
+                "decision": decision,
+                "request_id": req_id,
+                "request": req,
+                "reason": str(reason or "").strip(),
+                "overrides": clean_ov,
+            }
+            self._set_decision_draft(principal, chat_id, draft)
+            verb_lbl = "TỪ CHỐI cấp tài nguyên" if decision == "REJECTED" else "YÊU CẦU BỔ SUNG thông tin"
+            ask_what = "lý do từ chối" if decision == "REJECTED" else "nội dung cần bổ sung"
+            return {
+                "reply": (
+                    f"🤖 Tôi đã hiểu Admin muốn {verb_lbl} cho tài khoản {full_name} (@{uname}, mã đơn {req_id}).\n"
+                    f"• Điều kiện tiên quyết còn thiếu: Chưa có {ask_what} để gửi phản hồi cho tài khoản xin cấp.\n"
+                    f"👉 Admin vui lòng nhắn thêm {ask_what} nhé (hoặc nhắn \"Hủy\" để dừng)?"
+                ),
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_PREREQUISITE"},
+            }
+
+        eff_reason = str(reason or "").strip()
+        cfg_preview: Dict[str, Any] = {}
+        pool_mount = ""
+        pool_load_note = ""
+        if decision == "APPROVED":
+            if cat == "STUDENT" and clean_ov.get("ram_gb") is not None and int(clean_ov["ram_gb"]) > STUDENT_MAX_RAM_GB:
+                requested_ram = int(clean_ov["ram_gb"])
+                clean_ov["ram_gb"] = STUDENT_MAX_RAM_GB
+                prereq_notices.append(
+                    f"⚠️ Điều kiện tiên quyết: @{uname} là Sinh viên nên hệ thống quy định mặc định {STUDENT_DEFAULT_STORAGE_GB} GiB ổ cứng "
+                    f"và tối đa {STUDENT_MAX_RAM_GB} GiB RAM (Admin vừa nêu {requested_ram} GiB RAM). Tôi đã tự điều chỉnh về mức tối đa {STUDENT_MAX_RAM_GB} GiB RAM."
+                )
+            cfg_preview = mram_service.resolve_default_approval_config(req_id, overrides=clean_ov or None)
+            dist_list = mram_service.get_host_pool_distribution(
+                str(cfg_preview.get("host_id") or "workstation"),
+                required_storage_gb=float(cfg_preview.get("storage_quota_gb") or STUDENT_DEFAULT_STORAGE_GB),
+            )
+            matched_pool = next((d for d in dist_list if d["pool_id"] == cfg_preview.get("pool_id")), None)
+            if matched_pool:
+                pool_mount = str(matched_pool.get("mount_point") or "")
+                tier_tag = " • Ổ ƯU TIÊN" if int(matched_pool.get("priority_rank", 0)) == 0 else " • Ổ DỰ PHÒNG HẠN CHẾ"
+                pool_load_note = f" (đang có {matched_pool['assigned_member_count']} TV, trống {matched_pool['net_allocatable_gib']} GiB{tier_tag})"
+            if not eff_reason:
+                eff_reason = (
+                    f"Đã phê duyệt cấp tài nguyên mặc định trên máy chủ {cfg_preview['host_id']} "
+                    f"(ổ {cfg_preview['pool_id']}, {cfg_preview['cpu_cores']} vCPU, {cfg_preview['ram_gb']} GiB RAM, "
+                    f"{cfg_preview['storage_quota_gb']} GiB ổ cứng)."
+                )
+
+        draft = {
+            "stage": "AWAITING_CONFIRMATION",
+            "missing": None,
+            "decision": decision,
+            "request_id": req_id,
+            "request": req,
+            "reason": eff_reason,
+            "overrides": clean_ov,
+        }
+        self._set_decision_draft(principal, chat_id, draft)
+
+        if decision == "APPROVED":
+            gpu_lbl = (
+                f"SHARED ({cfg_preview.get('gpu_vram_gb') or 12} GiB VRAM)"
+                if cfg_preview.get("gpu_mode") == "SHARED"
+                else str(cfg_preview.get("gpu_mode") or "NONE")
+            )
+            pool_txt = f"{cfg_preview.get('pool_id')}" + (f" ({pool_mount})" if pool_mount else "") + pool_load_note
+            lines = [
+                "🤖 Tôi đã hiểu yêu cầu của Admin. Xin Admin xác nhận lại 1 lần nữa trước khi thực thi:",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "• Hành động: ✅ PHÊ DUYỆT & CẤP PHÁT TÀI NGUYÊN SSH",
+                f"• Tài khoản xin cấp: {full_name} (@{uname} • mã đơn {req_id} • {cat})",
+                f"• Đề tài: {req.get('project_title')}",
+                f"• Máy chủ mặc định: {cfg_preview.get('host_id') or 'workstation'}",
+                f"• Ổ cứng lưu trữ (chia đều tự động): {pool_txt}",
+                f"• Cấu hình dự kiến: {cfg_preview.get('cpu_cores')} vCPU | {cfg_preview.get('ram_gb')} GiB RAM | {cfg_preview.get('storage_quota_gb')} GiB Ổ cứng | GPU: {gpu_lbl}",
+                f"• Lời nhắn gửi @{uname}: \"{eff_reason}\"",
+            ]
+            if prereq_notices:
+                lines.append("")
+                lines.extend(prereq_notices)
+            lines.append("\n👉 Admin nhắn \"Xác nhận\", \"Đúng rồi\" hoặc \"OK\" để hệ thống cấp phát ngay (hoặc nhắn chỉnh sửa / \"Hủy\").")
+            return {
+                "reply": "\n".join(lines),
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_CONFIRMATION"},
+            }
+
+        action_lbl = "⛔ TỪ CHỐI cấp tài nguyên SSH" if decision == "REJECTED" else "⚠️ YÊU CẦU BỔ SUNG thông tin đơn SSH"
+        reason_lbl = "Lý do từ chối sẽ gửi" if decision == "REJECTED" else "Nội dung yêu cầu bổ sung gửi"
+        lines = [
+            "🤖 Tôi đã hiểu yêu cầu của Admin. Xin Admin xác nhận lại 1 lần nữa trước khi thực thi:",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"• Hành động: {action_lbl}",
+            f"• Tài khoản xin cấp: {full_name} (@{uname} • mã đơn {req_id})",
+            f"• Đề tài: {req.get('project_title')}",
+            f"• {reason_lbl} cho @{uname}: \"{eff_reason}\"",
+            "\n👉 Admin nhắn \"Xác nhận\", \"Đúng rồi\" hoặc \"OK\" để tôi hoàn tất và phản hồi cho tài khoản xin cấp (hoặc nhắn \"Sửa lý do thành ...\", \"Hủy\").",
+        ]
+        return {
+            "reply": "\n".join(lines),
+            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_CONFIRMATION"},
+        }
+
+    def _ask_target_prerequisite(
+        self,
+        *,
+        principal: ZaloPrincipal,
+        chat_id: str,
+        decision: str,
+        reason: str,
+        overrides: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+        ambiguous: bool = False,
+    ) -> Dict[str, Any]:
+        draft = {
+            "stage": "AWAITING_PREREQUISITE",
+            "missing": "TARGET",
+            "decision": decision,
+            "request_id": None,
+            "request": None,
+            "reason": str(reason or "").strip(),
+            "overrides": dict(overrides or {}),
+            "candidates": candidates[:10],
+        }
+        self._set_decision_draft(principal, chat_id, draft)
+        dec_lbl = {"APPROVED": "PHÊ DUYỆT", "REJECTED": "TỪ CHỐI", "NEED_INFO": "YÊU CẦU BỔ SUNG"}.get(decision, decision)
+        header = (
+            f"🤖 Admin muốn {dec_lbl} đơn SSH, nhưng có nhiều tài khoản khớp với tên vừa nêu:"
+            if ambiguous
+            else f"🤖 Admin muốn {dec_lbl} đơn SSH, nhưng chưa chỉ rõ tài khoản nào trong danh sách chờ:"
+        )
+        lines = [header]
+        for idx, c in enumerate(candidates[:8], 1):
+            lines.append(
+                f"{idx}. {c.get('full_name')} (@{c.get('username')}, mã {c.get('member_code') or 'N/A'}) — {c.get('project_title')} [{c.get('id')}]"
+            )
+        if reason:
+            lines.append(f"• Lý do tôi đã ghi nhận tạm: \"{reason}\"")
+        lines.append("\n👉 Admin vui lòng nhắn tên, `@username` hoặc số thứ tự (ví dụ \"số 1\") để tôi chuẩn bị bản xác nhận nhé (hoặc nhắn \"Hủy\").")
+        return {
+            "reply": "\n".join(lines),
+            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_PREREQUISITE"},
+        }
+
+    def _execute_confirmed_decision_draft(
+        self,
+        *,
+        draft: Dict[str, Any],
+        principal: ZaloPrincipal,
+    ) -> Dict[str, Any]:
+        from app.services.mram_service import MramConflictError, MramValidationError, mram_service
+
+        req_id = str(draft["request_id"])
+        decision = str(draft["decision"]).upper()
+        reason = str(draft.get("reason") or "").strip()
+        overrides = dict(draft.get("overrides") or {})
+
+        try:
+            res = mram_service.zalo_admin_decide_request(
+                identifier=req_id,
+                decision=decision,
+                admin_username=principal.username or "admin",
+                reason=reason,
+                overrides=overrides or None,
+            )
+        except (LookupError, PermissionError, MramValidationError, MramConflictError) as exc:
+            msg = getattr(exc, "message", None) or str(exc)
+            return {
+                "reply": f"⛔ Không thể thực thi quyết định cho đơn {req_id}: {msg}",
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_ERROR"},
+            }
+        except Exception as exc:
+            return {
+                "reply": f"⛔ Lỗi xử lý đơn SSH {req_id}: {exc}",
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_ERROR"},
+            }
+
+        req_data = res.get("request") or {}
+        uname = req_data.get("username") or "member"
+        final_reason = req_data.get("decision_reason") or reason
+        app_cfg = (req_data.get("latest_approval") or {}).get("approved_config") or {}
+        prov = res.get("provisioning") or {}
+        ver_info = prov.get("verification") or {}
+        notif = res.get("applicant_notification") or {}
+
+        if decision == "APPROVED":
+            host_lbl = app_cfg.get("host_id") or "workstation"
+            pool_lbl = app_cfg.get("pool_id") or "N/A"
+            mount_lbl = app_cfg.get("mount_point") or ""
+            pool_full = f"{pool_lbl} ({mount_lbl})" if mount_lbl else str(pool_lbl)
+            ssh_ip = ver_info.get("ssh_ip")
+            ssh_port = ver_info.get("ssh_port")
+            prov_status = str(prov.get("status") or req_data.get("status") or "")
+            header = (
+                f"✅ ĐÃ PHÊ DUYỆT & CẤP PHÁT ĐƠN SSH ({req_id})"
+                if prov_status == "VERIFIED_READY"
+                else f"⚠️ ĐÃ DUYỆT ĐƠN NHƯNG CẤP PHÁT SSH GẶP LỖI ({req_id})"
+            )
+            lines = [
+                header,
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"• Thành viên: @{uname} ({req_data.get('member_category') or 'STUDENT'})",
+                f"• Máy chủ & Ổ lưu trữ: {host_lbl} | Pool {pool_full}",
+                (
+                    f"• Tài nguyên đã cấp: {app_cfg.get('cpu_cores', 4)} vCPU | "
+                    f"{app_cfg.get('ram_gb', 16)} GiB RAM | "
+                    f"{app_cfg.get('storage_quota_gb', 50)} GiB Ổ cứng | "
+                    f"GPU: {app_cfg.get('gpu_mode', 'NONE')}"
+                ),
+                f"• Trạng thái cấp phát: {prov_status}",
+            ]
+            if prov_status != "VERIFIED_READY" and prov.get("error"):
+                lines.append(f"• Chi tiết lỗi: {prov.get('error')}")
+            if ssh_ip and ssh_port:
+                lines.append(f"• SSH Endpoint: {ssh_ip}:{ssh_port}")
+            lines.append(f"• Phản hồi đã lưu: {final_reason}")
+            lines.append(f"• Thông báo cho người xin cấp: {notif.get('delivery_detail') or notif.get('delivery_status') or 'Đã cập nhật trên Web Portal'}")
+            return {
+                "reply": "\n".join(lines),
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_EXECUTED"},
+            }
+
+        title = "⛔ ĐÃ TỪ CHỐI ĐƠN SSH" if decision == "REJECTED" else "⚠️ ĐÃ YÊU CẦU BỔ SUNG THÔNG TIN"
+        return {
+            "reply": "\n".join(
+                [
+                    f"{title} ({req_id})",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"• Thành viên: @{uname}",
+                    f"• Lý do phản hồi gửi người xin cấp: {final_reason}",
+                    f"• Thông báo cho người xin cấp: {notif.get('delivery_detail') or notif.get('delivery_status') or 'Đã cập nhật trên Web Portal'}",
+                ]
+            ),
+            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_EXECUTED"},
+        }
+
+    def _try_handle_conversational_ssh_decision(
+        self,
+        text: str,
+        principal: ZaloPrincipal,
+        *,
+        chat_id: str,
+        source: str,
+    ) -> Optional[Dict[str, Any]]:
+        clean = str(text or "").strip()
+        if not clean or clean.startswith("/"):
+            return None
+
+        from app.services.mram_service import mram_service
+
+        draft = self._get_decision_draft(principal, chat_id) if principal.is_admin else None
+
+        # 1. Handle ongoing Admin draft conversation (AWAITING_PREREQUISITE / AWAITING_CONFIRMATION)
+        if draft is not None:
+            if source != "dashboard" and principal.zalo_user_id and chat_id and chat_id != principal.zalo_user_id:
+                return {
+                    "reply": "⛔ Không chấp nhận xác nhận lệnh phê duyệt/từ chối trong nhóm chat. Vui lòng nhắn riêng (DM 1-1) với Bot.",
+                    "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_BLOCKED"},
+                }
+
+            if self._is_cancel_phrase(clean):
+                self._clear_decision_draft(principal, chat_id)
+                return {
+                    "reply": "❎ Đã hủy yêu cầu đang soạn. Không có thay đổi nào được thực thi.",
+                    "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_CANCELLED"},
+                }
+
+            stage = draft.get("stage")
+            if stage == "AWAITING_PREREQUISITE":
+                missing = draft.get("missing")
+                if missing == "TARGET":
+                    candidates = list(draft.get("candidates") or [])
+                    selected_req: Optional[Dict[str, Any]] = None
+                    bare_num = re.fullmatch(r"(?:so|thu|#)?\s*(\d{1,2})", self._strip_accents_lower(clean))
+                    if bare_num and candidates:
+                        idx = int(bare_num.group(1))
+                        if 1 <= idx <= len(candidates):
+                            selected_req = candidates[idx - 1]
+                    if selected_req is None:
+                        m_info = mram_service.match_pending_requests_by_query(clean)
+                        if len(m_info["matches"]) == 1:
+                            selected_req = m_info["matches"][0]
+                        elif len(m_info["matches"]) > 1:
+                            return self._ask_target_prerequisite(
+                                principal=principal,
+                                chat_id=chat_id,
+                                decision=draft["decision"],
+                                reason=draft.get("reason") or "",
+                                overrides=draft.get("overrides") or {},
+                                candidates=m_info["matches"],
+                                ambiguous=True,
+                            )
+                        else:
+                            # Bare last name word match among candidates ("Tiến", "Chương")
+                            clean_norm = self._strip_accents_lower(clean)
+                            name_hits = [
+                                c for c in candidates
+                                if clean_norm and clean_norm in self._strip_accents_lower(c.get("full_name") or "").split()
+                            ]
+                            if len(name_hits) == 1:
+                                selected_req = name_hits[0]
+                    if selected_req is None:
+                        # Check if user moved on to an unrelated query
+                        if (
+                            re.search(
+                                r"\b(?:gpu|cpu|ram|nhiet|su co|incident|job|status|bao cao|da duyet chua|duoc duyet chua|cho duyet|danh sach don|trang thai don|xem don)\b",
+                                self._strip_accents_lower(clean),
+                            )
+                            and not self._parse_natural_ssh_decision_intent(clean)
+                        ):
+                            self._clear_decision_draft(principal, chat_id)
+                            return None
+                        return self._ask_target_prerequisite(
+                            principal=principal,
+                            chat_id=chat_id,
+                            decision=draft["decision"],
+                            reason=draft.get("reason") or "",
+                            overrides=draft.get("overrides") or {},
+                            candidates=candidates or mram_service.match_pending_requests_by_query("")["all_pending"],
+                            ambiguous=False,
+                        )
+                    extra_reason = self._extract_reason_from_decision_prose(clean, draft["decision"])
+                    extra_ov = self._extract_resource_overrides_from_prose(clean)
+                    merged_ov = {**(draft.get("overrides") or {}), **extra_ov}
+                    return self._finalize_or_ask_confirmation(
+                        principal=principal,
+                        chat_id=chat_id,
+                        decision=draft["decision"],
+                        req=selected_req,
+                        reason=extra_reason or draft.get("reason") or "",
+                        overrides=merged_ov,
+                    )
+
+                if missing == "REASON":
+                    # Check if Admin actually gave a totally unrelated system question instead of a reason
+                    if re.search(
+                        r"\b(?:nhiet do|trang thai may chu|su co dang mo|kiem tra gpu|job dang chay|da duyet chua|duoc duyet chua|cho duyet|danh sach don|trang thai don|xem don)\b",
+                        self._strip_accents_lower(clean),
+                    ):
+                        self._clear_decision_draft(principal, chat_id)
+                        return None
+                    extracted = self._extract_reason_from_decision_prose(clean, draft["decision"]) or self._clean_reason_text(
+                        re.sub(
+                            r"^(?:vì\s+lý\s+do(?:\s+là)?|lý\s+do(?:\s+là|\s*[:\-])|vì\s+|do\s+|là\s+)",
+                            "",
+                            clean,
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                    if len(extracted) < 5:
+                        return {
+                            "reply": (
+                                "⚠️ Lý do phản hồi cho người xin cấp cần tối thiểu 5 ký tự rõ nghĩa.\n"
+                                "👉 Admin vui lòng nhập lý do cụ thể hơn (hoặc nhắn \"Hủy\" để dừng)?"
+                            ),
+                            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_PREREQUISITE"},
+                        }
+                    return self._finalize_or_ask_confirmation(
+                        principal=principal,
+                        chat_id=chat_id,
+                        decision=draft["decision"],
+                        req=draft["request"],
+                        reason=extracted,
+                        overrides=draft.get("overrides") or {},
+                    )
+
+            elif stage == "AWAITING_CONFIRMATION":
+                if self._is_affirmative_confirmation(clean):
+                    self._clear_decision_draft(principal, chat_id)
+                    return self._execute_confirmed_decision_draft(draft=draft, principal=principal)
+
+                if self._is_negative_rejection(clean):
+                    return {
+                        "reply": (
+                            "ℹ️ Bản nháp vẫn đang được giữ. Admin muốn sửa nội dung nào ạ?\n"
+                            "• Ví dụ: `Sửa lý do thành ...` hoặc `Đổi sang từ chối vì ...`\n"
+                            "• Hoặc nhắn `Hủy` để bỏ qua yêu cầu này."
+                        ),
+                        "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_CONFIRMATION"},
+                    }
+
+                # Check if Admin wants to edit reason / decision / resources on the open draft
+                edit_reason_m = re.search(
+                    r"(?:sửa\s+lý\s+do|sua\s+ly\s+do|đổi\s+lý\s+do|doi\s+ly\s+do|thay\s+lý\s+do|chỉnh\s+lý\s+do|cập\s+nhật\s+lý\s+do|đổi\s+lời\s+nhắn|sửa\s+lời\s+nhắn)\s*(?:thành|là|sang|:)?\s*(.+)$",
+                    clean,
+                    flags=re.IGNORECASE,
+                )
+                if edit_reason_m:
+                    raw_new_r = edit_reason_m.group(1).strip()
+                    auto_confirm = bool(
+                        re.search(r"\b(?:rồi|và|xong)\s+(?:chốt|xác\s+nhận|thực\s+hiện|gửi\s+luôn)\b", raw_new_r, flags=re.IGNORECASE)
+                    )
+                    new_reason = re.sub(
+                        r"\s+(?:rồi|và|xong)\s+(?:chốt|xác\s+nhận|thực\s+hiện|gửi).*$",
+                        "",
+                        raw_new_r,
+                        flags=re.IGNORECASE,
+                    )
+                    new_reason = self._clean_reason_text(new_reason)
+                    if len(new_reason) < 5:
+                        return {
+                            "reply": "⚠️ Lý do mới quá ngắn (cần tối thiểu 5 ký tự). Admin vui lòng nhập rõ hơn nhé.",
+                            "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_PREREQUISITE"},
+                        }
+                    if auto_confirm:
+                        updated_draft = {**draft, "reason": new_reason}
+                        self._clear_decision_draft(principal, chat_id)
+                        return self._execute_confirmed_decision_draft(draft=updated_draft, principal=principal)
+                    return self._finalize_or_ask_confirmation(
+                        principal=principal,
+                        chat_id=chat_id,
+                        decision=draft["decision"],
+                        req=draft["request"],
+                        reason=new_reason,
+                        overrides=draft.get("overrides") or {},
+                    )
+
+                new_ov = self._extract_resource_overrides_from_prose(clean)
+                switch_intent = self._parse_natural_ssh_decision_intent(clean)
+                if new_ov and not switch_intent:
+                    merged_ov = {**(draft.get("overrides") or {}), **new_ov}
+                    return self._finalize_or_ask_confirmation(
+                        principal=principal,
+                        chat_id=chat_id,
+                        decision=draft["decision"],
+                        req=draft["request"],
+                        reason=draft.get("reason") or "",
+                        overrides=merged_ov,
+                    )
+
+                if switch_intent is not None:
+                    switch_match = mram_service.match_pending_requests_by_query(clean)
+                    matched_list = list(switch_match.get("matches") or [])
+                    if len(matched_list) == 1:
+                        target_req = matched_list[0]
+                        same_target = str(target_req.get("id")) == str(draft.get("request_id"))
+                        switched_reason = self._extract_reason_from_decision_prose(clean, switch_intent)
+                        switched_ov = {**(draft.get("overrides") or {}), **new_ov} if same_target else dict(new_ov)
+                        if not switched_reason and same_target and str(draft.get("decision") or "").upper() != "APPROVED":
+                            switched_reason = str(draft.get("reason") or "").strip()
+                        return self._finalize_or_ask_confirmation(
+                            principal=principal,
+                            chat_id=chat_id,
+                            decision=switch_intent,
+                            req=target_req,
+                            reason=switched_reason,
+                            overrides=switched_ov,
+                        )
+                    if len(matched_list) > 1:
+                        return self._ask_target_prerequisite(
+                            principal=principal,
+                            chat_id=chat_id,
+                            decision=switch_intent,
+                            reason=self._extract_reason_from_decision_prose(clean, switch_intent),
+                            overrides=dict(new_ov),
+                            candidates=matched_list,
+                            ambiguous=True,
+                        )
+                    if not switch_match.get("explicit_unmatched_mention"):
+                        switched_reason = self._extract_reason_from_decision_prose(clean, switch_intent)
+                        switched_ov = {**(draft.get("overrides") or {}), **new_ov}
+                        if not switched_reason and str(draft.get("decision") or "").upper() != "APPROVED":
+                            switched_reason = str(draft.get("reason") or "").strip()
+                        return self._finalize_or_ask_confirmation(
+                            principal=principal,
+                            chat_id=chat_id,
+                            decision=switch_intent,
+                            req=draft["request"],
+                            reason=switched_reason,
+                            overrides=switched_ov,
+                        )
+
+                # If it's neither a new decision nor a confirmation/edit, check if Admin moved to an unrelated question
+                if not switch_intent:
+                    norm_c = self._strip_accents_lower(clean)
+                    if any(
+                        w in norm_c
+                        for w in (
+                            "nhiet do",
+                            "gpu",
+                            "cpu",
+                            "su co",
+                            "job",
+                            "server",
+                            "may chu",
+                            "vpn",
+                            "quota",
+                            "da duyet chua",
+                            "duoc duyet chua",
+                            "cho duyet",
+                            "danh sach don",
+                            "trang thai don",
+                            "xem don",
+                        )
+                    ):
+                        self._clear_decision_draft(principal, chat_id)
+                        return None
+                    req_cur = draft.get("request") or {}
+                    return {
+                        "reply": (
+                            f"⏳ Tôi vẫn đang chờ Admin xác nhận bản nháp cho @{req_cur.get('username')} ({draft.get('decision')}).\n"
+                            "👉 Admin nhắn `Xác nhận` / `OK` để thực thi, `Sửa lý do thành ...` để chỉnh, hoặc `Hủy` để bỏ qua."
+                        ),
+                        "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_CONFIRMATION"},
+                    }
+
+        # 2. Detect new natural-language SSH request decision intent
+        decision = self._parse_natural_ssh_decision_intent(clean)
+        if decision is None:
+            return None
+
+        if not principal.is_admin:
+            return {
+                "forbidden": True,
+                "reply": "⛔ Chỉ Quản trị viên (ADMIN) mới có quyền phê duyệt, từ chối hoặc yêu cầu bổ sung đơn xin cấp tài nguyên SSH.",
+            }
+
+        if source != "dashboard" and principal.zalo_user_id and chat_id and chat_id != principal.zalo_user_id:
+            return {
+                "reply": "⛔ Không chấp nhận lệnh phê duyệt/từ chối tài nguyên trong nhóm chat. Vui lòng nhắn riêng (DM 1-1) với Bot.",
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_BLOCKED"},
+            }
+
+        match_info = mram_service.match_pending_requests_by_query(clean)
+        matches = match_info["matches"]
+        all_pending = match_info["all_pending"]
+        unmatched_mention = match_info["explicit_unmatched_mention"]
+        reason = self._extract_reason_from_decision_prose(clean, decision)
+        overrides = self._extract_resource_overrides_from_prose(clean)
+
+        if unmatched_mention:
+            self._clear_decision_draft(principal, chat_id)
+            if not all_pending:
+                return {
+                    "reply": f"ℹ️ Không tìm thấy đơn xin cấp SSH nào của {unmatched_mention} đang chờ duyệt (hiện không có đơn nào trong hàng đợi).",
+                    "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_NOT_FOUND"},
+                }
+            sample = "\n".join(
+                f"{idx}. {r.get('full_name')} (@{r.get('username')}) — {r.get('project_title')} [{r.get('id')}]"
+                for idx, r in enumerate(all_pending[:6], 1)
+            )
+            return {
+                "reply": (
+                    f"⛔ Không tìm thấy đơn SSH đang chờ duyệt nào cho tài khoản {unmatched_mention}.\n"
+                    f"Các đơn đang chờ hiện tại:\n{sample}"
+                ),
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_NOT_FOUND"},
+            }
+
+        if not all_pending:
+            self._clear_decision_draft(principal, chat_id)
+            return {
+                "reply": "ℹ️ Hiện tại không có đơn xin cấp tài nguyên SSH nào đang ở trạng thái chờ phê duyệt.",
+                "meta": {"v4_route": "v4", "v4_intent": "ADMIN_DECISION_NOT_FOUND"},
+            }
+
+        if len(matches) == 0:
+            norm_clean = self._strip_accents_lower(clean)
+            has_pronoun_ref = bool(
+                re.search(
+                    r"\b(?:don nay|don do|don vua xem|tai khoan nay|tai khoan do|ban nay|ban ay|ban do|em nay|em ay|sinh vien nay|nguoi nay)\b",
+                    norm_clean,
+                )
+            )
+            if len(all_pending) == 1 and has_pronoun_ref:
+                matches = [all_pending[0]]
+            else:
+                ctx_req = self._resolve_recent_session_ssh_request(
+                    principal=principal,
+                    chat_id=chat_id,
+                    source=source,
+                    all_pending=all_pending,
+                    allow_implicit_single=not has_pronoun_ref,
+                )
+                if ctx_req is not None and (
+                    has_pronoun_ref
+                    or re.search(r"\b(?:duyet\s+(?:luon|di|nhe|nha)|dong\s+y|tu\s+choi|bo\s+sung|cho\s+phep|cap\s+cho)\b", norm_clean)
+                ):
+                    matches = [ctx_req]
+                else:
+                    return self._ask_target_prerequisite(
+                        principal=principal,
+                        chat_id=chat_id,
+                        decision=decision,
+                        reason=reason,
+                        overrides=overrides,
+                        candidates=all_pending,
+                        ambiguous=False,
+                    )
+
+        if len(matches) > 1:
+            return self._ask_target_prerequisite(
+                principal=principal,
+                chat_id=chat_id,
+                decision=decision,
+                reason=reason,
+                overrides=overrides,
+                candidates=matches,
+                ambiguous=True,
+            )
+
+        return self._finalize_or_ask_confirmation(
+            principal=principal,
+            chat_id=chat_id,
+            decision=decision,
+            req=matches[0],
+            reason=reason,
+            overrides=overrides,
+        )
+
+    def _record_v4_turn_memory(
+        self,
+        *,
+        principal: ZaloPrincipal,
+        source: str,
+        chat_id: str,
+        user_text: str,
+        reply_text: str,
+    ) -> None:
+        if (
+            self.v4_facade is None
+            or not getattr(self.v4_facade.config, "enabled", False)
+            or not getattr(self.v4_facade.config, "natural_language", False)
+        ):
+            return
+        try:
+            pid = self._principal_owner_id(principal)
+            eff_chat = chat_id or principal.zalo_user_id or principal.username
+            sess = self.v4_facade.memory.get_or_create_session(
+                principal_id=pid,
+                channel=source,
+                chat_id=eff_chat,
+            )
+            self.v4_facade.memory.append_turn_messages(
+                session_id=sess["session_id"],
+                expected_version=None,
+                entries=[
+                    {"role": "user", "content": str(user_text or "").strip()},
+                    {"role": "assistant", "content": str(reply_text or "").strip()},
+                ],
+            )
+        except Exception:
+            pass
+
+    def _resolve_recent_session_ssh_request(
+        self,
+        *,
+        principal: ZaloPrincipal,
+        chat_id: str,
+        source: str,
+        all_pending: List[Dict[str, Any]],
+        allow_implicit_single: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if not all_pending:
+            return None
+        by_req_id = {str(r.get("id") or "").lower(): r for r in all_pending if r.get("id")}
+        by_uname = {str(r.get("username") or "").lower(): r for r in all_pending if r.get("username")}
+
+        candidates_text: List[tuple[str, str]] = []
+        if self.v4_facade is not None and getattr(self.v4_facade.config, "enabled", False):
+            try:
+                pid = self._principal_owner_id(principal)
+                eff_chat = chat_id or principal.zalo_user_id or principal.username
+                sess = self.v4_facade.memory.get_or_create_session(
+                    principal_id=pid,
+                    channel=source,
+                    chat_id=eff_chat,
+                )
+                hist = self.v4_facade.memory.get_bounded_context(
+                    session_id=sess["session_id"],
+                    principal_id=pid,
+                    channel=source,
+                    chat_id=eff_chat,
+                )
+                for m in reversed(hist[-8:]):
+                    candidates_text.append((str(m.get("role") or ""), str(m.get("content") or "")))
+            except Exception:
+                pass
+
+        for h in reversed(self.message_history[-8:]):
+            if str(h.get("username") or "") == str(principal.username or ""):
+                candidates_text.append(("user", str(h.get("incoming_text") or "")))
+                candidates_text.append(("assistant", str(h.get("reply_snippet") or "")))
+
+        for idx, (role, content) in enumerate(candidates_text):
+            low = content.lower()
+            req_ids = list(dict.fromkeys(re.findall(r"\b(sshreq-[a-z0-9_-]+)\b", low)))
+            matched_rids = [by_req_id[rid] for rid in req_ids if rid in by_req_id]
+            if len(matched_rids) == 1:
+                if not allow_implicit_single or ("chi tiết đơn xin cấp" in low or idx <= 1):
+                    return matched_rids[0]
+            elif len(matched_rids) > 1:
+                # Last turn listed multiple requests -> do not guess blindly
+                return None
+
+            mentions = [m.lower() for m in re.findall(r"@([a-z0-9_.-]+)", low) if m.lower() != "admin"]
+            matched_users = [by_uname[u] for u in dict.fromkeys(mentions) if u in by_uname]
+            if len(matched_users) == 1:
+                if not allow_implicit_single or idx <= 1:
+                    return matched_users[0]
+            elif len(matched_users) > 1:
+                return None
+        return None
+
+    def _try_handle_natural_operational_action(
+        self,
+        text: str,
+        principal: ZaloPrincipal,
+        *,
+        chat_id: str,
+        source: str,
+    ) -> Optional[Dict[str, Any]]:
+        clean = str(text or "").strip()
+        if not clean or clean.startswith("/"):
+            return None
+        norm = self._strip_accents_lower(re.sub(r"[,.!?;:]+", " ", clean))
+
+        # Do not intercept @username dossier lookups or natural SSH decisions
+        has_at_mention = bool(re.search(r"@[a-z0-9_.-]+", clean.lower()))
+        if self._parse_natural_ssh_decision_intent(clean) is not None:
+            return None
+
+        # A. Greetings, identity & capability guidance
+        greet_re = re.compile(
+            r"^(?:alo+|hello+|hi+|chao(?:\s+(?:ban|em|anh|chi|bot|ai))?|xin\s+chao|"
+            r"ban\s+la\s+ai|ban\s+ten\s+gi|gioi\s+thieu|"
+            r"(?:ban\s+)?(?:co\s+the\s+)?lam\s+(?:duoc\s+)?(?:nhung\s+)?gi(?:\s+cho\s+toi)?|"
+            r"ban\s+ho\s+tro\s+(?:duoc\s+)?(?:nhung\s+)?gi|"
+            r"(?:co\s+the\s+)?giup\s+(?:duoc\s+)?gi(?:\s+cho\s+toi)?|giup\s+toi(?:\s+voi)?)$"
+        )
+        if len(norm.split()) <= 10 and greet_re.match(norm):
+            snap = self.telemetry_collector.collect_snapshot()
+            hosts = snap.get("hosts") or []
+            online_cnt = sum(1 for h in hosts if h.get("status") in {"ONLINE", "DEGRADED"})
+            open_incs = [
+                i
+                for i in self.incident_engine.list_incidents(
+                    owner_id=None if principal.is_admin else principal.username,
+                    limit=50,
+                )
+                if i.get("status") != "RESOLVED"
+            ]
+            pending_cnt = 0
+            if principal.is_admin:
+                try:
+                    from app.services.mram_service import mram_service
+
+                    pending_cnt = len(mram_service.list_requests_for_admin(status_filter="PENDING_APPROVAL"))
+                except Exception:
+                    pending_cnt = 0
+            lines = [
+                f"👋 Xin chào @{principal.username}! Tôi là LabOps Personal AI Agent V4 ({principal.role}).",
+                f"• Cụm hiện tại: {online_cnt}/{len(hosts)} máy chủ ONLINE | {len(open_incs)} sự cố mở"
+                + (f" | {pending_cnt} đơn SSH chờ duyệt." if principal.is_admin else "."),
+                "",
+                "💬 Bạn có thể nhắn tự nhiên (không cần thuộc lệnh `/`) để tôi thực hiện ngay:",
+            ]
+            if principal.is_admin:
+                lines.extend(
+                    [
+                        "• Xét duyệt SSH: \"tôi có cần kiểm duyệt ssh nào không\", \"cho tôi xem @sv_nguyenhuutien\", \"duyệt cho bạn này nhé\", \"từ chối @user vì lý do ...\"",
+                        "• Báo cáo & Sự cố: \"tạo báo cáo ngày hôm nay\", \"lập báo cáo tuần\", \"xác nhận sự cố đang mở\", \"đóng sự cố inc-... vì đã xong\"",
+                    ]
+                )
+            lines.extend(
+                [
+                    "• Cảnh báo & Nhắc việc: \"báo tôi khi CPU workstation vượt 85% trong 5 phút\", \"nhắc tôi sau 30 phút kiểm tra job\", \"hủy cảnh báo vừa tạo\"",
+                    "• Hạ tầng & Phiên chat: \"ai đang dùng nhiều GPU nhất\", \"so sánh tải hôm nay với hôm qua\", \"hạn mức tin nhắn zalo\", \"tôi đã ra các lệnh nào\", \"xóa bộ nhớ chat\"",
+                ]
+            )
+            return {"reply": "\n".join(lines), "meta": {"v4_route": "v4", "v4_intent": "CAPABILITY_HELP"}}
+
+        # B. User's command & question history ("tôi đã ra các lệnh nào", "lịch sử lệnh")
+        if re.search(
+            r"\b(?:da\s+ra\s+(?:cac\s+|nhung\s+)?lenh|lich\s+su\s+(?:lenh|cau\s+hoi|chat|thao\s+tac)|"
+            r"vua\s+(?:hoi|ra\s+lenh|gui)\s+(?:nhung\s+)?gi|nay\s+gio\s+(?:toi\s+)?(?:noi|hoi)\s+gi)\b",
+            norm,
+        ):
+            items: List[str] = []
+            if self.v4_facade is not None:
+                try:
+                    pid = self._principal_owner_id(principal)
+                    eff_chat = chat_id or principal.zalo_user_id or principal.username
+                    sess = self.v4_facade.memory.get_or_create_session(
+                        principal_id=pid,
+                        channel=source,
+                        chat_id=eff_chat,
+                    )
+                    with self.v4_facade.db.session_scope() as session:
+                        from app.db.models import V4ChatMessageRecord
+
+                        rows = (
+                            session.execute(
+                                select(V4ChatMessageRecord)
+                                .where(
+                                    V4ChatMessageRecord.session_id == sess["session_id"],
+                                    V4ChatMessageRecord.role == "user",
+                                )
+                                .order_by(V4ChatMessageRecord.seq.desc())
+                                .limit(12)
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        for r in reversed(rows):
+                            ts = _fmt_vn_time(r.created_at.isoformat() if r.created_at else "")
+                            items.append(f"[{ts}] {r.content_redacted}")
+                except Exception:
+                    pass
+            if not items:
+                for h in self.message_history[-12:]:
+                    if str(h.get("username") or "") == str(principal.username or ""):
+                        ts = _fmt_vn_time(h.get("timestamp"))
+                        items.append(f"[{ts}] {h.get('incoming_text')}")
+            lines = [f"📜 LỊCH SỬ CÁC LỆNH & CÂU HỎI GẦN ĐÂY CỦA @{principal.username} ({len(items)} mục):"]
+            if not items:
+                lines.append("• Hiện chưa ghi nhận lệnh nào trong phiên này.")
+            else:
+                for idx, entry in enumerate(items, 1):
+                    lines.append(f"{idx}. {entry}")
+            return {"reply": "\n".join(lines), "meta": {"v4_route": "v4", "v4_intent": "COMMAND_HISTORY"}}
+
+        # C. Natural-language Daily / Weekly Reports
+        if re.search(r"\b(?:tao|lap|xem|gui|doc)\s+bao\s+cao\b|\btom\s+tat\s+tinh\s+hinh\b", norm) and "ssh" not in norm:
+            wants_gen = any(w in norm for w in ("tao", "lap", "moi", "tong hop", "cap nhat"))
+            is_weekly = "tuan" in norm or "weekly" in norm
+            if wants_gen and not principal.is_admin:
+                return {"forbidden": True, "reply": "⛔ Chỉ quản trị viên mới được phép khởi tạo báo cáo mới."}
+            if is_weekly:
+                arg = "tạo tuần" if wants_gen else ""
+            else:
+                arg = "today tạo" if wants_gen else "today"
+            return {"reply": self._cmd_report(arg, principal), "meta": {"v4_route": "v4", "v4_intent": "NL_REPORT_ACTION"}}
+
+        # D. Natural-language Incident ACK / RESOLVE / Detail
+        inc_match = re.search(r"\b(inc-[a-z0-9_-]+)\b", clean.lower())
+        if re.search(r"\b(?:xem|chi\s+tiet)\s+su\s+co\b", norm) and inc_match:
+            return {"reply": self._cmd_incident_detail(inc_match.group(1), principal), "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_DETAIL"}}
+
+        is_ack_inc = bool(
+            re.search(
+                r"\b(?:xac\s+nhan|tiep\s+nhan|ack)\s+(?:(?:giup|ho)(?:\s+toi)?\s+|(?:tat\s+ca|toan\s+bo|cac|nhung|het)\s+)*su\s+co\b",
+                norm,
+            )
+        )
+        is_resolve_inc = bool(
+            re.search(
+                r"\b(?:dong|giai\s+quyet|xu\s+ly\s+xong|hoan\s+tat|resolve)\s+(?:(?:giup|ho)(?:\s+toi)?\s+|(?:tat\s+ca|toan\s+bo|cac|nhung|het)\s+)*su\s+co\b",
+                norm,
+            )
+        )
+        if is_ack_inc or is_resolve_inc:
+            target_inc_id = inc_match.group(1) if inc_match else ""
+            if is_resolve_inc and not principal.is_admin:
+                return {"forbidden": True, "reply": "⛔ Chỉ Quản trị viên (Admin) mới có quyền đóng (RESOLVED) sự cố."}
+            if not target_inc_id:
+                open_incs = [
+                    i
+                    for i in self.incident_engine.list_incidents(
+                        owner_id=None if principal.is_admin else principal.username,
+                        limit=20,
+                    )
+                    if i.get("status") != "RESOLVED"
+                ]
+                if not open_incs:
+                    return {"reply": "✅ Hiện không có sự cố nào đang mở cần xử lý.", "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_ACTION"}}
+                if len(open_incs) > 1 and is_ack_inc and any(w in norm for w in ("tat ca", "toan bo", "het", "cac")):
+                    ack_lines = [self._cmd_ack(str(i["incident_id"]), principal) for i in open_incs[:10]]
+                    return {
+                        "reply": f"✅ Đã tiếp nhận/xác nhận {len(ack_lines)} sự cố đang mở:\n" + "\n".join(ack_lines),
+                        "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_ACK"},
+                    }
+                if len(open_incs) > 1:
+                    sample = "\n".join(
+                        f"• {i['incident_id']} [{i['severity']}] ({i['status']}) {i['title']}"
+                        for i in open_incs[:5]
+                    )
+                    return {
+                        "reply": f"⚠️ Hiện có {len(open_incs)} sự cố đang mở. Vui lòng nêu rõ mã sự cố (`inc-...`):\n{sample}",
+                        "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_PREREQUISITE"},
+                    }
+                target_inc_id = str(open_incs[0]["incident_id"])
+            if is_ack_inc:
+                return {"reply": self._cmd_ack(target_inc_id, principal), "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_ACK"}}
+            note = self._extract_reason_from_decision_prose(clean, "APPROVED") or "Resolved via conversational AI assistant"
+            try:
+                upd = self.incident_engine.resolve_incident(
+                    target_inc_id,
+                    actor=principal.username,
+                    role=principal.role,
+                    note=note,
+                )
+                return {
+                    "reply": f"✅ @{principal.username} đã đóng (RESOLVED) sự cố `{upd['incident_id']}` (Ghi chú: {note}).",
+                    "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_RESOLVE"},
+                }
+            except Exception as exc:
+                return {"reply": f"❌ Không thể đóng sự cố {target_inc_id}: {exc}", "meta": {"v4_route": "v4", "v4_intent": "NL_INCIDENT_ERROR"}}
+
+        # E. Natural-language Watch / Reminder Cancel & List
+        if re.search(
+            r"\b(?:huy|dung|xoa|tat|bo)\s+(?:giup\s+|ho\s+)?(?:cac\s+|toan\s+bo\s+)?(?:canh\s+bao|theo\s+doi|tac\s+vu|watch|lich\s+nhac|nhac\s+viec)\b",
+            norm,
+        ):
+            tid_m = re.search(r"\b(tsk4-[a-z0-9_-]+)\b", clean.lower())
+            if tid_m:
+                return {"reply": self._cmd_v4_cancel(tid_m.group(1), principal), "meta": {"v4_route": "v4", "v4_intent": "NL_TASK_CANCEL"}}
+            if self.v4_facade is None:
+                return {"reply": self._v4_unavailable(), "meta": {"v4_route": "v4", "v4_intent": "NL_TASK_CANCEL"}}
+            tasks = self.v4_facade.tasks.list_tasks(
+                owner_id=self._principal_owner_id(principal),
+                is_admin=principal.is_admin,
+            )
+            active_tasks = [t for t in tasks if t.get("status") in {"ACTIVE", "WAITING_CONDITION"}]
+            if not active_tasks:
+                return {"reply": "ℹ️ Bạn hiện không có cảnh báo hay lịch nhắc nào đang hoạt động để hủy.", "meta": {"v4_route": "v4", "v4_intent": "NL_TASK_CANCEL"}}
+            active_tasks.sort(key=lambda t: str(t.get("created_at") or ""), reverse=True)
+            cancel_all = any(w in norm for w in ("tat ca", "toan bo", "het"))
+            to_cancel = active_tasks if cancel_all else [active_tasks[0]]
+            cancelled_lines = []
+            for t in to_cancel:
+                res = self.v4_facade.tasks.cancel_task(
+                    t["task_id"],
+                    actor_id=self._principal_owner_id(principal),
+                    actor_role=principal.role,
+                )
+                cancelled_lines.append(f"• `{res['task_id']}` ({t.get('title')}) → {res['status']}")
+            return {
+                "reply": "✅ Đã hủy theo dõi / lịch nhắc:\n" + "\n".join(cancelled_lines),
+                "meta": {"v4_route": "v4", "v4_intent": "NL_TASK_CANCEL"},
+            }
+
+        if re.search(
+            r"\b(?:danh\s+sach|xem\s+(?:lai\s+)?(?:cac\s+)?|liet\s+ke)\s+(?:canh\s+bao|theo\s+doi|tac\s+vu|watch|lich\s+nhac|nhac\s+viec)\b"
+            r"|\bdang\s+(?:dat|theo\s+doi|co)\s+(?:nhung\s+)?(?:canh\s+bao|lich\s+nhac|tac\s+vu)\b",
+            norm,
+        ):
+            return {"reply": self._cmd_v4_tasks(principal), "meta": {"v4_route": "v4", "v4_intent": "NL_TASKS_LIST"}}
+
+        # F. Session Memory & Personal Settings
+        if re.search(r"\b(?:xoa|lam\s+sach|don\s+dep|quen)\s+(?:giup\s+)?(?:bo\s+nho|ngu\s+canh|doan\s+chat|cuoc\s+tro\s+chuyen)\b", norm):
+            self._clear_decision_draft(principal, chat_id)
+            return {"reply": self._cmd_v4_clear(principal, source=source, chat_id=chat_id), "meta": {"v4_route": "v4", "v4_intent": "NL_SESSION_CLEAR"}}
+
+        if re.search(r"\b(?:tao|mo|bat\s+dau)\s+(?:giup\s+)?(?:phien|cuoc\s+tro\s+chuyen)\s+moi\b", norm):
+            self._clear_decision_draft(principal, chat_id)
+            return {"reply": self._cmd_v4_new(principal, source=source, chat_id=chat_id), "meta": {"v4_route": "v4", "v4_intent": "NL_SESSION_NEW"}}
+
+        if re.search(r"\b(?:xem|kiem\s+tra)\s+(?:bo\s+nho\s+ngu\s+canh|ngu\s+canh\s+phien)\b", norm):
+            return {"reply": self._cmd_v4_memory(principal, source=source, chat_id=chat_id), "meta": {"v4_route": "v4", "v4_intent": "NL_MEMORY_STATUS"}}
+
+        if re.search(r"\b(?:che\s+do\s+tom\s+tat|cai\s+dat\s+ca\s+nhan|tuy\s+chon\s+ca\s+nhan)\b", norm):
+            if any(w in norm for w in ("ngan gon", "rut gon", "compact")):
+                return {"reply": self._cmd_v4_settings("digest_style=compact", principal), "meta": {"v4_route": "v4", "v4_intent": "NL_SETTINGS"}}
+            if any(w in norm for w in ("chi tiet", "day du", "detailed")):
+                return {"reply": self._cmd_v4_settings("digest_style=detailed", principal), "meta": {"v4_route": "v4", "v4_intent": "NL_SETTINGS"}}
+            return {"reply": self._cmd_v4_settings("", principal), "meta": {"v4_route": "v4", "v4_intent": "NL_SETTINGS"}}
+
+        # G. Focused Specialized Queries (Quota, Compare, GPU Top, Workspace, Repo Security)
+        if re.search(r"\b(?:han\s+muc\s+tin\s+nhan|bao\s+nhieu\s+tin\s+nhan|quota\s+zalo|tin\s+nhan\s+zalo\s+con)\b", norm):
+            return {"reply": self._cmd_quota(), "meta": {"v4_route": "v4", "v4_intent": "NL_QUOTA"}}
+
+        if re.search(r"\bso\s+sanh\b", norm) and not has_at_mention:
+            hid = "track" if ("rack" in norm or "track" in norm) else ("workstation" if ("workstation" in norm or "ws" in norm) else "")
+            return {"reply": self._cmd_v4_compare(hid, principal, source=source), "meta": {"v4_route": "v4", "v4_intent": "NL_COMPARE"}}
+
+        if re.search(r"\b(?:ai\s+dang\s+(?:dung|chiem|su\s+dung)\s+(?:nhieu\s+)?(?:gpu|vram)|phan\s+bo\s+(?:gpu|vram)|xep\s+hang\s+(?:gpu|vram))\b", norm):
+            return {"reply": self._cmd_allocations(principal), "meta": {"v4_route": "v4", "v4_intent": "NL_GPU_ALLOC"}}
+
+        if re.search(r"\b(?:workspace|container)\s+cua\s+toi\b", norm):
+            return {"reply": self._cmd_myworkspace(principal), "meta": {"v4_route": "v4", "v4_intent": "NL_MYWORKSPACE"}}
+
+        if re.search(r"\b(?:an\s+ninh\s+repo|bao\s+mat\s+(?:repo|kho\s+ma)|quet\s+trivy|su\s+co\s+repo)\b", norm):
+            if not principal.is_admin:
+                return {"forbidden": True, "reply": "⛔ Thông tin kiểm tra an ninh kho mã toàn lab chỉ dành cho Quản trị viên (Admin)."}
+            return {"reply": self._cmd_security(), "meta": {"v4_route": "v4", "v4_intent": "NL_REPO_SECURITY"}}
+
+        return None
 
     def _cmd_report(self, arg: str, principal: ZaloPrincipal) -> str:
         lower = arg.lower().strip()
@@ -1062,8 +2554,57 @@ class ZaloBotEngine:
             principal,
             source=source,
         )
+        status = out.get("status")
+        evd = out.get("evidence_ref")
+        obs = _fmt_vn_time(out.get("observed_at"))
         data = out.get("data") or {}
-        return f"📊 So sánh chỉ số ({out.get('status')}, nguồn: {out.get('evidence_ref')}):\n{data}"
+        if status == "ERROR":
+            return f"⛔ Không thể so sánh chỉ số ({out.get('error_code') or 'ERR'}, nguồn: {evd})."
+
+        snap = data.get("current_snapshot") if status == "INSUFFICIENT_HISTORY" else {}
+        hosts = data.get("current_hosts") or (snap or {}).get("hosts") or []
+        gpus = data.get("current_gpus") or (snap or {}).get("gpus") or []
+        hist = data.get("history_kpis") or {}
+
+        lines = [f"📊 SO SÁNH CHỈ SỐ HẠ TẦNG ({status}, nguồn: {evd}, lúc {obs}):"]
+        if status == "INSUFFICIENT_HISTORY":
+            lines.append(f"⚠️ {data.get('message') or 'Chưa đủ mẫu lịch sử để so sánh với kỳ trước.'}")
+        elif hist:
+            cpu_avg = hist.get("cpu_avg_percent")
+            prev_cpu = hist.get("prev_cpu_avg_percent")
+            cpu_cmp = f" | Kỳ trước: {prev_cpu}%" if prev_cpu is not None else " | Kỳ trước: chưa đủ mẫu"
+            lines.append(
+                f"• Lịch sử {hist.get('window_hours', 24)}h ({hist.get('sample_count', 0)} mẫu): "
+                f"Khả dụng {hist.get('availability_percent', 'N/A')}% | CPU TB: {cpu_avg if cpu_avg is not None else 'N/A'}% "
+                f"(Đỉnh: {hist.get('cpu_peak_percent', 'N/A')}%){cpu_cmp}"
+            )
+            lines.append(
+                f"• GPU lịch sử: Tải TB {hist.get('gpu_util_avg_percent', 'N/A')}% | VRAM đỉnh {hist.get('gpu_vram_peak_mb', 'N/A')} MiB"
+            )
+            if hist.get("data_limit_note"):
+                lines.append(f"• Lưu ý: {hist['data_limit_note']}")
+
+        if hosts:
+            lines.append("🖥️ HIỆN TẠI THEO MÁY CHỦ:")
+            for h in hosts:
+                st = h.get("status", "UNKNOWN")
+                if st in {"ONLINE", "DEGRADED"}:
+                    cpu = f"{h.get('cpu_usage_percent')}%" if h.get("cpu_usage_percent") is not None else "N/A"
+                    ram = f"{h.get('ram_used_gb')}/{h.get('ram_total_gb')} GiB" if h.get("ram_total_gb") else "N/A"
+                    lines.append(f"  - {h.get('display_name') or h.get('hostname')} ({st}): CPU {cpu} | RAM {ram}")
+                else:
+                    lines.append(f"  - {h.get('display_name') or h.get('hostname')}: {st} ({h.get('freshness_status')})")
+        if gpus:
+            lines.append("🎮 HIỆN TẠI THEO GPU:")
+            for g in gpus:
+                if g.get("host_online"):
+                    lines.append(
+                        f"  - {g.get('model')} ({g.get('host_id')}): Tải {g.get('utilization_gpu')}% | "
+                        f"Nhiệt {g.get('temp_celsius')}°C | VRAM {g.get('vram_used_mb')}/{g.get('vram_total_mb')} MiB"
+                    )
+                else:
+                    lines.append(f"  - {g.get('model')} ({g.get('host_id')}): Máy chủ ngoại tuyến")
+        return "\n".join(lines)
 
     def _cmd_v4_who(self, arg: str, principal: ZaloPrincipal, *, source: str) -> str:
         if self.v4_facade is None:
@@ -1075,8 +2616,25 @@ class ZaloBotEngine:
             principal,
             source=source,
         )
-        data = out.get("data") or {}
-        return f"👤 Hồ sơ thành viên (nguồn: {out.get('evidence_ref')}):\n{data}"
+        evd = out.get("evidence_ref")
+        if out.get("status") != "OK":
+            target_lbl = uname or principal.username
+            return f"⛔ Không tìm thấy hồ sơ thành viên `{target_lbl}` ({out.get('error_code') or 'ERR'}, nguồn: {evd})."
+        m = (out.get("data") or {}).get("member") or {}
+        gpus = ", ".join(str(x) for x in (m.get("gpu_permissions") or [])) or "Không giới hạn/Chưa cấp"
+        ssh_p = m.get("ssh_port") if m.get("ssh_port") is not None else "N/A"
+        cpu_l = f"{m['cpu_limit_cores']} cores" if m.get("cpu_limit_cores") is not None else "Không giới hạn"
+        ram_l = f"{m['ram_limit_gb']} GiB" if m.get("ram_limit_gb") is not None else "Không giới hạn"
+        disk_l = f"{m['storage_quota_gb']} GiB" if m.get("storage_quota_gb") is not None else "Không giới hạn"
+        return "\n".join(
+            [
+                f"👤 HỒ SƠ THÀNH VIÊN @{m.get('username')} (nguồn: {evd}):",
+                f"• Họ tên: {m.get('full_name') or 'N/A'} | Vai trò: {m.get('role') or 'N/A'} | Trạng thái: {m.get('status') or 'N/A'}",
+                f"• Máy chủ: {m.get('assigned_server') or 'N/A'} | Workspace: {m.get('workspace_name') or 'N/A'} | SSH Port: {ssh_p}",
+                f"• Định mức: CPU {cpu_l} | RAM {ram_l} | Ổ đĩa {disk_l}",
+                f"• Quyền GPU: {gpus}",
+            ]
+        )
 
     def _cmd_v4_confirm(self, arg: str, principal: ZaloPrincipal, *, chat_id: str) -> str:
         if self.v4_facade is None:

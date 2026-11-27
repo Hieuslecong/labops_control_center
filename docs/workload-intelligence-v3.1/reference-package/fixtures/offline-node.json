@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "fixture-offline",
+  "observed_at": null,
+  "received_at": "2026-11-25T14:14:01Z",
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null,
+    "mode": "workloads"
+  },
+  "quality": {
+    "status": "OFFLINE",
+    "expected_nodes": 2,
+    "fresh_nodes": 0,
+    "fresh_workload_nodes": 0,
+    "expected_gpus": 4,
+    "fresh_gpus": 0,
+    "last_success_at": null
+  },
+  "nodes": [
+    {
+      "id": "workstation",
+      "quality": "OFFLINE",
+      "workload_quality": "OFFLINE",
+      "observed_at": null,
+      "last_success_at": null
+    },
+    {
+      "id": "track",
+      "quality": "OFFLINE",
+      "workload_quality": "OFFLINE",
+      "observed_at": null,
+      "last_success_at": null
+    }
+  ],
+  "gpus": [],
+  "kpis": {
+    "observed_workloads": null,
+    "last_known_workloads": null,
+    "gpu_associated_workloads": null,
+    "gpu_association_unknown": null,
+    "observed_members": null,
+    "unmapped_member_workloads": null,
+    "device_vram_used_bytes": null,
+    "device_vram_capacity_bytes": null,
+    "gpu_coverage": {
+      "fresh": 0,
+      "expected": 4
+    },
+    "attention_count": null
+  },
+  "composition": null,
+  "workloads": [],
+  "device_vram": {
+    "scope": "DEVICE_WIDE",
+    "member_filter_applied": false,
+    "reconciliation": "NOT_COMPARABLE"
+  },
+  "warnings": [
+    {
+      "code": "DEGRADED",
+      "message": "Synthetic degraded-source scenario"
+    }
+  ]
+}

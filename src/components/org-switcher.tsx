@@ -105,15 +105,18 @@ export function OrgSwitcher() {
               <Icons.server className='size-4.5' />
             </div>
             <div
-              className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
+              className={`grid min-w-0 flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
                   ? 'invisible max-w-0 overflow-hidden opacity-0'
-                  : 'visible max-w-full opacity-100'
+                  : 'visible max-w-full overflow-hidden opacity-100'
               }`}
             >
-              <div className='flex items-center gap-1.5'>
-                <span className='truncate font-bold tracking-tight'>LabOps Control</span>
-                <Badge variant='outline' className={statusBadgeClass}>
+              <div className='flex items-center justify-between gap-1 min-w-0'>
+                <span className='truncate font-bold tracking-tight text-xs'>LabOps Control</span>
+                <Badge
+                  variant='outline'
+                  className={`${statusBadgeClass} shrink-0 whitespace-nowrap`}
+                >
                   {statusLabel}
                 </Badge>
               </div>
@@ -122,7 +125,7 @@ export function OrgSwitcher() {
               </span>
             </div>
             <Icons.chevronsUpDown
-              className={`ml-auto size-4 transition-all duration-200 ease-in-out text-sidebar-foreground/60 ${
+              className={`ml-auto shrink-0 size-4 transition-all duration-200 ease-in-out text-sidebar-foreground/60 ${
                 state === 'collapsed'
                   ? 'invisible max-w-0 opacity-0'
                   : 'visible max-w-full opacity-100'

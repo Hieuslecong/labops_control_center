@@ -15,7 +15,7 @@ import subprocess
 import urllib.request
 import urllib.error
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import psutil
 
@@ -48,6 +48,68 @@ PROTECTED_CMD_KEYWORDS = {
     'next-server', 'next dev', 'next start', 'wg-easy',
     '/usr/sbin/dockerd', '/usr/bin/containerd'
 }
+
+MONITORING_EXECUTABLES = {"gpustat", "nvidia-smi", "nvtop"}
+
+
+def classify_workload_kind(
+    name: str,
+    cmdline: str,
+    *,
+    is_gpu: bool = False,
+    vram_mb: int = 0,
+    is_protected: bool = False,
+) -> tuple[str, str, List[str]]:
+    """Conservative workload taxonomy independent from GPU association."""
+    if is_protected:
+        return "SYSTEM", "VERIFIED", ["protected_system_policy"]
+
+    name_base = os.path.basename((name or "").strip()).lower()
+    tokens = (cmdline or "").strip().split()
+    cmd_base = ""
+    if tokens:
+        first_base = os.path.basename(tokens[0]).lower()
+        if first_base.startswith("python") and len(tokens) >= 3 and tokens[1] == "-m":
+            cmd_base = tokens[2].lower()
+        elif first_base.startswith("python") and len(tokens) >= 2 and not tokens[1].startswith("-"):
+            cmd_base = os.path.basename(tokens[1]).lower()
+        else:
+            cmd_base = first_base
+
+    if name_base in MONITORING_EXECUTABLES:
+        return "MONITORING", "VERIFIED", [f"monitoring_executable:{name_base}"]
+    if cmd_base in MONITORING_EXECUTABLES:
+        return "MONITORING", "VERIFIED", [f"monitoring_executable:{cmd_base}"]
+
+    cmd_lower = (cmdline or "").lower()
+    if name_base.startswith("jupyter") or "ipykernel" in name_base or cmd_base.startswith("jupyter") or "ipykernel_launcher" in cmd_lower:
+        return "NOTEBOOK", "VERIFIED", ["notebook_runtime"]
+
+    for tok in ("vllm", "tritonserver", "ollama", "text-generation-inference"):
+        if name_base == tok or cmd_base == tok or f" {tok} " in f" {cmd_lower} ":
+            return "INFERENCE", "HEURISTIC", [f"inference_engine:{tok}"]
+
+    if name_base in ("torchrun", "deepspeed", "accelerate") or cmd_base in ("torchrun", "deepspeed", "accelerate"):
+        return "TRAINING", "HEURISTIC", [f"distributed_training_launcher:{cmd_base or name_base}"]
+    if "train.py" in cmd_lower or "finetune" in cmd_lower or "--do_train" in cmd_lower:
+        return "TRAINING", "HEURISTIC", ["training_script_or_flag"]
+
+    if any(name_base.startswith(t) or cmd_base.startswith(t) for t in ("python", "pytest", "julia", "matlab", "rscript")) or cmd_base.endswith(".py"):
+        return "GENERAL_COMPUTE", "HEURISTIC", [f"general_compute_runtime:{name_base or cmd_base}"]
+    if cmd_lower.startswith("./") or ".sh" in cmd_lower:
+        return "GENERAL_COMPUTE", "HEURISTIC", ["user_script_or_binary"]
+    if is_gpu or vram_mb > 0:
+        return "GENERAL_COMPUTE", "HEURISTIC", ["gpu_compute_binary"]
+    return "OTHER", "UNKNOWN", ["unclassified_process"]
+
+
+def _read_local_boot_id() -> Optional[str]:
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "r", encoding="utf-8") as bf:
+            val = bf.read().strip()
+            return val or None
+    except Exception:
+        return None
 
 def sanitize_cmdline(cmdline_parts: List[str]) -> str:
     """Sanitize command line string to prevent leaking passwords, tokens, or secrets."""
@@ -191,11 +253,27 @@ class ProcessMonitorAdapter:
                         pid = int(parts[1])
                         proc_name = parts[2]
                         vram_mb = int(parts[3])
-                        gpu_pids[pid] = {
-                            "gpu_uuid": gpu_uuid,
-                            "vram_mb": vram_mb,
-                            "process_name": proc_name
-                        }
+                        existing = gpu_pids.get(pid)
+                        if existing:
+                            existing["vram_mb"] = int(existing.get("vram_mb", 0)) + vram_mb
+                            existing.setdefault("allocations", []).append({
+                                "gpu_uuid": gpu_uuid,
+                                "vram_mb": vram_mb,
+                                "value_bytes": vram_mb * 1024 * 1024,
+                            })
+                        else:
+                            gpu_pids[pid] = {
+                                "gpu_uuid": gpu_uuid,
+                                "vram_mb": vram_mb,
+                                "process_name": proc_name,
+                                "allocations": [
+                                    {
+                                        "gpu_uuid": gpu_uuid,
+                                        "vram_mb": vram_mb,
+                                        "value_bytes": vram_mb * 1024 * 1024,
+                                    }
+                                ],
+                            }
                     except ValueError:
                         continue
         except Exception as e:
@@ -277,10 +355,22 @@ class ProcessMonitorAdapter:
                 tree_gpu_idx = p.get("tree_gpu_index") if p.get("tree_gpu_index") is not None else gpu_idx
                 total_vram_mb = p.get("total_vram_mb", p.get("vram_mb", 0))
                 tree_is_gpu = bool(p.get("tree_is_gpu") or p.get("is_gpu", False) or (total_vram_mb or 0) > 0)
+                wk_kind = p.get("workload_kind")
+                wk_conf = p.get("kind_confidence")
+                wk_evidence = p.get("kind_evidence")
+                if not wk_kind:
+                    wk_kind, wk_conf, wk_evidence = classify_workload_kind(
+                        proc_name,
+                        cmdline,
+                        is_gpu=tree_is_gpu,
+                        vram_mb=int(total_vram_mb or 0),
+                        is_protected=is_protected,
+                    )
 
                 procs.append({
                     "host_id": self.server_id,
                     "server_name": self.server_name,
+                    "boot_id": p.get("boot_id") or agent_res.get("boot_id"),
                     "ref": p.get("ref", f"{self.server_id}:{container_id or 'host'}:{p.get('pid')}:{p.get('start_time_ticks', 0)}"),
                     "pid": p.get("pid"),
                     "ppid": p.get("ppid"),
@@ -291,21 +381,29 @@ class ProcessMonitorAdapter:
                     "script_display": proc_name,
                     "cmdline": cmdline,
                     "start_time": p.get("start_time"),
+                    "started_at_utc": p.get("started_at_utc"),
                     "start_time_ticks": p.get("start_time_ticks", 0),
                     "elapsed_time": p.get("elapsed_time", "00h 00m 00s"),
+                    "elapsed_seconds": p.get("elapsed_seconds"),
                     "cpu_percent": p.get("cpu_percent", 0.0),
                     "memory_rss_mb": p.get("memory_rss_mb", 0.0),
                     "memory_percent": p.get("memory_percent", 0.0),
                     "status": p.get("state", "RUNNING"),
                     "classification": classification,
+                    "workload_kind": wk_kind,
+                    "kind_confidence": wk_conf or "UNKNOWN",
+                    "kind_evidence": list(wk_evidence or []),
                     "is_gpu_process": p.get("is_gpu", False),
                     "gpu_id": f"{self.server_id}-gpu-0{int(gpu_idx) + 1}" if gpu_idx is not None else None,
                     "gpu_index": gpu_idx,
+                    "gpu_uuid": p.get("gpu_uuid"),
                     "vram_mb": p.get("vram_mb", 0),
                     "total_vram_mb": total_vram_mb,
                     "tree_is_gpu": tree_is_gpu,
                     "tree_gpu_index": tree_gpu_idx,
+                    "tree_gpu_uuid": p.get("tree_gpu_uuid") or p.get("gpu_uuid"),
                     "tree_gpu_id": f"{self.server_id}-gpu-0{int(tree_gpu_idx) + 1}" if tree_gpu_idx is not None else None,
+                    "gpu_allocations": p.get("gpu_allocations"),
                     "container_id": container_id,
                     "workspace": p.get("workspace") or (f"docker-{container_id}" if container_id else None),
                     "is_protected": is_protected,
@@ -329,6 +427,7 @@ class ProcessMonitorAdapter:
             }
 
         # 2. Python Fallback if Go agent is unreachable
+        local_boot_id = _read_local_boot_id()
         gpu_pids = self._get_gpu_compute_pids()
         processes: List[Dict[str, Any]] = []
 
@@ -402,6 +501,7 @@ class ProcessMonitorAdapter:
                 create_time = info.get('create_time') or now
                 elapsed_seconds = max(0, now - create_time)
                 start_time_str = datetime.fromtimestamp(create_time).strftime("%Y-%m-%d %H:%M:%S")
+                started_at_utc = datetime.fromtimestamp(create_time, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 elapsed_str = format_elapsed_time(elapsed_seconds)
 
                 rss_bytes = info['memory_info'].rss if info.get('memory_info') else 0
@@ -409,12 +509,20 @@ class ProcessMonitorAdapter:
 
                 clean_cmd = sanitize_cmdline(cmdline)
                 script_display = name
+                wk_kind, wk_conf, wk_evidence = classify_workload_kind(
+                    name,
+                    clean_cmd or cmd_str,
+                    is_gpu=is_gpu,
+                    vram_mb=vram_mb,
+                    is_protected=is_protected,
+                )
 
                 ref = f"{self.server_id}:{container or 'host'}:{pid}:{int(create_time * 100)}"
 
                 processes.append({
                     "host_id": self.server_id,
                     "server_name": self.server_name,
+                    "boot_id": local_boot_id,
                     "ref": ref,
                     "pid": pid,
                     "ppid": ppid,
@@ -426,16 +534,23 @@ class ProcessMonitorAdapter:
                     "cmdline": clean_cmd,
                     "create_time": create_time,
                     "start_time": start_time_str,
+                    "started_at_utc": started_at_utc,
                     "start_time_ticks": int(create_time * 100),
                     "elapsed_time": elapsed_str,
+                    "elapsed_seconds": int(elapsed_seconds),
                     "cpu_percent": round(info.get('cpu_percent') or 0.0, 1),
                     "memory_rss_mb": rss_mb,
                     "memory_percent": round(info.get('memory_percent') or 0.0, 1),
                     "status": (info.get('status') or "running").upper(),
                     "classification": classification,
+                    "workload_kind": wk_kind,
+                    "kind_confidence": wk_conf,
+                    "kind_evidence": wk_evidence,
                     "is_gpu_process": is_gpu,
                     "gpu_id": f"{self.server_id}-gpu-01" if is_gpu else None,
+                    "gpu_uuid": gpu_data.get("gpu_uuid"),
                     "vram_mb": vram_mb,
+                    "gpu_allocations": gpu_data.get("allocations"),
                     "container_id": container,
                     "workspace": workspace,
                     "is_protected": is_protected,

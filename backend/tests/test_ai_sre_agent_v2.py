@@ -613,3 +613,101 @@ def test_daily_brief_metrics_dedup_collector_down_and_empty_priorities(tmp_path:
     assert "Sự cố đang mở: N/A" in rep["zalo_summary"]
     assert "LABOPS | DAILY EXECUTIVE BRIEF" in rep["zalo_summary"]
     assert len(rep["zalo_summary"]) < 2000
+
+
+def test_gpu_thermal_requires_sustained_1_to_2_days_and_cooldown(tmp_path: Path):
+    from app.db.models import IncidentRecord, TelemetryHistorySampleRecord
+    from app.services.assistant_v4.notification_policy import IncidentLifecycleV4
+
+    db, _, _, _, incidents, _, _, _, _ = _build_stack(tmp_path)
+    now = datetime.now(timezone.utc)
+
+    hot_snap = {
+        "hosts": [
+            {
+                "host_id": "workstation",
+                "hostname": "aiot-ws1",
+                "status": "ONLINE",
+                "freshness_status": "ONLINE",
+                "desired_state": "ACTIVE",
+            }
+        ],
+        "gpus": [
+            {
+                "gpu_key": "workstation:GPU-WS-01",
+                "host_id": "workstation",
+                "gpu_uuid": "GPU-WS-01",
+                "host_online": True,
+                "temp_celsius": 90.0,
+                "utilization_gpu": 99.0,
+            }
+        ],
+        "workspaces": [],
+        "jobs": [],
+        "services": {},
+    }
+
+    # Seed only 6 hours of hot GPU telemetry (< 36h threshold) -> MUST NOT open GPU_THERMAL_HIGH
+    with db.session_scope() as session:
+        for h_ago in range(6, -1, -1):
+            session.add(
+                TelemetryHistorySampleRecord(
+                    id=f"th-short-{h_ago}",
+                    host_id="workstation",
+                    collected_at=now - timedelta(hours=h_ago),
+                    freshness_status="ONLINE",
+                    source="go_node_agent",
+                    gpus_json=[{"gpu_key": "workstation:GPU-WS-01", "gpu_uuid": "GPU-WS-01", "temp_celsius": 90.0}],
+                )
+            )
+
+    for _ in range(3):
+        incidents.evaluate_snapshot(hot_snap)
+    assert incidents.list_incidents(source="gpu") == []
+
+    # Seed full 36 hours of sustained >= 88C telemetry -> triggers GPU_THERMAL_HIGH P1 once
+    with db.session_scope() as session:
+        for h_ago in range(36, 6, -3):
+            session.add(
+                TelemetryHistorySampleRecord(
+                    id=f"th-long-{h_ago}",
+                    host_id="workstation",
+                    collected_at=now - timedelta(hours=h_ago),
+                    freshness_status="ONLINE",
+                    source="go_node_agent",
+                    gpus_json=[{"gpu_key": "workstation:GPU-WS-01", "gpu_uuid": "GPU-WS-01", "temp_celsius": 89.5}],
+                )
+            )
+
+    ev_res = incidents.evaluate_snapshot(hot_snap)
+    gpu_incs = incidents.list_incidents(source="gpu")
+    assert len(gpu_incs) == 1
+    assert gpu_incs[0]["event_type"] == "GPU_THERMAL_HIGH"
+    assert gpu_incs[0]["severity"] == "P1"
+    assert ev_res[0]["action"] == "CREATED"
+
+    # Mild cooldown to 78C between epochs must NOT resolve early (< 75C required), whereas 70C resolves + sets 24h cooldown
+    mild_snap = {
+        "hosts": [{"host_id": "workstation", "status": "ONLINE", "freshness_status": "ONLINE"}],
+        "gpus": [{"gpu_key": "workstation:GPU-WS-01", "host_id": "workstation", "host_online": True, "temp_celsius": 78.0}],
+    }
+    cool_snap = {
+        "hosts": [{"host_id": "workstation", "status": "ONLINE", "freshness_status": "ONLINE"}],
+        "gpus": [{"gpu_key": "workstation:GPU-WS-01", "host_id": "workstation", "host_online": True, "temp_celsius": 70.0}],
+    }
+    lc = IncidentLifecycleV4()
+    with db.session_scope() as session:
+        assert lc.evaluate_recovery_from_snapshot(session, mild_snap, now_override=now) == []
+        rec = lc.evaluate_recovery_from_snapshot(session, cool_snap, now_override=now)
+        assert len(rec) == 1
+        row = session.get(IncidentRecord, gpu_incs[0]["incident_id"])
+        assert row is not None and row.status == "RESOLVED"
+        assert row.cooldown_until is not None
+        cd_utc = row.cooldown_until.replace(tzinfo=timezone.utc) if row.cooldown_until.tzinfo is None else row.cooldown_until
+        assert (cd_utc - now).total_seconds() >= 23 * 3600
+
+    # Immediate spike back to 90C within 24h cooldown MUST NOT REOPEN
+    re_res = incidents.evaluate_snapshot(hot_snap)
+    assert re_res[0]["action"] == "UPDATED"
+    assert incidents.get_incident(gpu_incs[0]["incident_id"])["status"] == "RESOLVED"
+

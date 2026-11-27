@@ -493,19 +493,103 @@ class SecureToolExecutor:
 
     def _t_get_member_info(self, args: _MemberArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
         target_user = (args.username or principal.username).strip()
-        if not principal.is_admin and target_user != principal.username:
+        target_lower = target_user.lower()
+        if not principal.is_admin and target_lower != principal.username.lower():
             raise PermissionError("Chỉ Admin được phép tra cứu hồ sơ thành viên khác.")
+        m: Optional[Dict[str, Any]] = None
+        source_id = "labops_service:members"
         try:
             from app.services.labops_service import service as core_svc
 
-            m = next((x for x in getattr(core_svc, "members", []) or [] if str(x.get("username") or "").strip() == target_user), None)
+            m = next(
+                (x for x in getattr(core_svc, "members", []) or [] if str(x.get("username") or "").strip().lower() == target_lower),
+                None,
+            )
         except Exception:
             m = None
+
+        profile_meta: Dict[str, Any] = {}
+        if hasattr(self, "db") and self.db is not None:
+            try:
+                with self.db.session_scope() as session:
+                    rec = session.execute(
+                        select(MemberProfileRecord).where(MemberProfileRecord.username == target_lower)
+                    ).scalars().first()
+                    if rec is not None:
+                        sup_rec = (
+                            session.get(MemberProfileRecord, rec.primary_supervisor_id)
+                            if rec.primary_supervisor_id
+                            else None
+                        )
+                        profile_meta = {
+                            "username": rec.username,
+                            "full_name": rec.full_name,
+                            "email": rec.email,
+                            "member_code": rec.member_code,
+                            "member_category": rec.member_category,
+                            "department_class": rec.department_class,
+                            "supervisor_name": sup_rec.full_name if sup_rec else None,
+                            "web_account_status": rec.web_account_status,
+                            "ssh_access_state": rec.ssh_access_state,
+                        }
+                        if m is None:
+                            source_id = "db:member_profiles"
+                            m = {
+                                "username": rec.username,
+                                "full_name": rec.full_name,
+                                "email": rec.email,
+                                "role": rec.member_category or "RESEARCHER",
+                                "status": rec.ssh_access_state or rec.web_account_status,
+                            }
+            except Exception:
+                pass
+
+        if m is None and (target_lower == "admin" or (target_lower == principal.username.lower() and principal.is_admin)):
+            source_id = "identity_rbac:admin"
+            m = {
+                "username": target_user,
+                "full_name": principal.display_name or "LabOps Administrator",
+                "role": "ADMIN",
+                "status": "ACTIVE",
+                "assigned_server": "workstation",
+                "workspace_name": "admin-control-plane",
+                "ssh_port": None,
+                "storage_quota_gb": None,
+                "cpu_limit_cores": None,
+                "ram_limit_gb": None,
+                "gpu_permissions": ["FULL_ACCESS"],
+            }
+
+        recent_reqs: List[Dict[str, Any]] = []
+        try:
+            from app.services.mram_service import mram_service
+
+            reqs = mram_service.list_requests_for_member(target_lower)
+            recent_reqs = reqs[:5]
+            if m is None and recent_reqs:
+                source_id = "mram_service:requests"
+                first_r = recent_reqs[0]
+                m = {
+                    "username": first_r.get("username") or target_lower,
+                    "full_name": first_r.get("full_name") or target_user,
+                    "role": first_r.get("member_category") or "STUDENT",
+                    "status": first_r.get("status") or "PENDING_APPROVAL",
+                }
+        except Exception:
+            recent_reqs = []
+
         if m is None:
             return self._wrap_evidence(status="ERROR", source_id="members", error_code="MEMBER_NOT_FOUND")
         safe = {
-            "username": m.get("username"),
-            "full_name": m.get("full_name") or m.get("fullName"),
+            "username": m.get("username") or profile_meta.get("username"),
+            "full_name": m.get("full_name") or m.get("fullName") or profile_meta.get("full_name"),
+            "email": m.get("email") or profile_meta.get("email"),
+            "member_code": profile_meta.get("member_code"),
+            "member_category": profile_meta.get("member_category"),
+            "department_class": profile_meta.get("department_class"),
+            "supervisor_name": profile_meta.get("supervisor_name"),
+            "web_account_status": profile_meta.get("web_account_status"),
+            "ssh_access_state": profile_meta.get("ssh_access_state"),
             "role": m.get("role"),
             "status": m.get("status"),
             "assigned_server": m.get("assigned_server"),
@@ -515,14 +599,54 @@ class SecureToolExecutor:
             "cpu_limit_cores": m.get("cpu_limit_cores"),
             "ram_limit_gb": m.get("ram_limit_gb"),
             "gpu_permissions": m.get("gpu_permissions"),
+            "recent_ssh_requests": recent_reqs,
         }
-        return self._wrap_evidence(status="OK", source_id="labops_service:members", data={"member": safe})
+        return self._wrap_evidence(status="OK", source_id=source_id, data={"member": safe})
 
     def _t_list_pending_requests(self, args: _EmptyArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
         from app.services.mram_service import mram_service
 
-        pending = mram_service.list_requests_for_admin(status_filter="PENDING_APPROVAL")
-        return self._wrap_evidence(status="OK", source_id="mram_service", data={"pending_count": len(pending), "requests": pending[:15]})
+        pending_reqs = mram_service.list_requests_for_admin(status_filter="PENDING_APPROVAL")
+        need_info_reqs = mram_service.list_requests_for_admin(status_filter="NEED_INFO")
+        all_pending = list(pending_reqs) + list(need_info_reqs)
+        enriched: List[Dict[str, Any]] = []
+        for r in all_pending[:15]:
+            item = dict(r)
+            rec = item.get("recommendation") or {}
+            if not rec.get("recommended_pool_id"):
+                try:
+                    rec = mram_service.compute_resource_recommendation(
+                        member_category=str(item.get("member_category") or "STUDENT"),
+                        requested_duration_days=item.get("requested_duration_days"),
+                        gpu_requested=bool(item.get("gpu_requested")),
+                    )
+                    item["recommendation"] = rec
+                except Exception:
+                    pass
+            rat = rec.get("rationale") or {}
+            item["supervisor_name"] = item.get("supervisor_name") or "Chưa khai báo"
+            item["registration_reason"] = str(item.get("registration_reason") or "").strip()
+            item["ssh_purpose"] = str(item.get("ssh_purpose") or "").strip()
+            item["expected_tasks"] = str(item.get("expected_tasks") or "").strip()
+            item["gpu_requested"] = bool(item.get("gpu_requested"))
+            item["gpu_justification"] = str(item.get("gpu_justification") or "").strip()
+            item["requested_duration_days"] = item.get("requested_duration_days")
+            item["remaining_sla_hours"] = round(int(item.get("remaining_review_seconds") or 0) / 3600.0, 1)
+            item["recommended_host"] = rec.get("recommended_host_id") or "workstation"
+            item["recommended_pool_id"] = rec.get("recommended_pool_id")
+            item["recommended_mount_point"] = rec.get("recommended_mount_point")
+            item["recommended_free_gib"] = rat.get("chosen_pool_net_allocatable_gib")
+            item["recommended_member_count"] = rat.get("chosen_pool_assigned_members")
+            item["recommended_spec"] = (
+                f"{rec.get('cpu_cores', 4)}C/{rec.get('ram_gb', 16)}G/"
+                f"{rec.get('storage_quota_gb', 50)}GiB, GPU={rec.get('gpu_mode', 'NONE')}"
+            )
+            enriched.append(item)
+        return self._wrap_evidence(
+            status="OK",
+            source_id="mram_service",
+            data={"pending_count": len(all_pending), "requests": enriched},
+        )
 
     def _t_get_request(self, args: _IdArgs, principal: ZaloPrincipal) -> Dict[str, Any]:
         from app.services.mram_service import mram_service

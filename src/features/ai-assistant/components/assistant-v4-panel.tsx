@@ -21,24 +21,67 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 
+interface V4OutboxSummary {
+  total?: number;
+  backlog_count?: number;
+  oldest_pending_age_seconds?: number;
+  by_status?: Record<string, unknown>;
+  oldest_pending_age_seconds_by_priority?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+interface V4QuotaSummary {
+  month?: string;
+  monthly_budget?: number;
+  critical_reserve?: number;
+  standard_limit?: number;
+  standard_sent?: number;
+  critical_sent?: number;
+  total_sent?: number;
+  percent_used?: number;
+  budget_exhausted?: boolean;
+  estimate_only?: boolean;
+  [key: string]: unknown;
+}
+
 interface V4Health {
+  status?: string;
   v4_enabled: boolean;
   flags: Record<string, boolean>;
+  notification_ownership?: {
+    owner?: string;
+    effective_owner?: string;
+  };
   ingress_mode: string;
   agent_runtime: string;
   ai_circuit_breaker_open: boolean;
-  outbox_summary: Record<string, number>;
+  outbox_summary: V4OutboxSummary;
   watchdog: {
     configured: boolean;
     coverage_status: string;
     healthy: boolean;
     checks?: Record<string, { ok: boolean; detail?: string; reason?: string }>;
   };
+  retention?: {
+    enabled?: boolean;
+    dry_run?: boolean;
+    status?: string;
+  };
 }
 
 interface V4Metrics {
-  outbox: Record<string, number>;
-  quota: Record<string, unknown>;
+  outbox: V4OutboxSummary;
+  delivery_outcomes?: Record<string, unknown>;
+  shadow?: {
+    active?: boolean;
+    would_send_count?: number;
+    decisions_total?: number;
+  };
+  notification_ownership?: {
+    owner?: string;
+    effective_owner?: string;
+  };
+  quota: V4QuotaSummary;
   watchdog: { configured?: boolean; coverage_status?: string; healthy?: boolean };
   ai_circuit_breaker_open: boolean;
 }
@@ -142,6 +185,115 @@ interface V4InboxItem {
   received_at: string;
 }
 
+export interface NormalizedOutboxDisplay {
+  total: number;
+  backlogCount: number;
+  oldestPendingAgeSeconds: number;
+  byStatus: Array<[string, number]>;
+  oldestByPriority: Array<[string, number]>;
+}
+
+export function formatV4Scalar(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(formatV4Scalar).join(', ');
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+export function extractV4ErrorMessage(parsed: Record<string, unknown>, status: number): string {
+  const raw = parsed.detail ?? parsed.error;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg?: unknown }).msg ?? '');
+        }
+        return formatV4Scalar(item);
+      })
+      .filter(Boolean)
+      .join('; ');
+  }
+  if (raw && typeof raw === 'object') {
+    const obj = raw as { message?: unknown; code?: unknown };
+    if (typeof obj.message === 'string' && obj.message) {
+      return obj.code ? `${String(obj.code)}: ${obj.message}` : obj.message;
+    }
+    return formatV4Scalar(raw);
+  }
+  return `HTTP ${status}`;
+}
+
+function toOutboxNumber(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0;
+}
+
+export function normalizeOutboxSummary(raw: unknown): NormalizedOutboxDisplay {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      total: 0,
+      backlogCount: 0,
+      oldestPendingAgeSeconds: 0,
+      byStatus: [],
+      oldestByPriority: []
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const byStatusMap = new Map<string, number>();
+  if (obj.by_status && typeof obj.by_status === 'object' && !Array.isArray(obj.by_status)) {
+    for (const [k, v] of Object.entries(obj.by_status as Record<string, unknown>)) {
+      if (typeof v === 'number' || typeof v === 'string') {
+        byStatusMap.set(k, toOutboxNumber(v));
+      }
+    }
+  }
+  // Also preserve legacy flat numeric status entries if returned without nested by_status
+  const reservedKeys = new Set([
+    'total',
+    'backlog_count',
+    'oldest_pending_age_seconds',
+    'by_status',
+    'oldest_pending_age_seconds_by_priority'
+  ]);
+  for (const [k, v] of Object.entries(obj)) {
+    if (!reservedKeys.has(k) && typeof v === 'number' && !byStatusMap.has(k)) {
+      byStatusMap.set(k, v);
+    }
+  }
+
+  const oldestByPriority: Array<[string, number]> = [];
+  if (
+    obj.oldest_pending_age_seconds_by_priority &&
+    typeof obj.oldest_pending_age_seconds_by_priority === 'object' &&
+    !Array.isArray(obj.oldest_pending_age_seconds_by_priority)
+  ) {
+    for (const [k, v] of Object.entries(
+      obj.oldest_pending_age_seconds_by_priority as Record<string, unknown>
+    )) {
+      if (typeof v === 'number' || typeof v === 'string') {
+        oldestByPriority.push([k, toOutboxNumber(v)]);
+      }
+    }
+  }
+
+  return {
+    total: toOutboxNumber(obj.total),
+    backlogCount: toOutboxNumber(obj.backlog_count),
+    oldestPendingAgeSeconds: toOutboxNumber(obj.oldest_pending_age_seconds),
+    byStatus: Array.from(byStatusMap.entries()),
+    oldestByPriority
+  };
+}
+
 async function fetchLabOpsJson<T>(
   path: string,
   init?: RequestInit
@@ -165,7 +317,7 @@ async function fetchLabOpsJson<T>(
       return {
         ok: false,
         status: res.status,
-        error: String(parsed.detail || parsed.error || `HTTP ${res.status}`)
+        error: extractV4ErrorMessage(parsed, res.status)
       };
     }
     return { ok: true, status: res.status, data: parsed as unknown as T };
@@ -394,7 +546,56 @@ export function AssistantV4Panel() {
     await loadAll();
   }
 
+  async function handleRunRetentionDryRun() {
+    setBusyId('retention-run');
+    setBanner(null);
+    const res = await fetchLabOpsJson<{
+      status?: string;
+      dry_run?: boolean;
+      total_candidates?: number;
+    }>('ai-assistant/v4/retention/run', {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: true, force: true })
+    });
+    setBusyId(null);
+    if (!res.ok) {
+      setBanner(`Retention dry-run thất bại: ${res.error}`);
+      return;
+    }
+    setBanner(
+      `Retention dry-run hoàn tất (${formatV4Scalar(res.data?.status ?? 'OK')}, ứng viên: ${formatV4Scalar(res.data?.total_candidates ?? 0)}).`
+    );
+    await loadAll();
+  }
+
+  async function handleReloadV4Config() {
+    setBusyId('reload-config');
+    setBanner(null);
+    const res = await fetchLabOpsJson<{ reloaded?: boolean; status?: string }>(
+      'ai-assistant/v4/config/reload',
+      {
+        method: 'POST',
+        body: JSON.stringify({})
+      }
+    );
+    setBusyId(null);
+    if (!res.ok) {
+      setBanner(`Nạp lại cấu hình V4 thất bại: ${res.error}`);
+      return;
+    }
+    setBanner('Đã nạp lại cấu hình Personal AI V4 thành công.');
+    await loadAll();
+  }
+
   const flagEntries = Object.entries(health?.flags || {});
+  const outboxDisplay = normalizeOutboxSummary(metrics?.outbox ?? health?.outbox_summary);
+  const deliveryOutcomeEntries = Object.entries(metrics?.delivery_outcomes || {}).filter(
+    ([, val]) => typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean'
+  );
+  const effectiveOwner =
+    metrics?.notification_ownership?.effective_owner ??
+    health?.notification_ownership?.effective_owner ??
+    'V2_LEGACY';
 
   return (
     <div className='space-y-4 pt-3'>
@@ -409,7 +610,7 @@ export function AssistantV4Panel() {
             R1–R3 Approvals
           </p>
         </div>
-        <div className='flex items-center gap-2'>
+        <div className='flex flex-wrap items-center gap-2'>
           <Badge
             variant={health?.v4_enabled ? 'default' : 'secondary'}
             className='text-xs font-mono'
@@ -417,9 +618,28 @@ export function AssistantV4Panel() {
             V4 Flag: {health?.v4_enabled ? 'ON' : 'OFF (Safe Rollback)'}
           </Badge>
           <Badge variant='outline' className='text-xs font-mono'>
+            Owner: {formatV4Scalar(effectiveOwner)}
+          </Badge>
+          <Badge variant='outline' className='text-xs font-mono'>
             Watchdog: {health?.watchdog?.coverage_status || 'NOT_CONFIGURED'} (
             {health?.watchdog?.healthy ? 'OK' : 'CHECK'})
           </Badge>
+          <Button
+            variant='outline'
+            size='sm'
+            onClick={() => void handleRunRetentionDryRun()}
+            disabled={loading || busyId === 'retention-run'}
+          >
+            Retention Dry-Run
+          </Button>
+          <Button
+            variant='outline'
+            size='sm'
+            onClick={() => void handleReloadV4Config()}
+            disabled={loading || busyId === 'reload-config'}
+          >
+            Reload Config
+          </Button>
           <Button variant='outline' size='sm' onClick={() => void loadAll()} disabled={loading}>
             <IconRefresh className={`h-3.5 w-3.5 mr-1 ${loading ? 'animate-spin' : ''}`} />
             Làm mới V4
@@ -450,8 +670,8 @@ export function AssistantV4Panel() {
               Feature Flags &amp; Runtime
             </CardTitle>
             <CardDescription className='text-xs'>
-              Ingress: {health?.ingress_mode || 'polling'} • Runtime:{' '}
-              {health?.agent_runtime || 'native'}
+              Status: {formatV4Scalar(health?.status)} • Ingress:{' '}
+              {health?.ingress_mode || 'polling'} • Runtime: {health?.agent_runtime || 'native'}
             </CardDescription>
           </CardHeader>
           <CardContent className='flex flex-wrap gap-1.5'>
@@ -476,20 +696,49 @@ export function AssistantV4Panel() {
               Outbox &amp; Quota Governor V4
             </CardTitle>
             <CardDescription className='text-xs'>
-              Fenced claim states &amp; monthly bucket
+              Fenced claim states &amp; monthly bucket ({formatV4Scalar(metrics?.quota?.month)})
             </CardDescription>
           </CardHeader>
-          <CardContent className='space-y-1.5 text-xs font-mono'>
+          <CardContent className='space-y-2 text-xs font-mono'>
             <div className='flex flex-wrap gap-1.5'>
-              {Object.entries(metrics?.outbox || health?.outbox_summary || {}).map(([st, cnt]) => (
-                <Badge key={st} variant='outline' className='text-xs'>
+              <Badge variant='outline' className='text-xs'>
+                total: {outboxDisplay.total}
+              </Badge>
+              <Badge variant='outline' className='text-xs'>
+                backlog: {outboxDisplay.backlogCount}
+              </Badge>
+              <Badge variant='outline' className='text-xs'>
+                oldest: {outboxDisplay.oldestPendingAgeSeconds.toFixed(1)}s
+              </Badge>
+              {outboxDisplay.byStatus.map(([st, cnt]) => (
+                <Badge key={st} variant='secondary' className='text-xs'>
                   {st}: {cnt}
                 </Badge>
               ))}
             </div>
+            {deliveryOutcomeEntries.length > 0 && (
+              <div className='flex flex-wrap gap-1.5 pt-0.5'>
+                {deliveryOutcomeEntries.map(([st, cnt]) => (
+                  <Badge key={st} variant='outline' className='text-xs'>
+                    {st}: {formatV4Scalar(cnt)}
+                  </Badge>
+                ))}
+              </div>
+            )}
+            {metrics?.shadow && (
+              <div className='text-muted-foreground'>
+                Shadow: {metrics.shadow.active ? 'ACTIVE' : 'OFF'} • would_send:{' '}
+                {formatV4Scalar(metrics.shadow.would_send_count ?? 0)} /{' '}
+                {formatV4Scalar(metrics.shadow.decisions_total ?? 0)}
+              </div>
+            )}
             {metrics?.quota && (
-              <div className='text-muted-foreground pt-1'>
-                Quota: {JSON.stringify(metrics.quota)}
+              <div className='text-muted-foreground pt-0.5'>
+                Quota: {formatV4Scalar(metrics.quota.total_sent ?? 0)}/
+                {formatV4Scalar(metrics.quota.monthly_budget ?? 3000)} (
+                {formatV4Scalar(metrics.quota.percent_used ?? 0)}%) • Reserve:{' '}
+                {formatV4Scalar(metrics.quota.critical_reserve ?? 0)}
+                {metrics.quota.estimate_only ? ' • est' : ''}
               </div>
             )}
           </CardContent>
@@ -507,7 +756,7 @@ export function AssistantV4Panel() {
             {coverage ? (
               Object.entries(coverage.summary || {}).map(([st, cnt]) => (
                 <Badge key={st} variant='secondary' className='text-xs'>
-                  {st}: {cnt}
+                  {st}: {formatV4Scalar(cnt)}
                 </Badge>
               ))
             ) : (
@@ -526,32 +775,53 @@ export function AssistantV4Panel() {
           </CardDescription>
         </CardHeader>
         <CardContent className='space-y-3'>
+          {health && health.flags?.task_manager === false && (
+            <div className='rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200'>
+              Task Manager đang tắt (`ASSISTANT_V4_TASK_MANAGER=false`). Bật flag này trên backend
+              để tạo Watch Rule mới.
+            </div>
+          )}
           <form onSubmit={(e) => void handleCreateWatch(e)} className='grid gap-2 md:grid-cols-6'>
             <Input
+              id='v4-watch-target-input'
+              name='v4WatchTarget'
+              aria-label='Máy chủ mục tiêu theo dõi'
               value={watchTarget}
               onChange={(e) => setWatchTarget(e.target.value)}
               placeholder='target (workstation)'
               className='text-xs h-8'
             />
             <Input
+              id='v4-watch-metric-input'
+              name='v4WatchMetric'
+              aria-label='Chỉ số theo dõi'
               value={watchMetric}
               onChange={(e) => setWatchMetric(e.target.value)}
               placeholder='metric'
               className='text-xs h-8'
             />
             <Input
+              id='v4-watch-comparator-input'
+              name='v4WatchComparator'
+              aria-label='Toán tử so sánh ngưỡng'
               value={watchComp}
               onChange={(e) => setWatchComp(e.target.value)}
               placeholder='lt|lte|gt|gte'
               className='text-xs h-8'
             />
             <Input
+              id='v4-watch-threshold-input'
+              name='v4WatchThreshold'
+              aria-label='Ngưỡng cảnh báo'
               value={watchThreshold}
               onChange={(e) => setWatchThreshold(e.target.value)}
               placeholder='threshold'
               className='text-xs h-8'
             />
             <Input
+              id='v4-watch-hold-input'
+              name='v4WatchHoldSeconds'
+              aria-label='Thời gian duy trì ngưỡng (giây)'
               value={watchHold}
               onChange={(e) => setWatchHold(e.target.value)}
               placeholder='hold (sec)'
@@ -653,6 +923,9 @@ export function AssistantV4Panel() {
                 {a.state === 'PENDING_CONFIRMATION' && (
                   <div className='flex flex-wrap items-center gap-2'>
                     <Input
+                      id={`v4-approval-reason-${a.action_id}`}
+                      name={`v4ApprovalReason_${a.action_id}`}
+                      aria-label='Ghi chú xác nhận đề xuất hành động'
                       value={confirmReasonByAction[a.action_id] || ''}
                       onChange={(e) =>
                         setConfirmReasonByAction((prev) => ({
@@ -665,6 +938,9 @@ export function AssistantV4Panel() {
                     />
                     {a.risk_tier === 'R3' && (
                       <Input
+                        id={`v4-stepup-password-${a.action_id}`}
+                        name={`v4StepUpPassword_${a.action_id}`}
+                        aria-label='Mật khẩu Admin Step-Up cho hành động R3'
                         type='password'
                         value={stepUpPasswordByAction[a.action_id] || ''}
                         onChange={(e) =>
@@ -727,9 +1003,9 @@ export function AssistantV4Panel() {
                 </div>
                 <div>{inv.summary}</div>
                 <div className='text-muted-foreground font-mono'>
-                  evidence={inv.evidence_refs.join(', ') || 'none'}
+                  evidence={(inv.evidence_refs || []).map(formatV4Scalar).join(', ') || 'none'}
                   {inv.missing_information?.length
-                    ? ` | missing=${inv.missing_information.join('; ')}`
+                    ? ` | missing=${inv.missing_information.map(formatV4Scalar).join('; ')}`
                     : ''}
                 </div>
                 {inv.review_feedback && (
@@ -739,6 +1015,9 @@ export function AssistantV4Panel() {
                 )}
                 <div className='flex items-center gap-2 pt-1'>
                   <Input
+                    id={`v4-rca-feedback-${inv.run_id}`}
+                    name={`v4RcaFeedback_${inv.run_id}`}
+                    aria-label='Nhận xét review điều tra RCA'
                     value={feedbackByRun[inv.run_id] || ''}
                     onChange={(e) =>
                       setFeedbackByRun((prev) => ({ ...prev, [inv.run_id]: e.target.value }))
@@ -777,12 +1056,18 @@ export function AssistantV4Panel() {
           <CardContent className='space-y-3 text-xs'>
             <form onSubmit={(e) => void handleSavePreference(e)} className='flex flex-wrap gap-2'>
               <Input
+                id='v4-pref-key-input'
+                name='v4PrefKey'
+                aria-label='Tên khóa tùy chọn AI V4'
                 value={prefKey}
                 onChange={(e) => setPrefKey(e.target.value)}
                 placeholder='key'
                 className='text-xs h-8 flex-1 min-w-[120px]'
               />
               <Input
+                id='v4-pref-val-input'
+                name='v4PrefValue'
+                aria-label='Giá trị tùy chọn AI V4'
                 value={prefVal}
                 onChange={(e) => setPrefVal(e.target.value)}
                 placeholder='value'

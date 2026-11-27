@@ -34,6 +34,9 @@ interface PoolEntry {
   allocatable_gib?: number;
   eligible?: boolean;
   ineligibility_reason?: string | null;
+  priority_rank?: number;
+  priority_tier?: string;
+  is_default?: boolean;
 }
 
 interface GpuEntry {
@@ -480,28 +483,57 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
               </div>
             )}
 
+            {reqItem.recommendation?.rationale?.balancing_strategy ===
+              'FAIR_FREE_SPACE_AND_MEMBER_COUNT' && (
+              <div className='rounded border border-blue-500/30 bg-blue-500/5 p-3 text-xs text-blue-900 dark:text-blue-200'>
+                <strong>Tự động cân bằng tải ổ cứng trên {hostId || 'workstation'}:</strong> Đề xuất
+                chọn pool <span className='font-mono'>{poolId || 'N/A'}</span> (đang có{' '}
+                <strong>
+                  {String(reqItem.recommendation.rationale.chosen_pool_assigned_members ?? 0)}
+                </strong>{' '}
+                thành viên, còn trống{' '}
+                <strong>
+                  {String(reqItem.recommendation.rationale.chosen_pool_net_allocatable_gib ?? 0)}
+                </strong>{' '}
+                GiB).{' '}
+                {reqItem.member_category === 'STUDENT' &&
+                  'Định mức Sinh viên: mặc định 50 GiB ổ cứng và tối đa 16 GiB RAM.'}
+              </div>
+            )}
+
             <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
               <div className='space-y-1'>
-                <Label>Máy chủ (Host)</Label>
+                <Label htmlFor='ssh-review-host'>Máy chủ (Host)</Label>
                 <select
+                  id='ssh-review-host'
                   disabled={isFinal}
                   value={hostId}
                   onChange={(e) => handleHostChange(e.target.value)}
                   className='w-full rounded-md border bg-background px-3 py-2 text-sm'
                 >
                   <option value=''>-- Chọn máy chủ --</option>
-                  {hosts.map((h) => (
-                    <option key={h.id} value={h.id}>
-                      {h.display_name || h.hostname || h.id} (
-                      {h.observed_state || h.freshness || h.status || 'UNKNOWN'})
-                    </option>
-                  ))}
+                  {hosts.map((h) => {
+                    const state = h.observed_state || h.freshness || h.status || 'UNKNOWN';
+                    const rawName = h.display_name || h.hostname || h.id;
+                    const cleanName =
+                      state === 'ONLINE'
+                        ? rawName.replace(/\s*\(Từ xa\s*•\s*Chưa kết nối\)/i, '')
+                        : rawName;
+                    return (
+                      <option key={h.id} value={h.id}>
+                        {cleanName} ({state})
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
               <div className='space-y-1'>
-                <Label>Storage Pool vật lý (đã xác minh mount/UUID)</Label>
+                <Label htmlFor='ssh-review-pool'>
+                  Storage Pool vật lý (đã xác minh mount/UUID)
+                </Label>
                 <select
+                  id='ssh-review-pool'
                   disabled={isFinal || !hostId}
                   value={poolId}
                   onChange={(e) => {
@@ -514,11 +546,25 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
                   {hostPools.map((p) => {
                     const sid = String(p.storage_id || p.id || '');
                     const devLabel = p.device ? p.device.split('/').pop() : '';
+                    const mountStr = String(p.mount_point || '');
+                    const showSidSuffix = sid && !mountStr.includes(sid);
+                    const isRestricted =
+                      p.priority_tier === 'FALLBACK_RESTRICTED' ||
+                      mountStr === '/mnt/HDD3' ||
+                      devLabel === 'sdc';
+                    const tierPrefix = p.eligible
+                      ? isRestricted
+                        ? '[Hạn chế / Dự phòng] '
+                        : '[Ưu tiên] '
+                      : '';
                     return (
                       <option key={sid} value={sid} disabled={!p.eligible}>
+                        {tierPrefix}
                         {devLabel ? `[${devLabel}] ` : ''}
-                        {p.mount_point} ({sid}) — Còn {p.allocatable_gib ?? 0} GiB{' '}
-                        {p.eligible ? '' : `[INELIGIBLE: ${p.ineligibility_reason}]`}
+                        {mountStr || sid}
+                        {showSidSuffix ? ` (${sid.slice(0, 8)})` : ''} — Còn{' '}
+                        {p.allocatable_gib ?? 0} GiB
+                        {p.eligible ? '' : ` [Không khả dụng: ${p.ineligibility_reason}]`}
                       </option>
                     );
                   })}
@@ -538,19 +584,29 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
               </div>
 
               <div className='space-y-1'>
-                <Label>RAM (GiB)</Label>
+                <Label>
+                  RAM (GiB{reqItem.member_category === 'STUDENT' ? ' — SV tối đa 16 GiB' : ''})
+                </Label>
                 <Input
                   disabled={isFinal}
                   type='number'
                   min={1}
-                  max={512}
+                  max={reqItem.member_category === 'STUDENT' ? 16 : 512}
                   value={ramGb}
-                  onChange={(e) => setRamGb(Number(e.target.value))}
+                  onChange={(e) => {
+                    const nextVal = Number(e.target.value);
+                    setRamGb(
+                      reqItem.member_category === 'STUDENT' ? Math.min(16, nextVal) : nextVal
+                    );
+                  }}
                 />
               </div>
 
               <div className='space-y-1'>
-                <Label>Storage Quota (GiB)</Label>
+                <Label>
+                  Storage Quota (GiB
+                  {reqItem.member_category === 'STUDENT' ? ' — Mặc định SV 50 GiB' : ''})
+                </Label>
                 <Input
                   disabled={isFinal}
                   type='number'
@@ -666,10 +722,11 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
             )}
 
             {!isFinal && (
-              <div className='space-y-3 border-t pt-3'>
+              <form onSubmit={(e) => e.preventDefault()} className='space-y-3 border-t pt-3'>
                 <div className='space-y-1'>
-                  <Label>Lý do quyết định / Ghi chú</Label>
+                  <Label htmlFor='ssh-decision-reason'>Lý do quyết định / Ghi chú</Label>
                   <Textarea
+                    id='ssh-decision-reason'
                     value={decisionReason}
                     onChange={(e) => setDecisionReason(e.target.value)}
                     rows={2}
@@ -677,9 +734,13 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
                 </div>
                 {!hasValidInvite && (
                   <div className='space-y-1'>
-                    <Label>Mật khẩu Admin (Step-Up Verification) *</Label>
+                    <Label htmlFor='ssh-admin-stepup-password'>
+                      Mật khẩu Admin (Step-Up Verification) *
+                    </Label>
                     <Input
+                      id='ssh-admin-stepup-password'
                       type='password'
+                      autoComplete='current-password'
                       value={adminPassword}
                       onChange={(e) => setAdminPassword(e.target.value)}
                       placeholder='Nhập LABOPS_ADMIN_PASSWORD để xác thực'
@@ -714,7 +775,7 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
                     Từ chối
                   </Button>
                 </div>
-              </div>
+              </form>
             )}
 
             {isFinal && (
@@ -753,9 +814,10 @@ export function AdminSshRequestReview({ requestId, inviteToken }: AdminSshReques
                 <div className='font-semibold'>
                   Trạng thái Cấp phát: {reqItem.provisioning.status}
                 </div>
-                {reqItem.provisioning.last_error && (
-                  <div className='text-rose-600'>Lỗi: {reqItem.provisioning.last_error}</div>
-                )}
+                {reqItem.provisioning.last_error &&
+                  reqItem.provisioning.status !== 'VERIFIED_READY' && (
+                    <div className='text-rose-600'>Lỗi: {reqItem.provisioning.last_error}</div>
+                  )}
                 {(() => {
                   const ver = (reqItem.provisioning.verification || {}) as Record<string, unknown>;
                   const sshIp = typeof ver.ssh_ip === 'string' ? ver.ssh_ip : undefined;

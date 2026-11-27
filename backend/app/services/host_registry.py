@@ -100,10 +100,14 @@ class HostRegistry:
                 },
                 {
                     "id": "workstation",
-                    "hostname": "Chưa xác minh",
-                    "display_name": "Máy chủ 02 — Workstation (Từ xa • Chưa kết nối)",
+                    "hostname": "Chưa xác minh" if is_track_local else "aiot-ws1",
+                    "display_name": (
+                        "Máy chủ 02 — Workstation (Từ xa • Chưa kết nối)"
+                        if is_track_local
+                        else "Máy chủ 02 — Workstation"
+                    ),
                     "role": "COMPUTE_NODE",
-                    "management_ip": "",
+                    "management_ip": "" if is_track_local else "192.168.167.251",
                     "vpn_ip": None,
                     "ssh_legacy_port": 22,
                     "agent_url": None,
@@ -131,6 +135,16 @@ class HostRegistry:
                 if is_local_live:
                     collected_at = _now()
                     freshness = "ONLINE"
+                    if "Chưa kết nối" in str(item.get("display_name") or ""):
+                        item["display_name"] = (
+                            "Máy chủ 02 — Workstation"
+                            if h["id"] == "workstation"
+                            else str(live.get("name") or item["display_name"])
+                        )
+                    if str(item.get("hostname") or "") in ("", "Chưa xác minh") and live.get("hostname"):
+                        item["hostname"] = str(live["hostname"])
+                    if not item.get("management_ip") and live.get("ip_address"):
+                        item["management_ip"] = str(live["ip_address"])
                 elif live_status == "OFFLINE" and not item.get("agent_url"):
                     collected_at = item.get("last_heartbeat_at")
                     freshness = "OFFLINE"

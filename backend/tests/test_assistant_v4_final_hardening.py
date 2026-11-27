@@ -32,6 +32,7 @@ from app.db.models import (  # noqa: E402
     MemberProfileRecord,
     MemberRecord,
     NotificationOutboxRecord,
+    ReportRunRecord,
     RequestResourceRecommendationRecord,
     ServerAccessRequestRecord,
     V4ActionProposalRecord,
@@ -87,6 +88,32 @@ class _RecordingBot:
         self._seq += 1
         self.sent.append({"chat_id": chat_id, "text": text})
         return SimpleNamespace(message_id=f"zalo-rec-{self._seq}")
+
+
+def _suppress_wallclock_digests(svc: ZaloAssistantService) -> None:
+    """Prevent real wall-clock morning/evening/weekly digests from firing during non-digest event tests."""
+    now_utc = datetime.now(timezone.utc)
+    local_ict = now_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
+    day_key = local_ict.strftime("%Y-%m-%d")
+    wk_period = local_ict.strftime("%Y-W%W")
+    with svc.db.session_scope() as s:
+        if s.get(ReportRunRecord, f"rep-v2-done-{day_key}") is None:
+            s.add(
+                ReportRunRecord(
+                    id=f"rep-v2-done-{day_key}",
+                    report_type="DAILY_EXECUTIVE",
+                    period_key=day_key,
+                    window_start_utc=now_utc - timedelta(hours=24),
+                    window_end_utc=now_utc,
+                    status="SENT",
+                    title="Wall-clock digest already covered in test setup",
+                    markdown_content="Covered",
+                )
+            )
+        if s.get(V4WorkerCursorRecord, f"digest:weekly:{wk_period}") is None:
+            s.add(V4WorkerCursorRecord(cursor_name=f"digest:weekly:{wk_period}", cursor_value="COVERED_IN_TEST", metadata_json={"type": "test_guard"}))
+        if s.get(V4WorkerCursorRecord, f"digest:evening:{day_key}") is None:
+            s.add(V4WorkerCursorRecord(cursor_name=f"digest:evening:{day_key}", cursor_value="COVERED_IN_TEST", metadata_json={"type": "test_guard"}))
 
 
 def test_shadow_mode_zero_external_sends_zero_quota_and_no_cutover_backlog(tmp_path: Path):
@@ -152,6 +179,7 @@ def test_shadow_mode_zero_external_sends_zero_quota_and_no_cutover_backlog(tmp_p
     assert svc.v4.outbox.list_outbox() == []
 
     # Cutover to live V4_ACTIVE AFTER shadow mode: NO backlog flood and NO immediate shadow-reminder storm!
+    _suppress_wallclock_digests(svc)
     svc.v4.config.shadow_mode = False
     svc.v4.config.notification_v2 = True
     asyncio.run(worker._run_v4_worker_step(svc.v4, bot=bot))
@@ -259,6 +287,9 @@ def test_notification_cutover_v2_to_v4_drains_v2_pending_skips_precutover_and_de
         ).scalar_one()
         assert pre_rcp.result_status == "SKIPPED_PRE_CUTOVER"
 
+    # Ensure legacy V2 daily report marked SENT today prevents wall-clock V4 morning digest double-send
+    _suppress_wallclock_digests(svc)
+
     # Run V4 worker cycle: reconciler scans historical ssh-hist-1 -> marked SKIPPED_PRE_CUTOVER, NO spam!
     bot.sent.clear()
     asyncio.run(worker._run_v4_worker_step(svc.v4, bot=bot))
@@ -289,23 +320,32 @@ def test_notification_cutover_v2_to_v4_drains_v2_pending_skips_precutover_and_de
     asyncio.run(worker._run_v4_worker_step(svc.v4, bot=bot))
     assert bot.sent == []
 
-    # Verify legacy V2 daily report already SENT today prevents V4 morning double-send
-    from app.db.models import ReportRunRecord
-
+    # Verify legacy V2 daily report already SENT on 2026-11-26 prevents V4 morning double-send
     day_ict = datetime(2026, 11, 26, 8, 10, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")).astimezone(timezone.utc)
     with svc.db.session_scope() as s:
-        s.add(
-            ReportRunRecord(
-                id="rep-v2-done",
-                report_type="DAILY_EXECUTIVE",
-                period_key="2026-11-26",
-                window_start_utc=day_ict - timedelta(hours=24),
-                window_end_utc=day_ict,
-                status="SENT",
-                title="Legacy V2 morning already sent",
-                markdown_content="Already delivered by V2",
+        existing_rep = (
+            s.execute(
+                select(ReportRunRecord).where(
+                    ReportRunRecord.report_type == "DAILY_EXECUTIVE",
+                    ReportRunRecord.period_key == "2026-11-26",
+                )
             )
+            .scalars()
+            .first()
         )
+        if existing_rep is None:
+            s.add(
+                ReportRunRecord(
+                    id="rep-v2-done",
+                    report_type="DAILY_EXECUTIVE",
+                    period_key="2026-11-26",
+                    window_start_utc=day_ict - timedelta(hours=24),
+                    window_end_utc=day_ict,
+                    status="SENT",
+                    title="Legacy V2 morning already sent",
+                    markdown_content="Already delivered by V2",
+                )
+            )
     assert svc.v4.digests.evaluate_due_digests(now_utc=day_ict, has_changes=False) == []
 
     # Ownership audit trail recorded
@@ -320,6 +360,7 @@ def test_notification_ownership_rollback_v4_to_v2_preserves_state(tmp_path: Path
     svc = ZaloAssistantService(str(tmp_path))
     svc.identity_rbac.admin_bind_identity(zalo_user_id="z-adm", username="admin", member_id="m-adm", role="ADMIN")
     svc.bot_engine.authorized_users = ["z-adm"]
+    _suppress_wallclock_digests(svc)
 
     svc.v4.config = AssistantV4Config(enabled=True, event_engine=True, notification_v2=True, shadow_mode=False)
     svc.v4.run_worker_cycle()

@@ -60,34 +60,36 @@ export default function Header() {
 
   return (
     <header className='bg-white/90 dark:bg-slate-950/90 sticky top-0 z-20 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 backdrop-blur-md md:h-14 px-4'>
-      <div className='flex items-center gap-2'>
-        <SidebarTrigger className='-ml-1' />
-        <Separator orientation='vertical' className='mr-2 h-4 data-vertical:self-center' />
-        <Breadcrumbs />
+      <div className='flex items-center gap-2 min-w-0 flex-1 overflow-hidden'>
+        <SidebarTrigger className='-ml-1 shrink-0' />
+        <Separator orientation='vertical' className='mr-2 h-4 shrink-0 data-vertical:self-center' />
+        <div className='min-w-0 truncate'>
+          <Breadcrumbs />
+        </div>
       </div>
 
-      <div className='flex items-center gap-2.5'>
+      <div className='flex items-center gap-2 shrink-0'>
         {/* Status Indicator: Tailored per role */}
         {isResearcher ? (
-          <div className='hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border bg-blue-500/10 border-blue-500/20 text-blue-700 dark:text-blue-400'>
+          <div className='hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border bg-blue-500/10 border-blue-500/20 text-blue-700 dark:text-blue-400 whitespace-nowrap shrink-0'>
             <span className='relative flex h-2 w-2'>
               <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75'></span>
               <span className='relative inline-flex rounded-full h-2 w-2 bg-blue-500'></span>
             </span>
-            <span className='flex items-center gap-1.5'>
-              <Icons.terminal className='size-3.5' />
+            <span className='flex items-center gap-1.5 whitespace-nowrap'>
+              <Icons.terminal className='size-3.5 shrink-0' />
               <span>Cổng Nghiên cứu viên • Không gian cá nhân</span>
             </span>
           </div>
         ) : (
           <div
-            className={`hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border ${
+            className={`hidden 2xl:flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border whitespace-nowrap shrink-0 ${
               hostStatusColor === 'emerald'
                 ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-400'
                 : 'bg-amber-500/10 border-amber-500/20 text-amber-700 dark:text-amber-400'
             }`}
           >
-            <span className='relative flex h-2 w-2'>
+            <span className='relative flex h-2 w-2 shrink-0'>
               <span
                 className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
                   hostStatusColor === 'emerald' ? 'bg-emerald-400' : 'bg-amber-400'
@@ -99,8 +101,8 @@ export default function Header() {
                 }`}
               ></span>
             </span>
-            <span className='flex items-center gap-1.5 font-mono text-xs'>
-              <Icons.server className='size-3.5' />
+            <span className='flex items-center gap-1.5 font-mono text-xs whitespace-nowrap'>
+              <Icons.server className='size-3.5 shrink-0' />
               {hostStatusText}
             </span>
             {verifiedGpus.length > 0 && (
@@ -108,17 +110,17 @@ export default function Header() {
                 <span className='text-muted-foreground/60'>•</span>
                 {isGpuRunning ? (
                   <span
-                    className='font-mono text-xs text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5'
+                    className='font-mono text-xs text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5 whitespace-nowrap'
                     title={`GPU đang chạy tác vụ (${usedVramGb} / ${totalVramGb} GB VRAM)`}
                   >
-                    <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse' />
+                    <span className='size-1.5 rounded-full bg-indigo-500 animate-pulse shrink-0' />
                     <span>
                       GPU: {usedVramGb}/{totalVramGb} GB (
                       {Math.round((usedVramMb / (totalVramMb || 1)) * 100)}%)
                     </span>
                   </span>
                 ) : (
-                  <span className='font-mono text-xs text-muted-foreground'>
+                  <span className='font-mono text-xs text-muted-foreground whitespace-nowrap'>
                     {verifiedGpus.length}x A30 ({totalVramGb} GB)
                   </span>
                 )}

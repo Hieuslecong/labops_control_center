@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "fixture-healthy",
+  "observed_at": "2026-11-25T14:14:00Z",
+  "received_at": "2026-11-25T14:14:01Z",
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null,
+    "mode": "workloads"
+  },
+  "quality": {
+    "status": "FRESH",
+    "expected_nodes": 2,
+    "fresh_nodes": 2,
+    "fresh_workload_nodes": 2,
+    "expected_gpus": 4,
+    "fresh_gpus": 4,
+    "last_success_at": "2026-11-25T14:14:00Z"
+  },
+  "nodes": [
+    {
+      "id": "workstation",
+      "quality": "FRESH",
+      "workload_quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "last_success_at": "2026-11-25T14:14:00Z"
+    },
+    {
+      "id": "track",
+      "quality": "FRESH",
+      "workload_quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "last_success_at": "2026-11-25T14:14:00Z"
+    }
+  ],
+  "gpus": [
+    {
+      "gpu_uuid": "fixture-gpu-ws",
+      "node_id": "workstation",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 15309209600,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r0",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r1",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r2",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    }
+  ],
+  "kpis": {
+    "observed_workloads": 5,
+    "last_known_workloads": null,
+    "gpu_associated_workloads": 4,
+    "gpu_association_unknown": 0,
+    "observed_members": 2,
+    "unmapped_member_workloads": 0,
+    "device_vram_used_bytes": 15309209600,
+    "device_vram_capacity_bytes": 103079215104,
+    "gpu_coverage": {
+      "fresh": 4,
+      "expected": 4
+    },
+    "attention_count": null
+  },
+  "composition": {
+    "gpu_non_monitoring": 4,
+    "non_gpu_compute": 0,
+    "monitoring": 1,
+    "other_unknown": 0
+  },
+  "workloads": [
+    {
+      "id": "fixture-root-1",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304501,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-1",
+      "username": "member_1",
+      "group_id": null,
+      "workspace": "ws-member_1",
+      "display_name": "python",
+      "workload_kind": "GENERAL_COMPUTE",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": true,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 37748736000,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 7444889600,
+        "attribution": "LEGACY_AGGREGATE"
+      },
+      "gpu_allocations": null,
+      "elapsed_seconds": 5111,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    },
+    {
+      "id": "fixture-root-2",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304502,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-2",
+      "username": "member_2",
+      "group_id": null,
+      "workspace": "ws-member_2",
+      "display_name": "python",
+      "workload_kind": "GENERAL_COMPUTE",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": true,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 3460300800,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 2936012800,
+        "attribution": "LEGACY_AGGREGATE"
+      },
+      "gpu_allocations": null,
+      "elapsed_seconds": 15384,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    },
+    {
+      "id": "fixture-root-3",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304503,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-2",
+      "username": "member_2",
+      "group_id": null,
+      "workspace": "ws-member_2",
+      "display_name": "python",
+      "workload_kind": "GENERAL_COMPUTE",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": true,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 6081740800,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 2726297600,
+        "attribution": "LEGACY_AGGREGATE"
+      },
+      "gpu_allocations": null,
+      "elapsed_seconds": 11377,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    },
+    {
+      "id": "fixture-root-4",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304504,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-1",
+      "username": "member_1",
+      "group_id": null,
+      "workspace": "ws-member_1",
+      "display_name": "python",
+      "workload_kind": "GENERAL_COMPUTE",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": true,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 35546726400,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 2306867200,
+        "attribution": "LEGACY_AGGREGATE"
+      },
+      "gpu_allocations": null,
+      "elapsed_seconds": 285960,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    },
+    {
+      "id": "fixture-root-5",
+      "ref": null,
+      "node_id": "workstation",
+      "boot_id": null,
+      "host_pid": 3304505,
+      "start_ticks": null,
+      "container_id": null,
+      "uid": null,
+      "member_id": "fixture-member-1",
+      "username": "member_1",
+      "group_id": null,
+      "workspace": "ws-member_1",
+      "display_name": "gpustat",
+      "workload_kind": "MONITORING",
+      "kind_confidence": "HEURISTIC",
+      "kind_evidence": [
+        "Synthetic fixture, not training proof"
+      ],
+      "gpu_associated": false,
+      "cpu": {
+        "value_percent": 2.5,
+        "basis": "UNKNOWN"
+      },
+      "memory": {
+        "value_bytes": 104857600,
+        "method": "TREE_RSS_SUM",
+        "unique_memory": false
+      },
+      "vram": {
+        "value_bytes": 0,
+        "attribution": "LEGACY_AGGREGATE"
+      },
+      "gpu_allocations": null,
+      "elapsed_seconds": 22779,
+      "started_at": null,
+      "state": "OBSERVED",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "is_protected": false,
+      "actions_allowed": false,
+      "action_block_reason": "Synthetic fixture; no trusted action identity"
+    }
+  ],
+  "device_vram": {
+    "scope": "DEVICE_WIDE",
+    "member_filter_applied": false,
+    "reconciliation": "NOT_COMPARABLE"
+  },
+  "warnings": []
+}

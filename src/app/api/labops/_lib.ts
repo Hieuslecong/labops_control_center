@@ -130,7 +130,17 @@ export function isAdminRequiredLabOpsPath(method: string, segments: string[]): b
   ) {
     return true;
   }
-  if (m !== 'GET' && /^processes\/.+\/(stop|kill)$/.test(p)) {
+  if (
+    p === 'jobs/snapshot' ||
+    p === 'jobs/snapshot/export.csv' ||
+    p === 'jobs/analytics' ||
+    p === 'jobs/history' ||
+    p === 'jobs/events' ||
+    /^jobs\/[^/]+\/detail$/.test(p)
+  ) {
+    return true;
+  }
+  if (m !== 'GET' && /^processes\/.+\/(stop|kill|v31-action)$/.test(p)) {
     return true;
   }
   if (
@@ -268,8 +278,10 @@ export async function proxyLabOps(
       headers: forwardHeaders
     });
   } catch {
+    const portMatch = rawBackend.match(/:(\d+)(?:\/|$)/);
+    const backendPort = portMatch ? portMatch[1] : '8000';
     return NextResponse.json(
-      { detail: 'Backend LabOps (cổng 8000) hiện không phản hồi' },
+      { detail: `Backend LabOps (cổng ${backendPort}) hiện không phản hồi` },
       { status: 502 }
     );
   }

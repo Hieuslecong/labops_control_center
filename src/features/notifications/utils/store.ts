@@ -103,10 +103,20 @@ export function useOperationalNotifications() {
     servers.forEach((server) => {
       if (server.status !== 'online') {
         const id = `op-server-${server.id}`;
+        const rawSt = String(server.status || '').toLowerCase();
+        const statusLabel =
+          rawSt === 'degraded'
+            ? 'Suy giảm (DEGRADED)'
+            : rawSt === 'offline'
+              ? 'Ngoại tuyến (OFFLINE)'
+              : 'Mất kết nối (Chưa xác định)';
+        const ipText = server.ipAddress
+          ? `IP nội bộ: ${server.ipAddress}.`
+          : 'Chưa ghi nhận IP nội bộ.';
         operational.push({
           id,
-          title: `Máy chủ ${server.name} (${server.hostname}) ${server.status}`,
-          body: `Trạng thái kết nối hiện tại: ${server.status}. IP nội bộ: ${server.ipAddress}.`,
+          title: `Máy chủ ${server.name} (${server.hostname}) — ${statusLabel}`,
+          body: `Trạng thái kết nối hiện tại: ${statusLabel}. ${ipText}`,
           status: readIds[id] ? 'read' : 'unread',
           createdAt: server.collectedAt || fallbackIso,
           actions: [

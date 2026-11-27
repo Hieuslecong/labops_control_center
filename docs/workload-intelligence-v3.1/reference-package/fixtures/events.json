@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null
+  },
+  "from": "2026-11-25T00:00:00Z",
+  "to": "2026-11-25T00:03:00Z",
+  "items": [],
+  "next_cursor": null,
+  "capability": "NO_DATA"
+}

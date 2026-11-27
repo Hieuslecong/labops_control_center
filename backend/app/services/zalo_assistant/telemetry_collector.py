@@ -122,7 +122,7 @@ class UnifiedTelemetryCollector:
             reg = host_registry_rows.get(hid, {})
 
             collected_at = srv.get("collected_at") or reg.get("collected_at")
-            last_hb = srv.get("last_heartbeat_at") or reg.get("last_heartbeat_at") or collected_at
+            last_hb = srv.get("last_heartbeat_at") or srv.get("collected_at") or reg.get("last_heartbeat_at") or collected_at
             raw_st = str(srv.get("status") or reg.get("observed_state") or "").upper()
             explicit_freshness = str(srv.get("freshness_status") or "").upper()
             if explicit_freshness in {"ONLINE", "DEGRADED", "STALE", "OFFLINE", "UNKNOWN"}:

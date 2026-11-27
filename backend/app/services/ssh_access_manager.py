@@ -558,23 +558,205 @@ def _build_posix_setup_script(
 
 class OneTimeSecretVault:
     """
-    Kho lưu tạm một lần trong bộ nhớ RAM (không bao giờ ghi xuống đĩa).
+    Kho lưu tạm một lần có thể đồng bộ an toàn giữa đa tiến trình (Zalo Worker & Web API).
     Tách biệt 2 kênh bàn giao:
     - Kênh 1 (key_bundle): Gói kết nối + Private key đã mã hóa bằng passphrase.
     - Kênh 2 (secrets): Passphrase mở khóa private key + Mật khẩu tạm đăng nhập lần đầu.
+    Dữ liệu trên đĩa luôn được niêm phong mã hóa (0600, flock) và tự động xóa sau 1 lần nhận hoặc hết hạn.
     """
 
-    def __init__(self, default_ttl_seconds: int = 900):
+    def __init__(self, default_ttl_seconds: int = 86400, storage_path: Optional[str] = None):
+        import threading
+
         self.default_ttl_seconds = default_ttl_seconds
+        self.storage_path: Optional[str] = os.path.realpath(storage_path) if storage_path else None
+        self._thread_lock = threading.RLock()
         self._key_bundles: Dict[str, Dict[str, Any]] = {}
         self._channel_secrets: Dict[str, Dict[str, Any]] = {}
+        if self.storage_path:
+            with self._vault_lock():
+                self._sync_from_disk_unlocked()
 
-    def _purge_expired(self) -> None:
+    def _vault_lock(self):
+        from app.db.atomic_json import file_lock
+
+        thread_lock = self._thread_lock
+        storage_path = self.storage_path
+
+        class _Guard:
+            def __init__(self) -> None:
+                self._fl = None
+
+            def __enter__(self) -> None:
+                thread_lock.acquire()
+                try:
+                    if storage_path:
+                        self._fl = file_lock(storage_path)
+                        self._fl.__enter__()
+                except Exception:
+                    thread_lock.release()
+                    raise
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                try:
+                    if self._fl is not None:
+                        self._fl.__exit__(exc_type, exc, tb)
+                finally:
+                    thread_lock.release()
+
+        return _Guard()
+
+    def _cipher_key(self) -> bytes:
+        import hashlib
+
+        secret = (
+            os.getenv("LABOPS_SESSION_SECRET")
+            or os.getenv("LABOPS_DELEGATION_SECRET")
+            or os.getenv("LABOPS_BROKER_VERIFY_SECRET")
+        )
+        if not secret:
+            try:
+                from app.core.config import settings
+
+                secret = (
+                    getattr(settings, "LABOPS_SESSION_SECRET", "")
+                    or getattr(settings, "LABOPS_DELEGATION_SECRET", "")
+                    or getattr(settings, "LABOPS_BROKER_VERIFY_SECRET", "")
+                )
+            except Exception:
+                secret = ""
+        material = f"{secret or 'labops-v2-handover-vault'}|{self.storage_path or ''}".encode("utf-8")
+        return hashlib.sha256(material).digest()
+
+    @staticmethod
+    def _xor_keystream(key: bytes, nonce: bytes, data: bytes) -> bytes:
+        import hashlib
+
+        out = bytearray(len(data))
+        offset = 0
+        counter = 0
+        while offset < len(data):
+            block = hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+            take = min(len(block), len(data) - offset)
+            for idx in range(take):
+                out[offset + idx] = data[offset + idx] ^ block[idx]
+            offset += take
+            counter += 1
+        return bytes(out)
+
+    def _seal_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        import base64
+        import hmac
+        import json
+
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        nonce = os.urandom(16)
+        key = self._cipher_key()
+        ct = self._xor_keystream(key, nonce, raw)
+        mac = hmac.new(key, b"labops-vault-v1:" + nonce + ct, "sha256").hexdigest()
+        return {
+            "version": 1,
+            "nonce": nonce.hex(),
+            "ciphertext": base64.urlsafe_b64encode(ct).decode("ascii"),
+            "mac": mac,
+        }
+
+    def _unseal_state(self, envelope: Any) -> Dict[str, Dict[str, Any]]:
+        import base64
+        import hmac
+        import json
+
+        if not isinstance(envelope, dict) or envelope.get("version") != 1:
+            return {"key_bundles": {}, "channel_secrets": {}}
+        try:
+            nonce = bytes.fromhex(str(envelope.get("nonce") or ""))
+            ct = base64.urlsafe_b64decode(str(envelope.get("ciphertext") or "").encode("ascii"))
+            mac = str(envelope.get("mac") or "")
+            key = self._cipher_key()
+            expected_mac = hmac.new(key, b"labops-vault-v1:" + nonce + ct, "sha256").hexdigest()
+            if not hmac.compare_digest(expected_mac, mac):
+                return {"key_bundles": {}, "channel_secrets": {}}
+            raw = self._xor_keystream(key, nonce, ct)
+            decoded = json.loads(raw.decode("utf-8"))
+            kb = decoded.get("key_bundles") if isinstance(decoded.get("key_bundles"), dict) else {}
+            cs = decoded.get("channel_secrets") if isinstance(decoded.get("channel_secrets"), dict) else {}
+            return {"key_bundles": dict(kb), "channel_secrets": dict(cs)}
+        except Exception:
+            return {"key_bundles": {}, "channel_secrets": {}}
+
+    @staticmethod
+    def _purge_stores(key_bundles: Dict[str, Dict[str, Any]], channel_secrets: Dict[str, Dict[str, Any]]) -> bool:
         now = time.time()
-        for store in (self._key_bundles, self._channel_secrets):
+        changed = False
+        for store in (key_bundles, channel_secrets):
             expired = [k for k, v in store.items() if now > v.get("expires_at_epoch", 0)]
             for k in expired:
                 store.pop(k, None)
+                changed = True
+        return changed
+
+    def _load_disk_unlocked(self) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        if not self.storage_path or not os.path.exists(self.storage_path):
+            return {}, {}
+        from app.db.atomic_json import PersistenceCorruptionError, safe_load_json
+
+        try:
+            envelope = safe_load_json(self.storage_path, dict)
+        except PersistenceCorruptionError:
+            return {}, {}
+        unsealed = self._unseal_state(envelope)
+        kb = unsealed["key_bundles"]
+        cs = unsealed["channel_secrets"]
+        self._purge_stores(kb, cs)
+        return kb, cs
+
+    def _write_disk_unlocked(self, kb: Dict[str, Dict[str, Any]], cs: Dict[str, Dict[str, Any]]) -> None:
+        if not self.storage_path:
+            return
+        from app.db.atomic_json import atomic_write_json
+
+        self._purge_stores(kb, cs)
+        if not kb and not cs:
+            try:
+                if os.path.exists(self.storage_path):
+                    os.unlink(self.storage_path)
+            except OSError:
+                pass
+            return
+        sealed = self._seal_state({"key_bundles": kb, "channel_secrets": cs})
+        atomic_write_json(self.storage_path, sealed, mode=0o600, use_lock=False)
+
+    def _sync_from_disk_unlocked(self) -> None:
+        if self.storage_path:
+            kb, cs = self._load_disk_unlocked()
+            self._key_bundles.clear()
+            self._key_bundles.update(kb)
+            self._channel_secrets.clear()
+            self._channel_secrets.update(cs)
+        self._purge_stores(self._key_bundles, self._channel_secrets)
+
+    def _commit_member_unlocked(self, member_id: str) -> None:
+        if self.storage_path:
+            kb, cs = self._load_disk_unlocked()
+            if member_id in self._key_bundles:
+                kb[member_id] = dict(self._key_bundles[member_id])
+            else:
+                kb.pop(member_id, None)
+            if member_id in self._channel_secrets:
+                cs[member_id] = dict(self._channel_secrets[member_id])
+            else:
+                cs.pop(member_id, None)
+            self._write_disk_unlocked(kb, cs)
+            self._key_bundles.clear()
+            self._key_bundles.update(kb)
+            self._channel_secrets.clear()
+            self._channel_secrets.update(cs)
+        else:
+            self._purge_stores(self._key_bundles, self._channel_secrets)
+
+    def _purge_expired(self) -> None:
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
 
     def store_provisioned_package(
         self,
@@ -664,6 +846,8 @@ class OneTimeSecretVault:
             "expires_at": exp_iso,
             "expires_at_epoch": exp_epoch,
         }
+        with self._vault_lock():
+            self._commit_member_unlocked(member_id)
         return {
             "bundle_id": bundle_id,
             "secret_id": secret_id,
@@ -681,68 +865,78 @@ class OneTimeSecretVault:
         temp_password_expires_at: str,
         ttl_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
-        self._purge_expired()
-        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
-        exp_epoch = time.time() + ttl
-        exp_iso = datetime.fromtimestamp(exp_epoch, tz=timezone.utc).isoformat()
-        secret_id = f"sec-{uuid.uuid4().hex[:12]}"
-        existing = self._channel_secrets.get(member_id) or {}
-        self._channel_secrets[member_id] = {
-            "secret_id": secret_id,
-            "member_id": member_id,
-            "username": username,
-            "fingerprint": existing.get("fingerprint"),
-            "key_passphrase": existing.get("key_passphrase"),
-            "temporary_password": temporary_password,
-            "temp_password_expires_at": temp_password_expires_at,
-            "created_at": _now_iso(),
-            "expires_at": exp_iso,
-            "expires_at_epoch": exp_epoch,
-        }
-        return {
-            "secret_id": secret_id,
-            "channel_secrets_available": True,
-            "expires_at": exp_iso,
-        }
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
+            ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl_seconds
+            exp_epoch = time.time() + ttl
+            exp_iso = datetime.fromtimestamp(exp_epoch, tz=timezone.utc).isoformat()
+            secret_id = f"sec-{uuid.uuid4().hex[:12]}"
+            existing = self._channel_secrets.get(member_id) or {}
+            self._channel_secrets[member_id] = {
+                "secret_id": secret_id,
+                "member_id": member_id,
+                "username": username,
+                "fingerprint": existing.get("fingerprint"),
+                "key_passphrase": existing.get("key_passphrase"),
+                "temporary_password": temporary_password,
+                "temp_password_expires_at": temp_password_expires_at,
+                "created_at": _now_iso(),
+                "expires_at": exp_iso,
+                "expires_at_epoch": exp_epoch,
+            }
+            self._commit_member_unlocked(member_id)
+            return {
+                "secret_id": secret_id,
+                "channel_secrets_available": True,
+                "expires_at": exp_iso,
+            }
 
     def get_availability(self, member_id: str) -> Dict[str, Any]:
-        self._purge_expired()
-        kb = self._key_bundles.get(member_id)
-        cs = self._channel_secrets.get(member_id)
-        return {
-            "key_bundle_available": kb is not None,
-            "key_bundle_expires_at": kb.get("expires_at") if kb else None,
-            "channel_secrets_available": cs is not None,
-            "channel_secrets_expires_at": cs.get("expires_at") if cs else None,
-        }
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
+            kb = self._key_bundles.get(member_id)
+            cs = self._channel_secrets.get(member_id)
+            return {
+                "key_bundle_available": kb is not None,
+                "key_bundle_expires_at": kb.get("expires_at") if kb else None,
+                "channel_secrets_available": cs is not None,
+                "channel_secrets_expires_at": cs.get("expires_at") if cs else None,
+            }
 
     def claim_key_bundle_once(self, member_id: str, peek: bool = False) -> Dict[str, Any]:
-        self._purge_expired()
-        entry = self._key_bundles.get(member_id) if peek else self._key_bundles.pop(member_id, None)
-        if not entry:
-            raise LookupError(
-                "KEY_BUNDLE_UNAVAILABLE: Gói khóa riêng đã được tải một lần trước đó, đã hết hạn hoặc đã bị thu hồi. "
-                "Để lấy khóa mới, vui lòng thực hiện 'Cấp lại cặp khóa SSH mới'."
-            )
-        result = dict(entry)
-        result.pop("expires_at_epoch", None)
-        return result
-        return result
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
+            entry = self._key_bundles.get(member_id) if peek else self._key_bundles.pop(member_id, None)
+            if not entry:
+                raise LookupError(
+                    "KEY_BUNDLE_UNAVAILABLE: Gói khóa riêng đã được tải một lần trước đó, đã hết hạn hoặc đã bị thu hồi. "
+                    "Để lấy khóa mới, vui lòng thực hiện 'Cấp lại cặp khóa SSH mới'."
+                )
+            if not peek:
+                self._commit_member_unlocked(member_id)
+            result = dict(entry)
+            result.pop("expires_at_epoch", None)
+            return result
 
     def claim_channel_secrets_once(self, member_id: str) -> Dict[str, Any]:
-        self._purge_expired()
-        entry = self._channel_secrets.pop(member_id, None)
-        if not entry:
-            raise LookupError(
-                "SECRETS_UNAVAILABLE: Passphrase và mật khẩu tạm chỉ được hiển thị một lần duy nhất và hiện không còn trong bộ nhớ tạm."
-            )
-        result = dict(entry)
-        result.pop("expires_at_epoch", None)
-        return result
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
+            entry = self._channel_secrets.pop(member_id, None)
+            if not entry:
+                raise LookupError(
+                    "SECRETS_UNAVAILABLE: Passphrase và mật khẩu tạm chỉ được hiển thị một lần duy nhất và hiện không còn trong bộ nhớ tạm."
+                )
+            self._commit_member_unlocked(member_id)
+            result = dict(entry)
+            result.pop("expires_at_epoch", None)
+            return result
 
     def invalidate_member(self, member_id: str) -> None:
-        self._key_bundles.pop(member_id, None)
-        self._channel_secrets.pop(member_id, None)
+        with self._vault_lock():
+            self._sync_from_disk_unlocked()
+            self._key_bundles.pop(member_id, None)
+            self._channel_secrets.pop(member_id, None)
+            self._commit_member_unlocked(member_id)
 
 
 class SshAccessManager:
@@ -757,7 +951,10 @@ class SshAccessManager:
         self.workspaces_root = os.path.join(data_dir, "workspaces")
         self.accounts_path = os.path.join(data_dir, "v2_ssh_accounts.json")
         self.accounts_lock = self.accounts_path + ".lock"
-        self.vault = OneTimeSecretVault()
+        self.vault = OneTimeSecretVault(
+            default_ttl_seconds=86400,
+            storage_path=os.path.join(self.data_dir, "v2_handover_vault.json"),
+        )
         self._canary_daemons: Dict[str, subprocess.Popen] = {}
         os.makedirs(self.workspaces_root, mode=0o700, exist_ok=True)
         try:
@@ -2003,11 +2200,11 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
         username: str,
         actor: str,
         ttl_seconds: int = 86400,
+        invalidate_previous: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Cấp mật khẩu tạm mới cho thành viên.
-        - Vô hiệu hóa ngay lập tức mật khẩu tạm cũ (nếu có).
-        - Chỉ lưu PBKDF2-HMAC-SHA256 hash vào v2_ssh_accounts.json.
+        - Chỉ lưu PBKDF2/scrypt hash vào v2_ssh_accounts.json.
         - Đặt trạng thái password_status = CHANGE_REQUIRED.
         """
         temp_password = _generate_temp_password()
@@ -2023,7 +2220,7 @@ Write-Host "👉 Kết nối ngay bằng lệnh: ssh {host_alias}" -ForegroundCo
                 prev_mid = str(prev.get("member_id") or "").strip()
                 if prev_mid and prev_mid != member_id:
                     state.setdefault("archived_accounts", {})[prev_mid] = dict(prev)
-                elif not prev.get("temp_password_used"):
+                elif not invalidate_previous and not prev.get("temp_password_used"):
                     for h in [prev.get("temp_password_hash")] + list(prev.get("prev_temp_password_hashes") or []):
                         h_s = str(h or "").strip()
                         if h_s and h_s != pw_hash and h_s not in prev_hashes:

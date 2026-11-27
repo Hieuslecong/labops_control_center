@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "fixture-empty",
+  "observed_at": "2026-11-25T14:14:00Z",
+  "received_at": "2026-11-25T14:14:01Z",
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null,
+    "mode": "workloads"
+  },
+  "quality": {
+    "status": "FRESH",
+    "expected_nodes": 2,
+    "fresh_nodes": 2,
+    "fresh_workload_nodes": 2,
+    "expected_gpus": 4,
+    "fresh_gpus": 4,
+    "last_success_at": "2026-11-25T14:14:00Z"
+  },
+  "nodes": [
+    {
+      "id": "workstation",
+      "quality": "FRESH",
+      "workload_quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "last_success_at": "2026-11-25T14:14:00Z"
+    },
+    {
+      "id": "track",
+      "quality": "FRESH",
+      "workload_quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "last_success_at": "2026-11-25T14:14:00Z"
+    }
+  ],
+  "gpus": [
+    {
+      "gpu_uuid": "fixture-gpu-ws",
+      "node_id": "workstation",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r0",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r1",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    },
+    {
+      "gpu_uuid": "fixture-gpu-r2",
+      "node_id": "track",
+      "quality": "FRESH",
+      "observed_at": "2026-11-25T14:14:00Z",
+      "vram_used_bytes": 0,
+      "vram_capacity_bytes": 25769803776,
+      "utilization_percent": 65
+    }
+  ],
+  "kpis": {
+    "observed_workloads": 0,
+    "last_known_workloads": null,
+    "gpu_associated_workloads": 0,
+    "gpu_association_unknown": 0,
+    "observed_members": 0,
+    "unmapped_member_workloads": 0,
+    "device_vram_used_bytes": 0,
+    "device_vram_capacity_bytes": 103079215104,
+    "gpu_coverage": {
+      "fresh": 4,
+      "expected": 4
+    },
+    "attention_count": null
+  },
+  "composition": {
+    "gpu_non_monitoring": 0,
+    "non_gpu_compute": 0,
+    "monitoring": 0,
+    "other_unknown": 0
+  },
+  "workloads": [],
+  "device_vram": {
+    "scope": "DEVICE_WIDE",
+    "member_filter_applied": false,
+    "reconciliation": "NOT_COMPARABLE"
+  },
+  "warnings": []
+}

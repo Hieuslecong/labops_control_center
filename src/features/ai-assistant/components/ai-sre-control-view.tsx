@@ -1,7 +1,7 @@
 /* oxlint-disable react/set-state-in-effect */
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import {
   IconSparkles,
@@ -26,6 +26,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AssistantV4Panel } from './assistant-v4-panel';
+import { formatIctTime } from '@/features/jobs/api/service';
 
 interface ChatEntry {
   sender: string;
@@ -33,6 +34,10 @@ interface ChatEntry {
   tool_traces?: Array<{ tool: string; status: string }>;
   evidence_timestamps?: string[];
   context_scope?: string;
+  ai_used?: boolean;
+  v4_route?: string;
+  v4_intent?: string;
+  v4_session_id?: string;
 }
 
 export default function AIAssistantView() {
@@ -55,10 +60,12 @@ export default function AIAssistantView() {
   const [chatLog, setChatLog] = useState<ChatEntry[]>([
     {
       sender: 'assistant',
-      text: 'Xin chào! Tôi là LabOps AI SRE Agent v2. Bạn có thể chạy /status, /incidents, /report today, /security, /quota hoặc đặt câu hỏi điều tra hạ tầng bằng công cụ thực.'
+      v4_route: 'v4',
+      text: 'Xin chào! Tôi là LabOps Personal AI Agent V4 (SRE v2 + V4). Bạn có thể chạy /status, /incidents, /jobs, /tasks, /memory, /compare, /who admin, /settings, /new, /clear hoặc đặt câu hỏi ngôn ngữ tự nhiên về hạ tầng.'
     }
   ]);
   const [sending, setSending] = useState(false);
+  const chatLogContainerRef = useRef<HTMLDivElement | null>(null);
   const [reportGenLoading, setReportGenLoading] = useState(false);
   const [dailyGenLoading, setDailyGenLoading] = useState(false);
   const [evalLoading, setEvalLoading] = useState(false);
@@ -126,6 +133,13 @@ export default function AIAssistantView() {
     fetchData();
   }, []);
 
+  useEffect(() => {
+    const container = chatLogContainerRef.current;
+    if (container && (chatLog.length > 0 || sending)) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [chatLog.length, sending]);
+
   const handleSendCommand = async (cmdText?: string) => {
     const text = (cmdText || chatInput).trim();
     if (!text || sending) return;
@@ -148,7 +162,11 @@ export default function AIAssistantView() {
           text: data.reply || (data.success ? 'Đã thực thi thành công.' : 'Lỗi thực thi lệnh.'),
           tool_traces: data.tool_traces,
           evidence_timestamps: data.evidence_timestamps,
-          context_scope: data.context_scope
+          context_scope: data.context_scope,
+          ai_used: data.ai_used,
+          v4_route: data.v4_route,
+          v4_intent: data.v4_intent,
+          v4_session_id: data.v4_session_id
         }
       ]);
       fetchData();
@@ -376,14 +394,24 @@ export default function AIAssistantView() {
             <IconSparkles className='h-6 w-6' />
           </div>
           <div>
-            <h2 className='text-lg font-bold'>LabOps AI SRE Agent v2 &amp; Zalo Operations</h2>
+            <h2 className='text-lg font-bold'>
+              LabOps Personal AI Agent V4 &amp; Zalo SRE Operations
+            </h2>
             <p className='text-xs text-muted-foreground'>
-              Giám sát thời gian thực • Incident Engine • Daily Brief 08:00 ICT • RBAC Danh tính
-              Zalo
+              Giám sát thời gian thực • Incident Engine • Persistent Memory &amp; Watch Rules • RBAC
+              Danh tính Zalo
             </p>
           </div>
         </div>
         <div className='flex flex-wrap items-center gap-2'>
+          <Button
+            variant={activeTab === 'v4' ? 'default' : 'outline'}
+            size='sm'
+            onClick={() => setActiveTab('v4')}
+          >
+            <IconSparkles className='h-4 w-4 mr-1' />
+            V4 Control Plane
+          </Button>
           <Button variant='outline' size='sm' onClick={fetchData} disabled={loading}>
             <IconRefresh className={`h-4 w-4 mr-1 ${loading ? 'animate-spin' : ''}`} />
             Làm mới
@@ -548,7 +576,8 @@ export default function AIAssistantView() {
                     <div>
                       <div className='font-semibold'>{h.display_name || h.hostname}</div>
                       <div className='text-muted-foreground font-mono text-xs'>
-                        id={h.host_id} • src={h.source} • hb={h.last_heartbeat_at || 'N/A'}
+                        id={h.host_id} • src={h.source} • hb=
+                        {h.last_heartbeat_at ? formatIctTime(h.last_heartbeat_at) : 'N/A'}
                       </div>
                     </div>
                     <Badge variant='outline' className='font-mono'>
@@ -574,7 +603,20 @@ export default function AIAssistantView() {
                   </CardDescription>
                 </div>
                 <div className='flex flex-wrap gap-1'>
-                  {['/status', '/incidents', '/jobs', '/report today', '/quota'].map((cmd) => (
+                  {[
+                    '/status',
+                    '/requests',
+                    '/incidents',
+                    '/jobs',
+                    '/tasks',
+                    '/memory',
+                    '/compare',
+                    '/who admin',
+                    '/settings',
+                    '/new',
+                    '/clear',
+                    '/quota'
+                  ].map((cmd) => (
                     <Button
                       key={cmd}
                       variant='outline'
@@ -586,19 +628,49 @@ export default function AIAssistantView() {
                       {cmd}
                     </Button>
                   ))}
+                  <Button
+                    variant='secondary'
+                    size='sm'
+                    className='h-7 text-xs'
+                    onClick={() =>
+                      handleSendCommand('Kiểm tra nhiệt độ GPU và trạng thái máy chủ hiện tại')
+                    }
+                    disabled={sending}
+                  >
+                    Thử chat AI V4
+                  </Button>
                 </div>
               </div>
             </CardHeader>
             <CardContent className='space-y-3'>
-              <div className='h-64 overflow-y-auto rounded-lg border bg-muted/30 p-3 space-y-3 text-xs font-mono'>
+              <div
+                ref={chatLogContainerRef}
+                className='h-64 overflow-y-auto rounded-lg border bg-muted/30 p-3 space-y-3 text-xs font-mono'
+              >
                 {chatLog.map((m, idx) => (
                   <div
                     key={idx}
                     className={`flex flex-col ${m.sender === 'user' ? 'items-end' : 'items-start'}`}
                   >
-                    <span className='text-xs text-muted-foreground mb-1'>
-                      {m.sender === 'user' ? 'Bạn' : 'LabOps AI SRE v2'}
-                      {m.context_scope ? ` (${m.context_scope})` : ''}
+                    <span className='text-xs text-muted-foreground mb-1 flex flex-wrap items-center gap-1.5'>
+                      <span>
+                        {m.sender === 'user'
+                          ? 'Bạn'
+                          : m.v4_route === 'v4'
+                            ? 'LabOps Personal AI V4'
+                            : 'LabOps AI Assistant'}
+                        {m.context_scope ? ` (${m.context_scope})` : ''}
+                      </span>
+                      {m.v4_intent && (
+                        <Badge variant='outline' className='text-xs h-5 px-1.5'>
+                          {m.v4_intent}
+                        </Badge>
+                      )}
+                      {m.v4_session_id && (
+                        <Badge variant='outline' className='text-xs h-5 px-1.5'>
+                          {m.v4_session_id}
+                        </Badge>
+                      )}
                     </span>
                     <div
                       className={`max-w-[88%] rounded-lg p-2.5 whitespace-pre-wrap ${
@@ -614,7 +686,7 @@ export default function AIAssistantView() {
                             Tools: {m.tool_traces.map((t) => `${t.tool}[${t.status}]`).join(', ')}
                           </div>
                           {m.evidence_timestamps && m.evidence_timestamps.length > 0 && (
-                            <div>Evidence: {m.evidence_timestamps[0]}</div>
+                            <div>Evidence: {formatIctTime(m.evidence_timestamps[0])}</div>
                           )}
                         </div>
                       )}
@@ -636,6 +708,9 @@ export default function AIAssistantView() {
                 className='flex gap-2'
               >
                 <Input
+                  id='zalo-chat-message-input'
+                  name='zaloChatMessage'
+                  aria-label='Nhập lệnh hoặc câu hỏi cho Zalo AI Assistant'
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   placeholder='Ví dụ: Tại sao Workstation hôm nay chậm? hoặc /incidents'
@@ -879,14 +954,17 @@ export default function AIAssistantView() {
                     {dailyBriefStatus?.config?.timezone || 'Asia/Ho_Chi_Minh'}
                   </div>
                   <div className='text-muted-foreground'>
-                    Tiếp theo: {dailyBriefStatus?.next_scheduled_at || 'N/A'}
+                    Tiếp theo:{' '}
+                    {dailyBriefStatus?.next_scheduled_at
+                      ? formatIctTime(dailyBriefStatus.next_scheduled_at)
+                      : 'N/A'}
                   </div>
                 </div>
                 <div className='p-2.5 rounded border space-y-1'>
                   <div className='text-muted-foreground'>Trạng thái Gửi gần nhất</div>
                   <div className='font-mono'>
                     {dailyBriefStatus?.last_successful_at
-                      ? `Thành công: ${dailyBriefStatus.last_successful_at}`
+                      ? `Thành công: ${formatIctTime(dailyBriefStatus.last_successful_at)}`
                       : 'Chưa gửi kỳ nào'}
                   </div>
                   {dailyBriefStatus?.last_error && (
@@ -1030,7 +1108,7 @@ export default function AIAssistantView() {
                       </div>
                     </div>
                     <CardDescription className='text-xs'>
-                      {rpt.author} • {rpt.created_at} • {rpt.summary?.infrastructure}
+                      {rpt.author} • {formatIctTime(rpt.created_at)} • {rpt.summary?.infrastructure}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -1060,6 +1138,9 @@ export default function AIAssistantView() {
               <CardContent className='space-y-3 text-xs'>
                 <form onSubmit={handleGenerateLinkCode} className='flex flex-wrap gap-2'>
                   <Input
+                    id='zalo-link-username-input'
+                    name='zaloLinkUsername'
+                    aria-label='Username LabOps cần liên kết Zalo'
                     value={linkUsername}
                     onChange={(e) => setLinkUsername(e.target.value)}
                     placeholder='Username LabOps (vd: tranglt, admin)'
@@ -1067,6 +1148,8 @@ export default function AIAssistantView() {
                     required
                   />
                   <select
+                    id='zalo-link-role-select'
+                    name='zaloLinkRole'
                     aria-label='Vai trò tài khoản LabOps'
                     value={linkRole}
                     onChange={(e) => setLinkRole(e.target.value)}

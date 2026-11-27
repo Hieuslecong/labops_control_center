@@ -74,7 +74,7 @@ export function LabEventsPanel() {
           </div>
           <Link
             href='/dashboard/calendar'
-            className='text-xs font-medium text-primary hover:underline flex items-center gap-1'
+            className='text-xs font-medium text-primary hover:underline flex items-center gap-1 whitespace-nowrap shrink-0'
           >
             Mở lịch đầy đủ <Icons.arrowRight className='size-3.5' />
           </Link>
@@ -82,35 +82,49 @@ export function LabEventsPanel() {
       </CardHeader>
 
       <CardContent className='pt-0 pb-4 space-y-2.5 flex-1'>
-        {events.slice(0, 4).map((evt) => (
-          <div
-            key={evt.id}
-            className='p-2.5 rounded-lg border bg-muted/20 hover:bg-muted/40 transition-colors flex flex-col gap-1.5'
-          >
-            <div className='flex items-start justify-between gap-2'>
-              <div className='flex items-center gap-2 flex-wrap'>
-                {getEventBadge(evt.type)}
-                <span className='font-semibold text-xs text-foreground leading-snug'>
-                  {evt.title}
+        {events.length === 0 ? (
+          <div className='rounded-lg border border-dashed p-5 text-xs text-muted-foreground flex flex-col items-center justify-center gap-2 text-center h-full min-h-[140px]'>
+            <Icons.calendar className='size-5 text-muted-foreground/70' />
+            <span className='font-medium text-foreground'>Chưa có sự kiện nào được lên lịch</span>
+            <span>Thêm lịch seminar, họp lab hoặc bảo trì máy chủ trong mục Lịch Lab.</span>
+            <Link
+              href='/dashboard/calendar'
+              className='text-xs font-medium text-primary hover:underline mt-0.5'
+            >
+              Tạo sự kiện mới →
+            </Link>
+          </div>
+        ) : (
+          events.slice(0, 4).map((evt) => (
+            <div
+              key={evt.id}
+              className='p-2.5 rounded-lg border bg-muted/20 hover:bg-muted/40 transition-colors flex flex-col gap-1.5'
+            >
+              <div className='flex items-start justify-between gap-2'>
+                <div className='flex items-center gap-2 flex-wrap'>
+                  {getEventBadge(evt.type)}
+                  <span className='font-semibold text-xs text-foreground leading-snug'>
+                    {evt.title}
+                  </span>
+                </div>
+                <span className='text-xs font-mono text-muted-foreground shrink-0'>{evt.date}</span>
+              </div>
+
+              <p className='text-xs text-muted-foreground line-clamp-2'>{evt.description}</p>
+
+              <div className='flex items-center justify-between text-xs text-muted-foreground border-t border-border/40 pt-1.5 mt-0.5'>
+                <span className='flex items-center gap-1'>
+                  <Icons.clock className='size-3' />
+                  {evt.startTime} - {evt.endTime}
+                </span>
+                <span>
+                  {evt.location} •{' '}
+                  <span className='text-foreground font-medium'>{evt.organizer}</span>
                 </span>
               </div>
-              <span className='text-xs font-mono text-muted-foreground shrink-0'>{evt.date}</span>
             </div>
-
-            <p className='text-xs text-muted-foreground line-clamp-2'>{evt.description}</p>
-
-            <div className='flex items-center justify-between text-xs text-muted-foreground border-t border-border/40 pt-1.5 mt-0.5'>
-              <span className='flex items-center gap-1'>
-                <Icons.clock className='size-3' />
-                {evt.startTime} - {evt.endTime}
-              </span>
-              <span>
-                {evt.location} •{' '}
-                <span className='text-foreground font-medium'>{evt.organizer}</span>
-              </span>
-            </div>
-          </div>
-        ))}
+          ))
+        )}
       </CardContent>
     </Card>
   );

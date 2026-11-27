@@ -252,5 +252,48 @@ func TestAggregateWorkloadTrees_RollsUpChildGPUVRAM(t *testing.T) {
 	if !procs[6].IsRootWorkload || procs[6].ParentWorkloadPID != 0 {
 		t.Fatalf("Tiến trình của user khác không được gộp vào cây của vinh_test")
 	}
+	if len(root.GPUAllocations) != 2 {
+		t.Fatalf("Kỳ vọng 2 GPUAllocations tách biệt theo UUID, nhận được: %+v", root.GPUAllocations)
+	}
+	if root.GPUAllocations[0].GPUUUID != "GPU-0000" || root.GPUAllocations[0].VRAMMB != 2960 ||
+		root.GPUAllocations[1].GPUUUID != "GPU-1111" || root.GPUAllocations[1].VRAMMB != 1024 {
+		t.Fatalf("GPUAllocations rollup không chính xác: %+v", root.GPUAllocations)
+	}
+}
+
+func TestClassifyWorkloadKind_ConservativeAndMonitoring(t *testing.T) {
+	k, c, _ := ClassifyWorkloadKind("gpustat", "gpustat --watch", false, 0, false)
+	if k != "MONITORING" || c != "VERIFIED" {
+		t.Fatalf("gpustat phải là MONITORING/VERIFIED, nhận: %s/%s", k, c)
+	}
+	k, c, _ = ClassifyWorkloadKind("python3", "/usr/bin/python3 -m gpustat -i 1", false, 0, false)
+	if k != "MONITORING" || c != "VERIFIED" {
+		t.Fatalf("python -m gpustat phải là MONITORING/VERIFIED, nhận: %s/%s", k, c)
+	}
+	// Substring trap in unrelated directory name must NOT classify as MONITORING
+	k, _, _ = ClassifyWorkloadKind("python3", "python3 /data/gpustat_export/analyze.py", false, 0, false)
+	if k == "MONITORING" {
+		t.Fatalf("Substring trong đường dẫn không phải executable monitoring: %s", k)
+	}
+	// Bare python script must NOT fabricate TRAINING
+	k, c, _ = ClassifyWorkloadKind("python3", "python3 evaluate_model.py", true, 4096, false)
+	if k != "GENERAL_COMPUTE" || c != "HEURISTIC" {
+		t.Fatalf("python script không có proof training phải là GENERAL_COMPUTE, nhận: %s/%s", k, c)
+	}
+	// Torchrun -> TRAINING
+	k, _, _ = ClassifyWorkloadKind("torchrun", "torchrun --nproc_per_node=2 train.py", true, 8192, false)
+	if k != "TRAINING" {
+		t.Fatalf("torchrun phải là TRAINING, nhận: %s", k)
+	}
+	// Notebook
+	k, c, _ = ClassifyWorkloadKind("jupyter-lab", "/opt/conda/bin/jupyter-lab --port 8888", false, 0, false)
+	if k != "NOTEBOOK" || c != "VERIFIED" {
+		t.Fatalf("jupyter-lab phải là NOTEBOOK/VERIFIED, nhận: %s/%s", k, c)
+	}
+	// Protected system
+	k, c, _ = ClassifyWorkloadKind("systemd", "/sbin/systemd", false, 0, true)
+	if k != "SYSTEM" || c != "VERIFIED" {
+		t.Fatalf("protected systemd phải là SYSTEM/VERIFIED, nhận: %s/%s", k, c)
+	}
 }
 

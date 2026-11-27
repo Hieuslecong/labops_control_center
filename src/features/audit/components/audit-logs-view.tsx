@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Icons } from '@/components/icons';
+import { formatIctTime } from '@/features/jobs/api/service';
 import { useLabOpsStore } from '@/features/labops/store';
 
 export function AuditLogsView() {
@@ -96,6 +97,9 @@ export function AuditLogsView() {
         <div className='relative flex-1 max-w-md'>
           <Icons.search className='absolute left-2.5 top-2.5 size-4 text-muted-foreground' />
           <Input
+            id='audit-search-input'
+            name='auditSearch'
+            aria-label='Tìm kiếm nhật ký kiểm toán'
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder='Tìm kiếm thao tác, người dùng, ID đối tượng, Correlation ID...'
@@ -105,6 +109,9 @@ export function AuditLogsView() {
 
         <div className='flex items-center gap-2 flex-wrap'>
           <select
+            id='audit-result-filter'
+            name='resultFilter'
+            aria-label='Lọc theo kết quả'
             value={resultFilter}
             onChange={(e) => setResultFilter(e.target.value)}
             className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
@@ -116,6 +123,9 @@ export function AuditLogsView() {
           </select>
 
           <select
+            id='audit-type-filter'
+            name='typeFilter'
+            aria-label='Lọc theo loại đối tượng'
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
             className='h-9 rounded-md border border-input bg-background px-2.5 text-xs font-medium'
@@ -164,8 +174,11 @@ export function AuditLogsView() {
               <tbody className='divide-y divide-border/60'>
                 {filteredLogs.map((log) => (
                   <tr key={log.id} className='hover:bg-muted/30 transition-colors'>
-                    <td className='py-3 px-3 font-mono text-xs text-muted-foreground whitespace-nowrap'>
-                      {log.timestamp}
+                    <td
+                      className='py-3 px-3 font-mono text-xs text-muted-foreground whitespace-nowrap'
+                      title={log.timestamp}
+                    >
+                      {formatIctTime(log.timestamp)}
                     </td>
 
                     <td className='py-3 px-3 font-semibold text-foreground whitespace-nowrap'>

@@ -213,9 +213,62 @@ export function SshRequestHistoryCard({ requests, onReload }: SshRequestHistoryC
                     <span>Thời hạn đề xuất: {r.requested_duration_days} ngày</span>
                   )}
                 </div>
-                {r.decision_reason && (
-                  <div className='rounded border bg-background px-2.5 py-1.5'>
-                    <strong>Phản hồi Admin:</strong> {r.decision_reason}
+                {(() => {
+                  const cfg = (r.latest_approval?.approved_config || {}) as Record<string, unknown>;
+                  const hasCfg = Boolean(cfg.host_id || cfg.pool_id);
+                  const hostName = hasCfg
+                    ? String(cfg.host_id || 'workstation')
+                    : r.recommendation?.recommended_host_id || null;
+                  const poolName = hasCfg
+                    ? String(cfg.pool_id || '')
+                    : r.recommendation?.recommended_pool_id || null;
+                  const mountName = hasCfg
+                    ? String(cfg.mount_point || '')
+                    : r.recommendation?.recommended_mount_point || '';
+                  const cpuVal = hasCfg ? Number(cfg.cpu_cores || 4) : r.recommendation?.cpu_cores;
+                  const ramVal = hasCfg ? Number(cfg.ram_gb || 16) : r.recommendation?.ram_gb;
+                  const diskVal = hasCfg
+                    ? Number(cfg.storage_quota_gb || 50)
+                    : r.recommendation?.storage_quota_gb;
+                  if (!hostName && !poolName) return null;
+                  return (
+                    <div className='rounded border bg-background/80 px-2.5 py-1.5 font-mono text-xs text-muted-foreground'>
+                      <strong>{hasCfg ? 'Tài nguyên đã cấp:' : 'Dự kiến cấp phát:'}</strong>{' '}
+                      {hostName || 'workstation'}
+                      {poolName
+                        ? ` • Ổ lưu trữ: ${poolName}${mountName ? ` (${mountName})` : ''}`
+                        : ''}
+                      {cpuVal != null && ramVal != null && diskVal != null
+                        ? ` • ${cpuVal} vCPU / ${ramVal} GiB RAM / ${diskVal} GiB ổ cứng`
+                        : ''}
+                    </div>
+                  );
+                })()}
+                {(r.decision_reason || r.status === 'REJECTED' || r.status === 'NEED_INFO') && (
+                  <div
+                    className={`rounded border px-2.5 py-2 space-y-0.5 ${
+                      r.status === 'REJECTED'
+                        ? 'border-rose-500/40 bg-rose-500/10 text-rose-900 dark:text-rose-200'
+                        : r.status === 'NEED_INFO'
+                          ? 'border-orange-500/40 bg-orange-500/10 text-orange-900 dark:text-orange-200'
+                          : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200'
+                    }`}
+                  >
+                    <div className='font-semibold'>
+                      Phản hồi &amp; Lý do từ Quản trị viên
+                      {r.decided_by ? ` (@${r.decided_by})` : ''}:
+                    </div>
+                    <div>
+                      {r.decision_reason ||
+                        (r.status === 'REJECTED'
+                          ? 'Đơn đã bị từ chối.'
+                          : 'Quản trị viên yêu cầu bổ sung thêm thông tin.')}
+                    </div>
+                    {r.decided_at && (
+                      <div className='text-xs opacity-80'>
+                        Cập nhật lúc: {new Date(r.decided_at).toLocaleString('vi-VN')}
+                      </div>
+                    )}
                   </div>
                 )}
                 {(r.status === 'VERIFIED_READY' ||
@@ -285,7 +338,9 @@ export function ResearcherSshRequestForm() {
   }, [loadInit]);
   /* oxlint-enable react/set-state-in-effect */
 
-  const isStudent = me?.member_category !== 'LECTURER';
+  const isAdminAccount = me?.member_category === 'ADMIN' || me?.username === 'admin';
+  const isStudent = !isAdminAccount && me?.member_category !== 'LECTURER';
+  const categoryLabel = isAdminAccount ? 'Quản trị viên' : isStudent ? 'Sinh viên' : 'Giảng viên';
   const pendingReq = myRequests.find((r) => r.status === 'PENDING_APPROVAL');
 
   const handleSubmit = async (e: React.SyntheticEvent) => {
@@ -357,7 +412,7 @@ export function ResearcherSshRequestForm() {
                 Xem đơn đã nộp ({myRequests.length})
               </Button>
             </Link>
-            <Badge variant='outline'>{isStudent ? 'Sinh viên' : 'Giảng viên'}</Badge>
+            <Badge variant='outline'>{categoryLabel}</Badge>
           </div>
         </div>
       </CardHeader>
@@ -381,6 +436,15 @@ export function ResearcherSshRequestForm() {
           </span>
           <Badge variant='outline'>SSH: {me?.ssh_access_state || 'NONE'}</Badge>
         </div>
+
+        {isStudent && (
+          <div className='rounded-md border border-blue-500/30 bg-blue-500/5 p-3 text-xs text-blue-900 dark:text-blue-200'>
+            <strong>Định mức mặc định cho Sinh viên:</strong> Tài nguyên được cấp mặc định trên máy
+            chủ <span className='font-mono'>workstation</span> gồm{' '}
+            <strong>4 vCPU • tối đa 16 GiB RAM • mặc định 50 GiB ổ cứng lưu trữ</strong> (hệ thống
+            tự động chia đều qua các ổ đĩa trống ít thành viên nhất).
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className='space-y-4'>
           {isStudent && (

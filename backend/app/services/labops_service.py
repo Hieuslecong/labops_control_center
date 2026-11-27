@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.core.security import get_revocation_store
 from app.db.atomic_json import atomic_write_json, safe_load_json
 from app.db.idempotency import IdempotencyStore
-from app.db.models import AuditEventRecord, DeletionOperationRecord, MemberRecord, PersistenceRecoveryRecord
+from app.db.models import AuditEventRecord, DeletionOperationRecord, MemberProfileRecord, MemberRecord, PersistenceRecoveryRecord
 from app.db.session import DatabaseManager
 from app.adapters.host_monitor_adapter import HostMonitorAdapter, get_real_root_mount_info
 from app.adapters.nvml_adapter import NvmlAdapter
@@ -196,6 +196,7 @@ class LabOpsDataService:
         self._persist_lock = threading.RLock()
         self._inflight_usernames: set[str] = set()
         self._legacy_unsynced_member_ids: set[str] = set()
+        self._last_members_sync_mtime: float = 0.0
         self.host_monitor = HostMonitorAdapter(is_demo_mode=self.demo_mode)
         self.nvml_adapter = NvmlAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
         self.process_monitor = ProcessMonitorAdapter(server_id=settings.LOCAL_HOST_ID, demo_mode=self.demo_mode)
@@ -244,6 +245,7 @@ class LabOpsDataService:
         self._normalize_loaded_members()
         self._sync_initial_db_state()
         self._normalize_loaded_members()
+        self._last_members_sync_mtime = self._current_members_file_mtime()
         for entry in self.audit_logs:
             if isinstance(entry, dict) and not entry.get("correlation_id"):
                 entry["correlation_id"] = entry.get("correlationId") or f"corr-{entry.get('id', 'legacy')}"
@@ -322,6 +324,8 @@ class LabOpsDataService:
         try:
             with self.db.session_scope() as s:
                 rows = s.query(MemberRecord).all()
+                prof_rows = s.query(MemberProfileRecord).all()
+                db_profiles_by_id = {p.member_id: p for p in prof_rows if p.member_id}
                 db_deleted_ids = {
                     row.id for row in rows
                     if row.status == "DELETED" and bool((row.deleted_at or "").strip())
@@ -345,8 +349,13 @@ class LabOpsDataService:
                 # 2. Recover DB-committed active/pending members missing from JSON (e.g. prior JSON write failure)
                 ram_by_id = {m.get("id"): m for m in self.members if m.get("id")}
                 for mid, row in db_active_by_id.items():
+                    prof = db_profiles_by_id.get(mid)
                     if mid not in ram_by_id:
                         recovered = _member_dict_from_db_row(row)
+                        if recovered.get("version") is None:
+                            recovered["version"] = int(row.version or 1)
+                        if prof is not None and prof.ssh_access_state and not recovered.get("ssh_access_state"):
+                            recovered["ssh_access_state"] = prof.ssh_access_state
                         self.members.insert(0, recovered)
                         ram_by_id[mid] = recovered
                         summary["recovered_from_db"] += 1
@@ -362,6 +371,21 @@ class LabOpsDataService:
                             rebuilt = _member_dict_from_db_row(row)
                             cur_m.clear()
                             cur_m.update(rebuilt)
+                            needs_json_rewrite = True
+                        if cur_m.get("version") is None:
+                            cur_m["version"] = int(row.version or 1)
+                            row.version = cur_m["version"]
+                            row.payload_json = dict(cur_m)
+                            needs_json_rewrite = True
+                        if (
+                            prof is not None
+                            and prof.ssh_access_state
+                            and cur_m.get("ssh_access_state") != prof.ssh_access_state
+                        ):
+                            cur_m["ssh_access_state"] = prof.ssh_access_state
+                            cur_m["version"] = int(cur_m.get("version") or row.version or 1) + 1
+                            row.version = cur_m["version"]
+                            row.payload_json = dict(cur_m)
                             needs_json_rewrite = True
 
                 # 3. Sync legacy JSON-only members into DB (or quarantine stale duplicate JSON against DB owner)
@@ -455,6 +479,7 @@ class LabOpsDataService:
                                 row_pr.status = "RECOVERED"
                                 row_pr.resolved_at = now_dt
                                 summary["recovered_records"] += 1
+            self._last_members_sync_mtime = self._current_members_file_mtime()
         except Exception as exc:
             logger.warning("Initial DB sync / reconcile skipped cleanly: %s", exc)
         return summary
@@ -474,6 +499,23 @@ class LabOpsDataService:
                         if not audit_only:
                             legacy_idx = getattr(self.db, "has_legacy_username_unique_index", False)
                             legacy_ids = getattr(self, "_legacy_unsynced_member_ids", set())
+                            if not getattr(self, "demo_mode", False):
+                                db_rows = s.query(MemberRecord).all()
+                                ram_ids = {m.get("id") for m in self.members if m.get("id")}
+                                ram_unames = {
+                                    (m.get("username") or "").strip().lower()
+                                    for m in self.members
+                                    if m.get("username")
+                                }
+                                for er in db_rows:
+                                    if er.status == "DELETED" and bool((er.deleted_at or "").strip()):
+                                        continue
+                                    er_uname = (er.username or "").strip().lower()
+                                    if er.id not in ram_ids and er_uname not in ram_unames:
+                                        self.members.append(_member_dict_from_db_row(er))
+                                        ram_ids.add(er.id)
+                                        if er_uname:
+                                            ram_unames.add(er_uname)
                             for m in self.members:
                                 mid = m.get("id")
                                 uname = m.get("username")
@@ -491,6 +533,12 @@ class LabOpsDataService:
                                         f"Bản ghi lịch sử '{mid}' (@{uname}) đã bị xóa vĩnh viễn và không thể bị ghi đè.",
                                         409,
                                     )
+                                elif int(row.version or 1) > int(m.get("version") or 1):
+                                    # Another process (e.g. worker vs API) committed a newer version; sync RAM instead of clobbering DB.
+                                    rebuilt = _member_dict_from_db_row(row)
+                                    m.clear()
+                                    m.update(rebuilt)
+                                    continue
                                 row.email = str(m.get("email") or "")
                                 row.full_name = str(m.get("full_name") or "")
                                 row.role = str(m.get("role") or "RESEARCHER")
@@ -562,6 +610,7 @@ class LabOpsDataService:
                     atomic_write_json(os.path.join(self.data_dir, "audit_logs.json"), self.audit_logs, mode=0o600)
                     atomic_write_json(os.path.join(self.data_dir, "storage_allocations.json"), self.storage_allocations, mode=0o600)
                     atomic_write_json(os.path.join(self.data_dir, "ssh_endpoints.json"), self.ssh_endpoints, mode=0o600)
+                    self._last_members_sync_mtime = self._current_members_file_mtime()
             except Exception as json_exc:
                 recovery_id = f"rec-{uuid.uuid4().hex[:12]}"
                 logger.exception("JSON mirror write failed after DB commit (recovery_id=%s)", recovery_id)
@@ -611,6 +660,25 @@ class LabOpsDataService:
                 except Exception:
                     pass
 
+    def _current_members_file_mtime(self) -> float:
+        if not getattr(self, "data_dir", None):
+            return 0.0
+        path = os.path.join(self.data_dir, "members.json")
+        try:
+            return float(os.path.getmtime(path))
+        except OSError:
+            return 0.0
+
+    def ensure_members_fresh(self) -> None:
+        """Re-sync in-memory members when another process updated members.json."""
+        if getattr(self, "demo_mode", False):
+            return
+        cur_mtime = self._current_members_file_mtime()
+        if cur_mtime <= 0.0:
+            return
+        if cur_mtime > float(getattr(self, "_last_members_sync_mtime", 0.0) or 0.0):
+            self.reconcile_persistence_state()
+
     def save_audit_logs(self) -> None:
         """Persist audit logs cleanly without rewriting unrelated member/endpoint mirrors."""
         self._save_persistent_data(audit_only=True)
@@ -623,6 +691,7 @@ class LabOpsDataService:
         return []
 
     def _collect_servers(self, jobs_snapshot: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        self.ensure_members_fresh()
         if not self.demo_mode:
             ws = self.host_monitor.get_local_workstation_telemetry()
             track = self.host_monitor.get_remote_track_telemetry()
@@ -1427,10 +1496,10 @@ class LabOpsDataService:
                 "id": "ev-1",
                 "title": "Seminar: Tối ưu hóa suy luận LLM với vLLM & AWQ",
                 "type": "SEMINAR",
-                "date": "2024-11-08",
+                "date": "2026-11-28",
                 "start_time": "14:00",
                 "end_time": "16:00",
-                "location": "Phòng Lab Hà Nội & Google Meet",
+                "location": "Phòng Lab AIoT & Google Meet",
                 "organizer": "Lê Cảnh Hiếu",
                 "related_server": None,
                 "status": "SCHEDULED",
@@ -1438,16 +1507,16 @@ class LabOpsDataService:
             },
             {
                 "id": "ev-2",
-                "title": "Bảo trì định kỳ ZFS Pool & Cập nhật Kernel",
+                "title": "Bảo trì định kỳ Storage Pool & Cập nhật Kernel",
                 "type": "MAINTENANCE",
-                "date": "2024-11-10",
+                "date": "2026-11-30",
                 "start_time": "22:00",
                 "end_time": "02:00",
-                "location": "Server 01 — Track",
+                "location": "Server 01 — Server Rack",
                 "organizer": "System Admin",
                 "related_server": "track",
                 "status": "SCHEDULED",
-                "description": "Scrub ZFS pool và kiểm tra tính toàn vẹn snapshot tự động."
+                "description": "Kiểm tra hệ thống lưu trữ và tính toàn vẹn snapshot tự động."
             }
         ]
 
@@ -2808,6 +2877,8 @@ class LabOpsDataService:
                 return member
 
             try:
+                member["version"] = int(member.get("version") or 1) + 1
+                member["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self._save_persistent_data()
             except MemberPersistenceError as mp_err:
                 if mp_err.code == "JSON_PERSISTENCE_FAILED":
@@ -3208,6 +3279,7 @@ class LabOpsDataService:
     # Admin-Managed Member SSH Lifecycle (Tạo, Bàn giao 1 lần, Đổi mật khẩu tạm, Thu hồi)
     # ------------------------------------------------------------------
     def _find_member(self, member_id_or_username: str) -> Dict[str, Any]:
+        self.ensure_members_fresh()
         member = next(
             (m for m in self.members if m.get("id") == member_id_or_username or m.get("username") == member_id_or_username),
             None,
@@ -3867,13 +3939,72 @@ class LabOpsDataService:
                             # Fail-closed tuyệt đối: KHÔNG fallback về host SSHD khi Node Agent hoặc Spec lỗi
                             err_code = getattr(prov_err, "code", "")
                             err_msg = getattr(prov_err, "message", str(prov_err))
-                            delegation_status = (
-                                "AGENT_UNAVAILABLE"
-                                if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
-                                else "PROVISION_FAILED"
-                            )
-                            member["workspace_delegation_status"] = delegation_status
-                            member["workspace_delegation_reason"] = err_msg
+                            adopted_existing = False
+                            if "ERR_CONTAINER_EXISTS_PRESERVED" in err_msg:
+                                try:
+                                    telem_res = self.node_agent.dispatch(
+                                        server,
+                                        "COLLECT_TELEMETRY",
+                                        params={},
+                                        actor_id=actor_id,
+                                        actor_role="ADMIN",
+                                    )
+                                    ws_items = (telem_res.get("result") or {}).get("workspaces") or []
+                                    existing_c = next(
+                                        (
+                                            w
+                                            for w in ws_items
+                                            if isinstance(w, dict)
+                                            and w.get("name") == spec["name"]
+                                            and w.get("member_username") == username
+                                            and w.get("id")
+                                        ),
+                                        None,
+                                    )
+                                    if existing_c is not None:
+                                        cid = str(existing_c["id"])
+                                        ws_id = str(existing_c.get("workspace_id") or spec["workspace_id"])
+                                        actual_port = int(existing_c.get("ssh_port") or spec["ssh_port"])
+                                        member["container_id"] = cid
+                                        member["workspace_id"] = ws_id
+                                        member["ssh_port"] = actual_port
+                                        member["workspace_delegation_status"] = "VERIFIED"
+                                        member.pop("workspace_delegation_reason", None)
+                                        fx["has_container"] = True
+                                        fx["container_id"] = cid
+                                        for ep in self.ssh_endpoints:
+                                            if ep.get("member_id") == member["id"]:
+                                                ep["listen_port"] = actual_port
+                                        ver_res = self.node_agent.dispatch(
+                                            server,
+                                            "VERIFY_DOCKER_WORKSPACE",
+                                            params={
+                                                "workspace_id": ws_id,
+                                                "container_id": cid,
+                                                "uid": str(spec["uid"]),
+                                                "gid": str(spec["gid"]),
+                                                "ssh_port": str(actual_port),
+                                                "resource_mode": spec.get("resource_mode") or cpu_policy,
+                                                "vpn_bind_ip": spec.get("vpn_bind_ip") or "",
+                                            },
+                                            idempotency_key=f"ws-ver-{ws_id}-{uuid.uuid4().hex[:8]}",
+                                            actor_id=actor_id,
+                                            actor_role="ADMIN",
+                                        )
+                                        ver_payload = ver_res.get("result") or {}
+                                        if isinstance(ver_payload, dict) and ver_payload.get("checks"):
+                                            agent_verification_rec = ver_payload
+                                        adopted_existing = True
+                                except Exception as adopt_err:
+                                    logger.warning("Reconcile existing container failed for %s: %s", username, adopt_err)
+                            if not adopted_existing:
+                                delegation_status = (
+                                    "AGENT_UNAVAILABLE"
+                                    if err_code in ("AGENT_UNREACHABLE", "AGENT_NOT_CONFIGURED", "BLOCKED_BY_INFRASTRUCTURE")
+                                    else "PROVISION_FAILED"
+                                )
+                                member["workspace_delegation_status"] = delegation_status
+                                member["workspace_delegation_reason"] = err_msg
                     else:
                         member["workspace_delegation_status"] = "AGENT_UNAVAILABLE" if not host_online else "PROVISION_FAILED"
 
@@ -4096,6 +4227,8 @@ class LabOpsDataService:
                         f"cho @{username} (ID: {member['id']}) trên host '{server_id}' (cổng {ssh_port}). Trạng thái tổng thể: {gate['overall_readiness']}."
                     ),
                 })
+                member["version"] = int(member.get("version") or 1) + 1
+                member["updated_at"] = datetime.now(timezone.utc).isoformat()
                 self._save_persistent_data()
             except MemberPersistenceError as mp_err:
                 if created_new_member and mp_err.code == "JSON_PERSISTENCE_FAILED":

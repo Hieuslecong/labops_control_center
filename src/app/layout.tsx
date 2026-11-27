@@ -22,26 +22,33 @@ const socialImage = '/shadcn-dashboard.png';
 export const metadata: Metadata = {
   metadataBase,
   title: {
-    default: 'Shadcn Dashboard - Next.js Admin Dashboard Template',
-    template: '%s | Shadcn Dashboard'
+    default: 'AIoT LabOps Control Center',
+    template: '%s | AIoT LabOps'
   },
   description:
-    'Free, open source admin dashboard starter built with Next.js 16, shadcn/ui, Tailwind CSS, and TypeScript.',
+    'Hệ thống quản trị cụm máy chủ GPU, không gian nghiên cứu, kiểm soát truy cập SSH và giám sát tài nguyên AIoT Lab.',
   openGraph: {
-    title: 'Shadcn Dashboard - Next.js Admin Dashboard Template',
+    title: 'AIoT LabOps Control Center',
     description:
-      'Free, open source admin dashboard starter built with Next.js 16, shadcn/ui, Tailwind CSS, and TypeScript.',
-    siteName: 'Shadcn Dashboard',
+      'Hệ thống quản trị cụm máy chủ GPU, không gian nghiên cứu, kiểm soát truy cập SSH và giám sát tài nguyên AIoT Lab.',
+    siteName: 'AIoT LabOps',
     type: 'website',
     images: metadataBase
-      ? [{ url: socialImage, width: 3200, height: 1600, alt: 'Shadcn Dashboard overview page' }]
+      ? [
+          {
+            url: socialImage,
+            width: 3200,
+            height: 1600,
+            alt: 'AIoT LabOps Control Center overview page'
+          }
+        ]
       : undefined
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Shadcn Dashboard - Next.js Admin Dashboard Template',
+    title: 'AIoT LabOps Control Center',
     description:
-      'Free, open source admin dashboard starter built with Next.js 16, shadcn/ui, Tailwind CSS, and TypeScript.',
+      'Hệ thống quản trị cụm máy chủ GPU, không gian nghiên cứu, kiểm soát truy cập SSH và giám sát tài nguyên AIoT Lab.',
     images: metadataBase ? [socialImage] : undefined
   }
 };

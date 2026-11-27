@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "action_id": "fixture-operation-1",
+  "action": "SIGTERM",
+  "status": "PARTIAL_FAILURE",
+  "verification": "PARTIAL_FAILURE",
+  "pids_remaining": [
+    12345
+  ],
+  "skipped_descendants": [
+    "protected child"
+  ],
+  "message": "Fixture: remaining descendant, not success",
+  "correlation_id": "fixture-correlation",
+  "executed_at": "2026-11-25T14:14:00Z"
+}

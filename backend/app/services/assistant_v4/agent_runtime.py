@@ -315,7 +315,7 @@ class NativeAgentRuntime:
                     )
                     tool_traces.append({"tool": tname, "status": res.get("status"), "observed_at": res.get("observed_at"), "freshness": res.get("freshness"), "error_code": res.get("error_code")})
                     tc_entries.append({"id": tc_id, "type": "function", "function": {"name": tname, "arguments": json.dumps(parsed_a, ensure_ascii=False)}})
-                    tr_messages.append({"role": "tool", "tool_call_id": tc_id, "name": tname, "content": json.dumps(res, ensure_ascii=False, default=str)[:2500]})
+                    tr_messages.append({"role": "tool", "tool_call_id": tc_id, "name": tname, "content": json.dumps(res, ensure_ascii=False, default=str)[:12000]})
 
                 if tc_entries:
                     asst_tc_msg = {"role": "assistant", "content": resp.get("content") or "", "tool_calls": tc_entries}
@@ -449,6 +449,36 @@ class IntentRouter:
         "container",
         "đơn",
         "yêu cầu",
+        "ssh",
+        "duyệt",
+        "kiểm duyệt",
+        "xét duyệt",
+        "phê duyệt",
+        "xin cấp",
+        "cấp phát",
+        "giảng viên",
+        "ginagr",
+        "gvhd",
+        "hướng dẫn",
+        "đề tài",
+        "lý do",
+        "sinh viên",
+        "@",
+        "xóa ngữ cảnh",
+        "phiên mới",
+        "bộ nhớ chat",
+        "lịch sử lệnh",
+        "đã ra lệnh",
+        "hạn mức",
+        "cảnh báo",
+        "nhắc tôi",
+        "báo cáo ngày",
+        "báo cáo tuần",
+        "tóm tắt tình hình",
+        "xác nhận sự cố",
+        "đóng sự cố",
+        "so sánh tải",
+        "chi tiết",
         "sự cố",
         "incident",
         "repo",
@@ -472,9 +502,48 @@ class IntentRouter:
         low = clean.lower()
         if low.startswith("/"):
             return "EXPLICIT_COMMAND"
-        if any(k in low for k in ("theo dõi ", "cảnh báo tôi khi ", "watch ", "nhắc tôi ")) and (
-            any(u in low for u in ("°c", "độ", "phút", "giờ", "%", "online", "offline"))
-        ):
+        watch_triggers = (
+            "theo dõi ",
+            "theo doi ",
+            "cảnh báo ",
+            "canh bao ",
+            "báo tôi ",
+            "bao toi ",
+            "báo cho tôi ",
+            "bao cho toi ",
+            "nhắc tôi ",
+            "nhac toi ",
+            "nhắc mình ",
+            "hẹn tôi ",
+            "đặt lịch nhắc",
+            "dat lich nhac",
+            "watch ",
+        )
+        watch_units = (
+            "°c",
+            "độ",
+            "do ",
+            "phút",
+            "phut",
+            "giờ",
+            "gio",
+            "tiếng",
+            "tieng",
+            "giây",
+            "giay",
+            "%",
+            "online",
+            "offline",
+            "vượt",
+            "vuot",
+            "dưới",
+            "duoi",
+            "trên",
+            "tren",
+            "<",
+            ">",
+        )
+        if any(k in low for k in watch_triggers) and any(u in low for u in watch_units):
             return "WATCH_OR_REMINDER_NL"
         has_lab = any(k in low for k in cls.LAB_CONTEXT_HINTS)
         has_general = any(k in low for k in cls.GENERAL_CHAT_HINTS)

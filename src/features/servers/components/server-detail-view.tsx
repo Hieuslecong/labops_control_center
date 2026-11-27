@@ -144,7 +144,12 @@ export function ServerDetailView() {
           <p className='text-xs text-muted-foreground mt-1'>
             {server.location} • IP:{' '}
             <span className='font-mono font-medium text-foreground'>{server.ipAddress}</span> • VPN
-            WireGuard: <span className='font-mono font-medium text-foreground'>{server.vpnIp}</span>{' '}
+            WireGuard:{' '}
+            <span className='font-mono font-medium text-foreground'>
+              {server.vpnIp && server.vpnIp !== '—'
+                ? server.vpnIp
+                : 'Chưa cấu hình (Quản lý qua MikroTik RouterOS)'}
+            </span>{' '}
             • Uptime: {server.uptime}
           </p>
           {server.status !== 'online' && (

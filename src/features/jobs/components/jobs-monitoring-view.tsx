@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { Suspense, useState, useMemo, useCallback } from 'react';
+import { parseAsString, useQueryState } from 'nuqs';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,10 +13,12 @@ import { ProcessDetailSheet } from '@/features/overview/components/process-detai
 import { StopProcessDialog } from '@/features/jobs/components/stop-process-dialog';
 import { ForceKillDialog } from '@/features/jobs/components/force-kill-dialog';
 import { ProcessTreeDialog } from '@/features/jobs/components/process-tree-dialog';
+import { WorkloadIntelligenceV31View } from '@/features/jobs/components/workload-intelligence-v31';
 import { ComputeJob } from '@/types/labops';
 
-export function JobsMonitoringView() {
+export function LegacyJobsMonitoringView() {
   const jobs = useLabOpsStore((state) => state.jobs);
+  const servers = useLabOpsStore((state) => state.servers);
   const fetchLiveJobs = useLabOpsStore((state) => state.fetchLiveJobs);
   const fetchLiveState = useLabOpsStore((state) => state.fetchLiveState);
   const syncError = useLabOpsStore((state) => state.syncError);
@@ -395,11 +398,22 @@ export function JobsMonitoringView() {
           <select
             value={serverFilter}
             onChange={(e) => setServerFilter(e.target.value)}
+            aria-label='Lọc theo máy chủ'
             className='h-8 rounded-md border border-input bg-zinc-50/60 dark:bg-zinc-900/60 px-2 text-xs font-medium'
           >
             <option value='all'>Tất cả máy chủ</option>
-            <option value='track'>Server 01 — Server Rack (aiotlab-rack)</option>
-            <option value='workstation'>Server 02 — Workstation (Chưa xác minh)</option>
+            {servers.length > 0 ? (
+              servers.map((srv) => (
+                <option key={srv.id} value={srv.id}>
+                  {srv.name} ({srv.hostname || srv.id})
+                </option>
+              ))
+            ) : (
+              <>
+                <option value='track'>Server 01 — Server Rack (aiotlab-rack)</option>
+                <option value='workstation'>Server 02 — Workstation</option>
+              </>
+            )}
           </select>
         </div>
       </div>
@@ -692,5 +706,24 @@ export function JobsMonitoringView() {
 
       <ProcessTreeDialog job={selectedProcess} open={treeOpen} onOpenChange={setTreeOpen} />
     </div>
+  );
+}
+
+function JobsMonitoringViewSwitch() {
+  const [v31Param] = useQueryState('v31', parseAsString.withDefault(''));
+  const flagEnabled = process.env.NEXT_PUBLIC_LABOPS_WORKLOAD_V31 === 'true';
+  const useV31 = v31Param === '1' || (flagEnabled && v31Param !== '0');
+  if (useV31) {
+    return <WorkloadIntelligenceV31View />;
+  }
+  return <LegacyJobsMonitoringView />;
+}
+
+export function JobsMonitoringView() {
+  const flagEnabled = process.env.NEXT_PUBLIC_LABOPS_WORKLOAD_V31 === 'true';
+  return (
+    <Suspense fallback={flagEnabled ? null : <LegacyJobsMonitoringView />}>
+      <JobsMonitoringViewSwitch />
+    </Suspense>
   );
 }

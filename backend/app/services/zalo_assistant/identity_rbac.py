@@ -523,6 +523,14 @@ class ZaloIdentityRBACService:
                             )
                             .values(status="CANCELLED", updated_at=now)
                         )
+                        watch_task_res = session.execute(
+                            update(V4AssistantTaskRecord)
+                            .where(
+                                V4AssistantTaskRecord.owner_id.in_(principal_ids),
+                                V4AssistantTaskRecord.status == "WAITING_CONDITION",
+                            )
+                            .values(status="CANCELLED", cancellation_requested=True, updated_at=now)
+                        )
                         prop_res = session.execute(
                             update(V4ActionProposalRecord)
                             .where(
@@ -560,6 +568,7 @@ class ZaloIdentityRBACService:
                                         "revoked_usernames": unlinked_unames,
                                         "sessions": int(getattr(sess_res, "rowcount", 0) or 0),
                                         "watches": int(getattr(watch_res, "rowcount", 0) or 0),
+                                        "watch_tasks": int(getattr(watch_task_res, "rowcount", 0) or 0),
                                         "proposals": int(getattr(prop_res, "rowcount", 0) or 0),
                                         "outbox_suppressed": int(getattr(out_res, "rowcount", 0) or 0),
                                     },

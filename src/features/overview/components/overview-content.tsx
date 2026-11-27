@@ -30,20 +30,20 @@ export function OverviewContent() {
       {/* SECTION A — KPI Summary (6 Cards) */}
       <KpiSummary />
 
-      {/* SECTION B — Server Monitoring (Track & Workstation with Circular Gauges) */}
+      {/* SECTION B — Telemetry & Resource Charts (Primary Visual Insights) */}
+      <GpuHoursChart />
+
+      {/* SECTION C — Server Monitoring (Track & Workstation with Circular Gauges) */}
       <ServerMonitoringPanel />
 
-      {/* SECTION C — 4 Physical GPU Management Cards */}
+      {/* SECTION D — 4 Physical GPU Management Cards */}
       <GpuManagementPanel onOpenAllocateDialog={handleOpenAllocate} />
 
-      {/* SECTION C.2 — GPU-Grouped Account Allocation Matrix */}
+      {/* SECTION D.2 — GPU-Grouped Account Allocation Matrix */}
       <GpuAccountAllocationMatrix onAllocateGpu={handleOpenAllocate} />
 
-      {/* SECTION D — Running Jobs & Process Monitoring Table */}
+      {/* SECTION E — Running Jobs & Process Monitoring Table */}
       <RunningJobsTable />
-
-      {/* SECTION E — GPU-Hours Analytics Chart */}
-      <GpuHoursChart />
 
       {/* SECTION F — Lab Events & Security Center */}
       <div className='grid grid-cols-1 gap-5 lg:grid-cols-2'>

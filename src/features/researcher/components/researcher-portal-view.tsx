@@ -239,6 +239,17 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
   const isSimplifiedOnboarding =
     !loading && !isWorkspaceReady && authMe?.ssh_access_state !== 'VERIFIED_READY';
 
+  if (loading && !snapshot && !errorMsg) {
+    return (
+      <div className='max-w-3xl space-y-4'>
+        <Card className='p-6 text-sm text-muted-foreground flex items-center gap-2.5'>
+          <Icons.spinner className='size-4 animate-spin text-primary' />
+          <span>Đang đồng bộ hồ sơ và trạng thái không gian nghiên cứu của bạn...</span>
+        </Card>
+      </div>
+    );
+  }
+
   if (isSimplifiedOnboarding) {
     return (
       <div className='max-w-3xl space-y-5'>
@@ -254,7 +265,11 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 </CardDescription>
               </div>
               <Badge variant='outline'>
-                {authMe?.member_category === 'LECTURER' ? 'Giảng viên' : 'Sinh viên'}
+                {authMe?.member_category === 'ADMIN' || authMe?.username === 'admin'
+                  ? 'Quản trị viên'
+                  : authMe?.member_category === 'LECTURER'
+                    ? 'Giảng viên'
+                    : 'Sinh viên'}
               </Badge>
             </div>
           </CardHeader>
@@ -270,13 +285,27 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
             </div>
 
             <div className='rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3'>
-              <div className='space-y-0.5'>
+              <div className='space-y-1 flex-1 min-w-[240px]'>
                 <div className='font-semibold'>Bước 2: Gửi đơn xin cấp quyền SSH</div>
                 {latestReq ? (
-                  <div className='text-xs text-muted-foreground'>
-                    Đơn <strong>{latestReq.project_title}</strong> ({latestReq.status})
-                    {latestReq.supervisor_name ? ` • GVHD: ${latestReq.supervisor_name}` : ''}
-                    {latestReq.decision_reason ? ` • Phản hồi: ${latestReq.decision_reason}` : ''}
+                  <div className='space-y-1.5 text-xs text-muted-foreground'>
+                    <div>
+                      Đơn <strong>{latestReq.project_title}</strong> ({latestReq.status})
+                      {latestReq.supervisor_name ? ` • GVHD: ${latestReq.supervisor_name}` : ''}
+                    </div>
+                    {latestReq.decision_reason && (
+                      <div
+                        className={`rounded border px-2.5 py-1.5 text-xs ${
+                          latestReq.status === 'REJECTED'
+                            ? 'border-rose-500/40 bg-rose-500/10 text-rose-900 dark:text-rose-200'
+                            : latestReq.status === 'NEED_INFO'
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200'
+                              : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200'
+                        }`}
+                      >
+                        <strong>Phản hồi từ Admin:</strong> {latestReq.decision_reason}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className='text-xs text-muted-foreground'>
@@ -381,7 +410,11 @@ export function ResearcherPortalView({ initialTab = 'overview' }: ResearcherPort
                 variant='outline'
                 className='bg-blue-100/80 text-blue-800 border-blue-300 font-mono text-xs'
               >
-                ROLE: RESEARCHER
+                {authMe?.member_category === 'ADMIN' || authMe?.username === 'admin'
+                  ? 'ROLE: ADMIN'
+                  : authMe?.member_category === 'LECTURER'
+                    ? 'ROLE: LECTURER'
+                    : 'ROLE: RESEARCHER'}
               </Badge>
             </div>
             <p className='text-blue-900/90 dark:text-blue-200/80'>

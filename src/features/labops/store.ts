@@ -2100,7 +2100,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
         resSshTrack,
         resStorage,
         resAllocations,
-        resAllocationGroups
+        resAllocationGroups,
+        resMembers,
+        resEvents
       ] = await Promise.all([
         fetch('/api/labops/servers').catch(() => null),
         fetch('/api/labops/gpus').catch(() => null),
@@ -2113,7 +2115,9 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
           : Promise.resolve(null),
         isAdmin ? fetch('/api/labops/storage-pools').catch(() => null) : Promise.resolve(null),
         fetch('/api/labops/gpus/allocations').catch(() => null),
-        fetch('/api/labops/gpus/allocations/by-gpu').catch(() => null)
+        fetch('/api/labops/gpus/allocations/by-gpu').catch(() => null),
+        isAdmin ? fetch('/api/access/users').catch(() => null) : Promise.resolve(null),
+        isAdmin ? fetch('/api/labops/events').catch(() => null) : Promise.resolve(null)
       ]);
       const updates: Partial<LabOpsState> = {
         lastSyncTime: new Date().toLocaleTimeString('vi-VN'),
@@ -2171,6 +2175,14 @@ export const useLabOpsStore = create<LabOpsState>((set, get) => ({
       if (resAllocationGroups && resAllocationGroups.ok) {
         const data = await resAllocationGroups.json();
         if (Array.isArray(data)) updates.gpuAllocationGroups = data.map(mapRawGpuAllocationGroup);
+      }
+      if (resMembers && resMembers.ok) {
+        const data = await resMembers.json();
+        if (Array.isArray(data)) updates.members = data as LabMember[];
+      }
+      if (resEvents && resEvents.ok) {
+        const data = await resEvents.json();
+        if (Array.isArray(data)) updates.events = data as LabEvent[];
       }
       if (failures.length) updates.syncError = `Không thể xác minh dữ liệu: ${failures.join(', ')}`;
       set(updates);

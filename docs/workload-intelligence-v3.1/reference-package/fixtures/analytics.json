@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "node_id": null,
+    "gpu_uuid": null,
+    "member_id": null,
+    "group_id": null
+  },
+  "from": "2026-11-25T00:00:00Z",
+  "to": "2026-11-25T00:03:00Z",
+  "bucket_seconds": 60,
+  "coverage_ratio": null,
+  "series": [
+    {
+      "metric": "gpu_utilization_percent",
+      "entity_id": "fixture-gpu-ws",
+      "unit": "percent",
+      "aggregation": "observed_sample",
+      "coverage_ratio": null,
+      "points": [
+        {
+          "ts": "2026-11-25T00:00:00Z",
+          "value": 65,
+          "quality": "FRESH"
+        },
+        {
+          "ts": "2026-11-25T00:01:00Z",
+          "value": null,
+          "quality": "NO_DATA"
+        },
+        {
+          "ts": "2026-11-25T00:02:00Z",
+          "value": 80,
+          "quality": "FRESH"
+        }
+      ]
+    }
+  ],
+  "capabilities": {
+    "per_workload_cpu_history": {
+      "status": "UNSUPPORTED",
+      "reason": "No verified field"
+    },
+    "member_device_hours": {
+      "status": "DEFERRED",
+      "reason": "No verified attribution"
+    }
+  }
+}
